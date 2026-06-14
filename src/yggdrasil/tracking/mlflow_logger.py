@@ -34,11 +34,12 @@ def _log_metric_dict(mlflow, metrics: Dict[str, float], suffix: str = "") -> Non
 def _plot_psi_series(series: pd.DataFrame, titulo: str, path: str) -> None:
     import matplotlib.pyplot as plt
     from ..monitoring.psi import PSI_SIGNIFICANT, PSI_STABLE
+    from ..reporting.style import COR_NEUTRA, COR_PRIMARIA, COR_SECUNDARIA
 
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(series["mes"], series["psi"], marker="o", color="#4C72B0", linewidth=2)
-    ax.axhline(PSI_STABLE, color="#55A868", ls="--", lw=1, label=f"estável ({PSI_STABLE})")
-    ax.axhline(PSI_SIGNIFICANT, color="#C44E52", ls="--", lw=1, label=f"instável ({PSI_SIGNIFICANT})")
+    ax.plot(series["mes"], series["psi"], marker="o", color=COR_PRIMARIA, linewidth=2)
+    ax.axhline(PSI_STABLE, color=COR_NEUTRA, ls="--", lw=1, label=f"estável ({PSI_STABLE})")
+    ax.axhline(PSI_SIGNIFICANT, color=COR_SECUNDARIA, ls="--", lw=1, label=f"instável ({PSI_SIGNIFICANT})")
     ax.set_title(titulo, fontweight="bold")
     ax.set_ylabel("PSI")
     ax.set_xlabel("Mês de referência")
@@ -138,7 +139,7 @@ def log_pipeline_run(
         oot_metrics = metrics_by_sample.get(cfg.oot_sample, {})
         try:
             save_dashboard(df_scored, rating_cols, cfg, problem_type, dash_path,
-                           metrics=oot_metrics)
+                           metrics=oot_metrics, model=model, X_shap=X_train)
             mlflow.log_artifact(dash_path, artifact_path="dashboard")
         except Exception as exc:  # noqa: BLE001 - dashboard é best-effort
             mlflow.set_tag("dashboard_error", str(exc)[:250])

@@ -36,7 +36,20 @@ def compute_shap(
 
     Xs = _sample_X(X, sample_size, random_state)
 
-    # 1) API unificada (cobre árvore e modelos lineares automaticamente).
+    # 1) TreeExplainer direto — caminho rápido para modelos baseados em árvore.
+    try:
+        explainer = shap.TreeExplainer(model)
+        sv = explainer.shap_values(Xs, check_additivity=False)
+        if isinstance(sv, list):  # classificador antigo: lista por classe
+            sv = sv[-1]
+        sv = np.asarray(sv)
+        if sv.ndim == 3:  # (n, features, classes)
+            sv = sv[:, :, -1]
+        return sv, Xs
+    except Exception:
+        pass
+
+    # 2) API unificada (cobre modelos lineares e outros automaticamente).
     try:
         explainer = shap.Explainer(model, Xs)
         exp = explainer(Xs)
@@ -44,16 +57,6 @@ def compute_shap(
         if vals.ndim == 3:  # (n, features, classes)
             vals = vals[:, :, -1]
         return vals, Xs
-    except Exception:
-        pass
-
-    # 2) TreeExplainer direto.
-    try:
-        explainer = shap.TreeExplainer(model)
-        sv = explainer.shap_values(Xs)
-        if isinstance(sv, list):
-            sv = sv[-1]
-        return np.asarray(sv), Xs
     except Exception:
         pass
 

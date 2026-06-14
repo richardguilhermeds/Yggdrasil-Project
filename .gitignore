@@ -4,6 +4,9 @@ notebooks/rascunhos
 # Dados
 data/
 
+# Logs
+*.log
+
 # MLflow / artefatos de modelagem
 mlruns/
 mlartifacts/

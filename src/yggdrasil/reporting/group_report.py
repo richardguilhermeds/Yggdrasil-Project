@@ -90,7 +90,7 @@ def group_reports_to_html(
         "<style>body{font-family:Arial,Helvetica,sans-serif;margin:24px;}"
         "table{border-collapse:collapse;margin-bottom:28px;font-size:13px;}"
         "th,td{border:1px solid #ddd;padding:6px 10px;text-align:right;}"
-        "th{background:#4C72B0;color:#fff;}h2{color:#2c3e50;}"
+        "th{background:steelblue;color:#fff;}h2{color:#2c3e50;}"
         "caption{font-weight:bold;margin-bottom:6px;}</style></head><body>",
         f"<h1>{title}</h1>",
     ]

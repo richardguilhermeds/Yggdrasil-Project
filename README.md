@@ -104,7 +104,9 @@ resultado.shifts              # shifts DES->OOT
 resultado.reports             # relatório por grupo homogêneo
 ```
 
-> 📓 **Tutorial passo a passo** (cada módulo isolado): [`notebooks/tutoriais/00_tutorial_yggdrasil.ipynb`](notebooks/tutoriais/00_tutorial_yggdrasil.ipynb).
+> 📓 **Tutoriais passo a passo** (cada módulo isolado):
+> [PD/classificação](notebooks/tutoriais/00_tutorial_yggdrasil.ipynb) ·
+> [LGD/regressão (alvo [0,1] bimodal)](notebooks/tutoriais/01_tutorial_lgd.ipynb).
 > Notebook orquestrador pronto para produção: [`notebooks/03_modeling/01_esteira_ml_mlflow.ipynb`](notebooks/03_modeling/01_esteira_ml_mlflow.ipynb).
 > Localmente, o MLflow 3.x exige `MLFLOW_ALLOW_FILE_STORE=true` para usar o backend `./mlruns`
 > (o notebook já define isso). No Databricks, use o tracking do workspace.
