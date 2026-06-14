@@ -68,3 +68,28 @@ def scored_clf(df_clf, cfg):
     pipe = MLPipeline(cfg, problem_type="classification",
                       ratings=["decis", "quantil", "arvore", "optbin"])
     return pipe.run(df_clf, model=model, log_mlflow=False, log_shap=False)
+
+
+@pytest.fixture
+def df_eda() -> pd.DataFrame:
+    """Dataset de EDA com features variadas: boa, fraca, categórica, constante,
+    instável (drift), alto-missing e com leakage."""
+    rng = np.random.default_rng(0)
+    n = 1500
+    meses = pd.date_range("2023-01-01", periods=10, freq="MS")
+    df = pd.DataFrame({
+        "feat_bom": rng.normal(size=n),
+        "feat_fraca": rng.normal(size=n),
+        "feat_cat": rng.choice(["A", "B", "C", "D"], size=n, p=[0.5, 0.3, 0.15, 0.05]),
+        "feat_const": 1.0,
+        "feat_instavel": rng.normal(size=n),
+        "feat_missing": rng.normal(size=n),
+    })
+    df["target"] = (df["feat_bom"] * 1.2 + rng.normal(0, 0.6, n) > 0).astype(int)
+    df["feat_leakage"] = df["target"] + rng.normal(0, 0.01, n)
+    df["dt_ref"] = rng.choice(meses, size=n)
+    df["amostra"] = np.where(df["dt_ref"] >= meses[7], "OOT", "DES")
+    df.loc[df["amostra"] == "OOT", "feat_instavel"] += 2.5            # drift
+    df.loc[df.sample(frac=0.6, random_state=2).index, "feat_missing"] = np.nan
+    df.loc[df.sample(frac=0.04, random_state=3).index, "amostra"] = "SIMUL"
+    return df

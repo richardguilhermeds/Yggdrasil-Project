@@ -104,10 +104,29 @@ resultado.shifts              # shifts DES->OOT
 resultado.reports             # relatório por grupo homogêneo
 ```
 
+> 📖 **Metodologia** (o *porquê* dos métodos — KS, PSI/CSI, WoE/IV, ratings com fusão monotônica, SHAP, veredito de EDA): [`docs/metodologia.md`](docs/metodologia.md).
 > 📓 **Tutoriais passo a passo** (cada módulo isolado):
 > [PD/classificação](notebooks/tutoriais/00_tutorial_yggdrasil.ipynb) ·
-> [LGD/regressão (alvo [0,1] bimodal)](notebooks/tutoriais/01_tutorial_lgd.ipynb).
+> [LGD/regressão (alvo [0,1] bimodal)](notebooks/tutoriais/01_tutorial_lgd.ipynb) ·
+> [EDA de features](notebooks/tutoriais/02_tutorial_eda_features.ipynb).
 > Notebook orquestrador pronto para produção: [`notebooks/03_modeling/01_esteira_ml_mlflow.ipynb`](notebooks/03_modeling/01_esteira_ml_mlflow.ipynb).
+
+### 🔎 Esteira de EDA de features (`yggdrasil.eda`)
+
+Subpacote **isolado** (não interfere na esteira de modelo) para análise exploratória inicial das features:
+missing (global e por safra), percentis e variação no tempo, histograma, relação com o alvo, binning com
+**WoE/IV**, **importância** (univariada + surrogate multivariado), **estabilidade/PSI por feature** e extras
+(monotonicidade, outliers, correlação/VIF/redundância, **detecção de leakage**). Consolida tudo num
+`feature_profile` com **veredito** (manter/revisar/descartar).
+
+```python
+from yggdrasil import ColumnConfig
+from yggdrasil.eda import run_feature_eda, EDAConfig
+
+report = run_feature_eda(df, ColumnConfig(), EDAConfig())   # df: feat_*, dt_ref, amostra, target (opcional)
+report.feature_profile        # 1 linha por feature, com flags e veredito
+report.panels["feat_x"]       # painel consolidado da feature
+```
 > Localmente, o MLflow 3.x exige `MLFLOW_ALLOW_FILE_STORE=true` para usar o backend `./mlruns`
 > (o notebook já define isso). No Databricks, use o tracking do workspace.
 
