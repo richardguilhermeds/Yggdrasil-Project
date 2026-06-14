@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yggdrasil"
+version = "0.0.1"
+description = "Pacote com ferramentas e esteiras de Machine Learning para projetos em dados"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+dependencies = [
+    "requests>=2.28.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["yggdrasil*"]
+exclude = ["notebooks*"]
+
+[project.urls]
+Homepage = "https://github.com/zheage/Yggdrasil-Project"
