@@ -44,7 +44,10 @@ _CARDS = {
 _COR_BARRA = COR_PRIMARIA       # barras / métrica principal
 _COR_LINHA = COR_SECUNDARIA     # linhas de série / medianas
 _COR_VOL = COR_SECUNDARIA       # linha de volumetria / acento
-_CARD_CORES = [COR_PRIMARIA, COR_SECUNDARIA, COR_PRIMARIA, COR_SECUNDARIA]
+# Cards de métrica: cinza claro neutro (sem alternância de cor).
+_COR_CARD_FILL = "#ECECEC"
+_COR_CARD_EDGE = "#CCCCCC"
+_COR_CARD_LABEL = "#666666"
 
 
 def _draw_cards(fig, gs, problem_type: str, metrics: Dict[str, float]) -> None:
@@ -53,14 +56,14 @@ def _draw_cards(fig, gs, problem_type: str, metrics: Dict[str, float]) -> None:
     for j, (nome, chave, fmt) in enumerate(_CARDS[problem_type]):
         ax = fig.add_subplot(gs[0, j])
         ax.axis("off")
-        cor = _CARD_CORES[j % len(_CARD_CORES)]
         val = metrics.get(chave, float("nan"))
-        ax.add_patch(Rectangle((0.04, 0.05), 0.92, 0.85, facecolor=cor, alpha=0.12,
-                               edgecolor=cor, linewidth=2, transform=ax.transAxes))
-        ax.text(0.5, 0.64, nome, ha="center", va="center", fontsize=17,
-                fontweight="bold", color=cor, transform=ax.transAxes)
+        ax.add_patch(Rectangle((0.04, 0.08), 0.92, 0.84, facecolor=_COR_CARD_FILL,
+                               edgecolor=_COR_CARD_EDGE, linewidth=1.5,
+                               transform=ax.transAxes))
+        ax.text(0.5, 0.66, nome, ha="center", va="center", fontsize=16,
+                fontweight="bold", color=_COR_CARD_LABEL, transform=ax.transAxes)
         txt = fmt.format(val) if np.isfinite(val) else "—"
-        ax.text(0.5, 0.30, txt, ha="center", va="center", fontsize=28,
+        ax.text(0.5, 0.32, txt, ha="center", va="center", fontsize=27,
                 fontweight="bold", color="#2c2c2a", transform=ax.transAxes)
 
 
@@ -182,15 +185,17 @@ def build_dashboard(
     # ── layout ───────────────────────────────────────────────────────────
     shap_rows = 1 if has_shap else 0
     n_rows = 1 + shap_rows + len(rating_cols)
-    altura = 3.5 + (4.2 if has_shap else 0) + 4.0 * len(rating_cols)
+    altura = 2.6 + (4.2 if has_shap else 0) + 4.0 * len(rating_cols)
     fig = _DashFigure(figsize=(22, altura))
     FigureCanvasAgg(fig)  # canvas Agg => savefig e _repr_png_ funcionam
-    height_ratios = [0.45] + ([1.15] if has_shap else []) + [1] * len(rating_cols)
+    height_ratios = [0.5] + ([1.15] if has_shap else []) + [1] * len(rating_cols)
+    # Margens em polegadas (constantes), para o cabeçalho não "afastar" os cards.
+    top = 1 - 0.78 / altura
     gs = gridspec.GridSpec(n_rows, 4, figure=fig, height_ratios=height_ratios,
-                           hspace=0.6, wspace=0.30)
+                           hspace=0.42, wspace=0.30, top=top, bottom=0.45 / altura)
 
-    fig.suptitle(title, fontsize=22, fontweight="bold", y=0.995)
-    fig.text(0.5, 0.965, f"Métricas avaliadas na amostra {eval_sample}",
+    fig.suptitle(title, fontsize=22, fontweight="bold", y=1 - 0.26 / altura)
+    fig.text(0.5, 1 - 0.55 / altura, f"Métricas avaliadas na amostra {eval_sample}",
              ha="center", fontsize=12, style="italic", color="#666")
 
     # ── Linha 0 — cards de métrica ───────────────────────────────────────
