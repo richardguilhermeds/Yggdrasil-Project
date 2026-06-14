@@ -64,6 +64,51 @@ Módulo de testes automatizados cobrindo:
 
 Testes unitários — funções e transformações individuais
 
+---
+
+## 🚂 Esteira de ML (`yggdrasil`)
+
+Esteira governada de Machine Learning (estilo risco de crédito) orquestrada por **MLflow**.
+A entrada é uma tabela com features `feat_*`, coluna de data, coluna de amostra
+(`DES`/`OOT` para análise; `SIMUL`/`BACKTEST` apenas para score + rating) e a variável resposta.
+
+A esteira registra no experimento:
+
+- **Métricas** por amostra — KS, AUC, Gini, Acurácia, F1 (classificação) e RMSE, MAE, MAPE, R² (regressão);
+- **Shifts** DES→OOT de cada métrica (absoluto e relativo);
+- **Grupos homogêneos (ratings)** em 4 metodologias: `decis`, `quantil` (fusão monotônica por
+  inversão / Mann-Whitney), `arvore` (DecisionTree) e `optbin` (OptBinning);
+- **PSI** agregado (DES→OOT) e a série temporal do PSI de cada rating;
+- **SHAP** (importância + beeswarm) e **relatórios por grupo** (média prevista/observada,
+  representatividade, monotonicidade) + dashboard.
+
+### Instalação
+
+```bash
+pip install -e ".[dev]"          # núcleo + ferramentas de teste/notebook
+pip install -e ".[pycaret]"      # opcional: treino automatizado via PyCaret
+```
+
+### Uso
+
+```python
+from yggdrasil import MLPipeline, ColumnConfig
+
+cfg = ColumnConfig()  # feat_, dt_ref, amostra, target  (ajustável)
+pipe = MLPipeline(cfg, problem_type="classification",
+                  ratings=["decis", "quantil", "arvore", "optbin"])
+resultado = pipe.run(df, model=modelo_treinado, experiment="/Shared/Yggdrasil/pd_pf")
+
+resultado.metrics_by_sample   # métricas por DES/OOT
+resultado.shifts              # shifts DES->OOT
+resultado.reports             # relatório por grupo homogêneo
+```
+
+> 📓 **Tutorial passo a passo** (cada módulo isolado): [`notebooks/tutoriais/00_tutorial_yggdrasil.ipynb`](notebooks/tutoriais/00_tutorial_yggdrasil.ipynb).
+> Notebook orquestrador pronto para produção: [`notebooks/03_modeling/01_esteira_ml_mlflow.ipynb`](notebooks/03_modeling/01_esteira_ml_mlflow.ipynb).
+> Localmente, o MLflow 3.x exige `MLFLOW_ALLOW_FILE_STORE=true` para usar o backend `./mlruns`
+> (o notebook já define isso). No Databricks, use o tracking do workspace.
+
 
 
 

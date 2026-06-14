@@ -3,3 +3,25 @@ notebooks/rascunhos
 
 # Dados
 data/
+
+# MLflow / artefatos de modelagem
+mlruns/
+mlartifacts/
+mlflow.db
+**/mlruns/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+
+# Ambientes virtuais
+.venv/
+venv/
+env/
