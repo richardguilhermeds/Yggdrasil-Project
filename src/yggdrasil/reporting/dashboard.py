@@ -112,10 +112,32 @@ def _safra_distribution(ax, df, rating_col, cfg, ratings, cores) -> None:
     ax.stackplot(comp_pct.index, [comp_pct[r].values for r in ratings],
                  labels=[str(r) for r in ratings], colors=cores, alpha=0.9)
     ax.set_ylim(0, 100)
-    ax.set_ylabel("% da safra", fontsize=11)
+    ax.set_ylabel("% da safra", fontsize=10)
+    ax.set_xlabel("Mês de referência", fontsize=10)
+    if len(ratings) <= 6:  # legenda só quando cabe sem poluir
+        ax.legend(title="Rating", fontsize=6, ncol=len(ratings), loc="lower center",
+                  framealpha=0.6)
+    ax.tick_params(axis="x", rotation=45, labelsize=8)
+
+
+def _vintage_chart(ax, df, cfg, y_label) -> None:
+    """Carteira: volumetria por safra em BARRAS + alvo médio por safra em LINHA."""
+    g = (df.groupby("_mes", observed=True)
+           .agg(vol=(cfg.target_col, "size"), alvo=(cfg.target_col, "mean")))
+    x = list(range(len(g)))
+    ax.bar(x, g["vol"].values, color=_COR_BARRA, alpha=0.55, edgecolor="white", width=0.7)
+    ax.set_ylabel("Volumetria (nº)", fontsize=11, color=_COR_BARRA, fontweight="bold")
+    ax.set_xticks(x)
+    ax.set_xticklabels([d.strftime("%Y-%m") for d in g.index], rotation=45, ha="right", fontsize=9)
     ax.set_xlabel("Mês de referência", fontsize=11)
-    ax.legend(title="Rating", fontsize=7, ncol=2, loc="lower center")
-    ax.tick_params(axis="x", rotation=45)
+    ax.tick_params(axis="y", labelcolor=_COR_BARRA)
+    axb = ax.twinx()
+    axb.plot(x, g["alvo"].values, color=_COR_LINHA, marker="o", markersize=6, linewidth=2.5)
+    axb.set_ylabel(y_label, fontsize=11, color=_COR_LINHA, fontweight="bold")
+    axb.tick_params(axis="y", labelcolor=_COR_LINHA)
+    axb.grid(False)
+    ax.set_title(f"Volumetria e {y_label.lower()} por safra (carteira)",
+                 fontsize=13, fontweight="bold")
 
 
 def build_dashboard(
@@ -184,15 +206,16 @@ def build_dashboard(
 
     # ── layout ───────────────────────────────────────────────────────────
     shap_rows = 1 if has_shap else 0
-    n_rows = 1 + shap_rows + len(rating_cols)
-    altura = 2.6 + (4.2 if has_shap else 0) + 4.0 * len(rating_cols)
+    n_rows = 2 + shap_rows + len(rating_cols)   # cards + vintage (+ shap) + ratings
+    altura = 2.6 + 3.0 + (4.2 if has_shap else 0) + 4.0 * len(rating_cols)
     fig = _DashFigure(figsize=(22, altura))
     FigureCanvasAgg(fig)  # canvas Agg => savefig e _repr_png_ funcionam
-    height_ratios = [0.5] + ([1.15] if has_shap else []) + [1] * len(rating_cols)
+    height_ratios = [0.5, 0.85] + ([1.15] if has_shap else []) + [1] * len(rating_cols)
     # Margens em polegadas (constantes), para o cabeçalho não "afastar" os cards.
     top = 1 - 0.78 / altura
+    # wspace alto evita o rótulo do eixo gêmeo (target/volumetria) colidir com o vizinho.
     gs = gridspec.GridSpec(n_rows, 4, figure=fig, height_ratios=height_ratios,
-                           hspace=0.42, wspace=0.30, top=top, bottom=0.45 / altura)
+                           hspace=0.5, wspace=0.46, top=top, bottom=0.40 / altura)
 
     fig.suptitle(title, fontsize=22, fontweight="bold", y=1 - 0.26 / altura)
     fig.text(0.5, 1 - 0.55 / altura, f"Métricas avaliadas na amostra {eval_sample}",
@@ -201,16 +224,19 @@ def build_dashboard(
     # ── Linha 0 — cards de métrica ───────────────────────────────────────
     _draw_cards(fig, gs, problem_type, metrics)
 
+    # ── Linha 1 — vintage de carteira (volumetria barras + alvo linha) ───
+    _vintage_chart(fig.add_subplot(gs[1, 0:4]), df, cfg, y_label)
+
     # ── Linha SHAP (interpretabilidade global do modelo) ─────────────────
     if has_shap:
         importance = shap_feature_importance(shap_values, Xs.columns)
-        ax_imp = fig.add_subplot(gs[1, 0:2])
+        ax_imp = fig.add_subplot(gs[2, 0:2])
         _shap_importance_bar(ax_imp, importance, shap_max_display)
-        ax_bee = fig.add_subplot(gs[1, 2:4])
+        ax_bee = fig.add_subplot(gs[2, 2:4])
         _shap_beeswarm(fig, ax_bee, shap_values, Xs, shap_max_display)
 
     # ── Uma linha por metodologia de rating ──────────────────────────────
-    base = 1 + shap_rows
+    base = 2 + shap_rows
     for offset, rating_col in enumerate(rating_cols):
         row = base + offset
         ratings = sorted(df[rating_col].dropna().unique())
@@ -222,40 +248,43 @@ def build_dashboard(
                  .reindex(ratings))
         agg["pct_vol"] = 100 * agg["volume"] / agg["volume"].sum()
 
-        # G1 — barras target médio + linha de volumetria
+        # G1 — barras de VOLUMETRIA + linha do alvo médio, por rating (invertido)
         ax1 = fig.add_subplot(gs[row, 0])
-        ax1.bar(range(len(ratings)), agg["target_medio"], color=_COR_BARRA, alpha=0.85,
-                edgecolor="white", linewidth=1.2)
+        ax1.bar(range(len(ratings)), agg["pct_vol"], color=_COR_BARRA, alpha=0.6,
+                edgecolor="white", linewidth=1.0)
         ax1.set_xticks(range(len(ratings)))
-        ax1.set_xticklabels(ratings, rotation=0)
-        ax1.set_ylabel(y_label, fontsize=11, color=_COR_BARRA, fontweight="bold")
-        ax1.set_xlabel("Rating", fontsize=11)
-        ax1.set_title(f"{titulo} · {y_label} e volumetria", fontsize=12, fontweight="bold")
+        ax1.set_xticklabels(ratings, rotation=0, fontsize=8)
+        ax1.set_ylabel("% volumetria", fontsize=10, color=_COR_BARRA, fontweight="bold")
+        ax1.set_xlabel("Rating", fontsize=10)
+        ax1.tick_params(axis="y", labelcolor=_COR_BARRA, labelsize=8)
+        ax1.set_title(f"{titulo} · volume e {y_label.lower()}", fontsize=11, fontweight="bold")
         ax1b = ax1.twinx()
-        ax1b.plot(range(len(ratings)), agg["pct_vol"], color=_COR_VOL, marker="o",
-                  markersize=7, linewidth=2.5)
-        ax1b.set_ylabel("% volumetria", fontsize=11, color=_COR_VOL, fontweight="bold")
+        ax1b.plot(range(len(ratings)), agg["target_medio"], color=_COR_LINHA, marker="o",
+                  markersize=6, linewidth=2.2)
+        ax1b.set_ylabel(y_label, fontsize=10, color=_COR_LINHA, fontweight="bold", labelpad=1)
+        ax1b.tick_params(axis="y", labelcolor=_COR_LINHA, labelsize=8)
         ax1b.grid(False)
 
         # G2 — distribuição dos ratings ao longo das safras (composição %)
         ax2 = fig.add_subplot(gs[row, 1])
         _safra_distribution(ax2, df, rating_col, cfg, ratings, cores)
-        ax2.set_title(f"{titulo} · Distribuição por safra", fontsize=12, fontweight="bold")
+        ax2.set_title(f"{titulo} · distribuição por safra", fontsize=11, fontweight="bold")
 
-        # G3 — série temporal do target médio por rating
+        # G3 — série temporal do alvo médio por rating
         ax3 = fig.add_subplot(gs[row, 2])
         serie = (df.groupby(["_mes", rating_col], observed=True)[tg].mean()
                    .unstack(rating_col).reindex(columns=ratings))
         for k, rt in enumerate(ratings):
             ax3.plot(serie.index, serie[rt], marker="o", markersize=3.5, linewidth=1.8,
                      color=cores[k], label=str(rt))
-        ax3.set_title(f"{titulo} · {y_label} no tempo", fontsize=12, fontweight="bold")
-        ax3.set_ylabel(y_label, fontsize=11)
-        ax3.set_xlabel("Mês de referência", fontsize=11)
-        ax3.legend(title="Rating", fontsize=8, ncol=2, loc="best")
-        ax3.tick_params(axis="x", rotation=45)
+        ax3.set_title(f"{titulo} · {y_label.lower()} no tempo", fontsize=11, fontweight="bold")
+        ax3.set_ylabel(y_label, fontsize=10)
+        ax3.set_xlabel("Mês de referência", fontsize=10)
+        if len(ratings) <= 6:
+            ax3.legend(title="Rating", fontsize=6, ncol=2, loc="best", framealpha=0.6)
+        ax3.tick_params(axis="x", rotation=45, labelsize=8)
 
-        # G4 — dispersão do target por rating (boxplot)
+        # G4 — dispersão do alvo por rating (boxplot)
         ax4 = fig.add_subplot(gs[row, 3])
         dados = [df.loc[df[rating_col] == rt, tg].dropna().values for rt in ratings]
         rotulos = [str(r) for r in ratings]
@@ -269,10 +298,10 @@ def build_dashboard(
         for med in bp["medians"]:
             med.set_color(_COR_LINHA)
             med.set_linewidth(1.5)
-        ax4.set_title(f"{titulo} · Dispersão do target", fontsize=12, fontweight="bold")
-        ax4.set_ylabel("Target observado", fontsize=11)
-        ax4.set_xlabel("Rating", fontsize=11)
-        ax4.tick_params(axis="x", rotation=0)
+        ax4.set_title(f"{titulo} · dispersão do alvo", fontsize=11, fontweight="bold")
+        ax4.set_ylabel("Alvo observado", fontsize=10)
+        ax4.set_xlabel("Rating", fontsize=10)
+        ax4.tick_params(axis="x", rotation=0, labelsize=8)
 
     return fig
 
