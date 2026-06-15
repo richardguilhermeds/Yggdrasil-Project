@@ -211,15 +211,16 @@ def build_dashboard(
     fig = _DashFigure(figsize=(22, altura))
     FigureCanvasAgg(fig)  # canvas Agg => savefig e _repr_png_ funcionam
     height_ratios = [0.5, 0.85] + ([1.15] if has_shap else []) + [1] * len(rating_cols)
-    # Margens em polegadas (constantes), para o cabeçalho não "afastar" os cards.
-    top = 1 - 0.78 / altura
+    # Cabeçalho com folgas em polegadas (constantes): título, subtítulo e cards
+    # ficam separados o suficiente para não se sobreporem em nenhuma altura.
+    top = 1 - 1.55 / altura
     # wspace alto evita o rótulo do eixo gêmeo (target/volumetria) colidir com o vizinho.
     gs = gridspec.GridSpec(n_rows, 4, figure=fig, height_ratios=height_ratios,
                            hspace=0.5, wspace=0.46, top=top, bottom=0.40 / altura)
 
-    fig.suptitle(title, fontsize=22, fontweight="bold", y=1 - 0.26 / altura)
-    fig.text(0.5, 1 - 0.55 / altura, f"Métricas avaliadas na amostra {eval_sample}",
-             ha="center", fontsize=12, style="italic", color="#666")
+    fig.suptitle(title, fontsize=22, fontweight="bold", y=1 - 0.38 / altura)
+    fig.text(0.5, 1 - 1.18 / altura, f"Métricas avaliadas na amostra {eval_sample}",
+             ha="center", fontsize=11, style="italic", color="#666")
 
     # ── Linha 0 — cards de métrica ───────────────────────────────────────
     _draw_cards(fig, gs, problem_type, metrics)
