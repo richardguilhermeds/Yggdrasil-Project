@@ -682,8 +682,9 @@ def test_plot_target_hist():
     df = _amostra_safra()
     seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
                                  ref_sample="DES", verbose=False)
-    fig = seg.plot_target_hist(by_sample=True)
+    fig = seg.plot_target_hist()                  # só DES, preenchido
     assert fig is not None
+    assert "DES" in fig.axes[0].get_title()
     plt.close(fig)
 
 
@@ -704,3 +705,51 @@ def test_plot_feature_lgd():
     fig2 = seg.plot_feature_lgd("ltv", sid=folha)
     assert fig2 is not None
     plt.close(fig2)
+
+
+# ----------------------------------------------------------------------
+# Correções da auditoria de bugs
+# ----------------------------------------------------------------------
+def test_grow_grupos_cat_repetidos_erro():
+    df = _amostra()
+    seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                 ref_sample="DES", verbose=False)
+    with pytest.raises(ValueError, match="repetida"):
+        seg.grow("garantia", splits=[["A", "B"], ["A"], ["C"]])   # 'A' em 2 grupos
+
+
+def test_grow_nao_cria_split_degenerado():
+    df = _amostra()                       # garantia A/B/C/D, sem NaN
+    seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                 ref_sample="DES", verbose=False)
+    n0 = sum(s["is_leaf"] for s in seg.segments.values())
+    seg.grow("garantia", splits=[["A", "B", "C", "D"]])           # 1 grupo cobre tudo
+    n1 = sum(s["is_leaf"] for s in seg.segments.values())
+    assert n1 == n0                       # nenhum split degenerado de 1 filho
+    assert seg.segments["root"]["is_leaf"]
+
+
+def test_prune_respeita_protect():
+    df = _dois_patamares()
+    seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                 ref_sample="DES", verbose=False)
+    seg.grow("ltv", splits=[0.2, 0.35, 0.5, 0.7, 0.85])           # 6 folhas-irmãs
+    folhas = [s for s, v in seg.segments.items() if v["is_leaf"]]
+    prot = {folhas[0], folhas[1]}
+    seg.prune(min_repr=0.0, min_lgd_gap=0.03, protect=prot, verbose=False)
+    assert prot.issubset(set(seg.segments))                       # travadas preservadas
+
+
+def test_to_pyspark_categorico_cast_string():
+    df = _amostra()
+    seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                 ref_sample="DES", verbose=False)
+    seg.grow("garantia")
+    assert 'cast("string").isin' in seg.to_pyspark()              # paridade com pandas
+
+
+def test_construtor_sample_col_ausente_erro():
+    df = _amostra().drop(columns=["amostra"])
+    with pytest.raises(ValueError, match="amostra"):
+        SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                               ref_sample="DES", verbose=False)

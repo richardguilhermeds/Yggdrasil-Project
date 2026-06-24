@@ -46,7 +46,7 @@ _CSS = """
   text-transform: uppercase; letter-spacing: .5px; margin-bottom: 8px; }
 .lgdui-bar { padding: 8px 10px; background:#f7f9fb; border:1px solid #e6e8eb;
   border-radius: 10px; }
-.pill { display:inline-block; padding:3px 10px; border-radius:999px; font-size:11px;
+.pill { display:inline-block; padding:4px 11px; border-radius:999px; font-size:13px;
   font-weight:600; margin:2px 5px 2px 0; }
 .pill-muted  { background:#eef1f4; color:#3a4a5a; }
 .pill-green  { background:#e6f6ec; color:#137a3e; }
@@ -60,7 +60,10 @@ _CSS = """
 
 class LGDSegmenterUI:
     def __init__(self, df, target="lgd", sample_col=None, ref_sample="DES",
-                 feature_labels=None, features=None):
+                 feature_labels=None, features=None, tree_samples=None):
+        # tree_samples: amostras cujo LGD médio aparece nas folhas da árvore.
+        # None = todas; ex.: tree_samples=["DES","OOT"] mostra só DES e OOT.
+        self._tree_samples_cfg = tree_samples
         self._kwargs = dict(target=target, sample_col=sample_col,
                             ref_sample=ref_sample, feature_labels=feature_labels,
                             verbose=False)
@@ -86,8 +89,15 @@ class LGDSegmenterUI:
             self._samples = list(df[sample_col].dropna().unique())
             self._nonref = [a for a in self._samples if a != ref_sample]
             self._sample_masks = {a: (df[sample_col] == a) for a in self._samples}
+            # não-referência a EXIBIR na árvore (default: todas)
+            if tree_samples is not None:
+                self._tree_nonref = [a for a in tree_samples
+                                     if a in self._samples and a != ref_sample]
+            else:
+                self._tree_nonref = list(self._nonref)
         else:
             self._samples, self._nonref, self._sample_masks = [], [], {}
+            self._tree_nonref = []
 
         self._build()
         self._on_mode_change(None)   # estado inicial de visibilidade dos controles
@@ -259,7 +269,9 @@ class LGDSegmenterUI:
         self.out_boot = W.Output(layout=W.Layout(overflow="auto"))
         self.out_validate = W.Output(layout=W.Layout(overflow="auto"))
         self.out_quality = W.Output(layout=W.Layout(overflow="auto"))
-        self.out_log = W.Output(layout=W.Layout(max_height="200px", overflow="auto"))
+        self.out_log = W.Output(layout=W.Layout(max_height="320px", overflow="auto"))
+        self.out_preview_table = W.Output(layout=W.Layout(max_height="320px", overflow="auto"))
+        self.out_preview_chart = W.Output(layout=W.Layout(max_height="360px", overflow="auto"))
         self.out_table = W.Output(layout=W.Layout(max_height="300px", overflow="auto"))
         self.cat_box = W.VBox([], layout=W.Layout(width="98%", display="none",
                                                   border="1px solid #eef1f4",
@@ -301,13 +313,28 @@ class LGDSegmenterUI:
             W.HTML("<div class='lgdui-h' style='margin-top:8px'>Salvar no MLflow</div>"),
             self.tx_model, self.cb_uc, self.tx_experiment, self.tx_runname,
             W.HBox([self.btn_mlflow, self.btn_clear_log]),
-            W.HTML("<div class='lgdui-h' style='margin-top:8px'>Preview / log</div>"),
-            self.out_log,
         ], layout=W.Layout(width="49%"))
         card_refine.add_class("lgdui-card")
 
         controls = W.HBox([card_build, card_refine],
                           layout=W.Layout(justify_content="space-between"))
+
+        # Seção abaixo dos controles: log + tabela do preview + gráfico, lado a lado
+        col_log = W.VBox([W.HTML("<div class='lgdui-h'>Log</div>"), self.out_log],
+                         layout=W.Layout(width="27%"))
+        col_ptable = W.VBox([W.HTML("<div class='lgdui-h'>Preview · tabela</div>"),
+                             self.out_preview_table], layout=W.Layout(width="31%"))
+        col_pchart = W.VBox([W.HTML("<div class='lgdui-h'>Preview · representatividade × LGD</div>"),
+                             self.out_preview_chart], layout=W.Layout(width="40%"))
+        card_preview = W.VBox([
+            W.HTML("<div class='lgdui-h'>Preview / log</div>"),
+            W.HTML("<div class='lgdui-legend'>Mensagens das ações (log) e — ao clicar em "
+                   "👁 <b>Preview</b> — a <b>tabela</b> e o <b>gráfico</b> (barras = "
+                   "representatividade, linha = LGD médio) da divisão proposta.</div>"),
+            W.HBox([col_log, col_ptable, col_pchart],
+                   layout=W.Layout(justify_content="space-between", align_items="flex-start")),
+        ])
+        card_preview.add_class("lgdui-card")
 
         iv_legend = W.HTML(
             "<div class='lgdui-legend'>Information Value de cada variável na <b>folha "
@@ -444,7 +471,7 @@ class LGDSegmenterUI:
 
         # Ordem: segmentação → folhas → IV | PSI → métricas → bootstrap →
         #        qualidade dos segmentos → validação
-        cards = [banner, controls, bar_box, card_tree, card_table,
+        cards = [banner, controls, card_preview, bar_box, card_tree, card_table,
                  card_imp_psi, card_metrics, card_boot, card_quality, card_validacao]
         self.panel = W.VBox(cards)
         self.panel.add_class("lgdui")
@@ -524,7 +551,7 @@ class LGDSegmenterUI:
         def lgd_str(sid):
             if self.sample_col is not None:
                 parts = [f"{self.ref_sample} {self._node_lgd(sid, self.ref_sample):.3f}"]
-                for a in self._nonref:
+                for a in self._tree_nonref:          # só as amostras configuradas
                     parts.append(f"{a} {self._node_lgd(sid, a):.3f}")
                 return " · ".join(parts)
             return f"LGD {self._node_lgd(sid):.3f}"
@@ -625,7 +652,7 @@ class LGDSegmenterUI:
                    .map(r2_bg, subset=["R2"])
                    .format({"MAE": "{:.4f}", "RMSE": "{:.4f}", "R2": "{:.4f}"}, na_rep="—")
                    .hide(axis="index")
-                   .set_properties(**{"font-size": "12px"}))
+                   .set_properties(**{"font-size": "13.5px"}))
             display(sty)
 
     def _ordered_leaf_options(self):
@@ -798,10 +825,12 @@ class LGDSegmenterUI:
             if sid is None or sid not in self.seg.segments:
                 print("Selecione a folha POPULADA de destino."); return
             before = set(self.seg.segments)
+            redo_bak = list(self._redo)
             self._checkpoint()
             self.seg.merge_missing(sid)
             if set(self.seg.segments) == before:
                 self._undo.pop()                 # nada mudou — não polui o histórico
+                self._redo[:] = redo_bak         # ...nem destrói a pilha de refazer
                 self._sync_undo_buttons()
                 return
         self.locked &= set(self.seg.segments)
@@ -974,6 +1003,9 @@ class LGDSegmenterUI:
 
     def _on_preview(self, _):
         sid = self._selected_leaf()
+        self.out_preview_table.clear_output()
+        self.out_preview_chart.clear_output()
+        previews = None
         with self.out_log:
             self.out_log.clear_output(wait=True)
             if sid is None:
@@ -990,20 +1022,21 @@ class LGDSegmenterUI:
                         print("⚠ Preencha 'Cortes' para o modo Manual."); return
                 previews = self.seg.show_grow(feature, splits=splits, only_segments=[sid], **extra)
                 self._pending = dict(feature=feature, splits=splits, only_segments=[sid], **extra)
-                if sid in previews:
-                    drop = [c for c in ["lgd_std"] if c in previews[sid]]
-                    display(previews[sid].drop(columns=drop))
-                    # gráfico do LGD por faixa, embaixo da tabela (mesmos bins)
-                    try:
-                        fig = self.seg.plot_feature_lgd(
-                            feature, sid=sid, splits=splits,
-                            max_n_bins=extra.get("max_n_bins", 4))
-                        self._display_fig(fig, border=False)
-                    except Exception:
-                        pass
             except Exception as e:
                 self._pending = None
-                print("Erro no preview:", type(e).__name__, e)
+                print("Erro no preview:", type(e).__name__, e); return
+        if previews and sid in previews:
+            drop = [c for c in ["lgd_std"] if c in previews[sid]]
+            with self.out_preview_table:                 # tabela na 2ª coluna
+                display(previews[sid].drop(columns=drop))
+            with self.out_preview_chart:                 # gráfico na 3ª coluna
+                try:
+                    fig = self.seg.plot_feature_lgd(
+                        feature, sid=sid, splits=splits,
+                        max_n_bins=extra.get("max_n_bins", 4))
+                    self._display_fig(fig, border=False)
+                except Exception as e:
+                    print("(gráfico não gerado:", type(e).__name__, e, ")")
 
     def _on_split(self, _):
         with self.out_log:
@@ -1038,7 +1071,8 @@ class LGDSegmenterUI:
             self.out_log.clear_output(wait=True)
             try:
                 self._checkpoint()
-                self.seg.prune(min_repr=self.sl_repr.value, min_lgd_gap=self.sl_gap.value)
+                self.seg.prune(min_repr=self.sl_repr.value, min_lgd_gap=self.sl_gap.value,
+                               protect=set(self.locked))
             except Exception as e:
                 print("Erro na poda:", type(e).__name__, e); return
         self.locked &= set(self.seg.segments)
@@ -1233,8 +1267,8 @@ class LGDSegmenterUI:
         with self.out_quality:
             self.out_quality.clear_output(wait=True)
             try:
-                self._display_fig(self.seg.plot_target_hist(
-                    by_sample=self.sample_col is not None), border=False)
+                # só a amostra de referência (DES), preenchido
+                self._display_fig(self.seg.plot_target_hist(), border=False)
             except Exception as e:
                 print("Erro no histograma:", type(e).__name__, e)
 
