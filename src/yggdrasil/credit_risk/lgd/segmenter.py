@@ -969,11 +969,21 @@ class SequentialLGDSegmenter:
             sub = self.df[m]
             return sub[self.target].mean() if len(sub) else float("nan")
 
-        def lgd_sort(sid):
-            lg = stats(sid)[2]
-            return lg if not pd.isna(lg) else float("inf")
+        # menor nota_lgd entre as folhas de cada ramo — usada para ordenar os
+        # ramos da esquerda (menor nota) para a direita (maior nota)
+        _min_nota: dict = {}
 
-        # --- layout: folhas em x sequencial (DFS), internos centralizados ---
+        def min_nota(sid):
+            if sid not in _min_nota:
+                if self.segments[sid]["is_leaf"]:
+                    _min_nota[sid] = nota_map.get(sid, 10 ** 9)
+                else:
+                    _min_nota[sid] = min((min_nota(c) for c in filhos.get(sid, [])),
+                                         default=10 ** 9)
+            return _min_nota[sid]
+
+        # --- layout: folhas em x sequencial na ORDEM DE nota_lgd (esq.→dir.);
+        #     nós internos centralizados sobre o intervalo dos filhos ---
         X_GAP, Y_GAP = 2.4, 2.15        # espaçamento entre folhas / entre níveis
         bw, bh = 0.97, 0.74             # meia-largura / meia-altura do box (dados)
         pos: dict = {}
@@ -982,12 +992,13 @@ class SequentialLGDSegmenter:
 
         def place(sid, depth):
             max_depth[0] = max(max_depth[0], depth)
-            ch = sorted(filhos.get(sid, []), key=lgd_sort, reverse=not ascending)
+            ch = sorted(filhos.get(sid, []), key=min_nota)   # ramos por menor nota
             if self.segments[sid]["is_leaf"] or not ch:
                 x = counter[0] * X_GAP
                 counter[0] += 1
             else:
-                x = float(np.mean([place(c, depth + 1) for c in ch]))
+                cxs = [place(c, depth + 1) for c in ch]
+                x = 0.5 * (min(cxs) + max(cxs))              # centra sobre os filhos
             pos[sid] = (x, -depth * Y_GAP)
             return x
 
@@ -1036,7 +1047,7 @@ class SequentialLGDSegmenter:
             # apenas representatividade (%) e LGD médio (DES); nota nas folhas
             lgd_txt = f"LGD {lgd:.3f}" if not pd.isna(lgd) else "LGD —"
             if is_leaf:
-                lgd_txt += f"  ·  nota {nota_map.get(sid, '?')}"
+                lgd_txt += f"  ·  folha {nota_map.get(sid, '?')}"
             linhas = [cab, f"repr. {rep:.1f}%", lgd_txt]
             if show_samples and self.sample_col is not None:
                 amostras = list(self.df[self.sample_col].dropna().unique())

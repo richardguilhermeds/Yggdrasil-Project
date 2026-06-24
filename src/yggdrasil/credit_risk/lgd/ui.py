@@ -153,6 +153,7 @@ class LGDSegmenterUI:
                                 indent=False, layout=W.Layout(width="98%"))
         self.btn_mlflow = mk("Salvar no MLflow", "primary",
                              "Loga régua, métricas e o modelo pyfunc, e registra a versão no Model Registry", "save")
+        self.btn_clear_log = mk("Limpar log", "", "Limpa a área de preview/log", "eraser")
         self.sl_boot = W.IntSlider(description="reamostras", min=200, max=5000, step=100,
                                    value=1000, layout=full, style=dstyle)
         self.btn_boot = mk("Calcular IC bootstrap", "primary",
@@ -201,6 +202,7 @@ class LGDSegmenterUI:
         self.btn_suggest.on_click(self._on_suggest)
         self.btn_autofit.on_click(self._on_autofit)
         self.btn_mlflow.on_click(self._on_mlflow)
+        self.btn_clear_log.on_click(self._on_clear_log)
         self.btn_boot.on_click(self._on_boot)
         self.btn_undo.on_click(self._on_undo)
         self.btn_redo.on_click(self._on_redo)
@@ -252,7 +254,8 @@ class LGDSegmenterUI:
             self.tx_json_path,
             W.HBox([self.btn_save_json, self.btn_load_json]),
             W.HTML("<div class='lgdui-h' style='margin-top:8px'>Salvar no MLflow</div>"),
-            self.tx_model, self.cb_uc, self.tx_experiment, self.tx_runname, self.btn_mlflow,
+            self.tx_model, self.cb_uc, self.tx_experiment, self.tx_runname,
+            W.HBox([self.btn_mlflow, self.btn_clear_log]),
             W.HTML("<div class='lgdui-h' style='margin-top:8px'>Preview / log</div>"),
             self.out_log,
         ], layout=W.Layout(width="49%"))
@@ -789,6 +792,9 @@ class LGDSegmenterUI:
                 print("MLflow não está instalado neste ambiente. Instale com: %pip install mlflow")
             except Exception as e:
                 print(f"Erro ao salvar no MLflow: {type(e).__name__}: {e}")
+
+    def _on_clear_log(self, _):
+        self.out_log.clear_output()       # limpa a área de preview/log
 
     def _parse_cuts(self, feature, sid):
         sub = self.df[self.seg.segments[sid]["mask"]]

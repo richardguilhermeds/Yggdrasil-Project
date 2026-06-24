@@ -394,8 +394,14 @@ def test_plot_tree_gera_imagem(tmp_path):
     boxes = [p for p in fig.axes[0].patches if isinstance(p, FancyBboxPatch)]
     assert len(boxes) == len(seg.segments)              # uma caixa por segmento
     txt = " ".join(t.get_text() for t in fig.axes[0].texts)
-    assert "repr." in txt and "LGD" in txt and "nota" in txt  # repr.%, LGD(DES), nota
+    assert "repr." in txt and "LGD" in txt and "folha" in txt  # repr.%, LGD(DES), folha N
     assert "n=" not in txt                              # n removido (só repr. e LGD)
+    # folhas ordenadas por nota_lgd da esquerda para a direita (split único = estrito)
+    import re
+    ordem = [n for _, n in sorted(
+        (t.get_position()[0], int(re.search(r"folha (\d+)", t.get_text()).group(1)))
+        for t in fig.axes[0].texts if "folha" in t.get_text())]
+    assert ordem == sorted(ordem)
     # escala de cor (colorbar) fixa de 0 a 1
     cbar_ax = fig.axes[-1]
     lo, hi = cbar_ax.get_ylim()
