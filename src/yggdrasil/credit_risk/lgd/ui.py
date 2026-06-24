@@ -134,6 +134,9 @@ class LGDSegmenterUI:
                               "Funde a folha com a vizinha de menor corte (num) / menor LGD (cat)", "arrow-left")
         self.btn_merge_r = mk("Fundir direita ▶", "warning",
                               "Funde a folha com a vizinha de maior corte (num) / maior LGD (cat)", "arrow-right")
+        self.btn_merge_na = mk("Juntar faltante nesta folha", "warning",
+                               "Junta o nó de faltantes (NaN) deste split dentro da folha populada "
+                               "selecionada — a regra vira 'bin OU faltante'", "link")
         self.btn_suggest = mk("Sugerir split", "info",
                               "Recomenda a variável de maior IV para a folha selecionada", "lightbulb-o")
         self.btn_autofit = mk("Auto-fit (árvore)", "info",
@@ -164,12 +167,22 @@ class LGDSegmenterUI:
                                 "Funde automaticamente folhas-irmãs indistinguíveis (p > alpha)", "compress")
         self.sl_alpha = W.FloatSlider(description="alpha", min=0.01, max=0.50, step=0.01,
                                       value=0.05, readout_format=".2f", layout=full, style=dstyle)
+        self.cb_automerge_na = W.Checkbox(value=False, indent=False,
+                                          description="auto-fundir também junta faltantes ao bin mais próximo",
+                                          layout=W.Layout(width="98%"))
         self.tx_json_path = W.Text(description="arquivo", value="arvore_lgd.json",
                                    layout=full, style=dstyle, placeholder="caminho .json")
         self.btn_save_json = mk("Salvar árvore (JSON)", "success",
                                 "Salva a estrutura da árvore num arquivo JSON", "save")
         self.btn_load_json = mk("Carregar árvore (JSON)", "info",
                                 "Carrega uma árvore salva e reaplica ao DataFrame atual", "upload")
+        # --- imagem da árvore (matplotlib) ---
+        self.tx_img_path = W.Text(description="imagem", value="arvore_lgd.png",
+                                  layout=full, style=dstyle,
+                                  placeholder="caminho .png/.svg (opcional)")
+        self.btn_plot = mk("Ver / salvar árvore (imagem)", "info",
+                           "Renderiza a árvore como imagem (LGD médio e % por folha) e salva "
+                           "se um caminho for informado", "picture-o")
 
         self.btn_preview.on_click(self._on_preview)
         self.btn_split.on_click(self._on_split)
@@ -183,6 +196,7 @@ class LGDSegmenterUI:
         self.btn_collapse.on_click(self._on_collapse)
         self.btn_merge_l.on_click(lambda _: self._on_merge("left"))
         self.btn_merge_r.on_click(lambda _: self._on_merge("right"))
+        self.btn_merge_na.on_click(self._on_merge_missing)
         self.btn_suggest.on_click(self._on_suggest)
         self.btn_autofit.on_click(self._on_autofit)
         self.btn_mlflow.on_click(self._on_mlflow)
@@ -192,6 +206,7 @@ class LGDSegmenterUI:
         self.btn_automerge.on_click(self._on_automerge)
         self.btn_save_json.on_click(self._on_save_json)
         self.btn_load_json.on_click(self._on_load_json)
+        self.btn_plot.on_click(self._on_plot)
         self.tg_mode.observe(self._on_mode_change, names="value")
         self.dd_feature.observe(self._on_mode_change, names="value")
 
@@ -200,6 +215,7 @@ class LGDSegmenterUI:
         self.out_metrics = W.Output(layout=W.Layout(overflow="auto"))
         self.out_iv = W.Output(layout=W.Layout(overflow="auto"))
         self.out_csi = W.Output(layout=W.Layout(overflow="auto"))
+        self.out_plot = W.Output(layout=W.Layout(overflow="auto"))
         self.out_boot = W.Output(layout=W.Layout(overflow="auto"))
         self.out_log = W.Output(layout=W.Layout(max_height="200px", overflow="auto"))
         self.out_table = W.Output(layout=W.Layout(max_height="300px", overflow="auto"))
@@ -215,11 +231,13 @@ class LGDSegmenterUI:
             W.HBox([self.btn_lock, self.btn_unlock]),
             W.HBox([self.btn_collapse]),
             W.HBox([self.btn_merge_l, self.btn_merge_r]),
+            W.HBox([self.btn_merge_na]),
             W.HTML("<div class='lgdui-h' style='margin-top:8px'>Assistente</div>"),
             W.HBox([self.btn_suggest, self.btn_autofit]),
             self.sl_depth,
             W.HBox([self.btn_automerge]),
             self.sl_alpha,
+            self.cb_automerge_na,
         ], layout=W.Layout(width="49%"))
         card_build.add_class("lgdui-card")
 
@@ -262,7 +280,7 @@ class LGDSegmenterUI:
             "<span style='background:#fdf3da;padding:1px 5px;border-radius:3px'>0.10–0.25 atenção</span> "
             "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>&ge;0.25 instável</span></div>")
         card_csi = W.VBox([
-            W.HTML("<div class='lgdui-h'>Estabilidade das variáveis (CSI · DES → demais amostras)</div>"),
+            W.HTML("<div class='lgdui-h'>PSI por variável (CSI · DES → demais amostras)</div>"),
             csi_legend, self.out_csi])
         card_csi.add_class("lgdui-card")
         self._card_csi = card_csi
@@ -298,7 +316,10 @@ class LGDSegmenterUI:
             "<span style='color:#caa000'>médio</span> &rarr; "
             "<span style='color:#d6453e'>alto</span>) · 🔒 folha fechada</div>")
         card_tree = W.VBox([W.HTML("<div class='lgdui-h'>Árvore atual</div>"),
-                            tree_legend, self.out_tree])
+                            tree_legend, self.out_tree,
+                            W.HTML("<div class='lgdui-h' style='margin-top:8px'>Imagem da árvore "
+                                   "(LGD médio &amp; % por folha)</div>"),
+                            self.tx_img_path, W.HBox([self.btn_plot]), self.out_plot])
         card_tree.add_class("lgdui-card")
 
         tbl_legend = W.HTML(
@@ -307,7 +328,7 @@ class LGDSegmenterUI:
             "<span style='background:#fdf3da;padding:1px 5px;border-radius:3px'>0.10–0.25 atenção</span> "
             "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>&ge;0.25 instável</span>"
             " · <b>p_vs_prox</b> em vermelho &rArr; folha não distinguível da próxima (candidata a fusão)</div>")
-        card_table = W.VBox([W.HTML("<div class='lgdui-h'>Folhas · PSI &amp; teste de hipótese</div>"),
+        card_table = W.VBox([W.HTML("<div class='lgdui-h'>Folhas criadas · PSI &amp; teste de hipótese</div>"),
                              tbl_legend, self.out_table])
         card_table.add_class("lgdui-card")
 
@@ -316,10 +337,22 @@ class LGDSegmenterUI:
             "<div class='s'>Optimal binning híbrido · PSI ao vivo (DES como referência) · "
             "teste de hipótese entre folhas adjacentes</div></div>")
 
-        cards = [banner, controls, card_iv]
-        if self.sample_col is not None:        # CSI exige amostras (DES vs OOT/…)
-            cards.append(card_csi)
-        cards += [bar_box, card_tree, card_table, card_metrics, card_boot]
+        # Information Value (importância) e PSI por variável (CSI) lado a lado,
+        # separados por uma barra vertical intermediária.
+        if self.sample_col is not None:        # CSI/PSI exige amostras (DES vs OOT/…)
+            card_iv.layout.width = "48.5%"
+            card_csi.layout.width = "48.5%"
+            barra = W.HTML("<div style='width:2px;background:#d6dbe0;border-radius:1px;"
+                           "align-self:stretch;min-height:160px;margin:0 4px'></div>")
+            card_imp_psi = W.HBox([card_iv, barra, card_csi],
+                                  layout=W.Layout(width="100%", align_items="stretch",
+                                                  justify_content="space-between"))
+        else:
+            card_imp_psi = card_iv             # sem amostras não há PSI por variável
+
+        # Ordem: segmentação → folhas criadas → Information Value | PSI → métricas → bootstrap
+        cards = [banner, controls, bar_box, card_tree, card_table,
+                 card_imp_psi, card_metrics, card_boot]
         self.panel = W.VBox(cards)
         self.panel.add_class("lgdui")
 
@@ -552,11 +585,15 @@ class LGDSegmenterUI:
         self._refresh_iv()
         self._refresh_metrics()
         self._refresh_table()
-        # o IC bootstrap fica obsoleto após mudanças na árvore
+        # o IC bootstrap e a imagem ficam obsoletos após mudanças na árvore
         with self.out_boot:
             self.out_boot.clear_output(wait=True)
             display(W.HTML("<div style='font-size:12px;color:#889'>Árvore alterada — "
                            "clique em <b>Calcular IC bootstrap</b> para (re)calcular.</div>"))
+        with self.out_plot:
+            self.out_plot.clear_output(wait=True)
+            display(W.HTML("<div style='font-size:12px;color:#889'>Árvore alterada — "
+                           "clique em <b>Ver / salvar árvore (imagem)</b> para renderizar.</div>"))
 
     # ==================================================================
     # Entrada / handlers
@@ -660,6 +697,28 @@ class LGDSegmenterUI:
         alvo = (novos[0] if novos else (parent if parent in folhas else None))
         if alvo in folhas:
             self.dd_leaf.value = alvo
+
+    def _on_merge_missing(self, _):
+        sid = self._selected_leaf()
+        with self.out_log:
+            self.out_log.clear_output(wait=True)
+            if sid is None or sid not in self.seg.segments:
+                print("Selecione a folha POPULADA de destino."); return
+            before = set(self.seg.segments)
+            self._checkpoint()
+            self.seg.merge_missing(sid)
+            if set(self.seg.segments) == before:
+                self._undo.pop()                 # nada mudou — não polui o histórico
+                self._sync_undo_buttons()
+                return
+        self.locked &= set(self.seg.segments)
+        self._pending = None
+        novos = [i for i in self.seg.segments
+                 if i not in before and self.seg.segments[i]["is_leaf"]]
+        self._refresh()
+        folhas = [s for s, seg in self.seg.segments.items() if seg["is_leaf"]]
+        if novos and novos[0] in folhas:
+            self.dd_leaf.value = novos[0]
 
     def _on_suggest(self, _):
         sid = self._selected_leaf()
@@ -1050,7 +1109,8 @@ class LGDSegmenterUI:
                     self.seg.auto_merge(alpha=self.sl_alpha.value,
                                         min_lgd_gap=self.sl_gap.value,
                                         test=self.dd_test.value,
-                                        protect=set(self.locked))
+                                        protect=set(self.locked),
+                                        include_missing=self.cb_automerge_na.value)
             except Exception as e:
                 print("Erro no auto-merge:", type(e).__name__, e)
                 return
@@ -1109,6 +1169,27 @@ class LGDSegmenterUI:
             except Exception as e:
                 print("Erro ao carregar:", type(e).__name__, e); return
         self._refresh()
+
+    # ==================================================================
+    # Imagem da árvore (matplotlib)
+    # ==================================================================
+    def _on_plot(self, _):
+        import matplotlib.pyplot as plt
+        with self.out_plot:
+            self.out_plot.clear_output(wait=True)
+            path = self.tx_img_path.value.strip() or None
+            try:
+                fig = self.seg.plot_tree(show_samples=self.sample_col is not None,
+                                         save_path=path)
+            except Exception as e:
+                print("Erro ao desenhar a árvore:", type(e).__name__, e)
+                return
+            display(fig)
+            plt.close(fig)          # evita exibição dupla
+        if path:
+            with self.out_log:
+                self.out_log.clear_output(wait=True)
+                print(f"🖼️ imagem da árvore salva em '{path}'.")
 
     def _ipython_display_(self):
         display(self.panel)

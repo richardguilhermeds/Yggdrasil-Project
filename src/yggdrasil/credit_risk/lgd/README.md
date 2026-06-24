@@ -11,15 +11,17 @@ na raiz de domínio `yggdrasil.credit_risk`.
 Na raiz do repositório (layout `src/`):
 
 ```bash
-pip install -e .            # núcleo: numpy, pandas, optbinning
-pip install -e ".[ui]"      # + interface interativa (ipywidgets)
-pip install -e ".[all]"     # + ui, mlflow, pyspark
+pip install -e .                 # núcleo (numpy, pandas, optbinning, mlflow, …)
+pip install -e ".[ui]"           # + interface interativa (ipywidgets) → LGDSegmenterUI
+pip install -e ".[ui,spark,dev]" # tudo: UI + PySpark + testes/Jupyter
 ```
 
-Ou direto do GitHub:
+> `mlflow` já está no núcleo. Extras disponíveis: `ui`, `spark`, `pycaret`, `dev`.
+
+Ou direto do GitHub (após `git push`):
 
 ```bash
-pip install "git+https://github.com/zheage/Yggdrasil-Project.git"
+pip install "git+https://github.com/richardguilhermeds/Yggdrasil-Project.git"
 ```
 
 ## Uso
@@ -35,8 +37,10 @@ seg = SequentialLGDSegmenter(
 
 seg.fit_auto(max_depth=3)        # árvore inicial gulosa por IV
 seg.auto_merge(alpha=0.05)       # funde folhas-irmãs indistinguíveis (p > alpha)
+seg.merge_missing(folha)         # junta o nó de faltantes (NaN) num bin populado
 seg.leaves()                     # folhas com nota, LGD, representatividade e PSI
 print(seg.tree())                # árvore em texto, colorida por LGD no painel
+seg.plot_tree(save_path="arvore_lgd.png")   # imagem da árvore (LGD médio e % por folha)
 
 seg.csi()                        # CSI por variável (estabilidade das entradas DES→OOT)
 seg.csi_detalhe()                # contribuição de cada faixa ao CSI
@@ -75,6 +79,8 @@ seg.log_to_mlflow(
 - **CSI por variável** (`csi`/`csi_detalhe`) — estabilidade de cada característica de entrada
 - **Salvar/carregar a árvore em JSON** (`save`/`load`, `to_dict`/`from_dict`) — portável entre máquinas
 - **Auto-merge** (`auto_merge`) — funde automaticamente folhas-irmãs indistinguíveis (teste de hipótese)
+- **Juntar faltantes** (`merge_missing`) — agrupa o nó de faltantes (NaN) com um bin populado da variável (regra "bin OU faltante")
+- **Imagem da árvore** (`plot_tree`) — figura matplotlib com LGD médio, % e nota por folha, colorida pelo LGD (salva PNG/SVG)
 - `predict` (pandas) e `to_pyspark` (Spark) com a mesma régua
 - `fit_auto`, `suggest_split`, `prune`, `merge_leaf`, `collapse`
 - UI com **desfazer/refazer** de splits, auto-fundir e persistência em JSON

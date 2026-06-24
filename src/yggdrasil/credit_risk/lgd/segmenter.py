@@ -14,6 +14,8 @@ Contexto: parâmetros de risco de crédito sob Resolução CMN 4.966/2021 e IFRS
 """
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 
@@ -21,6 +23,23 @@ try:
     from optbinning import ContinuousOptimalBinning
 except ImportError:  # pragma: no cover
     ContinuousOptimalBinning = None
+
+
+def _fit_optbinning_splits(b, x, y) -> list:
+    """Roda ``b.fit(x, y)`` e devolve ``list(b.splits)``.
+
+    Silencia os ``RuntimeWarning`` de "divide by zero" benignos do optbinning
+    (em ``auto_monotonic``, quando algum prebin fica com 0 registros) — o ajuste
+    ainda produz cortes válidos. Devolve ``[]`` se o ajuste falhar.
+    """
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with np.errstate(divide="ignore", invalid="ignore"):
+                b.fit(x, y)
+        return list(b.splits)
+    except Exception:
+        return []
 
 
 # ======================================================================
@@ -69,20 +88,32 @@ def _classifica_iv(iv) -> str:
 
 
 def _match_conditions_pandas(df, conditions):
-    """Máscara das linhas de `df` que satisfazem todas as condições do caminho."""
+    """Máscara das linhas de `df` que satisfazem todas as condições do caminho.
+
+    Condições numéricas/categóricas podem trazer ``include_na=True``: nesse caso
+    a faixa também captura os faltantes (bin populado **OU** faltante).
+    """
     m = pd.Series(True, index=df.index)
     for c in conditions:
+        feat = c["feature"]
         if c["kind"] == "na":
-            m &= df[c["feature"]].isna()
+            m &= df[feat].isna()
         elif c["kind"] == "num":
             lo, hi = c.get("lo"), c.get("hi")
+            sub = pd.Series(True, index=df.index)
             if lo is not None:
-                m &= df[c["feature"]] > lo
+                sub &= df[feat] > lo
             if hi is not None:
-                m &= df[c["feature"]] <= hi
+                sub &= df[feat] <= hi
+            if c.get("include_na"):
+                sub |= df[feat].isna()
+            m &= sub
         else:
             cats = [str(x) for x in c["cats"]]
-            m &= df[c["feature"]].astype(str).isin(cats)
+            sub = df[feat].astype(str).isin(cats)
+            if c.get("include_na"):
+                sub |= df[feat].isna()
+            m &= sub
     return m
 
 
@@ -216,14 +247,18 @@ class SequentialLGDSegmenter:
                 modo = "manual"
             else:
                 fit = self._fit_frame(sub, min_bin_size)
-                b = ContinuousOptimalBinning(
-                    name=feature, dtype="numerical", max_n_bins=max_n_bins,
-                    min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
-                try:
-                    b.fit(fit[feature].values, fit[self.target].values)
-                    cortes = list(b.splits)
-                except Exception:
-                    cortes = []
+                x = fit[feature].to_numpy(dtype="float64")
+                y = fit[self.target].to_numpy(dtype="float64")
+                ok = ~np.isnan(y)
+                x, y = x[ok], y[ok]                         # alvo NaN não entra no ajuste
+                x_obs = x[~np.isnan(x)]
+                if len(y) < 4 or x_obs.size == 0 or np.unique(x_obs).size < 2:
+                    cortes = []                            # dados degenerados → sem corte
+                else:
+                    b = ContinuousOptimalBinning(
+                        name=feature, dtype="numerical", max_n_bins=max_n_bins,
+                        min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
+                    cortes = _fit_optbinning_splits(b, x, y)
                 modo = "ótimo"
             if not cortes:
                 return [], modo, kind
@@ -241,15 +276,16 @@ class SequentialLGDSegmenter:
             modo = "manual"
         else:
             fit = self._fit_frame(sub, min_bin_size)
-            fit = fit[fit[feature].notna()]      # NaN não entra como categoria
-            b = ContinuousOptimalBinning(
-                name=feature, dtype="categorical", max_n_bins=max_n_bins,
-                min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
-            try:
-                b.fit(fit[feature].astype(str).to_numpy(), fit[self.target].to_numpy())
-                grupos = [list(arr) for arr in b.splits]  # cada split = grupo de categorias
-            except Exception:
-                grupos = []
+            fit = fit[fit[feature].notna() & fit[self.target].notna()]  # NaN fora do ajuste
+            xs = fit[feature].astype(str).to_numpy()
+            ys = fit[self.target].to_numpy(dtype="float64")
+            if len(ys) < 4 or np.unique(xs).size < 2:
+                grupos = []                          # dados degenerados → sem grupos
+            else:
+                b = ContinuousOptimalBinning(
+                    name=feature, dtype="categorical", max_n_bins=max_n_bins,
+                    min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
+                grupos = [list(arr) for arr in _fit_optbinning_splits(b, xs, ys)]
             modo = "ótimo"
         _NA_TOK = {"nan", "NaN", "<NA>", "None"}
         bins = []
@@ -475,7 +511,8 @@ class SequentialLGDSegmenter:
         feat, kind = cond["feature"], cond["kind"]
         if kind == "na":
             if verbose:
-                print("[merge] o nó de faltantes não se funde — use Recolher p/ desfazer o split")
+                print("[merge] o nó de faltantes não funde por vizinhança — use "
+                      "merge_missing(<nó populado>) para juntá-lo a um bin da variável")
             return self
 
         # irmãos que dá para fundir: mesmo tipo de corte, excluindo o nó de faltantes
@@ -501,6 +538,7 @@ class SequentialLGDSegmenter:
             return self
 
         cond_viz = self.segments[viz]["conditions"][-1]
+        inc_na = bool(cond.get("include_na") or cond_viz.get("include_na"))
         if kind == "num":
             new_cond = {"feature": feat, "kind": "num",
                         "lo": min(cond["lo"], cond_viz["lo"]),
@@ -508,9 +546,11 @@ class SequentialLGDSegmenter:
         else:
             cats = list(dict.fromkeys(list(cond["cats"]) + list(cond_viz["cats"])))
             new_cond = {"feature": feat, "kind": "cat", "cats": cats}
+        if inc_na:
+            new_cond["include_na"] = True
 
         new_mask = seg["mask"] | self.segments[viz]["mask"]
-        new_label = self._bin_label(feat, new_cond)
+        new_label = self._bin_label(feat, new_cond) + (" + faltante" if inc_na else "")
         new_id = new_label if pai == "root" else f"{pai} | {new_label}"
         pai_seg = self.segments[pai]
         merged = {
@@ -534,19 +574,101 @@ class SequentialLGDSegmenter:
         return self
 
     # ------------------------------------------------------------------
+    # MERGE_MISSING: junta o nó de FALTANTES (na) do mesmo split DENTRO de um
+    #   nó POPULADO da variável. A regra do destino passa a ser "<bin> OU
+    #   faltante" (condição com include_na=True). Selecione sempre o nó populado
+    #   de destino; o nó de faltantes é localizado automaticamente entre os
+    #   irmãos. Diferente de merge_leaf (vizinhança), aqui a fusão é sempre
+    #   válida porque faltante é disjunto de qualquer bin populado.
+    # ------------------------------------------------------------------
+    def merge_missing(self, sid: str, verbose: bool = True):
+        if sid not in self.segments:
+            if verbose:
+                print(f"[merge_missing] segmento '{sid}' não existe")
+            return self
+        seg = self.segments[sid]
+        if not seg["is_leaf"]:
+            if verbose:
+                print(f"[merge_missing] '{sid}' não é folha")
+            return self
+        if not seg["conditions"]:
+            if verbose:
+                print("[merge_missing] a raiz não tem nó de faltantes para juntar")
+            return self
+        if seg["conditions"][-1]["kind"] == "na":
+            if verbose:
+                print("[merge_missing] selecione o nó POPULADO de destino "
+                      "(não o próprio nó de faltantes)")
+            return self
+        pai = seg["parent"]
+        na_irmaos = [c for c, s in self.segments.items()
+                     if s["parent"] == pai and s["is_leaf"] and s["conditions"]
+                     and s["conditions"][-1]["kind"] == "na"]
+        if not na_irmaos:
+            if verbose:
+                print("[merge_missing] este split não tem nó de faltantes "
+                      "(ou ele já foi juntado)")
+            return self
+        return self._merge_missing_into(na_irmaos[0], sid, verbose=verbose)
+
+    def _merge_missing_into(self, na_sid: str, target_sid: str, verbose: bool = True):
+        """Funde o nó de faltantes `na_sid` no nó populado `target_sid` (mesmo pai)."""
+        if na_sid not in self.segments or target_sid not in self.segments:
+            return self
+        na_seg, tgt = self.segments[na_sid], self.segments[target_sid]
+        pai = tgt["parent"]
+        if na_seg["parent"] != pai:
+            if verbose:
+                print("[merge_missing] o nó de faltantes é de outro split")
+            return self
+
+        cond = dict(tgt["conditions"][-1])      # cópia da última condição do destino
+        cond["include_na"] = True
+        if cond["kind"] == "num":
+            base = self._bin_label(cond["feature"],
+                                   {"kind": "num", "lo": cond["lo"], "hi": cond["hi"]})
+        else:
+            base = self._bin_label(cond["feature"],
+                                   {"kind": "cat", "cats": cond["cats"]})
+        new_label = base + " + faltante"
+        new_id = new_label if pai == "root" else f"{pai} | {new_label}"
+        pai_seg = self.segments[pai]
+        merged = {
+            "mask": tgt["mask"] | na_seg["mask"], "label": new_label,
+            "depth": tgt["depth"], "is_leaf": True,
+            "path": pai_seg["path"] + [new_label], "parent": pai,
+            "conditions": pai_seg["conditions"] + [cond],
+        }
+        self.segments.pop(na_sid, None)
+        self.segments.pop(target_sid, None)
+        self.segments[new_id] = merged
+
+        filhos_pai = [c for c, s in self.segments.items() if s["parent"] == pai]
+        if len(filhos_pai) == 1:
+            self.segments.pop(new_id, None)
+            self.segments[pai]["is_leaf"] = True
+            if verbose:
+                print(f"[merge_missing] faltantes juntados; pai '{pai}' voltou a ser folha")
+            return self
+        if verbose:
+            print(f"[merge_missing] faltantes juntados em → '{new_id}'")
+        return self
+
+    # ------------------------------------------------------------------
     # AUTO_MERGE: funde automaticamente pares de folhas-IRMÃS (mesmo pai)
     #   adjacentes que NÃO se distinguem em LGD. Em cada rodada, escolhe o par
     #   de irmãs vizinhas mais parecido e o funde se:
     #     - o teste de hipótese não rejeita a igualdade de LGD (p > alpha), OU
     #     - a diferença de LGD médio entre elas é < min_lgd_gap.
-    #   Só funde irmãs (a única fusão válida na árvore); o nó de faltantes nunca
-    #   é fundido. `protect` = ids de folhas a preservar (ex.: folhas travadas na
-    #   UI). Itera até nenhum par qualificar — uma poda estatística da árvore.
+    #   Só funde irmãs (a única fusão válida na árvore). Por padrão o nó de
+    #   faltantes NÃO entra; com `include_missing=True` ele também é juntado ao
+    #   bin populado irmão estatisticamente mais próximo. `protect` = ids de
+    #   folhas a preservar (ex.: travadas na UI). Itera até nenhum par qualificar.
     # ------------------------------------------------------------------
     def auto_merge(self, alpha: float = 0.05, min_lgd_gap: float = 0.0,
                    test: str = "mannwhitney", min_n: int = 8,
-                   protect: set | None = None, max_rounds: int = 200,
-                   verbose: bool = True):
+                   protect: set | None = None, include_missing: bool = False,
+                   max_rounds: int = 200, verbose: bool = True):
         protect = set(protect or [])
         n_merges = 0
         for _ in range(max_rounds):
@@ -556,42 +678,65 @@ class SequentialLGDSegmenter:
                 if s["is_leaf"]:
                     folhas_por_pai.setdefault(s["parent"], []).append(sid)
 
-            melhor = None  # (prioridade, sid_direita, pai)
+            melhor = None  # (prioridade, ação, *args)
             for pai, folhas in folhas_por_pai.items():
                 if pai is None or len(folhas) < 2:
                     continue
-                # irmãs fundíveis: excluem o nó de faltantes
-                irmaos = [c for c in folhas
-                          if self.segments[c]["conditions"]
-                          and self.segments[c]["conditions"][-1]["kind"] != "na"]
-                if len(irmaos) < 2:
-                    continue
-                if all(self.segments[c]["conditions"][-1]["kind"] == "num"
-                       for c in irmaos):
-                    irmaos.sort(key=lambda c: self.segments[c]["conditions"][-1]["lo"])
-                else:
-                    irmaos.sort(key=lambda c: (self._leaf_target(c).mean()
-                                               if len(self._leaf_target(c)) else np.inf))
-                for i in range(len(irmaos) - 1):
-                    a, b = irmaos[i], irmaos[i + 1]
-                    if a in protect or b in protect:
-                        continue
-                    va, vb = self._leaf_target(a), self._leaf_target(b)
-                    gap = (abs(va.mean() - vb.mean())
-                           if len(va) and len(vb) else np.inf)
-                    p = self._pair_pvalue(a, b, test=test, min_n=min_n)
-                    qualifica = ((not np.isnan(p) and p > alpha) or gap < min_lgd_gap)
-                    if not qualifica:
-                        continue
-                    # prioriza o par mais "igual": maior p; sem p, menor gap
-                    prio = p if not np.isnan(p) else (2.0 - min(gap, 1.0))
-                    if melhor is None or prio > melhor[0]:
-                        melhor = (prio, b, pai)
+                populadas = [c for c in folhas
+                             if self.segments[c]["conditions"]
+                             and self.segments[c]["conditions"][-1]["kind"] != "na"]
+                # --- fusão por vizinhança entre irmãs populadas ---
+                if len(populadas) >= 2:
+                    if all(self.segments[c]["conditions"][-1]["kind"] == "num"
+                           for c in populadas):
+                        populadas_ord = sorted(
+                            populadas,
+                            key=lambda c: self.segments[c]["conditions"][-1]["lo"])
+                    else:
+                        populadas_ord = sorted(
+                            populadas,
+                            key=lambda c: (self._leaf_target(c).mean()
+                                           if len(self._leaf_target(c)) else np.inf))
+                    for i in range(len(populadas_ord) - 1):
+                        a, b = populadas_ord[i], populadas_ord[i + 1]
+                        if a in protect or b in protect:
+                            continue
+                        va, vb = self._leaf_target(a), self._leaf_target(b)
+                        gap = (abs(va.mean() - vb.mean())
+                               if len(va) and len(vb) else np.inf)
+                        p = self._pair_pvalue(a, b, test=test, min_n=min_n)
+                        if not ((not np.isnan(p) and p > alpha) or gap < min_lgd_gap):
+                            continue
+                        prio = p if not np.isnan(p) else (2.0 - min(gap, 1.0))
+                        if melhor is None or prio > melhor[0]:
+                            melhor = (prio, "adj", b)
+                # --- fusão do nó de faltantes no bin populado mais próximo ---
+                if include_missing:
+                    na_leaves = [c for c in folhas
+                                 if self.segments[c]["conditions"]
+                                 and self.segments[c]["conditions"][-1]["kind"] == "na"]
+                    for na_sid in na_leaves:
+                        if na_sid in protect:
+                            continue
+                        for tgt in populadas:
+                            if tgt in protect:
+                                continue
+                            va, vb = self._leaf_target(na_sid), self._leaf_target(tgt)
+                            gap = (abs(va.mean() - vb.mean())
+                                   if len(va) and len(vb) else np.inf)
+                            p = self._pair_pvalue(na_sid, tgt, test=test, min_n=min_n)
+                            if not ((not np.isnan(p) and p > alpha) or gap < min_lgd_gap):
+                                continue
+                            prio = p if not np.isnan(p) else (2.0 - min(gap, 1.0))
+                            if melhor is None or prio > melhor[0]:
+                                melhor = (prio, "miss", na_sid, tgt)
             if melhor is None:
                 break
-            _, sid_dir, _pai = melhor
             antes = set(self.segments)
-            self.merge_leaf(sid_dir, side="left", verbose=False)
+            if melhor[1] == "adj":
+                self.merge_leaf(melhor[2], side="left", verbose=False)
+            else:
+                self._merge_missing_into(melhor[2], melhor[3], verbose=False)
             if set(self.segments) == antes:
                 break  # salvaguarda: nenhuma mudança → evita laço infinito
             n_merges += 1
@@ -599,8 +744,8 @@ class SequentialLGDSegmenter:
         n_folhas = sum(s["is_leaf"] for s in self.segments.values())
         if verbose:
             print(f"[auto_merge] {n_merges} fusão(ões) automática(s) "
-                  f"(alpha={alpha}, min_lgd_gap={min_lgd_gap}). "
-                  f"Folhas finais: {n_folhas}")
+                  f"(alpha={alpha}, min_lgd_gap={min_lgd_gap}, "
+                  f"include_missing={include_missing}). Folhas finais: {n_folhas}")
         return self
 
     # ------------------------------------------------------------------
@@ -612,13 +757,16 @@ class SequentialLGDSegmenter:
         partes = []
         for c in conditions:
             rotulo = self.feature_labels.get(c["feature"], c["feature"].replace("_", " "))
+            na = c.get("include_na")
             if c["kind"] == "na":
                 partes.append(f"{rotulo} faltante")
             elif c["kind"] == "num":
-                partes.append(f"{rotulo} {_intervalo_por_extenso(c['lo'], c['hi'])}")
+                base = f"{rotulo} {_intervalo_por_extenso(c['lo'], c['hi'])}"
+                partes.append(f"({base} ou faltante)" if na else base)
             else:
                 cats = " ou ".join(map(str, c["cats"]))
-                partes.append(f"{rotulo} em {{{cats}}}")
+                base = f"{rotulo} em {{{cats}}}"
+                partes.append(f"({base} ou faltante)" if na else base)
         return " e ".join(partes)
 
     # ------------------------------------------------------------------
@@ -778,6 +926,144 @@ class SequentialLGDSegmenter:
         print(out)
         return out
 
+    # ------------------------------------------------------------------
+    # PLOT_TREE: desenha a árvore como IMAGEM (matplotlib). Cada nó mostra o
+    #   rótulo da condição, n, % e LGD médio; folhas trazem a nota. A cor do nó
+    #   reflete o LGD (verde = baixo → vermelho = alto). Devolve a Figure e,
+    #   se `save_path` for dado, salva a imagem (PNG/SVG/PDF…).
+    # ------------------------------------------------------------------
+    def plot_tree(self, ascending: bool = True, figsize=None, cmap: str = "RdYlGn_r",
+                  show_samples: bool = False, title: str | None = "Segmentação de LGD",
+                  save_path: str | None = None, dpi: int = 150, ax=None):
+        try:
+            import textwrap
+
+            import matplotlib.pyplot as plt
+            from matplotlib.cm import ScalarMappable
+            from matplotlib.colors import Normalize
+            from matplotlib.patches import FancyBboxPatch
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("plot_tree requer matplotlib — use: pip install matplotlib") from e
+
+        filhos: dict = {}
+        for sid, s in self.segments.items():
+            filhos.setdefault(s["parent"], []).append(sid)
+
+        n_total = len(self.df)
+        nota_map, _ = self._grade_map(ascending=ascending)
+        ref = self.ref_sample if self.sample_col is not None else None
+
+        def stats(sid):
+            m = self.segments[sid]["mask"]
+            n = int(m.sum())
+            sub = self.df[m]
+            if ref is not None:
+                sr = sub.loc[sub[self.sample_col] == ref, self.target]
+                lgd = sr.mean() if len(sr) else (sub[self.target].mean() if n else float("nan"))
+            else:
+                lgd = sub[self.target].mean() if n else float("nan")
+            return n, (100 * n / n_total if n_total else 0.0), lgd
+
+        def sample_lgd(sid, a):
+            m = self.segments[sid]["mask"] & (self.df[self.sample_col] == a)
+            sub = self.df[m]
+            return sub[self.target].mean() if len(sub) else float("nan")
+
+        def lgd_sort(sid):
+            lg = stats(sid)[2]
+            return lg if not pd.isna(lg) else float("inf")
+
+        # --- layout: folhas em x sequencial (DFS), internos centralizados ---
+        X_GAP, Y_GAP = 2.4, 2.15        # espaçamento entre folhas / entre níveis
+        bw, bh = 0.97, 0.74             # meia-largura / meia-altura do box (dados)
+        pos: dict = {}
+        counter = [0]
+        max_depth = [0]
+
+        def place(sid, depth):
+            max_depth[0] = max(max_depth[0], depth)
+            ch = sorted(filhos.get(sid, []), key=lgd_sort, reverse=not ascending)
+            if self.segments[sid]["is_leaf"] or not ch:
+                x = counter[0] * X_GAP
+                counter[0] += 1
+            else:
+                x = float(np.mean([place(c, depth + 1) for c in ch]))
+            pos[sid] = (x, -depth * Y_GAP)
+            return x
+
+        place("root", 0)
+        n_leaves = max(counter[0], 1)
+        md = max_depth[0]
+        xs = [p[0] for p in pos.values()]
+        ys = [p[1] for p in pos.values()]
+
+        if figsize is None:
+            figsize = (max(7.0, (max(xs) - min(xs) + 2 * bw + 1.0) * 0.95),
+                       max(3.5, (md + 1) * Y_GAP * 0.95))
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+        else:
+            fig = ax.figure
+
+        leaf_lgds = [stats(s)[2] for s, v in self.segments.items() if v["is_leaf"]]
+        leaf_lgds = [v for v in leaf_lgds if not pd.isna(v)]
+        lo = min(leaf_lgds) if leaf_lgds else 0.0
+        hi = max(leaf_lgds) if leaf_lgds else 1.0
+        if hi <= lo:
+            hi = lo + 1e-6
+        norm = Normalize(lo, hi)
+        cmap_obj = plt.get_cmap(cmap)
+
+        def rotulo(sid):
+            s = self.segments[sid]
+            if s["parent"] is None:
+                return "TODA A CARTEIRA"
+            return self._descrever([s["conditions"][-1]])
+
+        # arestas (atrás dos nós)
+        for sid, (x, y) in pos.items():
+            for c in filhos.get(sid, []):
+                cx, cy = pos[c]
+                ax.plot([x, cx], [y - bh, cy + bh], color="#9aa7b2", lw=1.1, zorder=1)
+
+        for sid, (x, y) in pos.items():
+            n, rep, lgd = stats(sid)
+            color = cmap_obj(norm(lgd)) if not pd.isna(lgd) else (0.88, 0.88, 0.88, 1.0)
+            lum = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
+            txt_color = "#15324a" if lum > 0.6 else "#ffffff"
+            ax.add_patch(FancyBboxPatch(
+                (x - bw, y - bh), 2 * bw, 2 * bh,
+                boxstyle="round,pad=0.02,rounding_size=0.14",
+                linewidth=1.3, edgecolor="#33424f", facecolor=color, zorder=2))
+            is_leaf = self.segments[sid]["is_leaf"]
+            cab = "\n".join(textwrap.wrap(rotulo(sid), 22)[:2])
+            nota = f"   ·   nota {nota_map.get(sid, '?')}" if is_leaf else ""
+            linhas = [cab,
+                      f"n={n:,} · {rep:.1f}%".replace(",", "."),
+                      f"LGD {lgd:.3f}{nota}" if not pd.isna(lgd) else f"LGD —{nota}"]
+            if show_samples and self.sample_col is not None:
+                amostras = list(self.df[self.sample_col].dropna().unique())
+                linhas.append(" | ".join(f"{a} {sample_lgd(sid, a):.3f}" for a in amostras))
+            weight = "bold" if is_leaf else "normal"
+            ax.text(x, y, "\n".join(linhas), ha="center", va="center",
+                    fontsize=8.4, color=txt_color, zorder=3, linespacing=1.3,
+                    fontweight=weight)
+
+        ax.set_xlim(min(xs) - bw - 0.4, max(xs) + bw + 0.4)
+        ax.set_ylim(min(ys) - bh - 0.4, max(ys) + bh + 0.6)
+        ax.axis("off")
+        if title:
+            n_folhas = sum(s["is_leaf"] for s in self.segments.values())
+            ax.set_title(f"{title}  ·  {n_folhas} folhas",
+                         fontsize=12.5, fontweight="bold", color="#15324a")
+        sm = ScalarMappable(norm=norm, cmap=cmap_obj)
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=ax, fraction=0.025, pad=0.01)
+        cbar.set_label(f"LGD médio{' (DES)' if ref else ''}", fontsize=9)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
 
     # ------------------------------------------------------------------
     # PSI: estabilidade populacional, segmentos-folha como bins
@@ -1126,10 +1412,16 @@ class SequentialLGDSegmenter:
             elif c["kind"] == "num":
                 lo = float("-inf") if c.get("lo") is None else float(c["lo"])
                 hi = float("inf") if c.get("hi") is None else float(c["hi"])
-                out.append({"feature": c["feature"], "kind": "num", "lo": lo, "hi": hi})
+                d = {"feature": c["feature"], "kind": "num", "lo": lo, "hi": hi}
+                if c.get("include_na"):
+                    d["include_na"] = True
+                out.append(d)
             else:
-                out.append({"feature": c["feature"], "kind": "cat",
-                            "cats": [str(x) for x in c["cats"]]})
+                d = {"feature": c["feature"], "kind": "cat",
+                     "cats": [str(x) for x in c["cats"]]}
+                if c.get("include_na"):
+                    d["include_na"] = True
+                out.append(d)
         return out
 
     def to_dict(self) -> dict:
@@ -1215,12 +1507,18 @@ class SequentialLGDSegmenter:
             if c["kind"] == "na":
                 out.append({"feature": c["feature"], "kind": "na"})
             elif c["kind"] == "num":
-                out.append({"feature": c["feature"], "kind": "num",
-                            "lo": None if c["lo"] == float("-inf") else float(c["lo"]),
-                            "hi": None if c["hi"] == float("inf") else float(c["hi"])})
+                d = {"feature": c["feature"], "kind": "num",
+                     "lo": None if c["lo"] == float("-inf") else float(c["lo"]),
+                     "hi": None if c["hi"] == float("inf") else float(c["hi"])}
+                if c.get("include_na"):
+                    d["include_na"] = True
+                out.append(d)
             else:
-                out.append({"feature": c["feature"], "kind": "cat",
-                            "cats": [str(x) for x in c["cats"]]})
+                d = {"feature": c["feature"], "kind": "cat",
+                     "cats": [str(x) for x in c["cats"]]}
+                if c.get("include_na"):
+                    d["include_na"] = True
+                out.append(d)
         return out
 
     def _regua_dict(self) -> dict:
@@ -1257,16 +1555,23 @@ class SequentialLGDSegmenter:
         def cond_expr(conds):
             parts = []
             for c in conds:
+                feat = c["feature"]
                 if c["kind"] == "na":
-                    parts.append(f'F.col("{c["feature"]}").isNull()')
-                elif c["kind"] == "num":
+                    parts.append(f'F.col("{feat}").isNull()')
+                    continue
+                if c["kind"] == "num":
+                    sub = []
                     if c["lo"] is not None:
-                        parts.append(f'(F.col("{c["feature"]}") > {c["lo"]})')
+                        sub.append(f'(F.col("{feat}") > {c["lo"]})')
                     if c["hi"] is not None:
-                        parts.append(f'(F.col("{c["feature"]}") <= {c["hi"]})')
+                        sub.append(f'(F.col("{feat}") <= {c["hi"]})')
+                    expr = " & ".join(sub) if sub else "F.lit(True)"
                 else:
                     cats = ", ".join(repr(x) for x in c["cats"])
-                    parts.append(f'F.col("{c["feature"]}").isin({cats})')
+                    expr = f'F.col("{feat}").isin({cats})'
+                if c.get("include_na"):
+                    expr = f'(({expr}) | F.col("{feat}").isNull())'
+                parts.append(expr)
             return " & ".join(parts) if parts else "F.lit(True)"
 
         def chain(valfn):
@@ -1421,15 +1726,21 @@ class SequentialLGDSegmenter:
                 for leaf in self.regua["leaves"]:
                     m = _pd.Series(True, index=df.index)
                     for c in leaf["conditions"]:
+                        feat = c["feature"]
                         if c["kind"] == "na":
-                            m &= df[c["feature"]].isna()
-                        elif c["kind"] == "num":
+                            m &= df[feat].isna()
+                            continue
+                        if c["kind"] == "num":
+                            sub = _pd.Series(True, index=df.index)
                             if c.get("lo") is not None:
-                                m &= df[c["feature"]] > c["lo"]
+                                sub &= df[feat] > c["lo"]
                             if c.get("hi") is not None:
-                                m &= df[c["feature"]] <= c["hi"]
+                                sub &= df[feat] <= c["hi"]
                         else:
-                            m &= df[c["feature"]].astype(str).isin([str(x) for x in c["cats"]])
+                            sub = df[feat].astype(str).isin([str(x) for x in c["cats"]])
+                        if c.get("include_na"):
+                            sub = sub | df[feat].isna()
+                        m &= sub
                     seg[m] = leaf["id"]
                     nota[m] = leaf["nota"]
                     lgd[m] = leaf["lgd"]
