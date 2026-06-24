@@ -25,6 +25,12 @@ dependencies = [
 # Treino automatizado opcional (motor PyCaret). Pesado e com pins próprios —
 # instale apenas se for usar o PyCaretTrainer.
 pycaret = ["pycaret>=3.0"]
+# Interface interativa do segmentador de LGD (LGDSegmenterUI, ipywidgets) —
+# usada dentro do Jupyter/Databricks. O núcleo funciona sem ela.
+ui = ["ipywidgets>=8.0", "ipython>=8.0"]
+# Geração/aplicação da régua de LGD em PySpark (no Databricks o pyspark já vem
+# no cluster; instale só fora dele).
+spark = ["pyspark>=3.4"]
 # Ferramentas de desenvolvimento, testes e execução de notebooks.
 dev = [
     "pytest>=7.4",
@@ -32,6 +38,8 @@ dev = [
     "jupyter>=1.0",
     "nbconvert>=7.0",
     "ipykernel>=6.0",
+    "ipywidgets>=8.0",
+    "ipython>=8.0",
 ]
 
 [tool.setuptools.packages.find]
