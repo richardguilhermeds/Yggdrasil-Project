@@ -160,6 +160,10 @@ class SequentialLGDSegmenter:
         self.min_leaf_rows = min_leaf_rows
 
         if sample_col is not None:
+            if sample_col not in self.df.columns:
+                raise ValueError(
+                    f"Coluna de amostra '{sample_col}' não está no DataFrame "
+                    f"(colunas: {list(self.df.columns)}).")
             amostras = self.df[sample_col].dropna().unique().tolist()
             if ref_sample not in amostras:
                 raise ValueError(
@@ -273,6 +277,12 @@ class SequentialLGDSegmenter:
         na_present = bool(sub[feature].isna().any())
         if splits is not None:
             grupos = [list(g) for g in splits]   # lista de grupos de categorias
+            flat = [str(c) for g in grupos for c in g]
+            if len(flat) != len(set(flat)):      # grupos devem ser disjuntos
+                dup = sorted({c for c in flat if flat.count(c) > 1})
+                raise ValueError(
+                    f"Grupos categóricos manuais têm categoria(s) repetida(s): {dup}. "
+                    "Cada categoria deve estar em um único grupo.")
             modo = "manual"
         else:
             fit = self._fit_frame(sub, min_bin_size)
@@ -315,6 +325,9 @@ class SequentialLGDSegmenter:
                 "lgd_std": round(s.std(), 4),
             })
         tbl = pd.DataFrame(linhas)
+        if tbl.empty:                       # todos os bins vazios
+            tbl.attrs["mono_ok"] = True
+            return tbl
         means = tbl["lgd_medio"]
         tbl.attrs["mono_ok"] = bool(
             means.is_monotonic_increasing or means.is_monotonic_decreasing
@@ -373,13 +386,14 @@ class SequentialLGDSegmenter:
             if not bins:
                 print(f"[{sid}] sem corte válido em '{feature}' ({modo}) — folha mantida")
                 continue
+            filhos_sid = {}
             for b in bins:
                 child_mask = seg["mask"] & self._mask_in(self.df, feature, b)
                 if child_mask.sum() == 0:
                     continue
                 child_label = self._bin_label(feature, b)
                 child_id = f"{sid} | {child_label}" if sid != "root" else child_label
-                novos[child_id] = {
+                filhos_sid[child_id] = {
                     "mask": child_mask,
                     "label": child_label,
                     "depth": seg["depth"] + 1,
@@ -388,6 +402,11 @@ class SequentialLGDSegmenter:
                     "parent": sid,
                     "conditions": seg["conditions"] + [self._bin_condition(feature, b)],
                 }
+            if len(filhos_sid) < 2:        # 0/1 filho não-vazio = não separou de fato
+                print(f"[{sid}] '{feature}' não separou ({len(filhos_sid)} filho) "
+                      "— folha mantida")
+                continue
+            novos.update(filhos_sid)
             self.segments[sid]["is_leaf"] = False
         self.segments.update(novos)
         self.history.append({"feature": feature, "modo": modo_usado, "splits": splits})
@@ -407,7 +426,9 @@ class SequentialLGDSegmenter:
     #   faltantes não entra). Itera até nenhum par violar os critérios.
     # ------------------------------------------------------------------
     def prune(self, min_repr: float = 2.0, min_lgd_gap: float = 0.03,
-              verbose: bool = True, max_rounds: int = 1000):
+              protect: set | None = None, verbose: bool = True,
+              max_rounds: int = 1000):
+        protect = set(protect or [])
         n_total = len(self.df)
         n_merges = 0
         for _ in range(max_rounds):
@@ -431,12 +452,14 @@ class SequentialLGDSegmenter:
                 else:
                     irmaos.sort(key=lambda c: (self._leaf_target(c).mean()
                                                if len(self._leaf_target(c)) else np.inf))
-                reprs = {c: 100 * int(self.segments[c]["mask"].sum()) / n_total
-                         for c in irmaos}
-                lgds = {c: self.df[self.segments[c]["mask"]][self.target].mean()
-                        for c in irmaos}
+                reprs = {c: (100 * int(self.segments[c]["mask"].sum()) / n_total
+                             if n_total else 0.0) for c in irmaos}
+                lgds = {c: (self._leaf_target(c).mean()       # LGD na referência (DES)
+                            if len(self._leaf_target(c)) else np.nan) for c in irmaos}
                 for i in range(len(irmaos) - 1):
                     a, b = irmaos[i], irmaos[i + 1]
+                    if a in protect or b in protect:          # respeita folhas travadas
+                        continue
                     gap = (abs(lgds[b] - lgds[a])
                            if not (pd.isna(lgds[a]) or pd.isna(lgds[b])) else np.inf)
                     viola_gap = gap < min_lgd_gap
@@ -528,7 +551,10 @@ class SequentialLGDSegmenter:
                                  for c in irmaos):
             irmaos.sort(key=lambda c: self.segments[c]["conditions"][-1]["lo"])
         else:
-            irmaos.sort(key=lambda c: self.df[self.segments[c]["mask"]][self.target].mean())
+            # mesma chave (LGD na referência/DES) usada por prune/auto_merge/teste —
+            # senão a ordem das irmãs diverge e a fusão erra o par ou aborta
+            irmaos.sort(key=lambda c: (self._leaf_target(c).mean()
+                                       if len(self._leaf_target(c)) else np.inf))
 
         i = irmaos.index(sid)
         j = i - 1 if side == "left" else i + 1
@@ -792,13 +818,20 @@ class SequentialLGDSegmenter:
             if not seg["is_leaf"]:
                 continue
             sub = self.df[seg["mask"]]
+            # lgd_medio na referência (DES) = base da régua; assim nota_lgd é
+            # monotônica no LGD que entra em predict/apply_spark (com fallback)
+            if self.sample_col is not None:
+                ref_t = sub.loc[sub[self.sample_col] == self.ref_sample, self.target]
+                lgd_m = ref_t.mean() if len(ref_t) else sub[self.target].mean()
+            else:
+                lgd_m = sub[self.target].mean()
             row = {
                 "segmento": sid,
                 "descricao": self._descrever(seg["conditions"]),
                 "profundidade": seg["depth"],
                 "n": len(sub),
-                "repr_%": round(100 * len(sub) / n_total, 1),
-                "lgd_medio": round(sub[self.target].mean(), 4),
+                "repr_%": round(100 * len(sub) / n_total, 1) if n_total else 0.0,
+                "lgd_medio": round(lgd_m, 4) if not pd.isna(lgd_m) else np.nan,
                 "lgd_std": round(sub[self.target].std(), 4),
             }
             if self.sample_col is not None:
@@ -841,11 +874,13 @@ class SequentialLGDSegmenter:
         return out
 
     # alvo (LGD) de uma folha, restrito à amostra de referência quando houver
+    # (sem NaN, para os testes/fusões não ficarem cegos por valores ausentes)
     def _leaf_target(self, sid: str) -> np.ndarray:
         m = self.segments[sid]["mask"]
         if self.sample_col is not None:
             m = m & (self.df[self.sample_col] == self.ref_sample)
-        return self.df.loc[m, self.target].to_numpy()
+        vals = self.df.loc[m, self.target].to_numpy()
+        return vals[~np.isnan(vals)]
 
     # p-valor do teste de igualdade de LGD entre duas folhas (na referência)
     def _pair_pvalue(self, sid_a: str, sid_b: str, test: str = "mannwhitney",
@@ -1281,6 +1316,12 @@ class SequentialLGDSegmenter:
         for nome, mask in grupos:
             y = self.df.loc[mask, self.target].to_numpy()
             yhat = pred[mask.values].to_numpy()
+            valid = ~(np.isnan(y) | np.isnan(yhat))      # ignora alvo/predição NaN
+            y, yhat = y[valid], yhat[valid]
+            if len(y) == 0:
+                linhas.append({"amostra": nome, "n": int(mask.sum()),
+                               "MAE": np.nan, "RMSE": np.nan, "R2": np.nan})
+                continue
             err = y - yhat
             ss_res = float(np.sum(err ** 2))
             ss_tot = float(np.sum((y - y.mean()) ** 2))
@@ -1532,10 +1573,13 @@ class SequentialLGDSegmenter:
     @staticmethod
     def _df_to_md(df: pd.DataFrame) -> str:
         def cell(v):
+            try:
+                if pd.isna(v):                  # cobre None, NaN, pd.NA, pd.NaT
+                    return "—"
+            except (TypeError, ValueError):
+                pass
             if isinstance(v, float):
-                return "—" if pd.isna(v) else f"{v:.4f}"
-            if v is None or (isinstance(v, float) and pd.isna(v)):
-                return "—"
+                return f"{v:.4f}"
             return str(v)
         cols = list(df.columns)
         linhas = ["| " + " | ".join(str(c) for c in cols) + " |",
@@ -1556,22 +1600,23 @@ class SequentialLGDSegmenter:
         img_arvore = f"{stem}_arvore.png"
         img_calib = f"{stem}_calibracao.png"
 
+        import matplotlib.pyplot as plt
         try:
-            import matplotlib.pyplot as plt
             fig = self.plot_tree(save_path=os.path.join(base, img_arvore))
             plt.close(fig)
             tem_arvore = True
         except Exception:
+            plt.close("all")                    # não vaza figura se o plot falhar
             tem_arvore = False
         tem_calib = False
         if self.sample_col is not None:
             try:
-                import matplotlib.pyplot as plt
                 fig = self.plot_calibration(save_path=os.path.join(base, img_calib),
                                             tol=tol_calib)
                 plt.close(fig)
                 tem_calib = True
             except Exception:
+                plt.close("all")
                 tem_calib = False
 
         regua = self._regua_dict()
@@ -1708,33 +1753,36 @@ class SequentialLGDSegmenter:
     # PLOT_TARGET_HIST: distribuição do alvo (LGD) na carteira. Revela
     #   bimodalidade (massa em 0 e/ou 1) e concentração — orienta a modelagem.
     # ------------------------------------------------------------------
-    def plot_target_hist(self, by_sample: bool = False, bins: int = 30,
-                         figsize=(7.0, 4.2), save_path: str | None = None,
-                         dpi: int = 150, ax=None):
+    def plot_target_hist(self, sample: str | None = None, bins: int = 30,
+                         color: str = "#2a9d8f", figsize=(7.0, 4.2),
+                         save_path: str | None = None, dpi: int = 150, ax=None):
         try:
-            import matplotlib.pyplot as plt
+            import matplotlib.pyplot as plt  # noqa: F401
         except ImportError as e:  # pragma: no cover
             raise ImportError("plot_target_hist requer matplotlib.") from e
         fig, ax = self._new_ax(figsize, dpi, ax)
-        y = self.df[self.target].to_numpy()
-        y = y[~np.isnan(y)]
-        if by_sample and self.sample_col is not None:
-            for a in self.df[self.sample_col].dropna().unique():
-                ya = self.df.loc[self.df[self.sample_col] == a, self.target].dropna()
-                ax.hist(ya, bins=bins, range=(0, 1), histtype="step", lw=1.6, label=str(a))
-            ax.legend(fontsize=8, title="amostra")
+        # por padrão usa só a amostra de referência (DES)
+        if sample is None and self.sample_col is not None:
+            sample = self.ref_sample
+        if sample is not None and self.sample_col is not None:
+            y = self.df.loc[self.df[self.sample_col] == sample, self.target].to_numpy()
+            sfx = f" — {sample}"
         else:
-            ax.hist(y, bins=bins, range=(0, 1), color="#2a9d8f", alpha=0.85,
-                    edgecolor="#15324a")
-        ax.axvline(float(np.mean(y)), color="#d6453e", lw=1.4, ls="--",
-                   label=f"média {np.mean(y):.3f}")
+            y = self.df[self.target].to_numpy()
+            sfx = ""
+        y = y[~np.isnan(y)]
+        ax.hist(y, bins=bins, range=(0, 1), color=color, alpha=0.9,
+                edgecolor="#15324a")
+        if len(y):
+            ax.axvline(float(np.mean(y)), color="#d6453e", lw=1.6, ls="--",
+                       label=f"média {np.mean(y):.3f}")
+            ax.legend(fontsize=8)
         ax.set_xlabel("LGD")
         ax.set_ylabel("frequência")
-        ax.set_title("Distribuição do LGD (carteira)", fontsize=12,
+        ax.set_title(f"Distribuição do LGD{sfx}", fontsize=12,
                      fontweight="bold", color="#15324a")
         ax.set_xlim(0, 1)
         ax.grid(axis="y", alpha=0.2)
-        ax.legend(fontsize=8)
         fig.tight_layout()
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
@@ -1748,11 +1796,10 @@ class SequentialLGDSegmenter:
     # ------------------------------------------------------------------
     def plot_feature_lgd(self, feature: str, sid: str | None = None, splits=None,
                          dtype=None, max_n_bins: int = 6, min_bin_size: float = 0.05,
-                         cmap: str = "RdYlGn_r", figsize=None,
-                         save_path: str | None = None, dpi: int = 150, ax=None):
+                         figsize=None, save_path: str | None = None,
+                         dpi: int = 150, ax=None):
         try:
-            import matplotlib.pyplot as plt
-            from matplotlib.colors import Normalize
+            import matplotlib.pyplot as plt  # noqa: F401
         except ImportError as e:  # pragma: no cover
             raise ImportError("plot_feature_lgd requer matplotlib.") from e
         if sid is None or sid not in self.segments:
@@ -1771,25 +1818,45 @@ class SequentialLGDSegmenter:
         lgds = tbl["lgd_medio"].to_numpy()
         reprs = tbl["repr_%"].to_numpy()
         if figsize is None:
-            figsize = (max(6.0, len(labels) * 1.25), 4.4)
+            figsize = (max(6.0, len(labels) * 1.25), 4.6)
         fig, ax = self._new_ax(figsize, dpi, ax)
-        norm = Normalize(0.0, 1.0)
-        cmap_obj = plt.get_cmap(cmap)
-        xs = range(len(labels))
-        bars = ax.bar(xs, lgds, color=[cmap_obj(norm(v)) for v in lgds],
-                      edgecolor="#33424f")
-        for x, v, rp in zip(xs, lgds, reprs):
-            ax.text(x, v + 0.01, f"{v:.3f}\n{rp:.0f}%", ha="center", va="bottom",
-                    fontsize=8.5, color="#15324a")
-        ax.set_xticks(list(xs))
+        xs = list(range(len(labels)))
+
+        # BARRAS = representatividade (%), eixo da esquerda (azul)
+        col_bar, col_line = "#2a9d8f", "#d6453e"
+        bars = ax.bar(xs, reprs, color=col_bar, edgecolor="#1f6f63", alpha=0.85,
+                      width=0.62, label="Representatividade (%)")
+        ax.set_ylabel("Representatividade (%)", color=col_bar, fontweight="bold")
+        ax.tick_params(axis="y", labelcolor=col_bar)
+        rmax = float(np.nanmax(reprs)) or 1.0
+        ax.set_ylim(0, rmax * 1.25 + 1)
+        for x, rp in zip(xs, reprs):
+            dentro = rp > rmax * 0.18          # barra alta: rótulo branco dentro
+            ax.text(x, rp * 0.5 if dentro else rp + rmax * 0.02, f"{rp:.1f}%",
+                    ha="center", va="center" if dentro else "bottom", fontsize=8,
+                    color="white" if dentro else col_bar, fontweight="bold")
+
+        # LINHA = LGD médio por faixa, eixo da direita (vermelho)
+        ax2 = ax.twinx()
+        line, = ax2.plot(xs, lgds, color=col_line, marker="o", lw=2.2,
+                         markersize=7, markeredgecolor="#fff", zorder=5,
+                         label="LGD médio")
+        ax2.set_ylabel("LGD médio", color=col_line, fontweight="bold")
+        ax2.tick_params(axis="y", labelcolor=col_line)
+        ax2.set_ylim(0, min(1.0, float(np.nanmax(lgds)) * 1.3 + 0.05))
+        for x, v in zip(xs, lgds):
+            ax2.text(x, v + float(np.nanmax(lgds)) * 0.04, f"{v:.3f}",
+                     ha="center", va="bottom", fontsize=8, color=col_line,
+                     fontweight="bold")
+
+        ax.set_xticks(xs)
         ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=8.5)
         rot = self.feature_labels.get(feature, feature)
         mono = "monotônico" if tbl.attrs.get("mono_ok") else "NÃO monotônico"
-        ax.set_ylabel("LGD médio")
-        ax.set_title(f"LGD por faixa de '{rot}' ({modo}, {mono})", fontsize=12,
-                     fontweight="bold", color="#15324a")
-        ax.set_ylim(0, min(1.0, float(np.nanmax(lgds)) * 1.25 + 0.05))
-        ax.grid(axis="y", alpha=0.2)
+        ax.set_title(f"'{rot}': representatividade (barra) × LGD médio (linha) — "
+                     f"{modo}, {mono}", fontsize=11.5, fontweight="bold", color="#15324a")
+        ax.legend(handles=[bars, line], loc="upper left", fontsize=9, framealpha=0.9)
+        ax.grid(axis="y", alpha=0.15)
         fig.tight_layout()
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
@@ -2029,6 +2096,13 @@ class SequentialLGDSegmenter:
                 lgd = float(ref.mean()) if len(ref) else float(sub[self.target].mean())
             else:
                 lgd = float(sub[self.target].mean())
+            if np.isnan(lgd):                       # folha vazia → LGD global (sem NaN na régua)
+                if self.sample_col is not None:
+                    g = self.df.loc[self.df[self.sample_col] == self.ref_sample,
+                                    self.target].mean()
+                else:
+                    g = self.df[self.target].mean()
+                lgd = float(g) if not pd.isna(g) else 0.0
             leaves.append({"id": sid, "nota": int(nota_map[sid]),
                            "conditions": self._conditions_json(seg["conditions"]),
                            "lgd": round(lgd, 6)})
@@ -2063,7 +2137,8 @@ class SequentialLGDSegmenter:
                     expr = " & ".join(sub) if sub else "F.lit(True)"
                 else:
                     cats = ", ".join(repr(x) for x in c["cats"])
-                    expr = f'F.col("{feat}").isin({cats})'
+                    # cast p/ string espelha o astype(str) do pandas/pyfunc
+                    expr = f'F.col("{feat}").cast("string").isin({cats})'
                 if c.get("include_na"):
                     expr = f'(({expr}) | F.col("{feat}").isNull())'
                 parts.append(expr)
@@ -2146,7 +2221,7 @@ class SequentialLGDSegmenter:
                     if c.get("include_na"):
                         part = part | F.col(feat).isNull()
                 else:
-                    part = F.col(feat).isin([str(x) for x in c["cats"]])
+                    part = F.col(feat).cast("string").isin([str(x) for x in c["cats"]])
                     if c.get("include_na"):
                         part = part | F.col(feat).isNull()
                 expr = expr & part

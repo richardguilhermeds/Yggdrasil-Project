@@ -180,6 +180,40 @@ Todas as mudanças concentram-se em três arquivos do pacote, mais os testes:
   display responsivo vale para boxplot, histograma e calibração (helper
   `_display_fig`).
 
+### 16. Gráfico da variável: barras (representatividade) + linha (LGD médio)
+- **O quê:** `plot_feature_lgd` virou um gráfico de binning de risco com **eixo
+  duplo**: **barras = representatividade (%)** (eixo esquerdo, teal) e **linha =
+  LGD médio por faixa** (eixo direito, vermelho), com legenda, eixos coloridos e
+  título indicando qual métrica é qual. Antes as barras eram o próprio LGD.
+- **Notebook de validação:** criado `notebooks/credit_risk/02_relatorios_validacao_lgd.ipynb`
+  — só relatórios de validação (folhas/PSI/CSI/métricas/bootstrap/backtest/
+  monotonicidade/calibração/qualidade/relatório consolidado), rodando de ponta a
+  ponta com dados sintéticos.
+
+### 17. Auditoria de bugs (multi-agente) + correções
+Rodei uma auditoria de revisão multi-agente (7 dimensões → verificação adversarial
+de cada achado): **33 achados, 23 confirmados** (0 high, 13 medium, 10 low). Corrigidos:
+
+- **Ordenação de irmãs inconsistente (núcleo):** `merge_leaf` ordenava categóricas
+  pela média de **todas** as amostras, enquanto `prune`/`auto_merge`/teste usavam só
+  **DES** → a fusão errava o par ou abortava. Unificado para o LGD de **DES**
+  (`_leaf_target`), inclusive na nota (`leaves().lgd_medio` agora é a base da régua).
+- **Paridade pandas/Spark:** `to_pyspark`/`apply_spark` agora fazem `cast("string")`
+  na coluna categórica (espelha o `astype(str)` do pandas/pyfunc).
+- **`grow`:** valida grupos categóricos **disjuntos** (erro claro) e não cria mais
+  **split degenerado de 1 filho** (só rebaixa o pai com ≥2 filhos).
+- **`prune`** passou a respeitar **folhas travadas** (`protect`); a UI passa os locks.
+- **Robustez a NaN/vazio:** `_leaf_target` dropa NaN; `metrics` ignora alvo NaN;
+  `_bin_table` e `leaves` tratam tabela/`n_total` vazios; `_regua_dict` cai no LGD
+  global se a folha estiver vazia (sem NaN na régua); construtor dá erro claro se
+  faltar a `sample_col`; `_df_to_md` trata `pd.NA`; `validation_report` não vaza
+  figuras; o no-op de "juntar faltante" não destrói mais a pilha de refazer.
+- **Adicionados 5 testes de regressão.**
+
+Deixados de fora (baixo valor/por design): empates exatos de LGD na monotonicidade,
+clip de LGD fora de [0,1] nos gráficos (LGD ∈ [0,1] por definição), valor de feature
+literalmente igual a -inf, e `tree()` em DataFrame vazio.
+
 ---
 
 ## Dependências
