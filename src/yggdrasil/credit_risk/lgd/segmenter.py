@@ -1005,13 +1005,7 @@ class SequentialLGDSegmenter:
         else:
             fig = ax.figure
 
-        leaf_lgds = [stats(s)[2] for s, v in self.segments.items() if v["is_leaf"]]
-        leaf_lgds = [v for v in leaf_lgds if not pd.isna(v)]
-        lo = min(leaf_lgds) if leaf_lgds else 0.0
-        hi = max(leaf_lgds) if leaf_lgds else 1.0
-        if hi <= lo:
-            hi = lo + 1e-6
-        norm = Normalize(lo, hi)
+        norm = Normalize(0.0, 1.0)        # escala de cor do LGD fixa de 0 a 1
         cmap_obj = plt.get_cmap(cmap)
 
         def rotulo(sid):
@@ -1026,8 +1020,10 @@ class SequentialLGDSegmenter:
                 cx, cy = pos[c]
                 ax.plot([x, cx], [y - bh, cy + bh], color="#9aa7b2", lw=1.1, zorder=1)
 
+        base_fs = 8.6
+        node_texts = []           # textos dos nós, para ajustar a fonte à caixa
         for sid, (x, y) in pos.items():
-            n, rep, lgd = stats(sid)
+            _, rep, lgd = stats(sid)
             color = cmap_obj(norm(lgd)) if not pd.isna(lgd) else (0.88, 0.88, 0.88, 1.0)
             lum = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
             txt_color = "#15324a" if lum > 0.6 else "#ffffff"
@@ -1036,18 +1032,19 @@ class SequentialLGDSegmenter:
                 boxstyle="round,pad=0.02,rounding_size=0.14",
                 linewidth=1.3, edgecolor="#33424f", facecolor=color, zorder=2))
             is_leaf = self.segments[sid]["is_leaf"]
-            cab = "\n".join(textwrap.wrap(rotulo(sid), 22)[:2])
-            nota = f"   ·   nota {nota_map.get(sid, '?')}" if is_leaf else ""
-            linhas = [cab,
-                      f"n={n:,} · {rep:.1f}%".replace(",", "."),
-                      f"LGD {lgd:.3f}{nota}" if not pd.isna(lgd) else f"LGD —{nota}"]
+            cab = "\n".join(textwrap.wrap(rotulo(sid), 19)[:3])
+            # apenas representatividade (%) e LGD médio (DES); nota nas folhas
+            lgd_txt = f"LGD {lgd:.3f}" if not pd.isna(lgd) else "LGD —"
+            if is_leaf:
+                lgd_txt += f"  ·  nota {nota_map.get(sid, '?')}"
+            linhas = [cab, f"repr. {rep:.1f}%", lgd_txt]
             if show_samples and self.sample_col is not None:
                 amostras = list(self.df[self.sample_col].dropna().unique())
                 linhas.append(" | ".join(f"{a} {sample_lgd(sid, a):.3f}" for a in amostras))
-            weight = "bold" if is_leaf else "normal"
-            ax.text(x, y, "\n".join(linhas), ha="center", va="center",
-                    fontsize=8.4, color=txt_color, zorder=3, linespacing=1.3,
-                    fontweight=weight)
+            t = ax.text(x, y, "\n".join(linhas), ha="center", va="center",
+                        fontsize=base_fs, color=txt_color, zorder=3, linespacing=1.25,
+                        fontweight=("bold" if is_leaf else "normal"), clip_on=True)
+            node_texts.append(t)
 
         ax.set_xlim(min(xs) - bw - 0.4, max(xs) + bw + 0.4)
         ax.set_ylim(min(ys) - bh - 0.4, max(ys) + bh + 0.6)
@@ -1059,11 +1056,35 @@ class SequentialLGDSegmenter:
         sm = ScalarMappable(norm=norm, cmap=cmap_obj)
         sm.set_array([])
         cbar = fig.colorbar(sm, ax=ax, fraction=0.025, pad=0.01)
-        cbar.set_label(f"LGD médio{' (DES)' if ref else ''}", fontsize=9)
+        cbar.set_label(f"LGD médio{' (DES)' if ref else ''} (escala 0–1)", fontsize=9)
         fig.tight_layout()
+
+        # força cada texto a caber na sua caixa, encolhendo a fonte se preciso
+        self._fit_texts_to_boxes(fig, ax, node_texts, bw, bh)
+
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
+
+    @staticmethod
+    def _fit_texts_to_boxes(fig, ax, texts, bw, bh, pad: float = 0.88,
+                            min_fs: float = 4.5):
+        """Encolhe a fonte de cada texto até caber na caixa (2*bw × 2*bh em dados)."""
+        try:
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+        except Exception:        # pragma: no cover - backend sem renderer
+            return
+        for t in texts:
+            x, y = t.get_position()
+            px0, py0 = ax.transData.transform((x - bw, y - bh))
+            px1, py1 = ax.transData.transform((x + bw, y + bh))
+            box_w, box_h = abs(px1 - px0) * pad, abs(py1 - py0) * pad
+            ext = t.get_window_extent(renderer)
+            if ext.width <= box_w and ext.height <= box_h:
+                continue
+            scale = min(box_w / max(ext.width, 1e-6), box_h / max(ext.height, 1e-6))
+            t.set_fontsize(max(min_fs, t.get_fontsize() * scale))
 
     # ------------------------------------------------------------------
     # PSI: estabilidade populacional, segmentos-folha como bins

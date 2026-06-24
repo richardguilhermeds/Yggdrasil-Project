@@ -183,6 +183,7 @@ class LGDSegmenterUI:
         self.btn_plot = mk("Ver / salvar árvore (imagem)", "info",
                            "Renderiza a árvore como imagem (LGD médio e % por folha) e salva "
                            "se um caminho for informado", "picture-o")
+        self.btn_plot_hide = mk("Recolher imagem", "", "Oculta a imagem da árvore", "eye-slash")
 
         self.btn_preview.on_click(self._on_preview)
         self.btn_split.on_click(self._on_split)
@@ -207,6 +208,7 @@ class LGDSegmenterUI:
         self.btn_save_json.on_click(self._on_save_json)
         self.btn_load_json.on_click(self._on_load_json)
         self.btn_plot.on_click(self._on_plot)
+        self.btn_plot_hide.on_click(self._on_plot_hide)
         self.tg_mode.observe(self._on_mode_change, names="value")
         self.dd_feature.observe(self._on_mode_change, names="value")
 
@@ -319,7 +321,8 @@ class LGDSegmenterUI:
                             tree_legend, self.out_tree,
                             W.HTML("<div class='lgdui-h' style='margin-top:8px'>Imagem da árvore "
                                    "(LGD médio &amp; % por folha)</div>"),
-                            self.tx_img_path, W.HBox([self.btn_plot]), self.out_plot])
+                            self.tx_img_path,
+                            W.HBox([self.btn_plot, self.btn_plot_hide]), self.out_plot])
         card_tree.add_class("lgdui-card")
 
         tbl_legend = W.HTML(
@@ -1179,8 +1182,7 @@ class LGDSegmenterUI:
             self.out_plot.clear_output(wait=True)
             path = self.tx_img_path.value.strip() or None
             try:
-                fig = self.seg.plot_tree(show_samples=self.sample_col is not None,
-                                         save_path=path)
+                fig = self.seg.plot_tree(save_path=path)   # repr. % + LGD (DES)
             except Exception as e:
                 print("Erro ao desenhar a árvore:", type(e).__name__, e)
                 return
@@ -1190,6 +1192,9 @@ class LGDSegmenterUI:
             with self.out_log:
                 self.out_log.clear_output(wait=True)
                 print(f"🖼️ imagem da árvore salva em '{path}'.")
+
+    def _on_plot_hide(self, _):
+        self.out_plot.clear_output()      # recolhe (esvazia) a imagem
 
     def _ipython_display_(self):
         display(self.panel)

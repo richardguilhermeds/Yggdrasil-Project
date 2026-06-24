@@ -390,11 +390,16 @@ def test_plot_tree_gera_imagem(tmp_path):
                                  ref_sample="DES", verbose=False)
     seg.grow("ltv", splits=[0.8])
 
-    fig = seg.plot_tree(show_samples=True)
+    fig = seg.plot_tree()
     boxes = [p for p in fig.axes[0].patches if isinstance(p, FancyBboxPatch)]
     assert len(boxes) == len(seg.segments)              # uma caixa por segmento
     txt = " ".join(t.get_text() for t in fig.axes[0].texts)
-    assert "LGD" in txt and "%" in txt and "nota" in txt  # LGD médio, %, nota nas folhas
+    assert "repr." in txt and "LGD" in txt and "nota" in txt  # repr.%, LGD(DES), nota
+    assert "n=" not in txt                              # n removido (só repr. e LGD)
+    # escala de cor (colorbar) fixa de 0 a 1
+    cbar_ax = fig.axes[-1]
+    lo, hi = cbar_ax.get_ylim()
+    assert abs(lo - 0.0) < 1e-6 and abs(hi - 1.0) < 1e-6
     plt.close(fig)
 
     p = tmp_path / "arvore.png"
@@ -433,5 +438,8 @@ def test_ui_plot_tree(tmp_path):
         ui.seg.grow("ltv", splits=[0.5])
         ui._refresh()
         ui.tx_img_path.value = p
-        ui._on_plot(None)
-    assert os.path.exists(p) and os.path.getsize(p) > 0
+        ui._on_plot(None)                       # renderiza e salva
+        ui._on_plot_hide(None)                  # botão recolher esvazia a imagem
+        n_after = len(ui.out_plot.outputs)
+    assert os.path.exists(p) and os.path.getsize(p) > 0   # imagem foi gerada
+    assert n_after == 0                          # imagem recolhida
