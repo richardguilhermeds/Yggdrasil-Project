@@ -76,6 +76,7 @@ class LGDSegmenterUI:
         self.locked: set = set()
         self._pending = None
         self.result = None
+        self.spark_result = None      # último Spark DataFrame com a régua aplicada
         self._undo: list = []        # pilha de estados p/ desfazer splits/fusões
         self._redo: list = []        # pilha de estados p/ refazer
         self._csi_cache = None       # CSI por variável (independe da árvore)
@@ -112,8 +113,10 @@ class LGDSegmenterUI:
 
         self.sl_repr = W.FloatSlider(description="min repr%", min=0, max=10, step=0.5,
                                      value=3.0, layout=full, style=dstyle)
-        self.sl_gap = W.FloatSlider(description="min gap LGD", min=0, max=0.15, step=0.005,
+        self.sl_repr.tooltip = "Representatividade mínima por folha (%); abaixo disso, funde com a irmã"
+        self.sl_gap = W.FloatSlider(description="ΔLGD mínimo", min=0, max=0.15, step=0.005,
                                     value=0.03, readout_format=".3f", layout=full, style=dstyle)
+        self.sl_gap.tooltip = "Diferença mínima de LGD entre irmãs; abaixo disso, as duas são unidas (0.03 = 3%)"
         self.dd_test = W.Dropdown(description="Teste",
                                   options=[("Mann-Whitney", "mannwhitney"), ("Welch t", "welch")],
                                   value="mannwhitney", layout=full, style=dstyle)
@@ -125,7 +128,9 @@ class LGDSegmenterUI:
         self.btn_split = mk("Criar segmento", "success", "Efetiva o split na folha", "scissors")
         self.btn_lock = mk("Fechar folha", "warning", "Trava a folha (não será dividida)", "lock")
         self.btn_unlock = mk("Reabrir folha", "", "Destrava a folha", "unlock")
-        self.btn_prune = mk("Podar", "danger", "Colapsa folhas fracas", "cut")
+        self.btn_prune = mk("Podar", "danger",
+                            "Funde folhas-irmãs com representatividade < min repr% ou diferença "
+                            "de LGD < ΔLGD mínimo", "cut")
         self.btn_reset = mk("Reset", "", "Recomeça do zero", "refresh")
         self.btn_export = mk("Exportar", "primary", "Gera ui.result com o rótulo", "download")
         self.btn_collapse = mk("Recolher p/ o pai", "danger",
@@ -158,6 +163,24 @@ class LGDSegmenterUI:
                                    value=1000, layout=full, style=dstyle)
         self.btn_boot = mk("Calcular IC bootstrap", "primary",
                            "Calcula o IC da média de LGD por folha e a aderência em OOT", "random")
+        # --- validação regulatória (monotonicidade, calibração, backtest) e relatório ---
+        self.tx_time_col = W.Text(description="coluna tempo", value="dt_ref",
+                                  layout=full, style=dstyle,
+                                  placeholder="coluna de safra p/ o backtest (ex.: dt_ref)")
+        self.btn_validate = mk("Validar (monoton. · calibração · backtest)", "info",
+                               "Mostra monotonicidade das notas, calibração previsto×realizado e "
+                               "backtest por safra", "check-square-o")
+        self.tx_report_path = W.Text(description="relatório", value="relatorio_validacao_lgd.md",
+                                     layout=full, style=dstyle, placeholder="caminho .md")
+        self.btn_report = mk("Gerar relatório de validação (MD)", "success",
+                             "Gera um documento Markdown com árvore, folhas, PSI, CSI, métricas, "
+                             "calibração e backtest (+ imagens)", "file-text-o")
+        # --- qualidade dos segmentos (dispersão, distribuição, preview da variável) ---
+        self.btn_box = mk("Dispersão do LGD por folha (boxplot)", "info",
+                          "Boxplot do LGD dentro de cada folha — mostra a heterogeneidade intra-folha",
+                          "bar-chart")
+        self.btn_hist = mk("Distribuição do LGD (carteira)", "info",
+                           "Histograma do LGD — revela bimodalidade/concentração", "area-chart")
 
         # --- undo/redo, auto-merge e persistência da árvore (JSON) ---
         self.btn_undo = mk("◀ Desfazer", "", "Desfaz a última alteração na árvore", "undo")
@@ -185,6 +208,14 @@ class LGDSegmenterUI:
                            "Renderiza a árvore como imagem (LGD médio e % por folha) e salva "
                            "se um caminho for informado", "picture-o")
         self.btn_plot_hide = mk("Recolher imagem", "", "Oculta a imagem da árvore", "eye-slash")
+        # --- aplicar a régua numa tabela Spark ("reconstruir as folhas") ---
+        self.tx_spark_in = W.Text(description="tabela", layout=full, style=dstyle,
+                                  placeholder="tabela Spark de entrada (catalogo.schema.tabela)")
+        self.tx_spark_out = W.Text(description="saída", layout=full, style=dstyle,
+                                   placeholder="opcional: grava o resultado nesta tabela")
+        self.btn_spark_apply = mk("Reconstruir folhas (Spark)", "primary",
+                                  "Aplica a régua à tabela Spark (segmento, nota e LGD por linha), "
+                                  "desde que as colunas tenham o mesmo nome", "table")
 
         self.btn_preview.on_click(self._on_preview)
         self.btn_split.on_click(self._on_split)
@@ -204,6 +235,10 @@ class LGDSegmenterUI:
         self.btn_mlflow.on_click(self._on_mlflow)
         self.btn_clear_log.on_click(self._on_clear_log)
         self.btn_boot.on_click(self._on_boot)
+        self.btn_validate.on_click(self._on_validate)
+        self.btn_report.on_click(self._on_report)
+        self.btn_box.on_click(self._on_box)
+        self.btn_hist.on_click(self._on_hist)
         self.btn_undo.on_click(self._on_undo)
         self.btn_redo.on_click(self._on_redo)
         self.btn_automerge.on_click(self._on_automerge)
@@ -211,6 +246,7 @@ class LGDSegmenterUI:
         self.btn_load_json.on_click(self._on_load_json)
         self.btn_plot.on_click(self._on_plot)
         self.btn_plot_hide.on_click(self._on_plot_hide)
+        self.btn_spark_apply.on_click(self._on_spark_apply)
         self.tg_mode.observe(self._on_mode_change, names="value")
         self.dd_feature.observe(self._on_mode_change, names="value")
 
@@ -221,6 +257,8 @@ class LGDSegmenterUI:
         self.out_csi = W.Output(layout=W.Layout(overflow="auto"))
         self.out_plot = W.Output(layout=W.Layout(overflow="auto"))
         self.out_boot = W.Output(layout=W.Layout(overflow="auto"))
+        self.out_validate = W.Output(layout=W.Layout(overflow="auto"))
+        self.out_quality = W.Output(layout=W.Layout(overflow="auto"))
         self.out_log = W.Output(layout=W.Layout(max_height="200px", overflow="auto"))
         self.out_table = W.Output(layout=W.Layout(max_height="300px", overflow="auto"))
         self.cat_box = W.VBox([], layout=W.Layout(width="98%", display="none",
@@ -247,12 +285,19 @@ class LGDSegmenterUI:
 
         card_refine = W.VBox([
             W.HTML("<div class='lgdui-h'>2 · Podar &amp; exportar</div>"),
+            W.HTML("<div class='lgdui-legend'>Poda = funde <b>folhas-irmãs</b>: une as que têm "
+                   "<b>repr. &lt; min repr%</b> (imateriais) ou <b>diferença de LGD &lt; ΔLGD "
+                   "mínimo</b> (ex.: 0,03 = 3%). O seletor <b>Teste</b> define o teste de hipótese "
+                   "do <b>p_vs_prox</b> (tabela de folhas) e do auto-fundir.</div>"),
             self.sl_repr, self.sl_gap, self.dd_test,
             W.HBox([self.btn_prune, self.btn_reset]),
             self.btn_export,
             W.HTML("<div class='lgdui-h' style='margin-top:8px'>Salvar / carregar árvore (JSON)</div>"),
             self.tx_json_path,
             W.HBox([self.btn_save_json, self.btn_load_json]),
+            W.HTML("<div class='lgdui-h' style='margin-top:8px'>Reconstruir folhas em tabela Spark</div>"),
+            self.tx_spark_in, self.tx_spark_out,
+            W.HBox([self.btn_spark_apply]),
             W.HTML("<div class='lgdui-h' style='margin-top:8px'>Salvar no MLflow</div>"),
             self.tx_model, self.cb_uc, self.tx_experiment, self.tx_runname,
             W.HBox([self.btn_mlflow, self.btn_clear_log]),
@@ -315,6 +360,38 @@ class LGDSegmenterUI:
             self.out_boot])
         card_boot.add_class("lgdui-card")
 
+        quality_legend = W.HTML(
+            "<div class='lgdui-legend'>Qualidade dos segmentos: <b>boxplot</b> da dispersão do LGD "
+            "dentro de cada folha (caixa estreita = folha homogênea; larga = separa pouco) e "
+            "<b>histograma</b> do LGD da carteira (bimodalidade). "
+            "<i>O LGD por faixa da variável aparece embaixo da tabela ao clicar em 👁 Preview.</i></div>")
+        card_quality = W.VBox([
+            W.HTML("<div class='lgdui-h'>Qualidade dos segmentos</div>"),
+            quality_legend,
+            W.HBox([self.btn_box, self.btn_hist]),
+            self.out_quality,
+        ])
+        card_quality.add_class("lgdui-card")
+        self._card_quality = card_quality
+
+        valid_legend = W.HTML(
+            "<div class='lgdui-legend'>Validação regulatória: <b>monotonicidade</b> do LGD nas "
+            "notas (DES e demais amostras), <b>calibração</b> previsto (DES) × realizado (OOT) por "
+            "folha, e <b>backtest</b> do LGD previsto × realizado por safra (informe a coluna de "
+            "tempo). O <b>relatório</b> reúne tudo num Markdown com as imagens.</div>")
+        card_validacao = W.VBox([
+            W.HTML("<div class='lgdui-h'>Validação &amp; relatório (monotonicidade · calibração · backtest)</div>"),
+            valid_legend,
+            W.HBox([self.tx_time_col, self.btn_validate],
+                   layout=W.Layout(align_items="center")),
+            self.out_validate,
+            W.HTML("<div class='lgdui-h' style='margin-top:8px'>Relatório de validação (Markdown)</div>"),
+            W.HBox([self.tx_report_path, self.btn_report],
+                   layout=W.Layout(align_items="center")),
+        ])
+        card_validacao.add_class("lgdui-card")
+        self._card_validacao = card_validacao
+
         tree_legend = W.HTML(
             "<div class='lgdui-legend'>cor do quadrado = LGD "
             "(<span style='color:#1aa64b'>baixo</span> &rarr; "
@@ -329,12 +406,21 @@ class LGDSegmenterUI:
         card_tree.add_class("lgdui-card")
 
         tbl_legend = W.HTML(
-            "<div class='lgdui-legend'>PSI por amostra: "
+            "<div class='lgdui-legend'>"
+            "<b>PSI por amostra</b> (estabilidade da folha entre DES e a amostra): "
             "<span style='background:#e6f6ec;padding:1px 5px;border-radius:3px'>&lt;0.10 estável</span> "
             "<span style='background:#fdf3da;padding:1px 5px;border-radius:3px'>0.10–0.25 atenção</span> "
             "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>&ge;0.25 instável</span>"
-            " · <b>p_vs_prox</b> em vermelho &rArr; folha não distinguível da próxima (candidata a fusão)</div>")
-        card_table = W.VBox([W.HTML("<div class='lgdui-h'>Folhas criadas · PSI &amp; teste de hipótese</div>"),
+            "<br><b>p_vs_prox</b> = p-valor de um <b>teste de hipótese</b> que compara a "
+            "<b>distribuição de LGD</b> da folha com a da <b>irmã adjacente</b> (mesmo pai, "
+            "na amostra de referência DES). H₀: as duas irmãs têm o mesmo LGD. "
+            "O teste é o <b>Mann-Whitney U</b> (não-paramétrico, padrão) ou o <b>t de Welch</b> "
+            "(médias, variâncias desiguais) — escolha no seletor <b>Teste</b>. "
+            "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>p alto (&gt;0,05, em vermelho)</span> "
+            "⇒ <b>não</b> dá para distinguir as irmãs ⇒ candidatas a fusão; "
+            "<span style='color:#137a3e'>p baixo</span> ⇒ folhas bem separadas. "
+            "Só <b>irmãs</b> são comparadas (a última de cada grupo e o nó de faltantes ficam em branco).</div>")
+        card_table = W.VBox([W.HTML("<div class='lgdui-h'>Folhas criadas · PSI &amp; teste de hipótese (irmãs)</div>"),
                              tbl_legend, self.out_table])
         card_table.add_class("lgdui-card")
 
@@ -356,9 +442,10 @@ class LGDSegmenterUI:
         else:
             card_imp_psi = card_iv             # sem amostras não há PSI por variável
 
-        # Ordem: segmentação → folhas criadas → Information Value | PSI → métricas → bootstrap
+        # Ordem: segmentação → folhas → IV | PSI → métricas → bootstrap →
+        #        qualidade dos segmentos → validação
         cards = [banner, controls, bar_box, card_tree, card_table,
-                 card_imp_psi, card_metrics, card_boot]
+                 card_imp_psi, card_metrics, card_boot, card_quality, card_validacao]
         self.panel = W.VBox(cards)
         self.panel.add_class("lgdui")
 
@@ -796,6 +883,50 @@ class LGDSegmenterUI:
     def _on_clear_log(self, _):
         self.out_log.clear_output()       # limpa a área de preview/log
 
+    def _on_spark_apply(self, _):
+        with self.out_log:
+            self.out_log.clear_output(wait=True)
+            name = self.tx_spark_in.value.strip()
+            if not name:
+                print("Informe o nome da tabela Spark de entrada."); return
+            try:
+                from pyspark.sql import SparkSession
+            except ImportError:
+                print("PySpark não está disponível neste ambiente. No Databricks já "
+                      "vem no cluster; fora dele: %pip install pyspark."); return
+            spark = SparkSession.getActiveSession()
+            if spark is None:
+                try:
+                    spark = SparkSession.builder.getOrCreate()
+                except Exception as e:
+                    print("Nenhuma SparkSession ativa:", type(e).__name__, e); return
+            try:
+                sdf = spark.table(name)
+            except Exception as e:
+                print(f"Não foi possível ler a tabela '{name}':", type(e).__name__, e); return
+            try:
+                out = self.seg.apply_spark(sdf)
+            except ValueError as e:                 # colunas faltando / árvore vazia
+                print("⚠", e); return
+            except Exception as e:
+                print("Erro ao aplicar a régua:", type(e).__name__, e); return
+
+            self.spark_result = out
+            out_name = self.tx_spark_out.value.strip()
+            if out_name:
+                try:
+                    out.write.mode("overwrite").saveAsTable(out_name)
+                    print(f"✓ tabela '{out_name}' gravada (segmento_lgd, nota_lgd, lgd_regua).")
+                except Exception as e:
+                    print(f"Régua aplicada, mas falhou ao gravar '{out_name}':",
+                          type(e).__name__, e)
+            print(f"✓ régua aplicada em '{name}'. Spark DataFrame em  ui.spark_result.")
+            try:
+                dist = out.groupBy("nota_lgd").count().orderBy("nota_lgd").toPandas()
+                display(dist)
+            except Exception as e:
+                print("(não consegui resumir a distribuição:", type(e).__name__, e, ")")
+
     def _parse_cuts(self, feature, sid):
         sub = self.df[self.seg.segments[sid]["mask"]]
         kind = self.seg._detect_kind(sub, feature, None)
@@ -862,6 +993,14 @@ class LGDSegmenterUI:
                 if sid in previews:
                     drop = [c for c in ["lgd_std"] if c in previews[sid]]
                     display(previews[sid].drop(columns=drop))
+                    # gráfico do LGD por faixa, embaixo da tabela (mesmos bins)
+                    try:
+                        fig = self.seg.plot_feature_lgd(
+                            feature, sid=sid, splits=splits,
+                            max_n_bins=extra.get("max_n_bins", 4))
+                        self._display_fig(fig, border=False)
+                    except Exception:
+                        pass
             except Exception as e:
                 self._pending = None
                 print("Erro no preview:", type(e).__name__, e)
@@ -1010,6 +1149,94 @@ class LGDSegmenterUI:
                 print(f"Aderência {chk}: {n_ok}/{n_tot} folhas com LGD dentro do IC "
                       f"bootstrap (n_boot={bc.attrs.get('n_boot')}).")
             display(sty)
+
+    # ==================================================================
+    # Validação (monotonicidade · calibração · backtest) e relatório
+    # ==================================================================
+    def _on_validate(self, _):
+        with self.out_validate:
+            self.out_validate.clear_output(wait=True)
+            # monotonicidade
+            try:
+                mr = self.seg.monotonicity_report()
+                ok = bool(mr["monotonico"].all())
+                print("✅ LGD monotônico crescente em todas as amostras."
+                      if ok else "⚠️ Há inversões de monotonicidade (ver tabela).")
+                display(mr[["amostra", "monotonico", "n_inversoes"]])
+            except Exception as e:
+                print("Erro na monotonicidade:", type(e).__name__, e)
+            # calibração (previsto DES × realizado OOT)
+            if self.sample_col is not None:
+                try:
+                    self._display_fig(self.seg.plot_calibration(), border=False)
+                    ct = self.seg.calibration_table()
+                    display(ct[["nota_lgd", "n", "lgd_previsto", "lgd_realizado", "gap"]])
+                except Exception as e:
+                    print("Erro na calibração:", type(e).__name__, e)
+            # backtest por safra
+            tcol = self.tx_time_col.value.strip()
+            if not tcol:
+                print("(informe a coluna de tempo para o backtest)")
+            elif tcol not in self.df.columns:
+                print(f"(coluna de tempo '{tcol}' não existe no DataFrame — backtest pulado)")
+            else:
+                try:
+                    print(f"\nBacktest por '{tcol}':")
+                    display(self.seg.backtest(tcol))
+                except Exception as e:
+                    print("Erro no backtest:", type(e).__name__, e)
+
+    def _on_report(self, _):
+        with self.out_log:
+            self.out_log.clear_output(wait=True)
+            path = self.tx_report_path.value.strip()
+            if not path:
+                print("Informe o caminho do relatório (.md)."); return
+            tcol = self.tx_time_col.value.strip() or None
+            if tcol and tcol not in self.df.columns:
+                print(f"(coluna de tempo '{tcol}' inexistente — relatório sem backtest)")
+                tcol = None
+            try:
+                out = self.seg.validation_report(path, time_col=tcol)
+                print(f"📄 relatório de validação gerado em '{out}' (imagens salvas ao lado).")
+            except Exception as e:
+                print("Erro ao gerar relatório:", type(e).__name__, e)
+
+    # ==================================================================
+    # Qualidade dos segmentos (dispersão · distribuição · preview da variável)
+    # ==================================================================
+    def _display_fig(self, fig, border=True):
+        """Exibe uma figura matplotlib escalada para caber no painel (a versão
+        salva em arquivo continua em tamanho real). Evita a imagem ser cortada
+        quando a árvore tem muitas folhas."""
+        import base64
+        import io as _io
+        import matplotlib.pyplot as plt
+        buf = _io.BytesIO()
+        fig.savefig(buf, format="png", dpi=fig.get_dpi(), bbox_inches="tight")
+        plt.close(fig)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        style = "max-width:100%;height:auto"
+        if border:
+            style += ";border:1px solid #e6e8eb;border-radius:6px"
+        display(W.HTML(f"<img src='data:image/png;base64,{b64}' style='{style}'/>"))
+
+    def _on_box(self, _):
+        with self.out_quality:
+            self.out_quality.clear_output(wait=True)
+            try:
+                self._display_fig(self.seg.plot_leaf_boxplots(), border=False)
+            except Exception as e:
+                print("Erro no boxplot:", type(e).__name__, e)
+
+    def _on_hist(self, _):
+        with self.out_quality:
+            self.out_quality.clear_output(wait=True)
+            try:
+                self._display_fig(self.seg.plot_target_hist(
+                    by_sample=self.sample_col is not None), border=False)
+            except Exception as e:
+                print("Erro no histograma:", type(e).__name__, e)
 
     # ==================================================================
     # CSI por variável (estabilidade das entradas) — independe da árvore,
@@ -1183,21 +1410,20 @@ class LGDSegmenterUI:
     # Imagem da árvore (matplotlib)
     # ==================================================================
     def _on_plot(self, _):
-        import matplotlib.pyplot as plt
         with self.out_plot:
             self.out_plot.clear_output(wait=True)
             path = self.tx_img_path.value.strip() or None
             try:
+                # arquivo salvo em tamanho real; exibição escalada para caber
                 fig = self.seg.plot_tree(save_path=path)   # repr. % + LGD (DES)
+                self._display_fig(fig)
             except Exception as e:
                 print("Erro ao desenhar a árvore:", type(e).__name__, e)
                 return
-            display(fig)
-            plt.close(fig)          # evita exibição dupla
         if path:
             with self.out_log:
                 self.out_log.clear_output(wait=True)
-                print(f"🖼️ imagem da árvore salva em '{path}'.")
+                print(f"🖼️ imagem da árvore salva em '{path}' (tamanho real).")
 
     def _on_plot_hide(self, _):
         self.out_plot.clear_output()      # recolhe (esvazia) a imagem

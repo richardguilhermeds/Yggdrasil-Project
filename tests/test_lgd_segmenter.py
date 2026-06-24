@@ -449,3 +449,258 @@ def test_ui_plot_tree(tmp_path):
         n_after = len(ui.out_plot.outputs)
     assert os.path.exists(p) and os.path.getsize(p) > 0   # imagem foi gerada
     assert n_after == 0                          # imagem recolhida
+
+
+# ----------------------------------------------------------------------
+# Aplicar a régua numa tabela Spark (apply_spark / "reconstruir as folhas")
+# ----------------------------------------------------------------------
+def test_regua_features():
+    df = _amostra(com_na=True)
+    seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                 ref_sample="DES", verbose=False)
+    seg.grow("ltv", splits=[0.8])
+    feats = seg.regua_features()
+    assert "ltv" in feats                       # variáveis usadas pela árvore
+    assert seg.target not in feats and seg.sample_col not in feats
+
+
+def test_apply_spark_valida_colunas():
+    pytest.importorskip("pyspark")              # roda onde houver pyspark (ex.: Databricks)
+    df = _amostra(com_na=True)
+    seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                 ref_sample="DES", verbose=False)
+    seg.fit_auto(max_depth=2, verbose=False)
+
+    # a validação de colunas ocorre ANTES de montar qualquer expressão Spark
+    # (não inicia JVM): tabela sem as colunas da árvore -> ValueError listando-as
+    class _FakeDF:
+        def __init__(self, cols):
+            self.columns = cols
+
+    with pytest.raises(ValueError, match="ltv"):
+        seg.apply_spark(_FakeDF(["lgd", "amostra"]))
+
+
+# ----------------------------------------------------------------------
+# Validação regulatória: backtest, monotonicidade, calibração e relatório
+# ----------------------------------------------------------------------
+def _amostra_safra(n=6000, seed=1):
+    """DES/OOT por safra (dt_ref), com faltantes em ltv."""
+    rng = np.random.default_rng(seed)
+    ltv = rng.uniform(0.3, 1.3, n)
+    ltv[rng.random(n) < 0.10] = np.nan
+    gar = rng.choice(["A", "B", "C", "D"], n, p=[.4, .3, .2, .1]).astype(object)
+    lg = {"A": .1, "B": .2, "C": .3, "D": .5}
+    lgd = (0.1 + 0.3 * np.nan_to_num(ltv - 0.6, nan=.4)
+           + np.array([lg[g] for g in gar]) + rng.normal(0, .05, n))
+    safra = rng.choice(["2023Q1", "2023Q2", "2023Q3", "2023Q4"], n)
+    amostra = np.where(np.isin(safra, ["2023Q1", "2023Q2", "2023Q3"]), "DES", "OOT")
+    return pd.DataFrame({"ltv": ltv, "garantia": gar, "dt_ref": safra,
+                         "lgd": np.clip(lgd, 0, 1), "amostra": amostra})
+
+
+def test_backtest_por_safra():
+    df = _amostra_safra()
+    seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                 ref_sample="DES", verbose=False)
+    seg.fit_auto(max_depth=2, verbose=False)
+    bt = seg.backtest("dt_ref")
+    assert {"periodo", "n", "lgd_previsto", "lgd_realizado", "gap", "status"}.issubset(bt.columns)
+    assert int(bt["n"].sum()) == len(df)
+    assert set(bt["status"]) <= {"ok", "alerta"}
+    with pytest.raises(ValueError):
+        seg.backtest("coluna_inexistente")
+
+
+def test_monotonicity_report_detecta_inversao():
+    rng = np.random.default_rng(4)
+    n = 4000
+    x = rng.uniform(0, 1, n)
+    amostra = rng.choice(["DES", "OOT"], n, p=[.6, .4])
+    lgd = np.where(x < 0.5, 0.2, 0.6)
+    oot = amostra == "OOT"
+    lgd = np.where(oot & (x < 0.5), 0.7, lgd)        # inverte os níveis no OOT
+    lgd = np.where(oot & (x >= 0.5), 0.3, lgd)
+    df = pd.DataFrame({"x": x, "lgd": np.clip(lgd + rng.normal(0, 0.02, n), 0, 1),
+                       "amostra": amostra})
+    seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                 ref_sample="DES", verbose=False)
+    seg.grow("x", splits=[0.5])
+    mr = seg.monotonicity_report().set_index("amostra")
+    assert bool(mr.loc["DES", "monotonico"]) is True          # DES monotônico por construção
+    assert bool(mr.loc["OOT", "monotonico"]) is False         # OOT invertido
+    assert int(mr.loc["OOT", "n_inversoes"]) >= 1
+
+
+def test_calibration_table():
+    df = _amostra_safra()
+    seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                 ref_sample="DES", verbose=False)
+    seg.fit_auto(max_depth=2, verbose=False)
+    ct = seg.calibration_table()
+    assert {"nota_lgd", "n", "lgd_previsto", "lgd_realizado", "gap"}.issubset(ct.columns)
+    assert ct.attrs["check_sample"] == "OOT"
+    assert len(ct) == sum(s["is_leaf"] for s in seg.segments.values())
+
+
+def test_plot_calibration():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    df = _amostra_safra()
+    seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                 ref_sample="DES", verbose=False)
+    seg.fit_auto(max_depth=2, verbose=False)
+    fig = seg.plot_calibration()
+    assert fig is not None
+    plt.close(fig)
+
+
+def test_validation_report(tmp_path):
+    import os
+
+    import matplotlib
+    matplotlib.use("Agg")
+
+    df = _amostra_safra()
+    seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                 ref_sample="DES", verbose=False)
+    seg.fit_auto(max_depth=2, verbose=False)
+    p = tmp_path / "rel.md"
+    out = seg.validation_report(str(p), time_col="dt_ref", stamp="2026-06-24")
+    assert os.path.exists(out)
+    txt = p.read_text(encoding="utf-8")
+    for sec in ["## Visão geral", "## Folhas", "## Monotonicidade",
+                "## Calibração", "## Backtest"]:
+        assert sec in txt
+    assert (tmp_path / "rel_arvore.png").exists()        # imagens geradas ao lado
+    assert (tmp_path / "rel_calibracao.png").exists()
+
+
+def test_p_vs_prox_apenas_entre_irmas():
+    """O teste de hipótese (p_vs_prox) só compara folhas-IRMÃS (mesmo pai)."""
+    rng = np.random.default_rng(1)
+    n = 9000
+    ltv = rng.uniform(0.3, 1.3, n)
+    gar = rng.choice(["A", "B", "C", "D"], n, p=[.4, .3, .2, .1]).astype(object)
+    lg = {"A": .1, "B": .2, "C": .3, "D": .5}
+    lgd = 0.1 + 0.3 * (ltv - 0.6) + np.array([lg[g] for g in gar]) + rng.normal(0, .05, n)
+    df = pd.DataFrame({"ltv": ltv, "garantia": gar,
+                       "lgd": np.clip(lgd, 0, 1), "amostra": "DES"})
+    seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                 ref_sample="DES", verbose=False)
+    seg.grow("garantia", splits=[["A", "B", "C"], ["D"]])
+    abc = [s for s, v in seg.segments.items()
+           if v["is_leaf"] and v["conditions"][-1]["kind"] == "cat"
+           and set(v["conditions"][-1]["cats"]) == {"A", "B", "C"}]
+    seg.grow("ltv", splits=[0.6, 0.9], only_segments=abc)
+
+    lv = seg.leaves(with_test=True).set_index("segmento")
+    pai = lambda s: seg.segments[s]["parent"]
+    # a folha {D} é o único filho-folha da raiz -> sem irmã comparável -> NaN
+    d_leaf = [s for s in lv.index
+              if seg.segments[s]["conditions"][-1].get("cats") == ["D"]][0]
+    assert pd.isna(lv.loc[d_leaf, "p_vs_prox"])
+    # todo p_vs_prox não-nulo: a folha tem >=2 irmãs comparáveis (mesmo pai)
+    for sid, r in lv.iterrows():
+        if not pd.isna(r["p_vs_prox"]):
+            irmas = [s for s in lv.index if pai(s) == pai(sid)
+                     and seg.segments[s]["conditions"][-1]["kind"] != "na"]
+            assert len(irmas) >= 2
+    assert int(lv["p_vs_prox"].notna().sum()) == 2     # 2 pares de irmãs em {A,B,C}
+
+
+def test_prune_funde_irmas_por_lgd_e_repr():
+    """Poda funde irmãs com ΔLGD < min_lgd_gap ou repr% < min_repr."""
+    rng = np.random.default_rng(2)
+    n = 8000
+    ltv = rng.uniform(0, 1, n)
+
+    def base(x):
+        if x < 0.3:
+            return 0.30
+        if x < 0.6:
+            return 0.32          # ΔLGD ~0.02 vs faixa A -> deve fundir
+        if x < 0.62:
+            return 0.45          # repr ~1.9% -> imaterial, deve fundir
+        return 0.60
+
+    lgd = np.array([base(x) for x in ltv]) + rng.normal(0, 0.02, n)
+    df = pd.DataFrame({"ltv": ltv, "lgd": np.clip(lgd, 0, 1), "amostra": "DES"})
+    seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                 ref_sample="DES", verbose=False)
+    seg.grow("ltv", splits=[0.3, 0.6, 0.62])             # 4 folhas-irmãs
+    assert sum(s["is_leaf"] for s in seg.segments.values()) == 4
+
+    seg.prune(min_repr=3.0, min_lgd_gap=0.03, verbose=False)
+    cob = sum(s["mask"].sum() for s in seg.segments.values() if s["is_leaf"])
+    assert cob == len(df)                                # cobertura preservada
+
+    # nenhum par de irmãs adjacentes pode violar os critérios após a poda
+    n_total = len(df)
+    fp = {}
+    for sid, s in seg.segments.items():
+        if s["is_leaf"]:
+            fp.setdefault(s["parent"], []).append(sid)
+    for pai, fs in fp.items():
+        if pai is None:
+            continue
+        comp = [c for c in fs if seg.segments[c]["conditions"][-1]["kind"] != "na"]
+        comp.sort(key=lambda c: seg.segments[c]["conditions"][-1].get("lo", 0))
+        reprs = [100 * seg.segments[c]["mask"].sum() / n_total for c in comp]
+        lgds = [seg.df[seg.segments[c]["mask"]][seg.target].mean() for c in comp]
+        for i in range(len(comp) - 1):
+            assert abs(lgds[i + 1] - lgds[i]) >= 0.03
+            assert reprs[i] >= 3.0 and reprs[i + 1] >= 3.0
+
+
+# ----------------------------------------------------------------------
+# Qualidade dos segmentos: boxplot por folha, histograma, preview da variável
+# ----------------------------------------------------------------------
+def test_plot_leaf_boxplots():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    df = _amostra_safra()
+    seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                 ref_sample="DES", verbose=False)
+    seg.fit_auto(max_depth=2, verbose=False)
+    fig = seg.plot_leaf_boxplots()
+    # um boxplot (par de caixas) por folha
+    n_folhas = sum(s["is_leaf"] for s in seg.segments.values())
+    assert len(fig.axes[0].get_xticklabels()) == n_folhas
+    plt.close(fig)
+
+
+def test_plot_target_hist():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    df = _amostra_safra()
+    seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                 ref_sample="DES", verbose=False)
+    fig = seg.plot_target_hist(by_sample=True)
+    assert fig is not None
+    plt.close(fig)
+
+
+def test_plot_feature_lgd():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    df = _amostra_safra()
+    seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                 ref_sample="DES", verbose=False)
+    # preview na carteira inteira (root) e numa folha após um split
+    fig = seg.plot_feature_lgd("ltv", sid="root")
+    assert len(fig.axes[0].patches) >= 2          # uma barra por faixa
+    plt.close(fig)
+    seg.grow("garantia")
+    folha = [s for s, v in seg.segments.items() if v["is_leaf"]][0]
+    fig2 = seg.plot_feature_lgd("ltv", sid=folha)
+    assert fig2 is not None
+    plt.close(fig2)

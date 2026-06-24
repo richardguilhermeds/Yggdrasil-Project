@@ -45,11 +45,17 @@ seg.plot_tree(save_path="arvore_lgd.png")   # imagem da árvore (LGD médio e % 
 seg.csi()                        # CSI por variável (estabilidade das entradas DES→OOT)
 seg.csi_detalhe()                # contribuição de cada faixa ao CSI
 
+seg.backtest("dt_ref")           # LGD previsto × realizado por safra
+seg.monotonicity_report()        # monotonicidade do LGD nas notas (por amostra)
+seg.plot_calibration()           # calibração previsto (DES) × realizado (OOT) por folha
+seg.validation_report("rel.md", time_col="dt_ref")   # relatório de validação (Markdown + imagens)
+
 seg.save("arvore_lgd.json")      # salva a árvore (estrutura) em JSON
 seg = SequentialLGDSegmenter.load("arvore_lgd.json", df)   # recarrega e reaplica
 
 regua = seg.predict(df_novos)    # aplica a régua em pandas
 print(seg.to_pyspark())          # gera a régua como F.when().otherwise() p/ Spark
+sdf2 = seg.apply_spark(sdf)      # aplica a régua direto numa tabela Spark (segmento/nota/LGD)
 ```
 
 ### Interface interativa (Jupyter/Databricks)
@@ -76,12 +82,15 @@ seg.log_to_mlflow(
 - Binning **ótimo** (OptBinning) ou **manual**, numérico e categórico
 - **Faltantes (NaN) em bin própria** — nada é descartado no split
 - Notas por folha, **IV**, **PSI por amostra** (DES/OOT), **IC bootstrap**
+- **Validação regulatória**: backtesting por safra (`backtest`), **calibração** previsto×realizado (`plot_calibration`/`calibration_table`) e **monotonicidade** das notas (`monotonicity_report`)
+- **Relatório de validação** (`validation_report`) — Markdown com árvore, folhas, PSI, CSI, métricas, calibração e backtest (+ imagens)
 - **CSI por variável** (`csi`/`csi_detalhe`) — estabilidade de cada característica de entrada
 - **Salvar/carregar a árvore em JSON** (`save`/`load`, `to_dict`/`from_dict`) — portável entre máquinas
 - **Auto-merge** (`auto_merge`) — funde automaticamente folhas-irmãs indistinguíveis (teste de hipótese)
 - **Juntar faltantes** (`merge_missing`) — agrupa o nó de faltantes (NaN) com um bin populado da variável (regra "bin OU faltante")
 - **Imagem da árvore** (`plot_tree`) — figura matplotlib com LGD médio, % e nota por folha, colorida pelo LGD (salva PNG/SVG)
-- `predict` (pandas) e `to_pyspark` (Spark) com a mesma régua
+- **Qualidade dos segmentos** — dispersão do LGD por folha (`plot_leaf_boxplots`), distribuição do alvo (`plot_target_hist`) e LGD por faixa de uma variável (`plot_feature_lgd`)
+- `predict` (pandas), `to_pyspark` (gera o código) e **`apply_spark`** (aplica a régua direto numa tabela Spark) com a mesma régua
 - `fit_auto`, `suggest_split`, `prune`, `merge_leaf`, `collapse`
 - UI com **desfazer/refazer** de splits, auto-fundir e persistência em JSON
 - `log_to_mlflow` com assinatura e versão no Model Registry (Unity Catalog)

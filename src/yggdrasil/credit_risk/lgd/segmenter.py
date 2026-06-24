@@ -397,64 +397,70 @@ class SequentialLGDSegmenter:
         return self
 
     # ------------------------------------------------------------------
-    # PRUNE: colapsa splits que não compensam (poda bottom-up)
-    #   Um split (pai com TODOS os filhos folha) é desfeito se:
-    #     - algum filho tem repr_% < min_repr  (materialidade), OU
-    #     - a amplitude de LGD entre os filhos < min_lgd_gap (sem separação)
-    #   Itera até estabilizar, permitindo poda em cascata.
+    # PRUNE: poda por FUSÃO de folhas-IRMÃS (mesmo pai). Em cada rodada funde um
+    #   par de irmãs adjacentes que viole um dos critérios:
+    #     - diferença de LGD médio entre as duas irmãs < `min_lgd_gap` (ex.: 0.03
+    #       = 3%) → separam pouco, devem ser unidas;
+    #     - alguma das duas tem representatividade < `min_repr` % (imaterial) →
+    #       é unida à irmã adjacente mais próxima em LGD.
+    #   Prioriza o par de menor diferença de LGD. Só funde irmãs (o nó de
+    #   faltantes não entra). Itera até nenhum par violar os critérios.
     # ------------------------------------------------------------------
     def prune(self, min_repr: float = 2.0, min_lgd_gap: float = 0.03,
-              verbose: bool = True):
+              verbose: bool = True, max_rounds: int = 1000):
         n_total = len(self.df)
-        rodadas = 0
-        while True:
-            # mapeia pai -> lista de ids de filhos
-            filhos_por_pai: dict[str, list[str]] = {}
-            for sid, seg in self.segments.items():
-                p = seg["parent"]
-                if p is not None:
-                    filhos_por_pai.setdefault(p, []).append(sid)
+        n_merges = 0
+        for _ in range(max_rounds):
+            folhas_por_pai: dict[str, list[str]] = {}
+            for sid, s in self.segments.items():
+                if s["is_leaf"]:
+                    folhas_por_pai.setdefault(s["parent"], []).append(sid)
 
-            colapsou = False
-            for pai, filhos in filhos_por_pai.items():
-                # só é colapsável se o pai existe e TODOS os filhos são folhas
-                if pai not in self.segments:
+            melhor = None  # (gap, sid_direita_do_par, motivo)
+            for pai, folhas in folhas_por_pai.items():
+                if pai is None:
                     continue
-                if not all(self.segments[f]["is_leaf"] for f in filhos):
+                irmaos = [c for c in folhas
+                          if self.segments[c]["conditions"]
+                          and self.segments[c]["conditions"][-1]["kind"] != "na"]
+                if len(irmaos) < 2:
                     continue
-
-                # métricas dos filhos
-                reprs, means = [], []
-                for f in filhos:
-                    sub = self.df[self.segments[f]["mask"]]
-                    reprs.append(100 * len(sub) / n_total)
-                    means.append(sub[self.target].mean())
-                gap = (np.nanmax(means) - np.nanmin(means)) if means else 0.0
-                min_r = min(reprs) if reprs else 0.0
-
-                motivo = None
-                if min_r < min_repr:
-                    motivo = f"folha com repr_={min_r:.1f}% < {min_repr}%"
-                elif gap < min_lgd_gap:
-                    motivo = f"amplitude de LGD {gap:.4f} < {min_lgd_gap}"
-
-                if motivo:
-                    for f in filhos:
-                        self.segments.pop(f, None)
-                    self.segments[pai]["is_leaf"] = True
-                    colapsou = True
-                    if verbose:
-                        alvo = "root" if self.segments[pai]["label"] == "root" else pai
-                        print(f"[prune] colapsado '{alvo}' ({len(filhos)} folhas) — {motivo}")
-                    break  # recomeça do zero (estado mudou)
-
-            rodadas += 1
-            if not colapsou:
+                if all(self.segments[c]["conditions"][-1]["kind"] == "num"
+                       for c in irmaos):
+                    irmaos.sort(key=lambda c: self.segments[c]["conditions"][-1]["lo"])
+                else:
+                    irmaos.sort(key=lambda c: (self._leaf_target(c).mean()
+                                               if len(self._leaf_target(c)) else np.inf))
+                reprs = {c: 100 * int(self.segments[c]["mask"].sum()) / n_total
+                         for c in irmaos}
+                lgds = {c: self.df[self.segments[c]["mask"]][self.target].mean()
+                        for c in irmaos}
+                for i in range(len(irmaos) - 1):
+                    a, b = irmaos[i], irmaos[i + 1]
+                    gap = (abs(lgds[b] - lgds[a])
+                           if not (pd.isna(lgds[a]) or pd.isna(lgds[b])) else np.inf)
+                    viola_gap = gap < min_lgd_gap
+                    viola_repr = (reprs[a] < min_repr) or (reprs[b] < min_repr)
+                    if not (viola_gap or viola_repr):
+                        continue
+                    motivo = "ΔLGD" if viola_gap else "repr."
+                    if melhor is None or gap < melhor[0]:
+                        melhor = (gap, b, motivo)
+            if melhor is None:
                 break
+            _, sid_dir, motivo = melhor
+            antes = set(self.segments)
+            self.merge_leaf(sid_dir, side="left", verbose=False)
+            if set(self.segments) == antes:
+                break  # salvaguarda contra laço infinito
+            n_merges += 1
+            if verbose:
+                print(f"[prune] folhas-irmãs unidas ({motivo})")
 
         n_folhas = sum(s["is_leaf"] for s in self.segments.values())
         if verbose:
-            print(f"[prune] concluído em {rodadas} rodada(s). Folhas finais: {n_folhas}")
+            print(f"[prune] {n_merges} fusão(ões) (repr<{min_repr}% ou ΔLGD<{min_lgd_gap}). "
+                  f"Folhas finais: {n_folhas}")
         return self
 
     # ------------------------------------------------------------------
@@ -774,9 +780,10 @@ class SequentialLGDSegmenter:
     #   nota_lgd: 1..N ordenada por LGD (1 = menor LGD por padrão)
     #   with_psi:  adiciona a contribuição de PSI de cada folha por amostra
     #              (psi_<amostra>), tendo a referência (DES) como base
-    #   with_test: adiciona p_vs_prox = p-valor do teste de LGD entre a folha
-    #              e a próxima (na ordem de LGD). p alto ⇒ folhas não distinguíveis
-    #              (candidatas a fusão). test: 'mannwhitney' (default) ou 'welch'
+    #   with_test: adiciona p_vs_prox = p-valor do teste de LGD entre a folha e a
+    #              IRMÃ adjacente (mesmo pai — só irmãs são comparáveis/fundíveis).
+    #              p alto ⇒ irmãs não distinguíveis (candidatas a fusão); folhas sem
+    #              irmã à frente ficam com NaN. test: 'mannwhitney' (default)/'welch'
     # ------------------------------------------------------------------
     def leaves(self, ascending: bool = True, with_psi: bool = False,
                with_test: bool = False, test: str = "mannwhitney") -> pd.DataFrame:
@@ -857,14 +864,37 @@ class SequentialLGDSegmenter:
         except Exception:
             return np.nan
 
-    # p-valor do teste de LGD entre folhas adjacentes (na ordem de LGD)
+    # p-valor do teste de LGD entre uma folha e a IRMÃ adjacente (mesmo pai).
+    #   Só irmãs são diretamente comparáveis (e fundíveis), por isso o teste é
+    #   restrito a elas — folhas de pais diferentes não se comparam. A ordem das
+    #   irmãs é a mesma da fusão (por corte, no numérico; por LGD, no categórico).
+    #   A última irmã do grupo e o nó de faltantes ficam com NaN (sem par à frente).
     def _append_adjacency_test(self, out, test="mannwhitney", min_n=8):
-        amostras = out["segmento"].tolist()
+        leaf_ids = out["segmento"].tolist()
+        por_pai: dict = {}
+        for sid in leaf_ids:
+            por_pai.setdefault(self.segments[sid]["parent"], []).append(sid)
+        prox: dict = {}
+        for irmaos in por_pai.values():
+            comp = [c for c in irmaos
+                    if self.segments[c]["conditions"]
+                    and self.segments[c]["conditions"][-1]["kind"] != "na"]
+            if len(comp) < 2:
+                continue
+            if all(self.segments[c]["conditions"][-1]["kind"] == "num" for c in comp):
+                comp.sort(key=lambda c: self.segments[c]["conditions"][-1]["lo"])
+            else:
+                comp.sort(key=lambda c: (self._leaf_target(c).mean()
+                                         if len(self._leaf_target(c)) else np.inf))
+            for i in range(len(comp) - 1):
+                prox[comp[i]] = comp[i + 1]
         pvals = []
-        for i, sid in enumerate(amostras):
-            if i == len(amostras) - 1:
-                pvals.append(np.nan); continue
-            p = self._pair_pvalue(sid, amostras[i + 1], test=test, min_n=min_n)
+        for sid in leaf_ids:
+            nxt = prox.get(sid)
+            if nxt is None:
+                pvals.append(np.nan)
+                continue
+            p = self._pair_pvalue(sid, nxt, test=test, min_n=min_n)
             pvals.append(round(p, 4) if not np.isnan(p) else np.nan)
         out["p_vs_prox"] = pvals
         return out
@@ -1332,6 +1362,439 @@ class SequentialLGDSegmenter:
         out.attrs.update(sample=sample, check_sample=check_sample, ci=ci, n_boot=n_boot)
         return out
 
+    # ==================================================================
+    # VALIDAÇÃO: backtesting por safra, monotonicidade e calibração
+    # ==================================================================
+    def _predicted_lgd_series(self) -> pd.Series:
+        """LGD previsto por linha = média do segmento na referência (régua)."""
+        pred = pd.Series(np.nan, index=self.df.index, dtype="float64")
+        for sid, seg in self.segments.items():
+            if not seg["is_leaf"]:
+                continue
+            sub = self.df[seg["mask"]]
+            if self.sample_col is not None:
+                ref = sub.loc[sub[self.sample_col] == self.ref_sample, self.target]
+                lgd = float(ref.mean()) if len(ref) else float(sub[self.target].mean())
+            else:
+                lgd = float(sub[self.target].mean()) if len(sub) else np.nan
+            pred[seg["mask"]] = lgd
+        return pred
+
+    # ------------------------------------------------------------------
+    # BACKTEST: LGD previsto (régua) vs realizado ao longo do tempo (safra).
+    #   `time_col` = coluna de período (ex.: dt_ref). Em cada período traz n,
+    #   LGD previsto, LGD realizado, o gap e um status (ok/alerta por `tol`).
+    # ------------------------------------------------------------------
+    def backtest(self, time_col: str, sample: str | None = None,
+                 tol: float = 0.10) -> pd.DataFrame:
+        if time_col not in self.df.columns:
+            raise ValueError(f"Coluna de tempo '{time_col}' não está no DataFrame.")
+        pred = self._predicted_lgd_series()
+        mask = pd.Series(True, index=self.df.index)
+        if sample is not None and self.sample_col is not None:
+            mask = self.df[self.sample_col] == sample
+        base = pd.DataFrame({
+            "periodo": self.df.loc[mask, time_col].values,
+            "real": self.df.loc[mask, self.target].values,
+            "prev": pred[mask].values,
+        })
+        g = base.groupby("periodo", dropna=False)
+        out = g.agg(n=("real", "size"),
+                    lgd_previsto=("prev", "mean"),
+                    lgd_realizado=("real", "mean")).reset_index()
+        out["gap"] = out["lgd_realizado"] - out["lgd_previsto"]
+        out["status"] = out["gap"].abs().map(lambda d: "ok" if d <= tol else "alerta")
+        for c in ("lgd_previsto", "lgd_realizado", "gap"):
+            out[c] = out[c].round(4)
+        out = out.sort_values("periodo").reset_index(drop=True)
+        out.attrs.update(time_col=time_col, sample=sample, tol=tol)
+        return out
+
+    # ------------------------------------------------------------------
+    # MONOTONICITY_REPORT: verifica se o LGD é monotônico crescente na ordem
+    #   das notas, em cada amostra. Por construção o DES é monotônico; o valor
+    #   está em checar se OOT/demais amostras preservam a ordem (estabilidade
+    #   do rank). Lista as inversões (pares de notas onde o LGD cai).
+    # ------------------------------------------------------------------
+    def monotonicity_report(self) -> pd.DataFrame:
+        lv = self.leaves()
+        order = lv["segmento"].tolist()
+        if self.sample_col is None:
+            amostras = [None]
+        else:
+            todas = list(self.df[self.sample_col].dropna().unique())
+            amostras = [self.ref_sample] + [a for a in todas if a != self.ref_sample]
+        rows = []
+        for a in amostras:
+            vals = []
+            for sid in order:
+                m = self.segments[sid]["mask"]
+                if a is not None:
+                    m = m & (self.df[self.sample_col] == a)
+                s = self.df.loc[m, self.target]
+                vals.append(float(s.mean()) if len(s) else np.nan)
+            inv = []
+            for i in range(len(vals) - 1):
+                v0, v1 = vals[i], vals[i + 1]
+                if not (np.isnan(v0) or np.isnan(v1)) and v1 < v0:
+                    inv.append((int(lv.iloc[i]["nota_lgd"]), int(lv.iloc[i + 1]["nota_lgd"])))
+            rows.append({"amostra": a if a is not None else "todos",
+                         "monotonico": len(inv) == 0,
+                         "n_inversoes": len(inv), "inversoes": inv})
+        return pd.DataFrame(rows)
+
+    # ------------------------------------------------------------------
+    # CALIBRATION_TABLE: por folha, LGD previsto (régua/DES) vs realizado na
+    #   amostra de verificação (default = 1ª não-referência, ex.: OOT).
+    # ------------------------------------------------------------------
+    def calibration_table(self, check_sample: str | None = None) -> pd.DataFrame:
+        if self.sample_col is not None and check_sample is None:
+            nonref = [a for a in self.df[self.sample_col].dropna().unique()
+                      if a != self.ref_sample]
+            check_sample = nonref[0] if nonref else self.ref_sample
+        lv = self.leaves()
+        rows = []
+        for _, r in lv.iterrows():
+            sid = r["segmento"]
+            prev_vals = self._leaf_target(sid)               # régua = DES (ou todos)
+            prev = float(prev_vals.mean()) if len(prev_vals) else np.nan
+            m = self.segments[sid]["mask"]
+            if check_sample is not None and self.sample_col is not None:
+                m = m & (self.df[self.sample_col] == check_sample)
+            real_vals = self.df.loc[m, self.target]
+            real = float(real_vals.mean()) if len(real_vals) else np.nan
+            rows.append({
+                "nota_lgd": int(r["nota_lgd"]), "descricao": r["descricao"],
+                "n": int(len(real_vals)),
+                "lgd_previsto": round(prev, 4) if not np.isnan(prev) else np.nan,
+                "lgd_realizado": round(real, 4) if not np.isnan(real) else np.nan,
+                "gap": (round(real - prev, 4)
+                        if not (np.isnan(real) or np.isnan(prev)) else np.nan),
+            })
+        out = pd.DataFrame(rows)
+        out.attrs["check_sample"] = check_sample
+        return out
+
+    # ------------------------------------------------------------------
+    # PLOT_CALIBRATION: dispersão LGD previsto (x) vs realizado (y) por folha,
+    #   com a diagonal y=x (calibração perfeita) e faixa de tolerância.
+    # ------------------------------------------------------------------
+    def plot_calibration(self, check_sample: str | None = None, tol: float = 0.05,
+                         figsize=(6.0, 6.0), save_path: str | None = None,
+                         dpi: int = 150, ax=None):
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("plot_calibration requer matplotlib.") from e
+        ct = self.calibration_table(check_sample)
+        chk = ct.attrs.get("check_sample")
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+        else:
+            fig = ax.figure
+        x = ct["lgd_previsto"].to_numpy(dtype="float64")
+        y = ct["lgd_realizado"].to_numpy(dtype="float64")
+        lim_hi = float(np.nanmax([np.nanmax(x) if len(x) else 0,
+                                  np.nanmax(y) if len(y) else 0, 0.1])) * 1.1
+        diag = np.linspace(0, lim_hi, 50)
+        ax.fill_between(diag, diag - tol, diag + tol, color="#9bb7c9", alpha=0.25,
+                        label=f"tolerância ±{tol}")
+        ax.plot(diag, diag, color="#0f3d57", lw=1.3, label="calibração perfeita")
+        for _, r in ct.iterrows():
+            if np.isnan(r["lgd_previsto"]) or np.isnan(r["lgd_realizado"]):
+                continue
+            ok = abs(r["gap"]) <= tol
+            ax.scatter(r["lgd_previsto"], r["lgd_realizado"], s=70,
+                       color=("#1aa64b" if ok else "#d6453e"),
+                       edgecolor="#33424f", zorder=3)
+            ax.annotate(str(r["nota_lgd"]),
+                        (r["lgd_previsto"], r["lgd_realizado"]),
+                        textcoords="offset points", xytext=(6, 4), fontsize=9)
+        ax.set_xlim(0, lim_hi)
+        ax.set_ylim(0, lim_hi)
+        ax.set_xlabel(f"LGD previsto (régua · {self.ref_sample if self.sample_col else 'todos'})")
+        ax.set_ylabel(f"LGD realizado ({chk if chk else 'todos'})")
+        ax.set_title("Calibração da régua de LGD por folha", fontsize=12,
+                     fontweight="bold", color="#15324a")
+        ax.legend(fontsize=8, loc="upper left")
+        ax.grid(alpha=0.2)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    # ------------------------------------------------------------------
+    # VALIDATION_REPORT: gera um relatório de validação em Markdown reunindo
+    #   árvore (imagem), folhas, monotonicidade, PSI, CSI, métricas, calibração
+    #   (tabela + imagem) e backtest por safra (se `time_col`). As imagens são
+    #   salvas ao lado do .md. Documento único de governança (CMN 4.966/IFRS 9).
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _df_to_md(df: pd.DataFrame) -> str:
+        def cell(v):
+            if isinstance(v, float):
+                return "—" if pd.isna(v) else f"{v:.4f}"
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return "—"
+            return str(v)
+        cols = list(df.columns)
+        linhas = ["| " + " | ".join(str(c) for c in cols) + " |",
+                  "| " + " | ".join("---" for _ in cols) + " |"]
+        for _, r in df.iterrows():
+            linhas.append("| " + " | ".join(cell(r[c]) for c in cols) + " |")
+        return "\n".join(linhas)
+
+    def validation_report(self, path: str = "relatorio_validacao_lgd.md",
+                          time_col: str | None = None,
+                          title: str = "Relatório de Validação — Segmentação de LGD",
+                          tol_backtest: float = 0.10, tol_calib: float = 0.05,
+                          stamp: str | None = None) -> str:
+        import os
+
+        base = os.path.dirname(os.path.abspath(path))
+        stem = os.path.splitext(os.path.basename(path))[0]
+        img_arvore = f"{stem}_arvore.png"
+        img_calib = f"{stem}_calibracao.png"
+
+        try:
+            import matplotlib.pyplot as plt
+            fig = self.plot_tree(save_path=os.path.join(base, img_arvore))
+            plt.close(fig)
+            tem_arvore = True
+        except Exception:
+            tem_arvore = False
+        tem_calib = False
+        if self.sample_col is not None:
+            try:
+                import matplotlib.pyplot as plt
+                fig = self.plot_calibration(save_path=os.path.join(base, img_calib),
+                                            tol=tol_calib)
+                plt.close(fig)
+                tem_calib = True
+            except Exception:
+                tem_calib = False
+
+        regua = self._regua_dict()
+        feats = self.regua_features()
+        n_folhas = len(regua["leaves"])
+        prof = max(s["depth"] for s in self.segments.values())
+
+        L = [f"# {title}", ""]
+        if stamp:
+            L.append(f"_Gerado em {stamp}._\n")
+        L += ["## Visão geral", "",
+              f"- **Target:** `{self.target}`",
+              f"- **Amostra de referência:** `{self.ref_sample}`"
+              + ("" if self.sample_col is None else f" (coluna `{self.sample_col}`)"),
+              f"- **Folhas:** {n_folhas} · **profundidade máxima:** {prof}",
+              f"- **Variáveis usadas:** {', '.join(feats) or '(nenhuma)'}",
+              f"- **Linhas:** {len(self.df):,}".replace(",", "."), ""]
+
+        if tem_arvore:
+            L += ["## Árvore de segmentação", "", f"![arvore]({img_arvore})", ""]
+
+        L += ["## Folhas", "",
+              self._df_to_md(self.leaves(with_psi=(self.sample_col is not None))), ""]
+
+        mr = self.monotonicity_report()
+        ok = bool(mr["monotonico"].all())
+        L += ["## Monotonicidade do LGD por nota", "",
+              ("✅ LGD monotônico crescente em todas as amostras."
+               if ok else "⚠️ Há inversões de monotonicidade — ver tabela."),
+              "", self._df_to_md(mr[["amostra", "monotonico", "n_inversoes"]]), ""]
+
+        if self.sample_col is not None:
+            try:
+                L += ["## PSI (estabilidade da segmentação)", "",
+                      self._df_to_md(self.psi()), ""]
+            except Exception:
+                pass
+            try:
+                L += ["## CSI por variável (estabilidade das entradas)", "",
+                      self._df_to_md(self.csi()), ""]
+            except Exception:
+                pass
+
+        try:
+            L += ["## Métricas (régua como modelo de LGD)", "",
+                  self._df_to_md(self.metrics()), ""]
+        except Exception:
+            pass
+
+        if self.sample_col is not None:
+            ct = self.calibration_table()
+            L += [f"## Calibração (previsto DES × realizado {ct.attrs.get('check_sample')})",
+                  "", self._df_to_md(ct[["nota_lgd", "n", "lgd_previsto",
+                                         "lgd_realizado", "gap"]]), ""]
+            if tem_calib:
+                L += [f"![calibracao]({img_calib})", ""]
+
+        if time_col is not None:
+            try:
+                bt = self.backtest(time_col, tol=tol_backtest)
+                L += ["## Backtest por safra (previsto × realizado no tempo)", "",
+                      self._df_to_md(bt), ""]
+            except Exception as e:
+                L += ["## Backtest por safra", "", f"_não gerado: {e}_", ""]
+
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(L))
+        return path
+
+    # ==================================================================
+    # QUALIDADE DOS SEGMENTOS: gráficos de dispersão/distribuição
+    # ==================================================================
+    @staticmethod
+    def _new_ax(figsize, dpi, ax):
+        import matplotlib.pyplot as plt
+        if ax is None:
+            return plt.subplots(figsize=figsize, dpi=dpi)
+        return ax.figure, ax
+
+    # ------------------------------------------------------------------
+    # PLOT_LEAF_BOXPLOTS: dispersão do LGD DENTRO de cada folha (boxplot por
+    #   nota). Mostra a heterogeneidade intra-folha — caixa estreita = folha
+    #   homogênea (boa); caixa larga/bimodal = folha que separa pouco o LGD.
+    # ------------------------------------------------------------------
+    def plot_leaf_boxplots(self, sample: str | None = None, ascending: bool = True,
+                           cmap: str = "RdYlGn_r", figsize=None,
+                           save_path: str | None = None, dpi: int = 150, ax=None):
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.colors import Normalize
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("plot_leaf_boxplots requer matplotlib.") from e
+        lv = self.leaves(ascending=ascending)
+        ids, notas, descr, vals = [], [], [], []
+        for _, r in lv.iterrows():
+            sid = r["segmento"]
+            m = self.segments[sid]["mask"]
+            if sample is not None and self.sample_col is not None:
+                m = m & (self.df[self.sample_col] == sample)
+            v = self.df.loc[m, self.target].to_numpy()
+            v = v[~np.isnan(v)]
+            if len(v) == 0:
+                continue
+            ids.append(sid); notas.append(int(r["nota_lgd"]))
+            descr.append(r["descricao"]); vals.append(v)
+        if not vals:
+            raise ValueError("Sem dados para o boxplot.")
+        if figsize is None:
+            figsize = (max(6.0, len(vals) * 1.1), 4.6)
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        norm = Normalize(0.0, 1.0)
+        cmap_obj = plt.get_cmap(cmap)
+        bp = ax.boxplot(vals, positions=range(1, len(vals) + 1), widths=0.6,
+                        patch_artist=True, showfliers=False,
+                        medianprops=dict(color="#15324a", lw=1.4))
+        for patch, v in zip(bp["boxes"], vals):
+            patch.set_facecolor(cmap_obj(norm(float(np.mean(v)))))
+            patch.set_edgecolor("#33424f")
+            patch.set_alpha(0.92)
+        ax.set_xticks(range(1, len(vals) + 1))
+        ax.set_xticklabels([f"folha {n}" for n in notas], rotation=0, fontsize=9)
+        ax.set_ylabel("LGD")
+        sfx = f" · {sample}" if sample else ""
+        ax.set_title(f"Dispersão do LGD por folha{sfx}", fontsize=12,
+                     fontweight="bold", color="#15324a")
+        ax.set_ylim(0, 1)
+        ax.grid(axis="y", alpha=0.2)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    # ------------------------------------------------------------------
+    # PLOT_TARGET_HIST: distribuição do alvo (LGD) na carteira. Revela
+    #   bimodalidade (massa em 0 e/ou 1) e concentração — orienta a modelagem.
+    # ------------------------------------------------------------------
+    def plot_target_hist(self, by_sample: bool = False, bins: int = 30,
+                         figsize=(7.0, 4.2), save_path: str | None = None,
+                         dpi: int = 150, ax=None):
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("plot_target_hist requer matplotlib.") from e
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        y = self.df[self.target].to_numpy()
+        y = y[~np.isnan(y)]
+        if by_sample and self.sample_col is not None:
+            for a in self.df[self.sample_col].dropna().unique():
+                ya = self.df.loc[self.df[self.sample_col] == a, self.target].dropna()
+                ax.hist(ya, bins=bins, range=(0, 1), histtype="step", lw=1.6, label=str(a))
+            ax.legend(fontsize=8, title="amostra")
+        else:
+            ax.hist(y, bins=bins, range=(0, 1), color="#2a9d8f", alpha=0.85,
+                    edgecolor="#15324a")
+        ax.axvline(float(np.mean(y)), color="#d6453e", lw=1.4, ls="--",
+                   label=f"média {np.mean(y):.3f}")
+        ax.set_xlabel("LGD")
+        ax.set_ylabel("frequência")
+        ax.set_title("Distribuição do LGD (carteira)", fontsize=12,
+                     fontweight="bold", color="#15324a")
+        ax.set_xlim(0, 1)
+        ax.grid(axis="y", alpha=0.2)
+        ax.legend(fontsize=8)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    # ------------------------------------------------------------------
+    # PLOT_FEATURE_LGD: preview da variável candidata DENTRO de uma folha —
+    #   LGD médio por faixa da variável (com a representatividade), nos mesmos
+    #   bins do split. Mostra a FORMA da relação antes de dividir e se é
+    #   monotônica. Use antes do `grow` para escolher a variável/corte.
+    # ------------------------------------------------------------------
+    def plot_feature_lgd(self, feature: str, sid: str | None = None, splits=None,
+                         dtype=None, max_n_bins: int = 6, min_bin_size: float = 0.05,
+                         cmap: str = "RdYlGn_r", figsize=None,
+                         save_path: str | None = None, dpi: int = 150, ax=None):
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.colors import Normalize
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("plot_feature_lgd requer matplotlib.") from e
+        if sid is None or sid not in self.segments:
+            sid, sub = "root", self.df
+        else:
+            sub = self.df[self.segments[sid]["mask"]]
+        # `splits` (mesmos do preview/grow) garante que o gráfico bata com a tabela
+        bins, modo, kind = self._resolve_bins(sub, feature, splits, dtype,
+                                              max_n_bins, min_bin_size)
+        if not bins:
+            raise ValueError(f"Sem faixas válidas para '{feature}' nesta folha.")
+        tbl = self._bin_table(sub, feature, bins, len(self.df))
+        if tbl.empty:
+            raise ValueError(f"Sem dados de '{feature}' nesta folha.")
+        labels = [s.split(": ", 1)[-1] for s in tbl["faixa"]]
+        lgds = tbl["lgd_medio"].to_numpy()
+        reprs = tbl["repr_%"].to_numpy()
+        if figsize is None:
+            figsize = (max(6.0, len(labels) * 1.25), 4.4)
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        norm = Normalize(0.0, 1.0)
+        cmap_obj = plt.get_cmap(cmap)
+        xs = range(len(labels))
+        bars = ax.bar(xs, lgds, color=[cmap_obj(norm(v)) for v in lgds],
+                      edgecolor="#33424f")
+        for x, v, rp in zip(xs, lgds, reprs):
+            ax.text(x, v + 0.01, f"{v:.3f}\n{rp:.0f}%", ha="center", va="bottom",
+                    fontsize=8.5, color="#15324a")
+        ax.set_xticks(list(xs))
+        ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=8.5)
+        rot = self.feature_labels.get(feature, feature)
+        mono = "monotônico" if tbl.attrs.get("mono_ok") else "NÃO monotônico"
+        ax.set_ylabel("LGD médio")
+        ax.set_title(f"LGD por faixa de '{rot}' ({modo}, {mono})", fontsize=12,
+                     fontweight="bold", color="#15324a")
+        ax.set_ylim(0, min(1.0, float(np.nanmax(lgds)) * 1.25 + 0.05))
+        ax.grid(axis="y", alpha=0.2)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
     # ------------------------------------------------------------------
     # VARIABLE_IV: Information Value de cada variável candidata em relação à
     #   folha `sid`, para indicar qual variável usar no próximo split.
@@ -1632,6 +2095,78 @@ class SequentialLGDSegmenter:
         L.append("              .withColumn(col_nota, nota)")
         L.append("              .withColumn(col_lgd, lgd))")
         return "\n".join(L)
+
+    # ------------------------------------------------------------------
+    # REGUA_FEATURES: colunas usadas pela árvore (necessárias na tabela).
+    # ------------------------------------------------------------------
+    def regua_features(self) -> list:
+        feats = []
+        for leaf in self._regua_dict()["leaves"]:
+            for c in leaf["conditions"]:
+                if c["feature"] not in feats:
+                    feats.append(c["feature"])
+        return feats
+
+    # ------------------------------------------------------------------
+    # APPLY_SPARK: aplica a régua DIRETAMENTE num Spark DataFrame, devolvendo-o
+    #   com as colunas de segmento, nota e LGD ("reconstrói as folhas" na
+    #   tabela). Diferente de `to_pyspark` (que só gera o código), aqui a régua
+    #   é executada. Exige pyspark e que as colunas usadas na árvore existam no
+    #   `sdf` com o MESMO nome (senão levanta erro listando as que faltam).
+    # ------------------------------------------------------------------
+    def apply_spark(self, sdf, col_seg: str = "segmento_lgd",
+                    col_nota: str = "nota_lgd", col_lgd: str = "lgd_regua"):
+        try:
+            from pyspark.sql import functions as F
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("apply_spark requer pyspark — use: pip install pyspark") from e
+
+        regua = self._regua_dict()
+        if not regua["leaves"]:
+            raise ValueError("Árvore sem folhas — cresça a segmentação antes de aplicar.")
+
+        faltando = [f for f in self.regua_features() if f not in sdf.columns]
+        if faltando:
+            raise ValueError(
+                f"Colunas ausentes no Spark DataFrame: {faltando}. A tabela precisa "
+                f"ter as mesmas colunas usadas na árvore: {self.regua_features()}.")
+
+        def cond_col(conds):
+            expr = F.lit(True)
+            for c in conds:
+                feat = c["feature"]
+                if c["kind"] == "na":
+                    part = F.col(feat).isNull()
+                elif c["kind"] == "num":
+                    part = F.lit(True)
+                    if c.get("lo") is not None:
+                        part = part & (F.col(feat) > c["lo"])
+                    if c.get("hi") is not None:
+                        part = part & (F.col(feat) <= c["hi"])
+                    if c.get("include_na"):
+                        part = part | F.col(feat).isNull()
+                else:
+                    part = F.col(feat).isin([str(x) for x in c["cats"]])
+                    if c.get("include_na"):
+                        part = part | F.col(feat).isNull()
+                expr = expr & part
+            return expr
+
+        seg_col = nota_col = lgd_col = None
+        for leaf in regua["leaves"]:
+            cond = cond_col(leaf["conditions"])
+            if seg_col is None:
+                seg_col = F.when(cond, F.lit(leaf["id"]))
+                nota_col = F.when(cond, F.lit(leaf["nota"]))
+                lgd_col = F.when(cond, F.lit(leaf["lgd"]))
+            else:
+                seg_col = seg_col.when(cond, F.lit(leaf["id"]))
+                nota_col = nota_col.when(cond, F.lit(leaf["nota"]))
+                lgd_col = lgd_col.when(cond, F.lit(leaf["lgd"]))
+
+        return (sdf.withColumn(col_seg, seg_col.otherwise(F.lit(None)))
+                   .withColumn(col_nota, nota_col.otherwise(F.lit(None)))
+                   .withColumn(col_lgd, lgd_col.otherwise(F.lit(None))))
 
     # ------------------------------------------------------------------
     # SUGGEST_SPLIT: recomenda a melhor variável para dividir uma folha,
