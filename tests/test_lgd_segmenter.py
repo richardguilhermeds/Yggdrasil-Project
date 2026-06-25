@@ -149,6 +149,39 @@ def test_csi_requer_sample_col():
         seg.csi()
 
 
+def test_variable_iv_continuo_e_psi_mesmos_bins():
+    """O IV é o do optbinning para alvo CONTÍNUO (Σ (n_i/N)·|média_bin − média|),
+    e o PSI por variável é calculado sobre os MESMOS bins do IV (DES × OOT)."""
+    import contextlib
+    import io
+
+    from optbinning import ContinuousOptimalBinning
+
+    df = _amostra_shift()
+    seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                 ref_sample="DES", verbose=False)
+    iv = seg.variable_iv("root")
+    # PSI vem junto do IV (mesmos bins), não do csi() global
+    assert {"psi_OOT", "pior_psi", "psi_classificacao"}.issubset(iv.columns)
+    by = iv.set_index("variavel")
+
+    # IV(ltv) == IV contínuo que o optbinning calcula (mesmos bins, na DES)
+    des = df[df["amostra"] == "DES"]
+    cob = ContinuousOptimalBinning(name="ltv", dtype="numerical", max_n_bins=5,
+                                   min_bin_size=0.05, monotonic_trend="auto_asc_desc")
+    with contextlib.redirect_stderr(io.StringIO()):
+        cob.fit(des["ltv"].to_numpy(), des["lgd"].to_numpy())
+        cob.binning_table.build()
+        cob.binning_table.analysis(print_output=False)
+    assert abs(float(by.loc["ltv", "iv"]) - cob.binning_table.iv) < 0.015
+
+    # o PSI (nos bins do IV) capta o shift: ltv migrou ≫ garantia estável
+    assert by.loc["ltv", "pior_psi"] > by.loc["garantia", "pior_psi"]
+
+    # with_psi=False (usado por fit_auto/suggest_split) não traz colunas de PSI
+    assert "pior_psi" not in seg.variable_iv("root", with_psi=False).columns
+
+
 def test_save_load_roundtrip(tmp_path):
     df = _amostra()
     seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
@@ -203,7 +236,9 @@ def test_ui_undo_redo_automerge_e_json(tmp_path):
     with contextlib.redirect_stdout(io.StringIO()):
         ui = LGDSegmenterUI(df, target="lgd", sample_col="amostra", ref_sample="DES")
         nleaf = lambda: sum(s["is_leaf"] for s in ui.seg.segments.values())
-        assert ui._csi_cache is not None             # CSI calculado uma vez
+        # IV contínuo (optbinning) por variável alimenta a coluna esquerda
+        iv_root = ui.seg.variable_iv("root")
+        assert "iv" in iv_root.columns and not iv_root.empty
         ui.dd_leaf.value = "root"
         ui.dd_feature.value = "ltv"
         ui.tg_mode.value = "Manual"
@@ -357,22 +392,47 @@ def test_ui_merge_missing_e_layout(tmp_path):
                     if v["is_leaf"] and v["conditions"][-1]["kind"] == "na")
     assert n_na0 == 1 and n_na1 == 0          # botão juntou o nó de faltantes
 
-    # layout: Information Value e PSI lado a lado, separados por barra vertical;
-    # folhas logo abaixo da árvore e antes da linha IV|PSI
+    # layout em ABAS (workbench): banner · faixa de KPIs · Tab(5 abas) · console
     ch = list(ui.panel.children)
-    row = [c for c in ch if isinstance(c, W.HBox) and len(c.children) == 3
-           and "width:2px" in getattr(c.children[1], "value", "")]
-    assert row, "linha IV|PSI com barra vertical ausente"
-    esq, _barra, dir_ = row[0].children
-    assert "Information Value" in esq.children[0].value
-    assert "PSI por variável" in dir_.children[0].value
+    tabs = next(c for c in ch if isinstance(c, W.Tab))
+    titulos = [tabs.get_title(i) for i in range(len(tabs.children))]
+    assert titulos == ["① Construir", "② Análise de variável", "③ Diagnóstico",
+                       "④ Validar & Exportar", "⑤ Histórico"]
 
-    def _title(c):
-        return c.children[0].value if isinstance(c, W.VBox) and c.children else ""
-    i_tree = next(i for i, c in enumerate(ch) if "Árvore atual" in _title(c))
-    i_folhas = next(i for i, c in enumerate(ch) if "Folhas criadas" in _title(c))
-    i_row = ch.index(row[0])
-    assert i_tree < i_folhas < i_row
+    def _all(w):                       # achata a subárvore de widgets
+        acc = [w]
+        for c in getattr(w, "children", ()) or ():
+            acc.extend(_all(c))
+        return acc
+
+    def _titles_in(w):                 # cabeçalhos (1º HTML de cada VBox) na subárvore
+        return [x.children[0].value for x in _all(w)
+                if isinstance(x, W.VBox) and x.children
+                and isinstance(x.children[0], W.HTML)]
+
+    # ① Construir = VBox [cockpit de 3 colunas, preview da árvore]
+    construir = tabs.children[0]
+    build_cols = construir.children[0]
+    assert isinstance(build_cols, W.HBox) and len(build_cols.children) == 3
+    col_decision, col_center, _col_right = build_cols.children
+    # ESQUERDA: "Qual variável segmentar?" com IV + PSI por variável
+    assert any("Qual variável segmentar" in t for t in _titles_in(col_decision))
+    assert ui.out_iv in _all(col_decision)
+    # CENTRO: cabeçalho da folha (registros) e a árvore logo abaixo
+    assert ui.leaf_header in _all(col_center)
+    assert ui.out_tree in _all(col_center)
+
+    # ② Análise de variável é a 2ª aba (distribuição/PSI por safra)
+    assert ui.out_var_dist in _all(tabs.children[1])
+
+    # ③ Diagnóstico = folhas (PSI · teste); o CSI/PSI por variável saiu p/ o IV
+    diag_titles = _titles_in(tabs.children[2])
+    assert any("Folhas criadas" in t for t in diag_titles)
+    assert not any("PSI por variável" in t for t in diag_titles)
+    assert ui.out_iv not in _all(tabs.children[2])   # IV vive na aba Construir
+
+    # o console persistente (out_log) fica fora das abas, sempre visível
+    assert any(ui.out_log in _all(c) for c in ch if c is not tabs)
 
 
 # ----------------------------------------------------------------------
