@@ -121,7 +121,7 @@ def _match_conditions_pandas(df, conditions):
 
 
 def _aplicar_regua_pandas(regua, df, col_seg="segmento_lgd",
-                          col_nota="nota_lgd", col_lgd="lgd_regua"):
+                          col_nota="folha", col_lgd="lgd_regua"):
     """Aplica uma régua (dict de folhas) a um DataFrame pandas."""
     seg = pd.Series(pd.NA, index=df.index, dtype="object")
     nota = pd.Series(pd.NA, index=df.index, dtype="Int64")
@@ -1212,12 +1212,13 @@ class SequentialLGDSegmenter:
                               fontsize=base_fs, color=txt_color, zorder=3,
                               fontweight="bold", linespacing=1.12, clip_on=True)
             fit_items.append((t_split, bw * 0.94, bh * 0.58))
-            # 2) representatividade e LGD na MESMA linha, separados por barra
-            lgd_txt = f"LGD {lgd:.3f}" if not pd.isna(lgd) else "LGD —"
+            # 2) representatividade e LGD (em %, 2 casas) na MESMA linha, separados por barra
+            lgd_txt = f"LGD {lgd * 100:.2f}%" if not pd.isna(lgd) else "LGD —"
             metr = f"repr. {rep:.1f}%  |  {lgd_txt}"
             if show_samples and self.sample_col is not None:
                 amostras = list(self.df[self.sample_col].dropna().unique())
-                metr += "\n" + " | ".join(f"{a} {sample_lgd(sid, a):.3f}" for a in amostras)
+                metr += "\n" + " | ".join(f"{a} {sample_lgd(sid, a) * 100:.2f}%"
+                                          for a in amostras)
             t_metr = ax.text(x, y - 0.42 * bh, metr, ha="center", va="center",
                              fontsize=base_fs - 0.8, color=txt_color, zorder=3,
                              linespacing=1.12, clip_on=True)
@@ -1238,7 +1239,9 @@ class SequentialLGDSegmenter:
         sm = ScalarMappable(norm=norm, cmap=cmap_obj)
         sm.set_array([])
         cbar = fig.colorbar(sm, ax=ax, fraction=0.025, pad=0.01)
-        cbar.set_label(f"LGD médio{' (DES)' if ref else ''} (escala 0–1)", fontsize=9)
+        from matplotlib.ticker import PercentFormatter
+        cbar.ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
+        cbar.set_label(f"LGD médio{' (DES)' if ref else ''} (escala 0–100%)", fontsize=9)
         fig.tight_layout()
 
         # força cada texto a caber na sua sub-região, encolhendo a fonte se preciso
@@ -2687,8 +2690,8 @@ class SequentialLGDSegmenter:
         return {"target": self.target, "ref_sample": self.ref_sample, "leaves": leaves}
 
     def predict(self, X: pd.DataFrame, col_seg="segmento_lgd",
-                col_nota="nota_lgd", col_lgd="lgd_regua") -> pd.DataFrame:
-        """Aplica a régua a um DataFrame pandas novo: segmento, nota e LGD."""
+                col_nota="folha", col_lgd="lgd_regua") -> pd.DataFrame:
+        """Aplica a régua a um DataFrame pandas novo: segmento, folha e LGD."""
         return _aplicar_regua_pandas(self._regua_dict(), X, col_seg, col_nota, col_lgd)
 
     # ------------------------------------------------------------------
@@ -2730,8 +2733,8 @@ class SequentialLGDSegmenter:
             return "\n".join(out)
 
         L = ["from pyspark.sql import functions as F", "",
-             f"def {func_name}(df, col_seg='segmento_lgd', col_nota='nota_lgd', col_lgd='lgd_regua'):",
-             '    """Régua de LGD gerada por SequentialLGDSegmenter (segmento, nota e LGD por folha)."""']
+             f"def {func_name}(df, col_seg='segmento_lgd', col_nota='folha', col_lgd='lgd_regua'):",
+             '    """Régua de LGD gerada por SequentialLGDSegmenter (segmento, folha e LGD)."""']
         for i, leaf in enumerate(regua["leaves"], 1):
             L.append(f'    c{i} = {cond_expr(leaf["conditions"])}')
         L.append("    seg = (")
@@ -2767,7 +2770,7 @@ class SequentialLGDSegmenter:
     #   `sdf` com o MESMO nome (senão levanta erro listando as que faltam).
     # ------------------------------------------------------------------
     def apply_spark(self, sdf, col_seg: str = "segmento_lgd",
-                    col_nota: str = "nota_lgd", col_lgd: str = "lgd_regua"):
+                    col_nota: str = "folha", col_lgd: str = "lgd_regua"):
         try:
             from pyspark.sql import functions as F
         except ImportError as e:  # pragma: no cover
@@ -3025,7 +3028,7 @@ class SequentialLGDSegmenter:
                     seg[m] = leaf["id"]
                     nota[m] = leaf["nota"]
                     lgd[m] = leaf["lgd"]
-                return _pd.DataFrame({"segmento_lgd": seg, "nota_lgd": nota, "lgd_regua": lgd},
+                return _pd.DataFrame({"segmento_lgd": seg, "folha": nota, "lgd_regua": lgd},
                                      index=df.index)
 
         # Unity Catalog exige set_registry_uri('databricks-uc') e assinatura do modelo

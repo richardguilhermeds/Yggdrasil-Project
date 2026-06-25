@@ -55,7 +55,9 @@ def test_fit_auto_e_predict(seg):
     seg.fit_auto(max_depth=2, verbose=False)
     assert sum(s["is_leaf"] for s in seg.segments.values()) >= 2
     pred = seg.predict(_amostra(n=500, seed=9))
-    assert {"segmento_lgd", "nota_lgd", "lgd_regua"}.issubset(pred.columns)
+    # coluna da folha na saída da régua chama-se "folha" (era nota_lgd)
+    assert {"segmento_lgd", "folha", "lgd_regua"}.issubset(pred.columns)
+    assert "nota_lgd" not in pred.columns
     assert pred["lgd_regua"].notna().all()
 
 

@@ -846,11 +846,11 @@ class LGDSegmenterUI:
 
         def lgd_str(sid):
             if self.sample_col is not None:
-                parts = [f"{self.ref_sample} {self._node_lgd(sid, self.ref_sample):.3f}"]
+                parts = [f"{self.ref_sample} {self._node_lgd(sid, self.ref_sample) * 100:.2f}%"]
                 for a in self._tree_nonref:          # só amostras COM LGD (sem ESTABILIDADE)
-                    parts.append(f"{a} {self._node_lgd(sid, a):.3f}")
+                    parts.append(f"{a} {self._node_lgd(sid, a) * 100:.2f}%")
                 return "LGD " + " ".join(parts)
-            return f"LGD {self._node_lgd(sid):.3f}"
+            return f"LGD {self._node_lgd(sid) * 100:.2f}%"
 
         psi_hex = {"green": "#1aa64b", "yellow": "#caa000", "red": "#d6453e"}
 
@@ -1393,13 +1393,13 @@ class LGDSegmenterUI:
             if out_name:
                 try:
                     out.write.mode("overwrite").saveAsTable(out_name)
-                    print(f"✓ tabela '{out_name}' gravada (segmento_lgd, nota_lgd, lgd_regua).")
+                    print(f"✓ tabela '{out_name}' gravada (segmento_lgd, folha, lgd_regua).")
                 except Exception as e:
                     print(f"Régua aplicada, mas falhou ao gravar '{out_name}':",
                           type(e).__name__, e)
             print(f"✓ régua aplicada em '{name}'. Spark DataFrame em  ui.spark_result.")
             try:
-                dist = out.groupBy("nota_lgd").count().orderBy("nota_lgd").toPandas()
+                dist = out.groupBy("folha").count().orderBy("folha").toPandas()
                 display(dist)
             except Exception as e:
                 print("(não consegui resumir a distribuição:", type(e).__name__, e, ")")
