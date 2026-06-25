@@ -933,9 +933,11 @@ class LGDSegmenterUI:
             sty = sty.map(psi_bg, subset=[c])
         if "p_vs_prox" in lv.columns:
             sty = sty.map(p_bg, subset=["p_vs_prox"])
-        fmt = {"repr_%": "{:.1f}", "lgd_medio": "{:.4f}"}
+        fmt = {"repr_%": "{:.1f}"}
         for c in lv.columns:
-            if c.startswith("psi_") or c.startswith("lgd_"):
+            if c.startswith("lgd_"):        # LGD em % (coerente com a árvore)
+                fmt[c] = "{:.2%}"
+            elif c.startswith("psi_"):      # PSI é adimensional → decimal
                 fmt[c] = "{:.4f}"
         if "p_vs_prox" in lv.columns:
             fmt["p_vs_prox"] = "{:.3f}"
@@ -979,9 +981,9 @@ class LGDSegmenterUI:
                  ("Repr.", f"{rep:.1f}%", None)]
         if self.sample_col is not None:
             cells.append((f"LGD {self.ref_sample}",
-                          f"{self._node_lgd(sid, self.ref_sample):.3f}", None))
+                          f"{self._node_lgd(sid, self.ref_sample) * 100:.2f}%", None))
             for a in self._tree_nonref:
-                cells.append((f"LGD {a}", f"{self._node_lgd(sid, a):.3f}", None))
+                cells.append((f"LGD {a}", f"{self._node_lgd(sid, a) * 100:.2f}%", None))
             # PSI por amostra ≠ referência (OOT, ESTABILIDADE, … se a coluna existir)
             for a in self._nonref:
                 p = self._leaf_psi(sid, a)
@@ -990,7 +992,7 @@ class LGDSegmenterUI:
                 ab = "ESTAB" if a == "ESTABILIDADE" else a
                 cells.append((f"PSI {ab}", val, col))
         else:
-            cells.append(("LGD", f"{self._node_lgd(sid):.3f}", None))
+            cells.append(("LGD", f"{self._node_lgd(sid) * 100:.2f}%", None))
         cells.append(("Folha", str(nota), None))
 
         def cell(k, v, c):

@@ -103,7 +103,7 @@ seg.log_to_mlflow(
 | IV | contínuo (desvio absoluto ponderado) | WoE binário (escala de Siddiqi) |
 | Métricas da régua | MAE, RMSE, R² | **KS, AUC, Gini, Acurácia, F1** |
 | Gráficos próprios | boxplot do LGD, histograma do LGD | **ROC, KS**, taxa de default por folha, distribuição do score |
-| Régua / colunas | `segmento_lgd`, `nota_lgd`, `lgd_regua` | `segmento_pd`, `nota_pd`, `pd_regua` |
+| Régua / colunas | `segmento_lgd`, `folha`, `lgd_regua` | `segmento_pd`, `nota_pd`, `pd_regua` |
 
 ## Documentação
 

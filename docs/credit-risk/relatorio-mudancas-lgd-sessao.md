@@ -104,7 +104,7 @@ Todas as mudanças concentram-se em três arquivos do pacote, mais os testes:
 
 ### 10. Aplicar a régua numa tabela Spark (`apply_spark`)
 - **O quê:** `apply_spark(sdf)` — executa a régua direto num Spark DataFrame,
-  devolvendo-o com `segmento_lgd`, `nota_lgd` e `lgd_regua` (constrói as expressões
+  devolvendo-o com `segmento_lgd`, `folha` e `lgd_regua` (constrói as expressões
   `F.when().otherwise()`, com `isNull` para faltantes e `include_na`). **Valida que
   as colunas existem com o mesmo nome** (senão, `ValueError` listando as ausentes).
   Também `regua_features()` (colunas usadas pela árvore).
