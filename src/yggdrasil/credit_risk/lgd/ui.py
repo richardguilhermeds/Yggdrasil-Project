@@ -65,18 +65,23 @@ _CSS = """
 /* abas do workbench */
 .lgdui-tabs { margin-top:8px; }
 .lgdui-tabs > .widget-tab-contents { padding:12px 2px 2px; background:transparent; }
-.lgdui-tabs .lm-TabBar-tab, .lgdui-tabs .p-TabBar-tab { font-size:13px; }
+.lgdui-tabs .lm-TabBar-tab, .lgdui-tabs .p-TabBar-tab { font-size:13px;
+  min-width:max-content; flex:0 0 auto; }   /* tab cresce com o texto (não corta o título) */
+.lgdui-tabs .lm-TabBar-tabLabel, .lgdui-tabs .p-TabBar-tabLabel {
+  overflow:visible; text-overflow:clip; }
 .lgdui-tabs .lm-TabBar-tab.lm-mod-current,
 .lgdui-tabs .p-TabBar-tab.p-mod-current { color:var(--ac-deep); font-weight:600;
   box-shadow: inset 0 -2px 0 var(--ac); }
-/* cabeçalho da folha selecionada (métricas em chips) */
-.lgdui-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(78px,1fr));
+/* cabeçalho da folha selecionada (métricas em chips) — auto-fill mantém os chips
+   com a MESMA largura em todas as linhas (não estica a última linha) */
+.lgdui-metrics { display:grid; grid-template-columns:repeat(auto-fill,minmax(92px,1fr));
   gap:6px; }
 .lgdui-metric { background:#f7f8fa; border:1px solid #eef0f3; border-radius:9px;
-  padding:7px 10px; }
-.lgdui-metric .k { font-size:10px; text-transform:uppercase; letter-spacing:.05em;
-  color:#8a93a3; white-space:nowrap; }
-.lgdui-metric .v { font-size:16px; font-weight:600; color:var(--ink); margin-top:2px; }
+  padding:7px 10px; overflow:hidden; }
+.lgdui-metric .k { font-size:10px; text-transform:uppercase; letter-spacing:.04em;
+  color:#8a93a3; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.lgdui-metric .v { font-size:16px; font-weight:600; color:var(--ink); margin-top:2px;
+  white-space:nowrap; }
 /* botões: cantos mais suaves, alinhados ao mockup */
 .lgdui .jupyter-button { border-radius:8px; font-family:inherit; }
 </style>
@@ -331,32 +336,34 @@ class LGDSegmenterUI:
         self.btn_spark_apply.on_click(self._on_spark_apply)
         self.btn_var_analyze.on_click(self._on_var_analyze)
         self.btn_tree_preview.on_click(self._on_tree_preview)
-        self.btn_tree_preview_hide.on_click(lambda _: self.out_tree_img.clear_output())
+        self.btn_tree_preview_hide.on_click(lambda _: setattr(self.out_tree_img, "value", ""))
         self.tg_mode.observe(self._on_mode_change, names="value")
         self.dd_feature.observe(self._on_mode_change, names="value")
         self.cb_minbin.observe(lambda _: self._sync_optbin_visibility(), names="value")
         self.cb_maxbin.observe(lambda _: self._sync_optbin_visibility(), names="value")
 
+        # HTML widgets (.value substitui o conteúdo de forma confiável em qualquer
+        # frontend — Jupyter e Databricks — evitando a duplicação que o
+        # Output+display+clear_output causa quando o clear não limpa).
         self.bar = W.HTML()
         self.out_tree = W.HTML()
-        self.out_metrics = W.Output(layout=W.Layout(overflow="auto"))
-        self.out_iv = W.Output(layout=W.Layout(overflow="auto"))
-        self.out_leaf_hist = W.Output(layout=W.Layout(overflow="auto"))   # LGD da folha
-        self.out_plot = W.Output(layout=W.Layout(overflow="auto"))
-        self.out_boot = W.Output(layout=W.Layout(overflow="auto"))
-        self.out_validate = W.Output(layout=W.Layout(overflow="auto"))
-        self.out_quality = W.Output(layout=W.Layout(overflow="auto"))
+        self.out_metrics = W.HTML()
+        self.out_iv = W.HTML()
+        self.out_leaf_hist = W.HTML()                     # LGD da folha
+        self.out_plot = W.HTML()
+        self.out_boot = W.HTML()
+        self.out_validate = W.HTML()
+        self.out_quality = W.HTML()
         self.out_log = W.Output(layout=W.Layout(max_height="320px", overflow="auto"))
-        # preview: sem max_height para os dois gráficos aparecerem juntos (sem scroll)
-        self.out_preview_chart = W.Output(layout=W.Layout(overflow="visible"))
-        self.out_table = W.Output(layout=W.Layout(max_height="300px", overflow="auto"))
-        # aba "Análise de variáveis"
-        self.out_var_dist = W.Output(layout=W.Layout(overflow="auto"))
-        self.out_var_time = W.Output(layout=W.Layout(overflow="auto"))
-        self.out_var_psi = W.Output(layout=W.Layout(overflow="auto"))
-        self.out_var_table = W.Output(layout=W.Layout(max_height="360px", overflow="auto"))
+        self.out_preview_chart = W.HTML()
+        self.out_table = W.HTML()
+        # aba "Análise de variável"
+        self.out_var_dist = W.HTML()
+        self.out_var_time = W.HTML()
+        self.out_var_psi = W.HTML()
+        self.out_var_table = W.HTML()
         self.out_var_cards = W.HTML()
-        self.out_tree_img = W.Output(layout=W.Layout(overflow="auto"))   # preview da árvore
+        self.out_tree_img = W.HTML()                      # preview da árvore
         self.cat_box = W.VBox([], layout=W.Layout(width="98%", display="none",
                                                   border="1px solid #eef1f4",
                                                   padding="6px 8px", margin="2px 0"))
@@ -933,7 +940,8 @@ class LGDSegmenterUI:
                 p = self._leaf_psi(sid, a)
                 val = "—" if pd.isna(p) else f"{p:.3f}"
                 col = None if pd.isna(p) else psi_hex[self._psi_class(p)]
-                cells.append((f"PSI {a}", val, col))
+                ab = "ESTAB" if a == "ESTABILIDADE" else a
+                cells.append((f"PSI {ab}", val, col))
         else:
             cells.append(("LGD", f"{self._node_lgd(sid):.3f}", None))
         cells.append(("Folha", str(nota), None))
@@ -970,32 +978,29 @@ class LGDSegmenterUI:
         return float((p_cur - p_ref) * math.log(p_cur / p_ref))
 
     def _refresh_table(self):
-        with self.out_table:
-            self.out_table.clear_output(wait=True)
-            lv = self.seg.leaves(with_psi=True, with_test=True, test=self.dd_test.value)
-            lv = lv.rename(columns={"nota_lgd": "folha"})   # chamamos de folha, não nota
-            cols = ["folha", "descricao", "repr_%", "lgd_medio"]
-            cols += [c for c in lv.columns if c.startswith("psi_")]
-            if "p_vs_prox" in lv.columns:
-                cols.append("p_vs_prox")
-            display(self._style_leaves(lv[cols]))
+        lv = self.seg.leaves(with_psi=True, with_test=True, test=self.dd_test.value)
+        lv = lv.rename(columns={"nota_lgd": "folha"})   # chamamos de folha, não nota
+        cols = ["folha", "descricao", "repr_%", "lgd_medio"]
+        cols += [c for c in lv.columns if c.startswith("psi_")]
+        if "p_vs_prox" in lv.columns:
+            cols.append("p_vs_prox")
+        self.out_table.value = self._styler_html(self._style_leaves(lv[cols]),
+                                                 max_height="300px")
 
     def _refresh_metrics(self):
-        with self.out_metrics:
-            self.out_metrics.clear_output(wait=True)
-            m = self.seg.metrics()
+        m = self.seg.metrics()
 
-            def r2_bg(v):
-                if pd.isna(v):
-                    return "color:#aab"
-                c = "#e6f6ec" if v >= 0.5 else "#fdf3da" if v >= 0.2 else "#fde7e7"
-                return f"background-color:{c};font-weight:600"
-            sty = (m.style
-                   .map(r2_bg, subset=["R2"])
-                   .format({"MAE": "{:.4f}", "RMSE": "{:.4f}", "R2": "{:.4f}"}, na_rep="—")
-                   .hide(axis="index")
-                   .set_properties(**{"font-size": "13.5px"}))
-            display(sty)
+        def r2_bg(v):
+            if pd.isna(v):
+                return "color:#aab"
+            c = "#e6f6ec" if v >= 0.5 else "#fdf3da" if v >= 0.2 else "#fde7e7"
+            return f"background-color:{c};font-weight:600"
+        sty = (m.style
+               .map(r2_bg, subset=["R2"])
+               .format({"MAE": "{:.4f}", "RMSE": "{:.4f}", "R2": "{:.4f}"}, na_rep="—")
+               .hide(axis="index")
+               .set_properties(**{"font-size": "13.5px"}))
+        self.out_metrics.value = self._styler_html(sty)
 
     def _ordered_leaf_options(self):
         """Opções do dropdown na MESMA ordem da árvore (DFS, filhos por LGD),
@@ -1055,14 +1060,10 @@ class LGDSegmenterUI:
         self._refresh_metrics()
         self._refresh_table()
         # o IC bootstrap e a imagem ficam obsoletos após mudanças na árvore
-        with self.out_boot:
-            self.out_boot.clear_output(wait=True)
-            display(W.HTML("<div style='font-size:12px;color:#889'>Árvore alterada — "
-                           "clique em <b>Calcular IC bootstrap</b> para (re)calcular.</div>"))
-        with self.out_plot:
-            self.out_plot.clear_output(wait=True)
-            display(W.HTML("<div style='font-size:12px;color:#889'>Árvore alterada — "
-                           "clique em <b>Ver / salvar árvore (imagem)</b> para renderizar.</div>"))
+        self.out_boot.value = ("<div style='font-size:12px;color:#889'>Árvore alterada — "
+                               "clique em <b>Calcular IC bootstrap</b> para (re)calcular.</div>")
+        self.out_plot.value = ("<div style='font-size:12px;color:#889'>Árvore alterada — "
+                               "clique em <b>Ver / salvar árvore (imagem)</b> para renderizar.</div>")
 
     # ==================================================================
     # Entrada / handlers
@@ -1365,79 +1366,75 @@ class LGDSegmenterUI:
         self._on_mode_change(None)   # recompõe os grupos categóricos para a nova folha
 
     def _refresh_iv(self):
-        with self.out_iv:
-            self.out_iv.clear_output(wait=True)
-            sid = self.dd_leaf.value
-            # IV contínuo (optbinning) + PSI calculado nos MESMOS bins do IV
-            iv = self.seg.variable_iv(sid)
-            lgd_med = iv.attrs.get("lgd_medio")
-            has_psi = "pior_psi" in iv.columns
-            # n_bins = recomendação de faixas ideais; o PSI usa esses mesmos bins
-            disp = (iv[["variavel", "n_bins", "iv", "forca"]].copy()
-                    .rename(columns={"n_bins": "bins"}))
-            if has_psi:
-                disp["psi"] = iv["pior_psi"].values
-                disp["psi_status"] = iv["psi_classificacao"].values
-            disp["variavel"] = disp["variavel"].map(
-                lambda v: self.seg.feature_labels.get(v, v))
-            if len(disp):
-                disp.loc[0, "variavel"] = "★ " + str(disp.loc[0, "variavel"])
-            # cabeçalhos curtos: a coluna de variável ganha mais espaço (não corta)
-            disp = disp.rename(columns={"variavel": "variável", "forca": "força",
-                                        "psi_status": "estab."})
+        sid = self.dd_leaf.value
+        # IV contínuo (optbinning) + PSI calculado nos MESMOS bins do IV
+        iv = self.seg.variable_iv(sid)
+        lgd_med = iv.attrs.get("lgd_medio")
+        has_psi = "pior_psi" in iv.columns
+        # n_bins = recomendação de faixas ideais; o PSI usa esses mesmos bins
+        disp = (iv[["variavel", "n_bins", "iv", "forca"]].copy()
+                .rename(columns={"n_bins": "bins"}))
+        if has_psi:
+            disp["psi"] = iv["pior_psi"].values
+            disp["psi_status"] = iv["psi_classificacao"].values
+        disp["variavel"] = disp["variavel"].map(
+            lambda v: self.seg.feature_labels.get(v, v))
+        if len(disp):
+            disp.loc[0, "variavel"] = "★ " + str(disp.loc[0, "variavel"])
+        # cabeçalhos curtos: a coluna de variável ganha mais espaço (não corta)
+        disp = disp.rename(columns={"variavel": "variável", "forca": "força",
+                                    "psi_status": "estab."})
 
-            def forca_bg(v):
-                return {
-                    "forte": "background-color:#e6f6ec;color:#137a3e;font-weight:600",
-                    "médio": "background-color:#fdf3da;color:#9a6b00;font-weight:600",
-                    "suspeito": "background-color:#efe7fb;color:#6b3fa0;font-weight:600",
-                }.get(v, "color:#8a97a3")
+        def forca_bg(v):
+            return {
+                "forte": "background-color:#e6f6ec;color:#137a3e;font-weight:600",
+                "médio": "background-color:#fdf3da;color:#9a6b00;font-weight:600",
+                "suspeito": "background-color:#efe7fb;color:#6b3fa0;font-weight:600",
+            }.get(v, "color:#8a97a3")
 
-            def psi_bg(v):
-                if pd.isna(v):
-                    return "color:#aab"
-                a = abs(v)
-                c = "#e6f6ec" if a < 0.10 else "#fdf3da" if a < 0.25 else "#fde7e7"
-                return f"background-color:{c};font-weight:600"
+        def psi_bg(v):
+            if pd.isna(v):
+                return "color:#aab"
+            a = abs(v)
+            c = "#e6f6ec" if a < 0.10 else "#fdf3da" if a < 0.25 else "#fde7e7"
+            return f"background-color:{c};font-weight:600"
 
-            def psi_status_bg(v):
-                return {
-                    "estável": "color:#137a3e",
-                    "atenção": "color:#9a6b00;font-weight:600",
-                    "instável": "background-color:#fde7e7;color:#b3261e;font-weight:600",
-                }.get(v, "color:#8a97a3")
+        def psi_status_bg(v):
+            return {
+                "estável": "color:#137a3e",
+                "atenção": "color:#9a6b00;font-weight:600",
+                "instável": "background-color:#fde7e7;color:#b3261e;font-weight:600",
+            }.get(v, "color:#8a97a3")
 
-            fmt = {"iv": "{:.4f}",
-                   "bins": lambda v: "—" if (pd.isna(v) or v == 0) else f"{int(v)}"}
-            if has_psi:
-                fmt["psi"] = "{:.4f}"
-            sty = (disp.style.format(fmt, na_rep="—")
-                   .hide(axis="index")
-                   .map(forca_bg, subset=["força"])
-                   .set_properties(**{"font-size": "12px"}))
-            if has_psi:
-                sty = (sty.map(psi_bg, subset=["psi"])
-                          .map(psi_status_bg, subset=["estab."]))
-            qual = "TODA A CARTEIRA" if (sid in (None, "root")) else self._leaf_label(sid)
-            hint = (f"<div style='font-size:11px;color:#667;margin-bottom:4px'>folha: "
-                    f"<b>{qual}</b> · LGD médio (DES) = {lgd_med} · IV contínuo (optbinning)"
-                    + (" · PSI nos mesmos bins do IV (DES × amostra)" if has_psi else "")
-                    + "</div>")
-            display(W.HTML(hint))
-            display(sty)
+        fmt = {"iv": "{:.4f}",
+               "bins": lambda v: "—" if (pd.isna(v) or v == 0) else f"{int(v)}"}
+        if has_psi:
+            fmt["psi"] = "{:.4f}"
+        sty = (disp.style.format(fmt, na_rep="—")
+               .hide(axis="index")
+               .map(forca_bg, subset=["força"])
+               .set_properties(**{"font-size": "12px"}))
+        if has_psi:
+            sty = (sty.map(psi_bg, subset=["psi"])
+                      .map(psi_status_bg, subset=["estab."]))
+        qual = "TODA A CARTEIRA" if (sid in (None, "root")) else self._leaf_label(sid)
+        hint = (f"<div style='font-size:11px;color:#667;margin-bottom:4px'>folha: "
+                f"<b>{qual}</b> · LGD médio (DES) = {lgd_med} · IV contínuo (optbinning)"
+                + (" · PSI nos mesmos bins do IV (DES × amostra)" if has_psi else "")
+                + "</div>")
+        self.out_iv.value = hint + self._styler_html(sty)
 
     def _refresh_leaf_hist(self):
         """Histograma do LGD da folha selecionada (DES), abaixo da tabela IV/PSI."""
-        with self.out_leaf_hist:
-            self.out_leaf_hist.clear_output(wait=True)
-            sid = self.dd_leaf.value
-            if sid is None or sid not in self.seg.segments:
-                display(W.HTML("<div style='font-size:11px;color:#889'>—</div>"))
-                return
-            try:
-                self._display_fig(self.seg.plot_leaf_lgd_hist(sid), border=False)
-            except Exception as e:
-                print("(histograma de LGD não gerado:", type(e).__name__, e, ")")
+        sid = self.dd_leaf.value
+        if sid is None or sid not in self.seg.segments:
+            self.out_leaf_hist.value = "<div style='font-size:11px;color:#889'>—</div>"
+            return
+        try:
+            self.out_leaf_hist.value = self._fig_html(self.seg.plot_leaf_lgd_hist(sid))
+        except Exception as e:
+            self.out_leaf_hist.value = (f"<div style='font-size:11px;color:#b3261e'>"
+                                        f"(histograma não gerado: {type(e).__name__})</div>")
 
     # ==================================================================
     # Aba "Análise de variáveis"
@@ -1460,7 +1457,8 @@ class LGDSegmenterUI:
             cls = self._psi_class(pior)
             txt = {"green": "estável", "yellow": "atenção", "red": "instável"}[cls]
             det = " ".join(
-                f"<span style='color:{psi_hex[self._psi_class(v)]}'>{a} {v:.2f}</span>"
+                f"<span style='color:{psi_hex[self._psi_class(v)]}'>"
+                f"{'ESTAB' if a == 'ESTABILIDADE' else a} {v:.2f}</span>"
                 for a, v in (s.get("psi") or {}).items() if v is not None)
             rows.append(card("PSI atual (pior caso)",
                              f"<span style='color:{psi_hex[cls]}'>{pior:.3f}</span>",
@@ -1518,8 +1516,12 @@ class LGDSegmenterUI:
         sid = self.dd_var_leaf.value
         tcol = self.tx_var_time.value.strip()
         for o in (self.out_var_dist, self.out_var_time, self.out_var_psi, self.out_var_table):
-            o.clear_output()
+            o.value = ""                       # HTML widgets: limpa via .value
         self.out_var_cards.value = ""
+
+        def err(what, e):
+            return (f"<div style='font-size:11px;color:#b3261e'>({what} não gerada: "
+                    f"{type(e).__name__})</div>")
         bs, trend = None, None
         with self.out_log:
             self.out_log.clear_output(wait=True)
@@ -1548,43 +1550,41 @@ class LGDSegmenterUI:
                   + (f" · folha {self._leaf_label(sid)}" if sid not in (None, 'root') else "")
                   + ".")
         self.out_var_cards.value = self._var_cards_html(summ, trend)
-        with self.out_var_dist:
-            try:
-                self._display_fig(self.seg.plot_variable_distribution(feat, sid=sid), border=False)
-            except Exception as e:
-                print("(distribuição:", type(e).__name__, e, ")")
+        try:
+            self.out_var_dist.value = self._fig_html(
+                self.seg.plot_variable_distribution(feat, sid=sid))
+        except Exception as e:
+            self.out_var_dist.value = err("distribuição", e)
         if tcol and tcol in self.df.columns:
-            with self.out_var_time:
-                try:
-                    self._display_fig(self.seg.plot_variable_timeseries(feat, tcol, sid=sid),
-                                      border=False)
-                except Exception as e:
-                    print("(série temporal:", type(e).__name__, e, ")")
-            with self.out_var_table:
-                try:
-                    if kind == "cat":      # representatividade de cada categoria por safra
-                        display(self._style_var_share(
-                            self.seg.variable_share_by_safra(feat, tcol, sid=sid)))
-                    else:                  # percentis por safra (numérica)
-                        bs2 = bs if bs is not None else self.seg.variable_by_safra(feat, tcol, sid=sid)
-                        display(self._style_var_safra(bs2))
-                except Exception as e:
-                    print("(tabela por safra:", type(e).__name__, e, ")")
-            with self.out_var_psi:
-                try:
-                    if self.sample_col is not None:
-                        self._display_fig(
-                            self.seg.plot_variable_psi_by_safra(feat, tcol, sid=sid), border=False)
-                    else:
-                        display(W.HTML("<div style='font-size:12px;color:#889'>PSI por safra "
-                                       "requer amostras (DES/OOT).</div>"))
-                except Exception as e:
-                    print("(PSI por safra:", type(e).__name__, e, ")")
+            try:
+                self.out_var_time.value = self._fig_html(
+                    self.seg.plot_variable_timeseries(feat, tcol, sid=sid))
+            except Exception as e:
+                self.out_var_time.value = err("série temporal", e)
+            try:
+                if kind == "cat":      # representatividade de cada categoria por safra
+                    self.out_var_table.value = self._styler_html(self._style_var_share(
+                        self.seg.variable_share_by_safra(feat, tcol, sid=sid)), max_height="360px")
+                else:                  # percentis por safra (numérica)
+                    bs2 = bs if bs is not None else self.seg.variable_by_safra(feat, tcol, sid=sid)
+                    self.out_var_table.value = self._styler_html(
+                        self._style_var_safra(bs2), max_height="360px")
+            except Exception as e:
+                self.out_var_table.value = err("tabela por safra", e)
+            try:
+                if self.sample_col is not None:
+                    self.out_var_psi.value = self._fig_html(
+                        self.seg.plot_variable_psi_by_safra(feat, tcol, sid=sid))
+                else:
+                    self.out_var_psi.value = ("<div style='font-size:12px;color:#889'>PSI por "
+                                              "safra requer amostras (DES/OOT).</div>")
+            except Exception as e:
+                self.out_var_psi.value = err("PSI por safra", e)
         else:
-            with self.out_var_time:
-                display(W.HTML("<div style='font-size:12px;color:#889'>Informe a <b>coluna de "
-                               "safra</b> (ex.: dt_ref) acima para ver o comportamento ao longo "
-                               "do tempo, os percentis por safra e o PSI por safra.</div>"))
+            self.out_var_time.value = ("<div style='font-size:12px;color:#889'>Informe a "
+                                       "<b>coluna de safra</b> (ex.: dt_ref) acima para ver o "
+                                       "comportamento ao longo do tempo, os percentis por safra "
+                                       "e o PSI por safra.</div>")
 
     def _prepare_split(self):
         """Monta self._pending a partir dos controles atuais (modo, variável,
@@ -1617,7 +1617,7 @@ class LGDSegmenterUI:
             return False, f"Erro ao preparar a divisão: {type(e).__name__}: {e}"
 
     def _on_preview(self, _):
-        self.out_preview_chart.clear_output()
+        self.out_preview_chart.value = ""
         with self.out_log:
             self.out_log.clear_output(wait=True)
             ok, msg = self._prepare_split()
@@ -1630,25 +1630,28 @@ class LGDSegmenterUI:
             print(f"Preview de '{self.seg.feature_labels.get(feature, feature)}' "
                   f"({graf}) — revise os gráficos e clique em ✂ Criar segmento.")
         # gráfico(s) sem a tabela: CONSTRUÇÃO (barras de repr. × LGD) sempre, e —
-        # quando numérica — TAMBÉM o histograma. Cada um num try próprio.
+        # quando numérica — TAMBÉM o histograma. Concatenados num HTML widget.
         p = self._pending
         sid = p["only_segments"][0]
         splits = p.get("splits")
         mnb, mbs, xbs = p.get("max_n_bins", 4), p.get("min_bin_size", 0.05), p.get("max_bin_size")
-        with self.out_preview_chart:
+        partes = []
+        try:
+            partes.append(self._fig_html(self.seg.plot_feature_lgd(
+                p["feature"], sid=sid, splits=splits, max_n_bins=mnb,
+                min_bin_size=mbs, max_bin_size=xbs)))
+        except Exception as e:
+            partes.append(f"<div style='color:#b3261e;font-size:11px'>(gráfico de construção "
+                          f"não gerado: {type(e).__name__})</div>")
+        if self._feature_kind() == "num":
             try:
-                self._display_fig(self.seg.plot_feature_lgd(
-                    p["feature"], sid=sid, splits=splits, max_n_bins=mnb,
-                    min_bin_size=mbs, max_bin_size=xbs), border=False)
+                partes.append(self._fig_html(self.seg.plot_feature_hist(
+                    p["feature"], sid=sid, splits=splits, max_n_bins=max(mnb, 6),
+                    min_bin_size=mbs, max_bin_size=xbs)))
             except Exception as e:
-                print("(gráfico de construção não gerado:", type(e).__name__, e, ")")
-            if self._feature_kind() == "num":
-                try:
-                    self._display_fig(self.seg.plot_feature_hist(
-                        p["feature"], sid=sid, splits=splits, max_n_bins=max(mnb, 6),
-                        min_bin_size=mbs, max_bin_size=xbs), border=False)
-                except Exception as e:
-                    print("(histograma não gerado:", type(e).__name__, e, ")")
+                partes.append(f"<div style='color:#b3261e;font-size:11px'>(histograma não "
+                              f"gerado: {type(e).__name__})</div>")
+        self.out_preview_chart.value = "".join(partes)
 
     def _on_split(self, _):
         with self.out_log:
@@ -1768,72 +1771,82 @@ class LGDSegmenterUI:
         return "".join(rows)
 
     def _on_boot(self, _):
-        with self.out_boot:
-            self.out_boot.clear_output(wait=True)
-            try:
-                bc = self.seg.bootstrap_ci(n_boot=int(self.sl_boot.value))
-            except Exception as e:
-                print("Erro no bootstrap:", type(e).__name__, e); return
+        try:
+            bc = self.seg.bootstrap_ci(n_boot=int(self.sl_boot.value))
+        except Exception as e:
+            self.out_boot.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
+                                   f"bootstrap: {type(e).__name__}: {e}</div>")
+            return
 
-            # forest plot
-            display(W.HTML(self._boot_forest_html(bc)))
-
-            # tabela estilizada com aderência
-            def status_bg(v):
-                if v == "dentro":
-                    return "background-color:#e6f6ec;color:#137a3e;font-weight:600"
-                if v in ("acima", "abaixo"):
-                    return "background-color:#fde7e7;color:#b3261e;font-weight:600"
-                return "color:#aab"
-            fmt = {c: "{:.4f}" for c in bc.columns if c.startswith("lgd_")}
-            fmt.update({"ic_low": "{:.4f}", "ic_high": "{:.4f}", "amplitude": "{:.4f}"})
-            sty = bc.style.format(fmt, na_rep="—").hide(axis="index").set_properties(
-                **{"font-size": "12px"})
-            if "status_oot" in bc.columns:
-                sty = sty.map(status_bg, subset=["status_oot"])
-            if "aderente" in bc.columns:
-                n_ok = int((bc["aderente"] == True).sum())
-                n_tot = int(bc["aderente"].notna().sum())
-                chk = bc.attrs.get("check_sample")
-                print(f"Aderência {chk}: {n_ok}/{n_tot} folhas com LGD dentro do IC "
-                      f"bootstrap (n_boot={bc.attrs.get('n_boot')}).")
-            display(sty)
+        def status_bg(v):
+            if v == "dentro":
+                return "background-color:#e6f6ec;color:#137a3e;font-weight:600"
+            if v in ("acima", "abaixo"):
+                return "background-color:#fde7e7;color:#b3261e;font-weight:600"
+            return "color:#aab"
+        fmt = {c: "{:.4f}" for c in bc.columns if c.startswith("lgd_")}
+        fmt.update({"ic_low": "{:.4f}", "ic_high": "{:.4f}", "amplitude": "{:.4f}"})
+        sty = bc.style.format(fmt, na_rep="—").hide(axis="index").set_properties(
+            **{"font-size": "12px"})
+        if "status_oot" in bc.columns:
+            sty = sty.map(status_bg, subset=["status_oot"])
+        resumo = ""
+        if "aderente" in bc.columns:
+            n_ok = int((bc["aderente"] == True).sum())
+            n_tot = int(bc["aderente"].notna().sum())
+            chk = bc.attrs.get("check_sample")
+            resumo = (f"<div style='font-size:12px;color:#15324a;margin:6px 0'>Aderência "
+                      f"<b>{chk}</b>: {n_ok}/{n_tot} folhas com LGD dentro do IC bootstrap "
+                      f"(n_boot={bc.attrs.get('n_boot')}).</div>")
+        # forest plot (HTML) + resumo + tabela — tudo num único .value (não duplica)
+        self.out_boot.value = self._boot_forest_html(bc) + resumo + self._styler_html(sty)
 
     # ==================================================================
     # Validação (monotonicidade · calibração · backtest) e relatório
     # ==================================================================
     def _on_validate(self, _):
-        with self.out_validate:
-            self.out_validate.clear_output(wait=True)
-            # monotonicidade
+        parts = []
+        # monotonicidade
+        try:
+            mr = self.seg.monotonicity_report()
+            ok = bool(mr["monotonico"].all())
+            parts.append("<div style='font-size:12px;margin:2px 0 6px'>"
+                         + ("✅ LGD monotônico crescente em todas as amostras."
+                            if ok else "⚠️ Há inversões de monotonicidade (ver tabela).")
+                         + "</div>")
+            parts.append(self._df_html(mr[["amostra", "monotonico", "n_inversoes"]]))
+        except Exception as e:
+            parts.append(f"<div style='color:#b3261e;font-size:12px'>Erro na monotonicidade: "
+                         f"{type(e).__name__}</div>")
+        # calibração (previsto DES × realizado OOT)
+        if self.sample_col is not None:
             try:
-                mr = self.seg.monotonicity_report()
-                ok = bool(mr["monotonico"].all())
-                print("✅ LGD monotônico crescente em todas as amostras."
-                      if ok else "⚠️ Há inversões de monotonicidade (ver tabela).")
-                display(mr[["amostra", "monotonico", "n_inversoes"]])
+                parts.append("<div class='lgdui-h' style='margin-top:10px'>Calibração "
+                             "(previsto DES × realizado)</div>")
+                parts.append(self._fig_html(self.seg.plot_calibration()))
+                ct = self.seg.calibration_table().rename(columns={"nota_lgd": "folha"})
+                parts.append(self._df_html(ct[["folha", "n", "lgd_previsto",
+                                               "lgd_realizado", "gap"]]))
             except Exception as e:
-                print("Erro na monotonicidade:", type(e).__name__, e)
-            # calibração (previsto DES × realizado OOT)
-            if self.sample_col is not None:
-                try:
-                    self._display_fig(self.seg.plot_calibration(), border=False)
-                    ct = self.seg.calibration_table().rename(columns={"nota_lgd": "folha"})
-                    display(ct[["folha", "n", "lgd_previsto", "lgd_realizado", "gap"]])
-                except Exception as e:
-                    print("Erro na calibração:", type(e).__name__, e)
-            # backtest por safra
-            tcol = self.tx_time_col.value.strip()
-            if not tcol:
-                print("(informe a coluna de tempo para o backtest)")
-            elif tcol not in self.df.columns:
-                print(f"(coluna de tempo '{tcol}' não existe no DataFrame — backtest pulado)")
-            else:
-                try:
-                    print(f"\nBacktest por '{tcol}':")
-                    display(self.seg.backtest(tcol))
-                except Exception as e:
-                    print("Erro no backtest:", type(e).__name__, e)
+                parts.append(f"<div style='color:#b3261e;font-size:12px'>Erro na calibração: "
+                             f"{type(e).__name__}</div>")
+        # backtest por safra
+        tcol = self.tx_time_col.value.strip()
+        if not tcol:
+            parts.append("<div style='font-size:12px;color:#889'>(informe a coluna de tempo "
+                         "para o backtest)</div>")
+        elif tcol not in self.df.columns:
+            parts.append(f"<div style='font-size:12px;color:#889'>(coluna de tempo '{tcol}' "
+                         f"não existe no DataFrame — backtest pulado)</div>")
+        else:
+            try:
+                parts.append(f"<div class='lgdui-h' style='margin-top:10px'>Backtest por "
+                             f"'{tcol}'</div>")
+                parts.append(self._df_html(self.seg.backtest(tcol), max_height="300px"))
+            except Exception as e:
+                parts.append(f"<div style='color:#b3261e;font-size:12px'>Erro no backtest: "
+                             f"{type(e).__name__}</div>")
+        self.out_validate.value = "".join(parts)
 
     def _on_report(self, _):
         with self.out_log:
@@ -1854,38 +1867,51 @@ class LGDSegmenterUI:
     # ==================================================================
     # Qualidade dos segmentos (dispersão · distribuição · preview da variável)
     # ==================================================================
-    def _display_fig(self, fig, border=True):
-        """Exibe uma figura matplotlib escalada para caber no painel (a versão
-        salva em arquivo continua em tamanho real). Evita a imagem ser cortada
-        quando a árvore tem muitas folhas."""
+    def _fig_html(self, fig, border=False):
+        """Converte uma figura matplotlib em <img> base64 (string HTML) para
+        atribuir a um widget HTML (.value) — sem display()/Output."""
         import base64
         import io as _io
-        import matplotlib.pyplot as plt
         buf = _io.BytesIO()
         fig.savefig(buf, format="png", dpi=fig.get_dpi(), bbox_inches="tight")
-        plt.close(fig)
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         style = "max-width:100%;height:auto"
         if border:
             style += ";border:1px solid #e6e8eb;border-radius:6px"
-        display(W.HTML(f"<img src='data:image/png;base64,{b64}' style='{style}'/>"))
+        return f"<img src='data:image/png;base64,{b64}' style='{style}'/>"
+
+    @staticmethod
+    def _styler_html(styler, max_height=None):
+        """HTML de um pandas Styler, opcionalmente num container rolável."""
+        html = styler.to_html()
+        if max_height:
+            return f"<div style='max-height:{max_height};overflow:auto'>{html}</div>"
+        return html
+
+    def _df_html(self, df, max_height=None):
+        """HTML de um DataFrame cru (sem índice), p/ atribuir a um widget HTML."""
+        return self._styler_html(
+            df.style.hide(axis="index").set_properties(**{"font-size": "12px"}), max_height)
+
+    def _display_fig(self, fig, border=True):
+        """Exibe uma figura num Output widget (usado só onde resta Output:
+        bootstrap e validação). A maioria dos painéis usa _fig_html + HTML."""
+        display(W.HTML(self._fig_html(fig, border=border)))
 
     def _on_box(self, _):
-        with self.out_quality:
-            self.out_quality.clear_output(wait=True)
-            try:
-                self._display_fig(self.seg.plot_leaf_boxplots(), border=False)
-            except Exception as e:
-                print("Erro no boxplot:", type(e).__name__, e)
+        try:
+            self.out_quality.value = self._fig_html(self.seg.plot_leaf_boxplots())
+        except Exception as e:
+            self.out_quality.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
+                                      f"boxplot: {type(e).__name__}: {e}</div>")
 
     def _on_hist(self, _):
-        with self.out_quality:
-            self.out_quality.clear_output(wait=True)
-            try:
-                # só a amostra de referência (DES), preenchido
-                self._display_fig(self.seg.plot_target_hist(), border=False)
-            except Exception as e:
-                print("Erro no histograma:", type(e).__name__, e)
+        try:
+            # só a amostra de referência (DES), preenchido
+            self.out_quality.value = self._fig_html(self.seg.plot_target_hist())
+        except Exception as e:
+            self.out_quality.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
+                                      f"histograma: {type(e).__name__}: {e}</div>")
 
     # ==================================================================
     # Undo / redo de splits (e demais alterações estruturais da árvore)
@@ -2015,32 +2041,30 @@ class LGDSegmenterUI:
     # Imagem da árvore (matplotlib)
     # ==================================================================
     def _on_plot(self, _):
-        with self.out_plot:
-            self.out_plot.clear_output(wait=True)
-            path = self.tx_img_path.value.strip() or None
-            try:
-                # arquivo salvo em tamanho real; exibição escalada para caber
-                fig = self.seg.plot_tree(save_path=path)   # repr. % + LGD (DES)
-                self._display_fig(fig)
-            except Exception as e:
-                print("Erro ao desenhar a árvore:", type(e).__name__, e)
-                return
+        path = self.tx_img_path.value.strip() or None
+        try:
+            # arquivo salvo em tamanho real; exibição escalada para caber
+            fig = self.seg.plot_tree(save_path=path)   # repr. % + LGD (DES)
+            self.out_plot.value = self._fig_html(fig, border=True)
+        except Exception as e:
+            self.out_plot.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao "
+                                   f"desenhar a árvore: {type(e).__name__}: {e}</div>")
+            return
         if path:
             with self.out_log:
                 self.out_log.clear_output(wait=True)
                 print(f"🖼️ imagem da árvore salva em '{path}' (tamanho real).")
 
     def _on_plot_hide(self, _):
-        self.out_plot.clear_output()      # recolhe (esvazia) a imagem
+        self.out_plot.value = ""          # recolhe (esvazia) a imagem
 
     def _on_tree_preview(self, _):
         """Preview da árvore como imagem, na própria aba Construir (sem exportar)."""
-        with self.out_tree_img:
-            self.out_tree_img.clear_output(wait=True)
-            try:
-                self._display_fig(self.seg.plot_tree())   # sem save_path → não salva
-            except Exception as e:
-                print("Erro ao desenhar a árvore:", type(e).__name__, e)
+        try:
+            self.out_tree_img.value = self._fig_html(self.seg.plot_tree(), border=True)
+        except Exception as e:
+            self.out_tree_img.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao "
+                                       f"desenhar a árvore: {type(e).__name__}: {e}</div>")
 
     def _ipython_display_(self):
         display(self.panel)

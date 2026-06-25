@@ -504,11 +504,13 @@ def test_ui_plot_tree(tmp_path):
         ui.seg.grow("ltv", splits=[0.5])
         ui._refresh()
         ui.tx_img_path.value = p
-        ui._on_plot(None)                       # renderiza e salva
+        ui._on_plot(None)                       # renderiza (HTML widget) e salva
+        valor_apos_plot = ui.out_plot.value
         ui._on_plot_hide(None)                  # botão recolher esvazia a imagem
-        n_after = len(ui.out_plot.outputs)
+        valor_apos_hide = ui.out_plot.value
     assert os.path.exists(p) and os.path.getsize(p) > 0   # imagem foi gerada
-    assert n_after == 0                          # imagem recolhida
+    assert "<img" in valor_apos_plot            # imagem renderizada no widget
+    assert valor_apos_hide == ""                # imagem recolhida
 
 
 # ----------------------------------------------------------------------

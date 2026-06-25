@@ -1089,10 +1089,7 @@ class SequentialLGDSegmenter:
         if figsize is None:
             figsize = (max(7.0, (max(xs) - min(xs) + 2 * bw + 1.0) * 0.95),
                        max(3.5, (md + 1) * Y_GAP * 0.95))
-        if ax is None:
-            fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-        else:
-            fig = ax.figure
+        fig, ax = self._new_ax(figsize, dpi, ax)
 
         norm = Normalize(0.0, 1.0)        # escala de cor do LGD fixa de 0 a 1
         cmap_obj = plt.get_cmap(cmap)
@@ -1542,10 +1539,7 @@ class SequentialLGDSegmenter:
             raise ImportError("plot_calibration requer matplotlib.") from e
         ct = self.calibration_table(check_sample)
         chk = ct.attrs.get("check_sample")
-        if ax is None:
-            fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-        else:
-            fig = ax.figure
+        fig, ax = self._new_ax(figsize, dpi, ax)
         x = ct["lgd_previsto"].to_numpy(dtype="float64")
         y = ct["lgd_realizado"].to_numpy(dtype="float64")
         lim_hi = float(np.nanmax([np.nanmax(x) if len(x) else 0,
@@ -1704,10 +1698,15 @@ class SequentialLGDSegmenter:
     # ==================================================================
     @staticmethod
     def _new_ax(figsize, dpi, ax):
-        import matplotlib.pyplot as plt
-        if ax is None:
-            return plt.subplots(figsize=figsize, dpi=dpi)
-        return ax.figure, ax
+        # Figura SEM pyplot (não entra no Gcf): evita o backend inline
+        # re-exibir o gráfico (duplicação) além do display explícito do widget.
+        if ax is not None:
+            return ax.figure, ax
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+        fig = Figure(figsize=figsize, dpi=dpi)
+        FigureCanvasAgg(fig)
+        return fig, fig.subplots()
 
     # ------------------------------------------------------------------
     # PLOT_LEAF_BOXPLOTS: dispersão do LGD DENTRO de cada folha (boxplot por
@@ -2136,11 +2135,13 @@ class SequentialLGDSegmenter:
             reprs = tbl["repr_%"].to_numpy()
             cols = ["#c98a8a" if "faltante" in f else "steelblue" for f in tbl["faixa"]]
             xs = list(range(len(labels)))
-            ax.bar(xs, reprs, color=cols, edgecolor="#2f5d82", alpha=0.9, width=0.78)
+            ax.bar(xs, reprs, color=cols, edgecolor="#2f5d82", alpha=0.9, width=0.72)
             for x0, rp in zip(xs, reprs):
                 ax.text(x0, rp, f"{rp:.0f}%", ha="center", va="bottom", fontsize=7.5,
                         color="#15324a")
             ax.set_xticks(xs); ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8)
+            ax.set_xlim(-0.75, len(labels) - 0.25)               # respiro nas bordas (eixo x)
+            ax.set_ylim(0, float(np.nanmax(reprs)) * 1.16 + 1)   # espaço p/ os rótulos %
         ax.set_ylabel("% da folha")
         ax.set_title(f"Distribuição de '{rot}'" + (f" · {sample}" if sample else ""),
                      fontsize=11, fontweight="bold", color="#15324a")
@@ -2217,8 +2218,9 @@ class SequentialLGDSegmenter:
         ax.set_ylim(0, 100); ax.margins(x=0)
         ax.set_xticks(x); ax.set_xticklabels(sh["safra"], rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("% da safra")
-        ax.legend(fontsize=7.5, ncol=min(len(cats), 4), loc="upper center",
-                  bbox_to_anchor=(0.5, -0.16), framealpha=0.9)
+        # legenda à DIREITA (vertical) — não colide com as datas do eixo x
+        ax.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5),
+                  framealpha=0.9, title="categoria")
         rot = self.feature_labels.get(feature, feature)
         ax.set_title(f"'{rot}' ao longo do tempo — representatividade por categoria",
                      fontsize=11, fontweight="bold", color="#15324a")
@@ -2260,8 +2262,8 @@ class SequentialLGDSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
-    def plot_variable_psi_by_safra(self, feature, time_col, sid=None,
-                                   figsize=(8.6, 2.9), save_path=None, dpi=150, ax=None):
+    def plot_variable_psi_by_safra(self, feature, time_col=None, sid=None,
+                                   figsize=(9.6, 3.4), save_path=None, dpi=150, ax=None):
         """PSI da variável por safra vs DES (barras coloridas por faixa de PSI)."""
         ps = self.variable_psi_by_safra(feature, time_col, sid=sid)
         fig, ax = self._new_ax(figsize, dpi, ax)
@@ -2272,12 +2274,14 @@ class SequentialLGDSegmenter:
         x = list(range(len(ps)))
         cor = ["#1aa64b" if p < 0.10 else "#caa000" if p < 0.25 else "#d6453e"
                for p in ps["psi"]]
-        ax.bar(x, ps["psi"], color=cor, alpha=0.92, width=0.8)
+        ax.bar(x, ps["psi"], color=cor, alpha=0.92, width=0.78)
         for x0, p in zip(x, ps["psi"]):
-            ax.text(x0, p, f"{p:.2f}", ha="center", va="bottom", fontsize=7.5, color="#555")
+            ax.text(x0, p, f"{p:.2f}", ha="center", va="bottom", fontsize=7, color="#555")
         ax.axhline(0.10, color="#caa000", lw=0.8, ls="--")
         ax.axhline(0.25, color="#d6453e", lw=0.8, ls="--")
         ax.set_xticks(x); ax.set_xticklabels(ps["safra"], rotation=45, ha="right", fontsize=8)
+        ax.set_xlim(-0.7, len(ps) - 0.3)                          # respiro nas bordas (eixo x)
+        ax.set_ylim(0, float(np.nanmax(ps["psi"])) * 1.16 + 0.05)  # espaço p/ os rótulos
         ax.set_ylabel("PSI")
         rot = self.feature_labels.get(feature, feature)
         ax.set_title(f"PSI de '{rot}' por safra vs DES (bins fixados na DES)",
