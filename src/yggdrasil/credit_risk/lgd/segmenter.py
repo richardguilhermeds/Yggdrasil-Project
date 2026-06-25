@@ -245,7 +245,7 @@ class SequentialLGDSegmenter:
         return {"feature": feature, "kind": "cat", "cats": list(b["cats"])}
 
     def _resolve_bins(self, sub, feature, splits, dtype, max_n_bins, min_bin_size,
-                      max_bin_size=None):
+                      max_bin_size=None, relax_max=False):
         """Resolve os bins de um ramo. Devolve (bins, modo, kind).
         - num: bins = [{'kind':'num','lo','hi'}, ...]
         - cat: bins = [{'kind':'cat','cats':[...]}, ...]
@@ -270,11 +270,22 @@ class SequentialLGDSegmenter:
                 if len(y) < 4 or x_obs.size == 0 or np.unique(x_obs).size < 2:
                     cortes = []                            # dados degenerados → sem corte
                 else:
-                    b = ContinuousOptimalBinning(
-                        name=feature, dtype="numerical", max_n_bins=max_n_bins,
-                        min_bin_size=min_bin_size, max_bin_size=max_bin_size,
-                        monotonic_trend="auto_asc_desc")
-                    cortes = _fit_optbinning_splits(b, x, y)
+                    def _opt(mnb, mbs):
+                        b = ContinuousOptimalBinning(
+                            name=feature, dtype="numerical", max_n_bins=mnb,
+                            min_bin_size=min_bin_size, max_bin_size=mbs,
+                            monotonic_trend="auto_asc_desc")
+                        return _fit_optbinning_splits(b, x, y)
+                    cortes = _opt(max_n_bins, max_bin_size)
+                    if not cortes and max_bin_size is not None and relax_max:
+                        # o máximo pode deixar o problema INFEASIBLE p/ este nº de
+                        # bins/amostra: tenta mais bins e, por fim, relaxa o máximo
+                        for k in range(max_n_bins + 1, 9):
+                            cortes = _opt(k, max_bin_size)
+                            if cortes:
+                                break
+                        if not cortes:
+                            cortes = _opt(max_n_bins, None)
                 modo = "ótimo"
             if not cortes:
                 return [], modo, kind
@@ -379,7 +390,7 @@ class SequentialLGDSegmenter:
     # GROW: efetiva o split (manual ou ótimo, num ou cat) em cada folha-alvo
     # ------------------------------------------------------------------
     def grow(self, feature, splits=None, dtype=None, max_n_bins=4,
-             min_bin_size=0.05, only_segments=None, max_bin_size=None):
+             min_bin_size=0.05, only_segments=None, max_bin_size=None, relax_max=False):
         targets = {
             sid: s for sid, s in self.segments.items()
             if s["is_leaf"] and (only_segments is None or sid in only_segments)
@@ -394,7 +405,8 @@ class SequentialLGDSegmenter:
                           f"({n_fit} < {self.min_leaf_rows}) — folha mantida")
                     continue
             bins, modo, kind = self._resolve_bins(
-                sub, feature, splits, dtype, max_n_bins, min_bin_size, max_bin_size)
+                sub, feature, splits, dtype, max_n_bins, min_bin_size, max_bin_size,
+                relax_max=relax_max)
             modo_usado = modo
             if not bins:
                 print(f"[{sid}] sem corte válido em '{feature}' ({modo}) — folha mantida")
@@ -815,6 +827,60 @@ class SequentialLGDSegmenter:
         return " e ".join(partes)
 
     # ------------------------------------------------------------------
+    # Ordenação ESQUERDA→DIREITA das folhas (posição na árvore construída).
+    #   A nota_lgd passa a ser essa posição: 1, 2, 3, … da esquerda p/ a direita.
+    #   Em cada nó os filhos são ordenados pelo MENOR LGD (DES) de folha do ramo
+    #   (asc. = ramo de menor risco à esquerda), espelhando o layout de plot_tree.
+    #   Para um split único, posição = ordem de LGD (idêntico ao comportamento
+    #   anterior); em árvores profundas, as notas leem 1, 2, 3 de fato.
+    # ------------------------------------------------------------------
+    def _node_lgd(self, sid: str) -> float:
+        """LGD médio do nó na amostra de referência (DES), com fallback p/ todas."""
+        sub = self.df[self.segments[sid]["mask"]]
+        if self.sample_col is not None:
+            sr = sub.loc[sub[self.sample_col] == self.ref_sample, self.target]
+            if len(sr):
+                return float(sr.mean())
+        return float(sub[self.target].mean()) if len(sub) else float("nan")
+
+    def _leaf_order(self, ascending: bool = True) -> list:
+        """sids das folhas na ordem esquerda→direita da árvore (ver bloco acima)."""
+        filhos: dict = {}
+        for sid, s in self.segments.items():
+            filhos.setdefault(s["parent"], []).append(sid)
+        INF = float("inf")
+        leaf_lgd = {sid: self._node_lgd(sid)
+                    for sid, s in self.segments.items() if s["is_leaf"]}
+        _submin: dict = {}
+
+        def submin(sid):
+            if sid not in _submin:
+                if self.segments[sid]["is_leaf"]:
+                    v = leaf_lgd.get(sid, INF)
+                    _submin[sid] = INF if (v is None or pd.isna(v)) else v
+                else:
+                    _submin[sid] = min((submin(c) for c in filhos.get(sid, [])),
+                                       default=INF)
+            return _submin[sid]
+
+        sgn = 1 if ascending else -1
+        order: list = []
+
+        def dfs(sid):
+            if self.segments[sid]["is_leaf"]:
+                order.append(sid)
+                return
+            for c in sorted(filhos.get(sid, []), key=lambda c: (sgn * submin(c), str(c))):
+                dfs(c)
+
+        dfs("root")
+        # garante todas as folhas mesmo se algum ramo ficar órfão (defensivo)
+        for sid, s in self.segments.items():
+            if s["is_leaf"] and sid not in order:
+                order.append(sid)
+        return order
+
+    # ------------------------------------------------------------------
     # LEAVES: segmentos-folha finais, com nota de LGD e descrição
     #   nota_lgd: 1..N ordenada por LGD (1 = menor LGD por padrão)
     #   with_psi:  adiciona a contribuição de PSI de cada folha por amostra
@@ -852,9 +918,12 @@ class SequentialLGDSegmenter:
                     s_am = sub.loc[sub[self.sample_col] == amostra, self.target]
                     row[f"lgd_{amostra}"] = round(s_am.mean(), 4) if len(s_am) else np.nan
             linhas.append(row)
+        # nota_lgd = POSIÇÃO esquerda→direita na árvore (ver _leaf_order); assim os
+        # números sempre leem 1, 2, 3 da esquerda p/ a direita no plot_tree.
+        ordem = {sid: i for i, sid in enumerate(self._leaf_order(ascending=ascending))}
         out = (
             pd.DataFrame(linhas)
-            .sort_values("lgd_medio", ascending=ascending)
+            .sort_values("segmento", key=lambda s: s.map(ordem), kind="stable")
             .reset_index(drop=True)
         )
         out.insert(1, "nota_lgd", range(1, len(out) + 1))
@@ -980,9 +1049,18 @@ class SequentialLGDSegmenter:
                 return "TODA A CARTEIRA"
             return self._descrever([seg["conditions"][-1]])
 
-        def lgd_de(sid):
-            sub = self.df[self.segments[sid]["mask"]]
-            return sub[self.target].mean() if len(sub) else float("inf")
+        # ordena os filhos pela MENOR nota do ramo (esquerda→direita), igual ao
+        # plot_tree — assim o texto lê as folhas 1, 2, 3 na mesma ordem
+        _min_nota: dict = {}
+
+        def min_nota(sid):
+            if sid not in _min_nota:
+                if self.segments[sid]["is_leaf"]:
+                    _min_nota[sid] = nota_map.get(sid, 10 ** 9)
+                else:
+                    _min_nota[sid] = min((min_nota(c) for c in filhos.get(sid, [])),
+                                         default=10 ** 9)
+            return _min_nota[sid]
 
         def rec(sid, prefix, is_last, is_root=False):
             n, rep, lgd = stats(sid)
@@ -991,7 +1069,7 @@ class SequentialLGDSegmenter:
             tag = f"  [nota {nota_map.get(sid, '?')}]" if seg["is_leaf"] else ""
             linhas.append(f"{prefix}{conn}{rotulo(sid)}  "
                           f"(n={n}, {rep:.1f}%, LGD={lgd:.4f}){tag}")
-            ch = sorted(filhos.get(sid, []), key=lgd_de, reverse=not ascending)
+            ch = sorted(filhos.get(sid, []), key=min_nota)
             child_prefix = "" if is_root else prefix + ("   " if is_last else "│  ")
             for i, c in enumerate(ch):
                 rec(c, child_prefix, i == len(ch) - 1)
@@ -1012,7 +1090,8 @@ class SequentialLGDSegmenter:
     # ------------------------------------------------------------------
     def plot_tree(self, ascending: bool = True, figsize=None, cmap: str = "RdYlGn_r",
                   show_samples: bool = False, title: str | None = "Segmentação de LGD",
-                  save_path: str | None = None, dpi: int = 150, ax=None):
+                  save_path: str | None = None, dpi: int = 150, ax=None,
+                  highlight: str | None = None):
         try:
             import textwrap
 
@@ -1107,30 +1186,47 @@ class SequentialLGDSegmenter:
                 ax.plot([x, cx], [y - bh, cy + bh], color="#9aa7b2", lw=1.1, zorder=1)
 
         base_fs = 8.6
-        node_texts = []           # textos dos nós, para ajustar a fonte à caixa
+        fit_items = []            # (texto, meia-largura, meia-altura) p/ ajuste de fonte
         for sid, (x, y) in pos.items():
             _, rep, lgd = stats(sid)
             color = cmap_obj(norm(lgd)) if not pd.isna(lgd) else (0.88, 0.88, 0.88, 1.0)
             lum = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
             txt_color = "#15324a" if lum > 0.6 else "#ffffff"
+            is_leaf = self.segments[sid]["is_leaf"]
+            selecionada = (highlight is not None and sid == highlight)
+            # folha selecionada: contorno destacado (âmbar grosso) + leve glow
+            if selecionada:
+                ax.add_patch(FancyBboxPatch(
+                    (x - bw - 0.06, y - bh - 0.06), 2 * bw + 0.12, 2 * bh + 0.12,
+                    boxstyle="round,pad=0.02,rounding_size=0.16",
+                    linewidth=0, facecolor="#f5a623", alpha=0.30, zorder=1.5))
             ax.add_patch(FancyBboxPatch(
                 (x - bw, y - bh), 2 * bw, 2 * bh,
                 boxstyle="round,pad=0.02,rounding_size=0.14",
-                linewidth=1.3, edgecolor="#33424f", facecolor=color, zorder=2))
-            is_leaf = self.segments[sid]["is_leaf"]
-            cab = "\n".join(textwrap.wrap(rotulo(sid), 19)[:3])
-            # apenas representatividade (%) e LGD médio (DES); nota nas folhas
+                linewidth=(3.2 if selecionada else 1.3),
+                edgecolor=("#e8870b" if selecionada else "#33424f"),
+                facecolor=color, zorder=2))
+            # 1) QUEBRA (condição do nó) em NEGRITO, no topo da caixa
+            cab = "\n".join(textwrap.wrap(rotulo(sid), 18)[:3])
+            t_split = ax.text(x, y + 0.34 * bh, cab, ha="center", va="center",
+                              fontsize=base_fs, color=txt_color, zorder=3,
+                              fontweight="bold", linespacing=1.12, clip_on=True)
+            fit_items.append((t_split, bw * 0.94, bh * 0.58))
+            # 2) representatividade e LGD na MESMA linha, separados por barra
             lgd_txt = f"LGD {lgd:.3f}" if not pd.isna(lgd) else "LGD —"
-            if is_leaf:
-                lgd_txt += f"  ·  folha {nota_map.get(sid, '?')}"
-            linhas = [cab, f"repr. {rep:.1f}%", lgd_txt]
+            metr = f"repr. {rep:.1f}%  |  {lgd_txt}"
             if show_samples and self.sample_col is not None:
                 amostras = list(self.df[self.sample_col].dropna().unique())
-                linhas.append(" | ".join(f"{a} {sample_lgd(sid, a):.3f}" for a in amostras))
-            t = ax.text(x, y, "\n".join(linhas), ha="center", va="center",
-                        fontsize=base_fs, color=txt_color, zorder=3, linespacing=1.25,
-                        fontweight=("bold" if is_leaf else "normal"), clip_on=True)
-            node_texts.append(t)
+                metr += "\n" + " | ".join(f"{a} {sample_lgd(sid, a):.3f}" for a in amostras)
+            t_metr = ax.text(x, y - 0.42 * bh, metr, ha="center", va="center",
+                             fontsize=base_fs - 0.8, color=txt_color, zorder=3,
+                             linespacing=1.12, clip_on=True)
+            fit_items.append((t_metr, bw * 0.94, bh * 0.34))
+            # 3) número da folha no CANTO INFERIOR DIREITO
+            if is_leaf:
+                ax.text(x + bw * 0.93, y - bh * 0.9, f"folha {nota_map.get(sid, '?')}",
+                        ha="right", va="bottom", fontsize=base_fs - 1.8, color=txt_color,
+                        zorder=3, fontweight="bold", clip_on=True)
 
         ax.set_xlim(min(xs) - bw - 0.4, max(xs) + bw + 0.4)
         ax.set_ylim(min(ys) - bh - 0.4, max(ys) + bh + 0.6)
@@ -1145,26 +1241,29 @@ class SequentialLGDSegmenter:
         cbar.set_label(f"LGD médio{' (DES)' if ref else ''} (escala 0–1)", fontsize=9)
         fig.tight_layout()
 
-        # força cada texto a caber na sua caixa, encolhendo a fonte se preciso
-        self._fit_texts_to_boxes(fig, ax, node_texts, bw, bh)
+        # força cada texto a caber na sua sub-região, encolhendo a fonte se preciso
+        self._fit_texts_to_boxes(fig, ax, fit_items)
 
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
     @staticmethod
-    def _fit_texts_to_boxes(fig, ax, texts, bw, bh, pad: float = 0.88,
-                            min_fs: float = 4.5):
-        """Encolhe a fonte de cada texto até caber na caixa (2*bw × 2*bh em dados)."""
+    def _fit_texts_to_boxes(fig, ax, items, pad: float = 0.92, min_fs: float = 4.0):
+        """Encolhe a fonte de cada texto até caber na sua sub-região.
+
+        ``items``: lista de ``(texto, meia_largura, meia_altura)`` em coordenadas de
+        dados, centradas na posição do texto.
+        """
         try:
             fig.canvas.draw()
             renderer = fig.canvas.get_renderer()
         except Exception:        # pragma: no cover - backend sem renderer
             return
-        for t in texts:
+        for t, hw, hh in items:
             x, y = t.get_position()
-            px0, py0 = ax.transData.transform((x - bw, y - bh))
-            px1, py1 = ax.transData.transform((x + bw, y + bh))
+            px0, py0 = ax.transData.transform((x - hw, y - hh))
+            px1, py1 = ax.transData.transform((x + hw, y + hh))
             box_w, box_h = abs(px1 - px0) * pad, abs(py1 - py0) * pad
             ext = t.get_window_extent(renderer)
             if ext.width <= box_w and ext.height <= box_h:
@@ -1463,9 +1562,10 @@ class SequentialLGDSegmenter:
 
     # ------------------------------------------------------------------
     # MONOTONICITY_REPORT: verifica se o LGD é monotônico crescente na ordem
-    #   das notas, em cada amostra. Por construção o DES é monotônico; o valor
-    #   está em checar se OOT/demais amostras preservam a ordem (estabilidade
-    #   do rank). Lista as inversões (pares de notas onde o LGD cai).
+    #   das notas (posição esquerda→direita), em cada amostra. Checa se o LGD
+    #   cresce ao longo das folhas 1..N — tanto na referência (DES) quanto nas
+    #   demais amostras (estabilidade). Lista as inversões (pares de notas
+    #   consecutivas onde o LGD cai).
     # ------------------------------------------------------------------
     def monotonicity_report(self) -> pd.DataFrame:
         lv = self.leaves()
@@ -2759,8 +2859,26 @@ class SequentialLGDSegmenter:
     def fit_auto(self, features: list | None = None, max_depth: int = 3,
                  min_iv: float = 0.02, max_n_bins: int = 2, min_bin_size: float = 0.05,
                  from_scratch: bool = True, subtree: str | None = None,
+                 min_leaf_repr: float | None = None, max_bin_repr: float | None = None,
                  verbose: bool = True):
+        """Cresce a árvore de forma gulosa (maior IV por nível).
+
+        ``min_leaf_repr`` e ``max_bin_repr`` são **representatividades GLOBAIS**
+        (fração da carteira inteira), não da folha-mãe:
+
+        * ``min_leaf_repr`` — cada folha terminal deve reter ao menos essa fração
+          da carteira. Uma folha pequena demais para gerar dois filhos ≥
+          ``min_leaf_repr`` não é dividida (vira terminal). Corrige o efeito de o
+          ``min_bin_size`` do optbinning ser relativo à folha-mãe e, ao compor por
+          nível, deixar folhas profundas com representatividade ínfima.
+        * ``max_bin_repr`` — nenhuma quebra pode concentrar mais que essa fração da
+          carteira (força granularidade em segmentos dominantes).
+
+        Cada um é traduzido por folha para a fração local exigida pelo optbinning
+        (``repr_global · N / n_folha``).
+        """
         import io
+        import math
         import contextlib
         if subtree is not None and subtree not in self.segments:
             raise ValueError(f"Folha '{subtree}' não existe na árvore atual.")
@@ -2783,18 +2901,38 @@ class SequentialLGDSegmenter:
                 if sid in self.segments and not self.segments[sid]["is_leaf"]:
                     continue
                 sub = self.df[self.segments[sid]["mask"]]
-                if len(self._fit_frame(sub, min_bin_size)) < self.min_leaf_rows:
+                n_leaf = len(sub)
+                # concentrações GLOBAIS → fração local (da folha) p/ o optbinning
+                loc_min = min_bin_size
+                if min_leaf_repr is not None and n_leaf:
+                    loc_min = min_leaf_repr * len(self.df) / n_leaf
+                    if loc_min >= 0.5:        # folha pequena p/ 2 filhos ≥ min_leaf_repr
+                        continue              # → não divide (vira terminal)
+                # a concentração MÁXIMA por quebra pode exigir mais bins do que o
+                # split binário padrão. k bins cada ≤ loc_max precisa de k ≥ 1/loc_max;
+                # com monotonicidade no alvo contínuo o optbinning fica INFEASIBLE no
+                # limite exato, então pedimos 1 bin de folga (e limitamos a 6).
+                loc_max, mnb = None, max_n_bins
+                if max_bin_repr is not None and n_leaf:
+                    loc_max = min(0.999, max_bin_repr * len(self.df) / n_leaf)
+                    if loc_max <= loc_min:    # restrição de máx incompatível → ignora
+                        loc_max = None
+                    else:
+                        mnb = max(max_n_bins, min(math.ceil(1.0 / loc_max) + 1, 6))
+                        if loc_max * mnb < 1.0:   # inviável mesmo com 6 bins → ignora máx
+                            loc_max, mnb = None, max_n_bins
+                if len(self._fit_frame(sub, loc_min)) < self.min_leaf_rows:
                     continue
-                iv = self.variable_iv(sid, features=features, max_n_bins=max_n_bins,
-                                      min_bin_size=min_bin_size, with_psi=False)
+                iv = self.variable_iv(sid, features=features, max_n_bins=mnb,
+                                      min_bin_size=loc_min, with_psi=False)
                 if len(iv) == 0:
                     continue
                 top = iv.iloc[0]
                 if pd.isna(top["iv"]) or top["iv"] < min_iv:
                     continue
                 with contextlib.redirect_stdout(io.StringIO()):
-                    self.grow(top["variavel"], only_segments=[sid],
-                              max_n_bins=max_n_bins, min_bin_size=min_bin_size)
+                    self.grow(top["variavel"], only_segments=[sid], max_n_bins=mnb,
+                              min_bin_size=loc_min, max_bin_size=loc_max, relax_max=True)
         n_folhas = sum(s["is_leaf"] for s in self.segments.values())
         prof = max(s["depth"] for s in self.segments.values())
         if verbose:

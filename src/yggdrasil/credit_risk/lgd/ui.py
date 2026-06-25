@@ -139,6 +139,7 @@ class LGDSegmenterUI:
 
         self._build()
         self._on_mode_change(None)   # estado inicial de visibilidade dos controles
+        self._sync_autoconc_visibility()   # sliders de concentração do auto-fit
         self._refresh()              # _refresh_iv já mescla o PSI/CSI por variável
 
     # ==================================================================
@@ -152,7 +153,9 @@ class LGDSegmenterUI:
         # para mostrar o máximo possível do texto da opção selecionada
         self.dd_leaf = W.Dropdown(description="Folha", layout=W.Layout(width="100%"),
                                   style={"description_width": "52px"})
-        self.dd_feature = W.Dropdown(description="Variável", options=self.features,
+        # opções com o NOME DE EXIBIÇÃO (feature_labels) — valor = nome da coluna
+        feat_opts = [(self.seg.feature_labels.get(f, f), f) for f in self.features]
+        self.dd_feature = W.Dropdown(description="Variável", options=feat_opts,
                                      layout=W.Layout(width="100%"),
                                      style={"description_width": "62px"})
         self.tg_mode = W.ToggleButtons(options=["Ótimo", "Manual"], value="Ótimo",
@@ -214,11 +217,25 @@ class LGDSegmenterUI:
                               "Constrói uma árvore gulosa por IV até a profundidade escolhida", "magic")
         self.sl_depth = W.IntSlider(description="profundidade", min=1, max=5, value=3,
                                     layout=W.Layout(width="98%"), style=dstyle)
-        self.sl_autoconc = W.FloatSlider(description="concentr. mín.", min=0.01, max=0.30,
-                                         step=0.01, value=0.05, readout_format=".0%",
-                                         layout=W.Layout(width="98%"), style=dstyle)
-        self.sl_autoconc.tooltip = ("Concentração mínima das folhas terminais do auto-fit "
-                                    "(min_bin_size): cada folha terá ao menos esta fração da folha-mãe")
+        # concentração das folhas no auto-fit — REPRESENTATIVIDADE GLOBAL (% da
+        # carteira inteira). Cada uma só atua se o respectivo checkbox estiver marcado.
+        self.cb_autoconc_min = W.Checkbox(value=True, indent=False,
+                                          description="concentração mínima da folha (% carteira)",
+                                          layout=W.Layout(width="98%"))
+        self.sl_autoconc_min = W.FloatSlider(description="conc. mín.", min=0.005, max=0.25,
+                                             step=0.005, value=0.03, readout_format=".1%",
+                                             layout=W.Layout(width="98%"), style=dstyle)
+        self.sl_autoconc_min.tooltip = ("Cada folha terminal reterá ao menos esta fração da "
+                                        "CARTEIRA inteira (não da folha-mãe)")
+        self.cb_autoconc_max = W.Checkbox(value=False, indent=False,
+                                          description="concentração máxima por quebra (% carteira)",
+                                          layout=W.Layout(width="98%"))
+        self.sl_autoconc_max = W.FloatSlider(description="conc. máx.", min=0.20, max=0.90,
+                                             step=0.05, value=0.50, readout_format=".0%",
+                                             layout=W.Layout(width="98%"), style=dstyle)
+        self.sl_autoconc_max.tooltip = ("Nenhuma quebra concentrará mais que esta fração da "
+                                        "carteira (força granularidade em segmentos dominantes; "
+                                        "amplia o nº de bins automaticamente)")
         self.tx_experiment = W.Text(description="experimento", placeholder="opcional (usa o do notebook)",
                                     layout=full, style=dstyle)
         self.tx_runname = W.Text(description="run", placeholder="opcional",
@@ -341,6 +358,8 @@ class LGDSegmenterUI:
         self.dd_feature.observe(self._on_mode_change, names="value")
         self.cb_minbin.observe(lambda _: self._sync_optbin_visibility(), names="value")
         self.cb_maxbin.observe(lambda _: self._sync_optbin_visibility(), names="value")
+        self.cb_autoconc_min.observe(lambda _: self._sync_autoconc_visibility(), names="value")
+        self.cb_autoconc_max.observe(lambda _: self._sync_autoconc_visibility(), names="value")
 
         # HTML widgets (.value substitui o conteúdo de forma confiável em qualquer
         # frontend — Jupyter e Databricks — evitando a duplicação que o
@@ -433,11 +452,14 @@ class LGDSegmenterUI:
             tree_legend, tree_scroll,
             W.HTML("<div class='lgdui-h' style='margin-top:10px'>Auto-fit</div>"),
             W.HTML("<div class='lgdui-legend'>Constrói a árvore gulosa por IV até a "
-                   "profundidade escolhida. <b>Concentr. mín.</b> = fração mínima de cada folha "
-                   "terminal (folhas menores são evitadas). Com uma <b>folha selecionada</b> "
-                   "(≠ raiz), cresce <b>apenas aquela folha</b>; na raiz, reconstrói tudo.</div>"),
+                   "profundidade escolhida. As concentrações são <b>% da carteira inteira</b>: "
+                   "<b>mín.</b> evita folhas terminais pequenas (folhas que não geram dois "
+                   "filhos ≥ mín. viram terminais); <b>máx.</b> impede que uma quebra concentre "
+                   "demais. Com uma <b>folha selecionada</b> (≠ raiz), cresce <b>apenas aquela "
+                   "folha</b>; na raiz, reconstrói tudo.</div>"),
             self.sl_depth,
-            self.sl_autoconc,
+            self.cb_autoconc_min, self.sl_autoconc_min,
+            self.cb_autoconc_max, self.sl_autoconc_max,
             W.HBox([self.btn_autofit, self.btn_reset]),
         ])
         card_tree.add_class("lgdui-card")
@@ -791,12 +813,29 @@ class LGDSegmenterUI:
             pass
         return f"<div style='display:flex;align-items:stretch'>{''.join(cells)}</div>"
 
+    def _min_nota_fn(self, filhos, nota_map):
+        """min_nota(sid) = menor nota do ramo — ordena os filhos esquerda→direita
+        de forma consistente com a numeração (nota_lgd = posição na árvore)."""
+        cache: dict = {}
+
+        def min_nota(sid):
+            if sid not in cache:
+                if self.seg.segments[sid]["is_leaf"]:
+                    cache[sid] = nota_map.get(sid, 10 ** 9)
+                else:
+                    cache[sid] = min((min_nota(c) for c in filhos.get(sid, [])),
+                                     default=10 ** 9)
+            return cache[sid]
+
+        return min_nota
+
     def _tree_html(self):
         seg = self.seg
         filhos: dict = {}
         for sid, s in seg.segments.items():
             filhos.setdefault(s["parent"], []).append(sid)
         nota_map, _ = seg._grade_map()
+        min_nota = self._min_nota_fn(filhos, nota_map)
         lo, hi = self._leaf_lgds()
         n_total = len(self.df)
         rows = []
@@ -829,13 +868,11 @@ class LGDSegmenterUI:
                              f"{ab} {p:.2f}</span>")
             return (" · PSI " + " ".join(parts)) if parts else ""
 
-        def lgd_of(sid):
-            sub = self.df[seg.segments[sid]["mask"]]
-            return sub[self.target].mean() if len(sub) else float("inf")
-
         def rotulo(sid):
             s = seg.segments[sid]
             return "TODA A CARTEIRA" if s["parent"] is None else seg._descrever([s["conditions"][-1]])
+
+        mono = "white-space:pre;font-family:ui-monospace,Menlo,monospace"
 
         def rec(sid, prefix, is_last, is_root):
             n, rep = stat(sid)
@@ -845,20 +882,30 @@ class LGDSegmenterUI:
             color = self._color(self._node_lgd(sid, ref), lo, hi)
             sw = (f"<span style='display:inline-block;width:11px;height:11px;background:{color};"
                   f"border-radius:2px;vertical-align:middle;margin:0 5px'></span>")
+            is_sel = (s["is_leaf"] and sid == self.dd_leaf.value)
             tags = ""
             if s["is_leaf"]:
                 tags += f" · <b>folha {nota_map.get(sid, '?')}</b>"
                 if sid in self.locked:
                     tags += " 🔒"
-            sel = ("background:#eef1f5;border-radius:5px;box-shadow:inset 2px 0 0 #3b4a63;"
-                   if (s["is_leaf"] and sid == self.dd_leaf.value) else "")
+                if is_sel:
+                    tags += (" <span style='color:#e8870b;font-weight:700'>"
+                             "◀ selecionada</span>")
+            # continuação do prefixo (mantém os traços verticais alinhados na 2ª linha)
+            cont = "" if is_root else prefix + ("   " if is_last else "│  ")
             psi_html = psi_str(sid) if s["is_leaf"] else ""
-            rows.append(
-                f"<div style='{sel}white-space:pre;font-family:ui-monospace,Menlo,monospace;"
-                f"font-size:12px;padding:1px 2px'>{prefix}{conn}{sw}{rotulo(sid)}"
-                f"<span style='color:#8a97a3'>  (n={n}, {rep:.1f}% · {lgd_str(sid)}"
-                f"{psi_html})</span>{tags}</div>")
-            ch = sorted(filhos.get(sid, []), key=lgd_of)
+            # linha 1 — rótulo (condição do nó) + nº da folha
+            nome_cor = "#e8870b" if is_sel else "#15324a"
+            linha1 = (f"<div style='{mono};font-size:12px;padding:1px 2px 0'>"
+                      f"{prefix}{conn}{sw}<b style='color:{nome_cor}'>{rotulo(sid)}</b>{tags}</div>")
+            # linha 2 — métricas EMBAIXO: volumetria, representatividade, LGD e PSI
+            vol = f"{n:,}".replace(",", ".")        # separador de milhar pt-BR
+            linha2 = (f"<div style='{mono};font-size:11px;color:#7c8893;padding:0 2px 3px'>"
+                      f"{cont}    vol {vol} · repr. {rep:.1f}% · {lgd_str(sid)}{psi_html}</div>")
+            wrap = ("background:#fff5e6;border-radius:5px;box-shadow:inset 3px 0 0 #e8870b"
+                    if is_sel else "")
+            rows.append(f"<div style='{wrap}'>{linha1}{linha2}</div>")
+            ch = sorted(filhos.get(sid, []), key=min_nota)
             for i, c in enumerate(ch):
                 child_prefix = "" if is_root else prefix + ("   " if is_last else "│  ")
                 rec(c, child_prefix, i == len(ch) - 1, False)
@@ -1003,14 +1050,16 @@ class LGDSegmenterUI:
         self.out_metrics.value = self._styler_html(sty)
 
     def _ordered_leaf_options(self):
-        """Opções do dropdown na MESMA ordem da árvore (DFS, filhos por LGD),
-        com indentação por profundidade e a nota — fácil de localizar."""
+        """Opções do dropdown na MESMA ordem da árvore (esquerda→direita por nota),
+        com a DESCRIÇÃO COMPLETA da folha (todas as condições) — sem truncar, para
+        identificar a folha por inteiro."""
         seg = self.seg
         filhos: dict = {}
         for sid, s in seg.segments.items():
             filhos.setdefault(s["parent"], []).append(sid)
         nota_map, _ = seg._grade_map()
         n_total = len(self.df)
+        min_nota = self._min_nota_fn(filhos, nota_map)
 
         def lgd_of(sid):
             sub = self.df[seg.segments[sid]["mask"]]
@@ -1018,23 +1067,20 @@ class LGDSegmenterUI:
 
         opts = []
 
-        def rec(sid, depth):
+        def rec(sid):
             s = seg.segments[sid]
             if s["is_leaf"]:
                 own = ("TODA A CARTEIRA" if s["parent"] is None
-                       else seg._descrever([s["conditions"][-1]]))
-                if len(own) > 46:
-                    own = own[:43] + "…"
+                       else seg._descrever(s["conditions"]))   # caminho COMPLETO, sem cortar
                 rep = 100 * s["mask"].sum() / n_total
-                indent = "· " * depth
                 lock = "🔒 " if sid in self.locked else ""
                 nota = nota_map.get(sid, "?")
-                label = f"[{nota:>2}] {indent}{lock}{own}  (LGD {lgd_of(sid):.3f} · {rep:.0f}%)"
+                label = f"[{nota:>2}] {lock}{own}  (LGD {lgd_of(sid):.3f} · {rep:.0f}%)"
                 opts.append((label, sid))
-            for c in sorted(filhos.get(sid, []), key=lgd_of):
-                rec(c, depth + 1)
+            for c in sorted(filhos.get(sid, []), key=min_nota):   # esquerda→direita
+                rec(c)
 
-        rec("root", 0)
+        rec("root")
         return opts
 
     def _refresh(self):
@@ -1096,6 +1142,11 @@ class LGDSegmenterUI:
         self.cb_maxbin.layout.display = "" if otimo else "none"
         self.sl_minbin.layout.display = "" if (otimo and self.cb_minbin.value) else "none"
         self.sl_maxbin.layout.display = "" if (otimo and self.cb_maxbin.value) else "none"
+
+    def _sync_autoconc_visibility(self):
+        """Cada slider de concentração do auto-fit só aparece com o checkbox marcado."""
+        self.sl_autoconc_min.layout.display = "" if self.cb_autoconc_min.value else "none"
+        self.sl_autoconc_max.layout.display = "" if self.cb_autoconc_max.value else "none"
 
     def _optbin_extra(self):
         """kwargs de tamanho de bin (fração da folha) p/ o binning ótimo, conforme
@@ -1237,17 +1288,23 @@ class LGDSegmenterUI:
         # na raiz (ou sem seleção) reconstrói a árvore inteira.
         so_folha = sid is not None and sid != "root" and sid in self.seg.segments
         depth = int(self.sl_depth.value)
-        conc = float(self.sl_autoconc.value)     # concentração mín. das folhas terminais
+        # concentrações GLOBAIS (% da carteira), cada uma só se o checkbox marcado
+        cmin = float(self.sl_autoconc_min.value) if self.cb_autoconc_min.value else None
+        cmax = float(self.sl_autoconc_max.value) if self.cb_autoconc_max.value else None
         with self.out_log:
             self.out_log.clear_output(wait=True)
             alvo = self._leaf_label(sid) if so_folha else "TODA A CARTEIRA"
-            print(f"Auto-fit em '{alvo}' (profundidade ≤ {depth}, concentração ≥ {conc:.0%})…")
+            lim = []
+            if cmin is not None:
+                lim.append(f"folha ≥ {cmin:.1%}")
+            if cmax is not None:
+                lim.append(f"quebra ≤ {cmax:.0%}")
+            slim = (", " + " · ".join(lim)) if lim else ""
+            print(f"Auto-fit em '{alvo}' (profundidade ≤ {depth}{slim})…")
             self._checkpoint()
-            if so_folha:
-                self.seg.fit_auto(max_depth=depth, min_bin_size=conc,
-                                  subtree=sid, from_scratch=False)
-            else:
-                self.seg.fit_auto(max_depth=depth, min_bin_size=conc)
+            self.seg.fit_auto(max_depth=depth, min_leaf_repr=cmin, max_bin_repr=cmax,
+                              subtree=sid if so_folha else None,
+                              from_scratch=not so_folha)
         if so_folha:
             self.locked &= set(self.seg.segments)   # só folhas removidas saem
         else:
@@ -2044,7 +2101,8 @@ class LGDSegmenterUI:
         path = self.tx_img_path.value.strip() or None
         try:
             # arquivo salvo em tamanho real; exibição escalada para caber
-            fig = self.seg.plot_tree(save_path=path)   # repr. % + LGD (DES)
+            fig = self.seg.plot_tree(save_path=path,    # repr. % + LGD (DES)
+                                     highlight=self.dd_leaf.value)   # destaca a folha selecionada
             self.out_plot.value = self._fig_html(fig, border=True)
         except Exception as e:
             self.out_plot.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao "
@@ -2061,7 +2119,8 @@ class LGDSegmenterUI:
     def _on_tree_preview(self, _):
         """Preview da árvore como imagem, na própria aba Construir (sem exportar)."""
         try:
-            self.out_tree_img.value = self._fig_html(self.seg.plot_tree(), border=True)
+            self.out_tree_img.value = self._fig_html(
+                self.seg.plot_tree(highlight=self.dd_leaf.value), border=True)
         except Exception as e:
             self.out_tree_img.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao "
                                        f"desenhar a árvore: {type(e).__name__}: {e}</div>")

@@ -59,6 +59,85 @@ def test_fit_auto_e_predict(seg):
     assert pred["lgd_regua"].notna().all()
 
 
+def test_fit_auto_concentracao_global():
+    """min_leaf_repr/max_bin_repr são REPRESENTATIVIDADE GLOBAL (% da carteira).
+
+    Regressão: antes a concentração mínima usava o min_bin_size do optbinning
+    (relativo à folha-mãe) e, ao compor por nível, deixava folhas terminais com
+    representatividade ínfima.
+    """
+    df = _amostra(n=5000, seed=1)
+    N = len(df)
+
+    def reprs(seg):
+        return [s["mask"].sum() / N for s in seg.segments.values() if s["is_leaf"]]
+
+    # concentração MÍNIMA global de 10%: nenhuma folha abaixo de ~10%
+    s_min = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                   ref_sample="DES", verbose=False)
+    s_min.fit_auto(max_depth=5, min_iv=0.0, min_leaf_repr=0.10, verbose=False)
+    assert min(reprs(s_min)) >= 0.07            # folha terminal respeita o piso global
+
+    # o comportamento antigo (min_bin_size pequeno) gerava folhas bem menores
+    s_old = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                   ref_sample="DES", verbose=False)
+    s_old.fit_auto(max_depth=5, min_iv=0.0, min_bin_size=0.02, verbose=False)
+    assert min(reprs(s_min)) > min(reprs(s_old))
+
+    # concentração MÁXIMA global de 25% (variável CONTÍNUA — divisível): divide de
+    # forma robusta (optbinning fica INFEASIBLE no limite exato → retry com +bins) e
+    # nenhuma folha excede o teto. Para categóricas o teto é best-effort (uma
+    # categoria dominante indivisível não pode ser reduzida).
+    rng = np.random.default_rng(7)
+    nc = 5000
+    x = rng.normal(0, 1, nc)
+    dfc = pd.DataFrame({"x": x, "amostra": "DES",
+                        "lgd": np.clip(0.3 + 0.2 * x + rng.normal(0, 0.05, nc), 0, 1)})
+    s_max = SequentialLGDSegmenter(dfc, target="lgd", sample_col="amostra",
+                                   ref_sample="DES", verbose=False)
+    s_max.fit_auto(max_depth=4, min_iv=0.0, min_leaf_repr=0.04,
+                   max_bin_repr=0.25, verbose=False)
+    rs = [s["mask"].sum() / nc for s in s_max.segments.values() if s["is_leaf"]]
+    assert len(rs) > 1                          # a restrição não impede a divisão
+    assert max(rs) <= 0.25 + 0.03               # respeita o teto de concentração
+
+
+def test_notas_ordenadas_esquerda_para_direita():
+    """nota_lgd = POSIÇÃO esquerda→direita na árvore (1, 2, 3, …), mesmo quando as
+    subárvores se intercalam em LGD. Antes a nota era o rank global de LGD, então
+    lendo a árvore os números saíam fora de ordem (ex.: 1, 3, 2, 4)."""
+    import re
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib.patches import FancyBboxPatch  # noqa: F401
+
+    rng = np.random.default_rng(11)
+    n = 8000
+    f1 = rng.uniform(0, 1, n)
+    f2 = rng.uniform(0, 1, n)
+    # LGD desenhado p/ as subárvores de f1 se intercalarem em f2: 0.10 / 0.50 / 0.30 / 0.70
+    lgd = np.where(f1 < 0.5, np.where(f2 < 0.5, 0.10, 0.50),
+                   np.where(f2 < 0.5, 0.30, 0.70))
+    df = pd.DataFrame({"lgd": np.clip(lgd + rng.normal(0, 0.02, n), 0, 1),
+                       "amostra": "DES", "f1": f1, "f2": f2})
+    seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
+                                 ref_sample="DES", verbose=False)
+    seg.grow("f1", splits=[0.5])
+    seg.grow("f2", splits=[0.5])
+
+    lv = seg.leaves().set_index("nota_lgd")
+    # a folha 2 (f1≤0.5 & f2>0.5) tem LGD ~0.50, maior que a folha 3 (~0.30):
+    # prova que a numeração é por POSIÇÃO, não por LGD global
+    assert lv.loc[2, "lgd_medio"] > lv.loc[3, "lgd_medio"]
+
+    # no plot_tree as notas leem 1, 2, 3, 4 da esquerda para a direita
+    fig = seg.plot_tree()
+    ordem = [g for _, g in sorted(
+        (t.get_position()[0], int(re.search(r"folha (\d+)", t.get_text()).group(1)))
+        for t in fig.axes[0].texts if "folha" in t.get_text())]
+    assert ordem == [1, 2, 3, 4]
+
+
 def test_faltantes_viram_bin_propria():
     df = _amostra(com_na=True)
     seg = SequentialLGDSegmenter(df, target="lgd", sample_col="amostra",
