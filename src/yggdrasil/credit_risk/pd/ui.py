@@ -156,7 +156,9 @@ class PDSegmenterUI:
         # para mostrar o máximo possível do texto da opção selecionada
         self.dd_leaf = W.Dropdown(description="Folha", layout=W.Layout(width="100%"),
                                   style={"description_width": "52px"})
-        self.dd_feature = W.Dropdown(description="Variável", options=self.features,
+        # opções com o NOME DE EXIBIÇÃO (feature_labels) — valor = nome da coluna
+        feat_opts = [(self.seg.feature_labels.get(f, f), f) for f in self.features]
+        self.dd_feature = W.Dropdown(description="Variável", options=feat_opts,
                                      layout=W.Layout(width="100%"),
                                      style={"description_width": "62px"})
         self.tg_mode = W.ToggleButtons(options=["Ótimo", "Manual"], value="Ótimo",
@@ -828,12 +830,29 @@ class PDSegmenterUI:
             pass
         return f"<div style='display:flex;align-items:stretch'>{''.join(cells)}</div>"
 
+    def _min_nota_fn(self, filhos, nota_map):
+        """min_nota(sid) = menor nota do ramo — ordena os filhos esquerda→direita
+        de forma consistente com a numeração (nota_pd = posição na árvore)."""
+        cache: dict = {}
+
+        def min_nota(sid):
+            if sid not in cache:
+                if self.seg.segments[sid]["is_leaf"]:
+                    cache[sid] = nota_map.get(sid, 10 ** 9)
+                else:
+                    cache[sid] = min((min_nota(c) for c in filhos.get(sid, [])),
+                                     default=10 ** 9)
+            return cache[sid]
+
+        return min_nota
+
     def _tree_html(self):
         seg = self.seg
         filhos: dict = {}
         for sid, s in seg.segments.items():
             filhos.setdefault(s["parent"], []).append(sid)
         nota_map, _ = seg._grade_map()
+        min_nota = self._min_nota_fn(filhos, nota_map)
         lo, hi = self._leaf_pds()
         n_total = len(self.df)
         rows = []
@@ -844,11 +863,11 @@ class PDSegmenterUI:
 
         def pd_str(sid):
             if self.sample_col is not None:
-                parts = [f"{self.ref_sample} {self._node_pd(sid, self.ref_sample):.3f}"]
+                parts = [f"{self.ref_sample} {self._node_pd(sid, self.ref_sample) * 100:.2f}%"]
                 for a in self._tree_nonref:          # só amostras COM alvo (sem ESTABILIDADE)
-                    parts.append(f"{a} {self._node_pd(sid, a):.3f}")
+                    parts.append(f"{a} {self._node_pd(sid, a) * 100:.2f}%")
                 return "PD " + " ".join(parts)
-            return f"PD {self._node_pd(sid):.3f}"
+            return f"PD {self._node_pd(sid) * 100:.2f}%"
 
         psi_hex = {"green": "#1aa64b", "yellow": "#caa000", "red": "#d6453e"}
 
@@ -865,13 +884,11 @@ class PDSegmenterUI:
                              f"{ab} {p:.2f}</span>")
             return (" · PSI " + " ".join(parts)) if parts else ""
 
-        def pd_of(sid):
-            sub = self.df[seg.segments[sid]["mask"]]
-            return sub[self.target].mean() if len(sub) else float("inf")
-
         def rotulo(sid):
             s = seg.segments[sid]
             return "TODA A CARTEIRA" if s["parent"] is None else seg._descrever([s["conditions"][-1]])
+
+        mono = "white-space:pre;font-family:ui-monospace,Menlo,monospace"
 
         def rec(sid, prefix, is_last, is_root):
             n, rep = stat(sid)
@@ -881,20 +898,30 @@ class PDSegmenterUI:
             color = self._color(self._node_pd(sid, ref), lo, hi)
             sw = (f"<span style='display:inline-block;width:11px;height:11px;background:{color};"
                   f"border-radius:2px;vertical-align:middle;margin:0 5px'></span>")
+            is_sel = (s["is_leaf"] and sid == self.dd_leaf.value)
             tags = ""
             if s["is_leaf"]:
                 tags += f" · <b>folha {nota_map.get(sid, '?')}</b>"
                 if sid in self.locked:
                     tags += " 🔒"
-            sel = ("background:#eef1f5;border-radius:5px;box-shadow:inset 2px 0 0 #3b4a63;"
-                   if (s["is_leaf"] and sid == self.dd_leaf.value) else "")
+                if is_sel:
+                    tags += (" <span style='color:#e8870b;font-weight:700'>"
+                             "◀ selecionada</span>")
+            # continuação do prefixo (mantém os traços verticais alinhados na 2ª linha)
+            cont = "" if is_root else prefix + ("   " if is_last else "│  ")
             psi_html = psi_str(sid) if s["is_leaf"] else ""
-            rows.append(
-                f"<div style='{sel}white-space:pre;font-family:ui-monospace,Menlo,monospace;"
-                f"font-size:12px;padding:1px 2px'>{prefix}{conn}{sw}{rotulo(sid)}"
-                f"<span style='color:#8a97a3'>  (n={n}, {rep:.1f}% · {pd_str(sid)}"
-                f"{psi_html})</span>{tags}</div>")
-            ch = sorted(filhos.get(sid, []), key=pd_of)
+            # linha 1 — rótulo (condição do nó) + nº da folha
+            nome_cor = "#e8870b" if is_sel else "#15324a"
+            linha1 = (f"<div style='{mono};font-size:12px;padding:1px 2px 0'>"
+                      f"{prefix}{conn}{sw}<b style='color:{nome_cor}'>{rotulo(sid)}</b>{tags}</div>")
+            # linha 2 — métricas EMBAIXO: volumetria, representatividade, PD e PSI
+            vol = f"{n:,}".replace(",", ".")        # separador de milhar pt-BR
+            linha2 = (f"<div style='{mono};font-size:11px;color:#7c8893;padding:0 2px 3px'>"
+                      f"{cont}    vol {vol} · repr. {rep:.1f}% · {pd_str(sid)}{psi_html}</div>")
+            wrap = ("background:#fff5e6;border-radius:5px;box-shadow:inset 3px 0 0 #e8870b"
+                    if is_sel else "")
+            rows.append(f"<div style='{wrap}'>{linha1}{linha2}</div>")
+            ch = sorted(filhos.get(sid, []), key=min_nota)
             for i, c in enumerate(ch):
                 child_prefix = "" if is_root else prefix + ("   " if is_last else "│  ")
                 rec(c, child_prefix, i == len(ch) - 1, False)
@@ -922,9 +949,11 @@ class PDSegmenterUI:
             sty = sty.map(psi_bg, subset=[c])
         if "p_vs_prox" in lv.columns:
             sty = sty.map(p_bg, subset=["p_vs_prox"])
-        fmt = {"repr_%": "{:.1f}", "pd_medio": "{:.4f}"}
+        fmt = {"repr_%": "{:.1f}"}
         for c in lv.columns:
-            if c.startswith("psi_") or c.startswith("pd_"):
+            if c.startswith("pd_"):         # PD em % (coerente com a árvore)
+                fmt[c] = "{:.2%}"
+            elif c.startswith("psi_"):      # PSI é adimensional → decimal
                 fmt[c] = "{:.4f}"
         if "p_vs_prox" in lv.columns:
             fmt["p_vs_prox"] = "{:.3f}"
@@ -967,9 +996,9 @@ class PDSegmenterUI:
                  ("Repr.", f"{rep:.1f}%", None)]
         if self.sample_col is not None:
             cells.append((f"PD {self.ref_sample}",
-                          f"{self._node_pd(sid, self.ref_sample):.3f}", None))
+                          f"{self._node_pd(sid, self.ref_sample) * 100:.2f}%", None))
             for a in self._tree_nonref:
-                cells.append((f"PD {a}", f"{self._node_pd(sid, a):.3f}", None))
+                cells.append((f"PD {a}", f"{self._node_pd(sid, a) * 100:.2f}%", None))
             for a in self._nonref:
                 p = self._leaf_psi(sid, a)
                 val = "—" if pd.isna(p) else f"{p:.3f}"
@@ -977,7 +1006,7 @@ class PDSegmenterUI:
                 ab = "ESTAB" if a == "ESTABILIDADE" else a
                 cells.append((f"PSI {ab}", val, col))
         else:
-            cells.append(("PD", f"{self._node_pd(sid):.3f}", None))
+            cells.append(("PD", f"{self._node_pd(sid) * 100:.2f}%", None))
         cells.append(("Folha", str(nota), None))
 
         def cell(k, v, c):
@@ -1045,14 +1074,16 @@ class PDSegmenterUI:
         self.out_metrics.value = self._styler_html(sty)
 
     def _ordered_leaf_options(self):
-        """Opções do dropdown na MESMA ordem da árvore (DFS, filhos por PD),
-        com indentação por profundidade e a nota — fácil de localizar."""
+        """Opções do dropdown na MESMA ordem da árvore (esquerda→direita por nota),
+        com a DESCRIÇÃO COMPLETA da folha (todas as condições) — sem truncar, para
+        identificar a folha por inteiro."""
         seg = self.seg
         filhos: dict = {}
         for sid, s in seg.segments.items():
             filhos.setdefault(s["parent"], []).append(sid)
         nota_map, _ = seg._grade_map()
         n_total = len(self.df)
+        min_nota = self._min_nota_fn(filhos, nota_map)
 
         def pd_of(sid):
             sub = self.df[seg.segments[sid]["mask"]]
@@ -1060,23 +1091,20 @@ class PDSegmenterUI:
 
         opts = []
 
-        def rec(sid, depth):
+        def rec(sid):
             s = seg.segments[sid]
             if s["is_leaf"]:
                 own = ("TODA A CARTEIRA" if s["parent"] is None
-                       else seg._descrever([s["conditions"][-1]]))
-                if len(own) > 46:
-                    own = own[:43] + "…"
+                       else seg._descrever(s["conditions"]))   # caminho COMPLETO, sem cortar
                 rep = 100 * s["mask"].sum() / n_total
-                indent = "· " * depth
                 lock = "🔒 " if sid in self.locked else ""
                 nota = nota_map.get(sid, "?")
-                label = f"[{nota:>2}] {indent}{lock}{own}  (PD {pd_of(sid):.3f} · {rep:.0f}%)"
+                label = f"[{nota:>2}] {lock}{own}  (PD {pd_of(sid) * 100:.2f}% · {rep:.0f}%)"
                 opts.append((label, sid))
-            for c in sorted(filhos.get(sid, []), key=pd_of):
-                rec(c, depth + 1)
+            for c in sorted(filhos.get(sid, []), key=min_nota):   # esquerda→direita
+                rec(c)
 
-        rec("root", 0)
+        rec("root")
         return opts
 
     def _refresh(self):
@@ -2088,7 +2116,8 @@ class PDSegmenterUI:
     def _on_plot(self, _):
         path = self.tx_img_path.value.strip() or None
         try:
-            fig = self.seg.plot_tree(save_path=path)   # repr. % + PD (DES)
+            fig = self.seg.plot_tree(save_path=path,    # repr. % + PD (DES)
+                                     highlight=self.dd_leaf.value)   # destaca a folha selecionada
             self.out_plot.value = self._fig_html(fig, border=True)
         except Exception as e:
             self.out_plot.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao "
@@ -2105,7 +2134,8 @@ class PDSegmenterUI:
     def _on_tree_preview(self, _):
         """Preview da árvore como imagem, na própria aba Construir (sem exportar)."""
         try:
-            self.out_tree_img.value = self._fig_html(self.seg.plot_tree(), border=True)
+            self.out_tree_img.value = self._fig_html(
+                self.seg.plot_tree(highlight=self.dd_leaf.value), border=True)
         except Exception as e:
             self.out_tree_img.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao "
                                        f"desenhar a árvore: {type(e).__name__}: {e}</div>")

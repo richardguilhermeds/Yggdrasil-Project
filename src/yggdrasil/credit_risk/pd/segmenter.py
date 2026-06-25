@@ -838,8 +838,61 @@ class SequentialPDSegmenter:
         return " e ".join(partes)
 
     # ------------------------------------------------------------------
+    # Ordenação ESQUERDA→DIREITA das folhas (posição na árvore construída).
+    #   A nota_pd passa a ser essa posição: 1, 2, 3, … da esquerda p/ a direita.
+    #   Em cada nó os filhos são ordenados pela MENOR PD (DES) de folha do ramo
+    #   (asc. = ramo de menor risco à esquerda), espelhando o layout de plot_tree.
+    #   Para um split único, posição = ordem de PD (idêntico ao comportamento
+    #   anterior); em árvores profundas, as notas leem 1, 2, 3 de fato.
+    # ------------------------------------------------------------------
+    def _node_pd(self, sid: str) -> float:
+        """PD média do nó na amostra de referência (DES), com fallback p/ todas."""
+        sub = self.df[self.segments[sid]["mask"]]
+        if self.sample_col is not None:
+            sr = sub.loc[sub[self.sample_col] == self.ref_sample, self.target]
+            if len(sr):
+                return float(sr.mean())
+        return float(sub[self.target].mean()) if len(sub) else float("nan")
+
+    def _leaf_order(self, ascending: bool = True) -> list:
+        """sids das folhas na ordem esquerda→direita da árvore (ver bloco acima)."""
+        filhos: dict = {}
+        for sid, s in self.segments.items():
+            filhos.setdefault(s["parent"], []).append(sid)
+        INF = float("inf")
+        leaf_pd = {sid: self._node_pd(sid)
+                   for sid, s in self.segments.items() if s["is_leaf"]}
+        _submin: dict = {}
+
+        def submin(sid):
+            if sid not in _submin:
+                if self.segments[sid]["is_leaf"]:
+                    v = leaf_pd.get(sid, INF)
+                    _submin[sid] = INF if (v is None or pd.isna(v)) else v
+                else:
+                    _submin[sid] = min((submin(c) for c in filhos.get(sid, [])),
+                                       default=INF)
+            return _submin[sid]
+
+        sgn = 1 if ascending else -1
+        order: list = []
+
+        def dfs(sid):
+            if self.segments[sid]["is_leaf"]:
+                order.append(sid)
+                return
+            for c in sorted(filhos.get(sid, []), key=lambda c: (sgn * submin(c), str(c))):
+                dfs(c)
+
+        dfs("root")
+        for sid, s in self.segments.items():
+            if s["is_leaf"] and sid not in order:
+                order.append(sid)
+        return order
+
+    # ------------------------------------------------------------------
     # LEAVES: segmentos-folha finais, com nota de PD e descrição
-    #   nota_pd: 1..N ordenada por PD (1 = menor PD por padrão)
+    #   nota_pd: 1..N pela POSIÇÃO esquerda→direita na árvore
     #   with_psi:  adiciona a contribuição de PSI de cada folha por amostra
     #              (psi_<amostra>), tendo a referência (DES) como base
     #   with_test: adiciona p_vs_prox = p-valor do teste de PD entre a folha e a
@@ -875,9 +928,12 @@ class SequentialPDSegmenter:
                     s_am = sub.loc[sub[self.sample_col] == amostra, self.target]
                     row[f"pd_{amostra}"] = round(s_am.mean(), 4) if len(s_am) else np.nan
             linhas.append(row)
+        # nota_pd = POSIÇÃO esquerda→direita na árvore (ver _leaf_order); assim os
+        # números sempre leem 1, 2, 3 da esquerda p/ a direita no plot_tree.
+        ordem = {sid: i for i, sid in enumerate(self._leaf_order(ascending=ascending))}
         out = (
             pd.DataFrame(linhas)
-            .sort_values("pd_medio", ascending=ascending)
+            .sort_values("segmento", key=lambda s: s.map(ordem), kind="stable")
             .reset_index(drop=True)
         )
         out.insert(1, "nota_pd", range(1, len(out) + 1))
@@ -1003,9 +1059,18 @@ class SequentialPDSegmenter:
                 return "TODA A CARTEIRA"
             return self._descrever([seg["conditions"][-1]])
 
-        def pd_de(sid):
-            sub = self.df[self.segments[sid]["mask"]]
-            return sub[self.target].mean() if len(sub) else float("inf")
+        # ordena os filhos pela MENOR nota do ramo (esquerda→direita), igual ao
+        # plot_tree — assim o texto lê as folhas 1, 2, 3 na mesma ordem
+        _min_nota: dict = {}
+
+        def min_nota(sid):
+            if sid not in _min_nota:
+                if self.segments[sid]["is_leaf"]:
+                    _min_nota[sid] = nota_map.get(sid, 10 ** 9)
+                else:
+                    _min_nota[sid] = min((min_nota(c) for c in filhos.get(sid, [])),
+                                         default=10 ** 9)
+            return _min_nota[sid]
 
         def rec(sid, prefix, is_last, is_root=False):
             n, rep, pdv = stats(sid)
@@ -1014,7 +1079,7 @@ class SequentialPDSegmenter:
             tag = f"  [nota {nota_map.get(sid, '?')}]" if seg["is_leaf"] else ""
             linhas.append(f"{prefix}{conn}{rotulo(sid)}  "
                           f"(n={n}, {rep:.1f}%, PD={pdv:.4f}){tag}")
-            ch = sorted(filhos.get(sid, []), key=pd_de, reverse=not ascending)
+            ch = sorted(filhos.get(sid, []), key=min_nota)
             child_prefix = "" if is_root else prefix + ("   " if is_last else "│  ")
             for i, c in enumerate(ch):
                 rec(c, child_prefix, i == len(ch) - 1)
@@ -1052,7 +1117,8 @@ class SequentialPDSegmenter:
     # ------------------------------------------------------------------
     def plot_tree(self, ascending: bool = True, figsize=None, cmap: str = "RdYlGn_r",
                   show_samples: bool = False, title: str | None = "Segmentação de PD",
-                  save_path: str | None = None, dpi: int = 150, ax=None):
+                  save_path: str | None = None, dpi: int = 150, ax=None,
+                  highlight: str | None = None):
         try:
             import textwrap
 
@@ -1148,30 +1214,48 @@ class SequentialPDSegmenter:
                 ax.plot([x, cx], [y - bh, cy + bh], color="#9aa7b2", lw=1.1, zorder=1)
 
         base_fs = 8.6
-        node_texts = []           # textos dos nós, para ajustar a fonte à caixa
+        fit_items = []            # (texto, meia-largura, meia-altura) p/ ajuste de fonte
         for sid, (x, y) in pos.items():
             _, rep, pdv = stats(sid)
             color = cmap_obj(norm(pdv)) if not pd.isna(pdv) else (0.88, 0.88, 0.88, 1.0)
             lum = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
             txt_color = "#15324a" if lum > 0.6 else "#ffffff"
+            is_leaf = self.segments[sid]["is_leaf"]
+            selecionada = (highlight is not None and sid == highlight)
+            # folha selecionada: contorno destacado (âmbar grosso) + leve glow
+            if selecionada:
+                ax.add_patch(FancyBboxPatch(
+                    (x - bw - 0.06, y - bh - 0.06), 2 * bw + 0.12, 2 * bh + 0.12,
+                    boxstyle="round,pad=0.02,rounding_size=0.16",
+                    linewidth=0, facecolor="#f5a623", alpha=0.30, zorder=1.5))
             ax.add_patch(FancyBboxPatch(
                 (x - bw, y - bh), 2 * bw, 2 * bh,
                 boxstyle="round,pad=0.02,rounding_size=0.14",
-                linewidth=1.3, edgecolor="#33424f", facecolor=color, zorder=2))
-            is_leaf = self.segments[sid]["is_leaf"]
-            cab = "\n".join(textwrap.wrap(rotulo(sid), 19)[:3])
-            # apenas representatividade (%) e PD média (DES); nota nas folhas
-            pd_txt = f"PD {pdv:.3f}" if not pd.isna(pdv) else "PD —"
-            if is_leaf:
-                pd_txt += f"  ·  folha {nota_map.get(sid, '?')}"
-            linhas = [cab, f"repr. {rep:.1f}%", pd_txt]
+                linewidth=(3.2 if selecionada else 1.3),
+                edgecolor=("#e8870b" if selecionada else "#33424f"),
+                facecolor=color, zorder=2))
+            # 1) QUEBRA (condição do nó) em NEGRITO, no topo da caixa
+            cab = "\n".join(textwrap.wrap(rotulo(sid), 18)[:3])
+            t_split = ax.text(x, y + 0.34 * bh, cab, ha="center", va="center",
+                              fontsize=base_fs, color=txt_color, zorder=3,
+                              fontweight="bold", linespacing=1.12, clip_on=True)
+            fit_items.append((t_split, bw * 0.94, bh * 0.58))
+            # 2) representatividade e PD (em %, 2 casas) na MESMA linha, separados por barra
+            pd_txt = f"PD {pdv * 100:.2f}%" if not pd.isna(pdv) else "PD —"
+            metr = f"repr. {rep:.1f}%  |  {pd_txt}"
             if show_samples and self.sample_col is not None:
                 amostras = list(self.df[self.sample_col].dropna().unique())
-                linhas.append(" | ".join(f"{a} {sample_pd(sid, a):.3f}" for a in amostras))
-            t = ax.text(x, y, "\n".join(linhas), ha="center", va="center",
-                        fontsize=base_fs, color=txt_color, zorder=3, linespacing=1.25,
-                        fontweight=("bold" if is_leaf else "normal"), clip_on=True)
-            node_texts.append(t)
+                metr += "\n" + " | ".join(f"{a} {sample_pd(sid, a) * 100:.2f}%"
+                                          for a in amostras)
+            t_metr = ax.text(x, y - 0.42 * bh, metr, ha="center", va="center",
+                             fontsize=base_fs - 0.8, color=txt_color, zorder=3,
+                             linespacing=1.12, clip_on=True)
+            fit_items.append((t_metr, bw * 0.94, bh * 0.34))
+            # 3) número da folha no CANTO INFERIOR DIREITO
+            if is_leaf:
+                ax.text(x + bw * 0.93, y - bh * 0.9, f"folha {nota_map.get(sid, '?')}",
+                        ha="right", va="bottom", fontsize=base_fs - 1.8, color=txt_color,
+                        zorder=3, fontweight="bold", clip_on=True)
 
         ax.set_xlim(min(xs) - bw - 0.4, max(xs) + bw + 0.4)
         ax.set_ylim(min(ys) - bh - 0.4, max(ys) + bh + 0.6)
@@ -1183,30 +1267,35 @@ class SequentialPDSegmenter:
         sm = ScalarMappable(norm=norm, cmap=cmap_obj)
         sm.set_array([])
         cbar = fig.colorbar(sm, ax=ax, fraction=0.025, pad=0.01)
+        from matplotlib.ticker import PercentFormatter
+        cbar.ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=1))
         cbar.set_label(f"PD média{' (DES)' if ref else ''} "
-                       f"(escala 0–{vmax:.2f})", fontsize=9)
+                       f"(escala 0–{vmax * 100:.1f}%)", fontsize=9)
         fig.tight_layout()
 
-        # força cada texto a caber na sua caixa, encolhendo a fonte se preciso
-        self._fit_texts_to_boxes(fig, ax, node_texts, bw, bh)
+        # força cada texto a caber na sua sub-região, encolhendo a fonte se preciso
+        self._fit_texts_to_boxes(fig, ax, fit_items)
 
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
     @staticmethod
-    def _fit_texts_to_boxes(fig, ax, texts, bw, bh, pad: float = 0.88,
-                            min_fs: float = 4.5):
-        """Encolhe a fonte de cada texto até caber na caixa (2*bw × 2*bh em dados)."""
+    def _fit_texts_to_boxes(fig, ax, items, pad: float = 0.92, min_fs: float = 4.0):
+        """Encolhe a fonte de cada texto até caber na sua sub-região.
+
+        ``items``: lista de ``(texto, meia_largura, meia_altura)`` em coordenadas de
+        dados, centradas na posição do texto.
+        """
         try:
             fig.canvas.draw()
             renderer = fig.canvas.get_renderer()
         except Exception:        # pragma: no cover - backend sem renderer
             return
-        for t in texts:
+        for t, hw, hh in items:
             x, y = t.get_position()
-            px0, py0 = ax.transData.transform((x - bw, y - bh))
-            px1, py1 = ax.transData.transform((x + bw, y + bh))
+            px0, py0 = ax.transData.transform((x - hw, y - hh))
+            px1, py1 = ax.transData.transform((x + hw, y + hh))
             box_w, box_h = abs(px1 - px0) * pad, abs(py1 - py0) * pad
             ext = t.get_window_extent(renderer)
             if ext.width <= box_w and ext.height <= box_h:
@@ -1510,10 +1599,10 @@ class SequentialPDSegmenter:
         return out
 
     # ------------------------------------------------------------------
-    # MONOTONICITY_REPORT: verifica se a PD é monotônica crescente na ordem
-    #   das notas, em cada amostra. Por construção o DES é monotônico; o valor
-    #   está em checar se OOT/demais amostras preservam a ordem (estabilidade
-    #   do rank). Lista as inversões (pares de notas onde a PD cai).
+    # MONOTONICITY_REPORT: verifica se a PD cresce ao longo das folhas 1..N
+    #   (posição esquerda→direita), em cada amostra — tanto na referência (DES)
+    #   quanto nas demais (estabilidade). Lista as inversões (pares de notas
+    #   consecutivas onde a PD cai).
     # ------------------------------------------------------------------
     def monotonicity_report(self) -> pd.DataFrame:
         lv = self.leaves()
