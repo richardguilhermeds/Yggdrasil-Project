@@ -30,49 +30,82 @@ from .segmenter import SequentialLGDSegmenter
 
 _CSS = """
 <style>
-.lgdui { font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
-.lgdui-banner {
-  background: linear-gradient(95deg, #0f3d57 0%, #1f6f8b 60%, #2a9d8f 100%);
-  color: #fff; padding: 13px 18px; border-radius: 12px; margin-bottom: 10px;
-  box-shadow: 0 2px 8px rgba(15,61,87,.25);
-}
-.lgdui-banner .t { font-size: 17px; font-weight: 700; letter-spacing:.2px; }
-.lgdui-banner .s { font-size: 12px; opacity: .82; margin-top: 2px; }
-.lgdui-card {
-  background: #ffffff; border: 1px solid #e6e8eb; border-radius: 11px;
-  padding: 12px 14px; box-shadow: 0 1px 3px rgba(16,24,40,.05);
-}
-.lgdui-h { font-weight: 600; font-size: 12.5px; color: #15324a;
-  text-transform: uppercase; letter-spacing: .5px; margin-bottom: 8px; }
-.lgdui-bar { padding: 8px 10px; background:#f7f9fb; border:1px solid #e6e8eb;
-  border-radius: 10px; }
-.pill { display:inline-block; padding:4px 11px; border-radius:999px; font-size:13px;
-  font-weight:600; margin:2px 5px 2px 0; }
-.pill-muted  { background:#eef1f4; color:#3a4a5a; }
-.pill-green  { background:#e6f6ec; color:#137a3e; }
-.pill-yellow { background:#fdf3da; color:#9a6b00; }
-.pill-red    { background:#fde7e7; color:#b3261e; }
-.lgdui-legend { font-size:11px; color:#667; margin:6px 0 2px; }
-.lgdui-tree { line-height:1.5; }
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+.lgdui { --ac:#3b4a63; --ac-deep:#27324a; --ac-soft:#eef1f5; --ac-border:#cdd5e0;
+  --ink:#1f2733; --muted:#6b7480; --line:#e7e9ee;
+  font-family:'IBM Plex Sans', -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  color:var(--ink); }
+.lgdui .mono { font-family:'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas,
+  monospace; font-variant-numeric: tabular-nums; }
+/* top bar (estilo mockup): branca, com chip LGD grafite */
+.lgdui-banner { display:flex; align-items:center; gap:11px; background:#fff;
+  border:1px solid var(--line); border-radius:13px; padding:11px 16px; margin-bottom:10px;
+  box-shadow:0 1px 3px rgba(16,24,40,.08); }
+.lgdui-banner .logo { width:30px; height:30px; border-radius:9px; background:var(--ac);
+  color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700;
+  font-size:12px; flex:none; }
+.lgdui-banner .t { font-size:15px; font-weight:600; color:var(--ink); line-height:1.2; }
+.lgdui-banner .s { font-size:11.5px; color:var(--muted); margin-top:1px; }
+/* cards */
+.lgdui-card { background:#fff; border:1px solid var(--line); border-radius:12px;
+  padding:13px 15px; box-shadow:0 1px 3px rgba(16,24,40,.06); margin-bottom:2px; }
+.lgdui-h { font-weight:600; font-size:11px; color:var(--muted); text-transform:uppercase;
+  letter-spacing:.07em; margin-bottom:9px; }
+/* faixa de KPIs (health strip) sempre visível acima das abas */
+.lgdui-bar { background:#fff; border:1px solid var(--line); border-radius:11px;
+  box-shadow:0 1px 3px rgba(16,24,40,.05); padding:0; overflow-x:auto; }
+.pill { display:inline-block; padding:3px 10px; border-radius:999px; font-size:11.5px;
+  font-weight:600; margin:2px 4px 2px 0; }
+.pill-muted  { background:var(--ac-soft); color:var(--ac-deep); }
+.pill-green  { background:#e7f5ee; color:#157a52; }
+.pill-yellow { background:#fbf3e0; color:#9a6f12; }
+.pill-red    { background:#fbe7e4; color:#b23a2a; }
+.lgdui-legend { font-size:11px; color:var(--muted); margin:6px 0 2px; line-height:1.55; }
+.lgdui-tree { line-height:1.55; }
+/* abas do workbench */
+.lgdui-tabs { margin-top:8px; }
+.lgdui-tabs > .widget-tab-contents { padding:12px 2px 2px; background:transparent; }
+.lgdui-tabs .lm-TabBar-tab, .lgdui-tabs .p-TabBar-tab { font-size:13px;
+  min-width:max-content; flex:0 0 auto; }   /* tab cresce com o texto (não corta o título) */
+.lgdui-tabs .lm-TabBar-tabLabel, .lgdui-tabs .p-TabBar-tabLabel {
+  overflow:visible; text-overflow:clip; }
+.lgdui-tabs .lm-TabBar-tab.lm-mod-current,
+.lgdui-tabs .p-TabBar-tab.p-mod-current { color:var(--ac-deep); font-weight:600;
+  box-shadow: inset 0 -2px 0 var(--ac); }
+/* cabeçalho da folha selecionada (métricas em chips) — auto-fill mantém os chips
+   com a MESMA largura em todas as linhas (não estica a última linha) */
+.lgdui-metrics { display:grid; grid-template-columns:repeat(auto-fill,minmax(92px,1fr));
+  gap:6px; }
+.lgdui-metric { background:#f7f8fa; border:1px solid #eef0f3; border-radius:9px;
+  padding:7px 10px; overflow:hidden; }
+.lgdui-metric .k { font-size:10px; text-transform:uppercase; letter-spacing:.04em;
+  color:#8a93a3; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.lgdui-metric .v { font-size:16px; font-weight:600; color:var(--ink); margin-top:2px;
+  white-space:nowrap; }
+/* botões: cantos mais suaves, alinhados ao mockup */
+.lgdui .jupyter-button { border-radius:8px; font-family:inherit; }
 </style>
 """
 
 
 class LGDSegmenterUI:
     def __init__(self, df, target="lgd", sample_col=None, ref_sample="DES",
-                 feature_labels=None, features=None, tree_samples=None):
+                 feature_labels=None, features=None, tree_samples=None, date_col=None):
         # tree_samples: amostras cujo LGD médio aparece nas folhas da árvore.
         # None = todas; ex.: tree_samples=["DES","OOT"] mostra só DES e OOT.
+        # date_col: coluna de data/safra — FORA da modelagem, só p/ gráficos no tempo.
         self._tree_samples_cfg = tree_samples
+        self.date_col = date_col
         self._kwargs = dict(target=target, sample_col=sample_col,
                             ref_sample=ref_sample, feature_labels=feature_labels,
-                            verbose=False)
+                            date_col=date_col, verbose=False)
         self.df = df
         self.target = target
         self.sample_col = sample_col
         self.ref_sample = ref_sample
         if features is None:
-            features = [c for c in df.columns if c not in (target, sample_col)]
+            features = [c for c in df.columns
+                        if c not in (target, sample_col, date_col)]
         self.features = features
 
         self.seg = SequentialLGDSegmenter(df, **self._kwargs)
@@ -82,27 +115,31 @@ class LGDSegmenterUI:
         self.spark_result = None      # último Spark DataFrame com a régua aplicada
         self._undo: list = []        # pilha de estados p/ desfazer splits/fusões
         self._redo: list = []        # pilha de estados p/ refazer
-        self._csi_cache = None       # CSI por variável (independe da árvore)
 
         # máscaras de amostra (fixas) e amostras ≠ referência (ex.: OOT)
         if sample_col is not None:
             self._samples = list(df[sample_col].dropna().unique())
             self._nonref = [a for a in self._samples if a != ref_sample]
             self._sample_masks = {a: (df[sample_col] == a) for a in self._samples}
-            # não-referência a EXIBIR na árvore (default: todas)
+            # amostras SEM variável resposta (ex.: ESTABILIDADE = público recente
+            # só para validação): entram no PSI, mas não têm LGD para exibir.
+            self._psi_only = [a for a in self._nonref
+                              if df.loc[self._sample_masks[a], target].notna().sum() == 0]
+            # não-referência COM LGD (entra nas células/colunas de LGD)
+            self._lgd_nonref = [a for a in self._nonref if a not in self._psi_only]
+            # não-referência a EXIBIR na árvore (default: todas com LGD)
             if tree_samples is not None:
                 self._tree_nonref = [a for a in tree_samples
-                                     if a in self._samples and a != ref_sample]
+                                     if a in self._lgd_nonref]
             else:
-                self._tree_nonref = list(self._nonref)
+                self._tree_nonref = list(self._lgd_nonref)
         else:
             self._samples, self._nonref, self._sample_masks = [], [], {}
-            self._tree_nonref = []
+            self._tree_nonref, self._psi_only, self._lgd_nonref = [], [], []
 
         self._build()
         self._on_mode_change(None)   # estado inicial de visibilidade dos controles
-        self._refresh()
-        self._refresh_csi()          # CSI renderizado uma vez (não muda com a árvore)
+        self._refresh()              # _refresh_iv já mescla o PSI/CSI por variável
 
     # ==================================================================
     # Construção dos widgets
@@ -111,13 +148,31 @@ class LGDSegmenterUI:
         full = W.Layout(width="98%")
         dstyle = {"description_width": "82px"}
 
-        self.dd_leaf = W.Dropdown(description="Folha", layout=full, style=dstyle)
+        # dropdowns de folha/variável: Layout próprio (largo) e rótulo curto,
+        # para mostrar o máximo possível do texto da opção selecionada
+        self.dd_leaf = W.Dropdown(description="Folha", layout=W.Layout(width="100%"),
+                                  style={"description_width": "52px"})
         self.dd_feature = W.Dropdown(description="Variável", options=self.features,
-                                     layout=full, style=dstyle)
+                                     layout=W.Layout(width="100%"),
+                                     style={"description_width": "62px"})
         self.tg_mode = W.ToggleButtons(options=["Ótimo", "Manual"], value="Ótimo",
-                                       style={"button_width": "92px"})
+                                       style={"button_width": "150px"},
+                                       layout=W.Layout(width="100%"))
         self.sl_bins = W.IntSlider(description="máx. bins", min=2, max=8, value=4,
                                    layout=W.Layout(width="98%"), style=dstyle)
+        # Ótimo: limites OPCIONAIS de tamanho de bin (fração da folha) — optbinning
+        self.cb_minbin = W.Checkbox(value=False, indent=False,
+                                    description="limitar tamanho mínimo da bin",
+                                    layout=W.Layout(width="98%"))
+        self.sl_minbin = W.FloatSlider(description="mín. bin", min=0.01, max=0.30, step=0.01,
+                                       value=0.05, readout_format=".0%",
+                                       layout=W.Layout(width="98%"), style=dstyle)
+        self.cb_maxbin = W.Checkbox(value=False, indent=False,
+                                    description="limitar tamanho máximo da bin",
+                                    layout=W.Layout(width="98%"))
+        self.sl_maxbin = W.FloatSlider(description="máx. bin", min=0.10, max=1.0, step=0.05,
+                                       value=0.50, readout_format=".0%",
+                                       layout=W.Layout(width="98%"), style=dstyle)
         self.tx_cuts = W.Text(description="Cortes", layout=W.Layout(width="98%"), style=dstyle,
                               placeholder="num: 0.7,0.9  |  cat: a,b; c")
 
@@ -129,7 +184,8 @@ class LGDSegmenterUI:
         self.sl_gap.tooltip = "Diferença mínima de LGD entre irmãs; abaixo disso, as duas são unidas (0.03 = 3%)"
         self.dd_test = W.Dropdown(description="Teste",
                                   options=[("Mann-Whitney", "mannwhitney"), ("Welch t", "welch")],
-                                  value="mannwhitney", layout=full, style=dstyle)
+                                  value="mannwhitney", layout=W.Layout(width="100%"),
+                                  style={"description_width": "44px"})
 
         def mk(desc, style, tip, icon):
             return W.Button(description=desc, button_style=style, tooltip=tip, icon=icon,
@@ -149,15 +205,20 @@ class LGDSegmenterUI:
                               "Funde a folha com a vizinha de menor corte (num) / menor LGD (cat)", "arrow-left")
         self.btn_merge_r = mk("Fundir direita ▶", "warning",
                               "Funde a folha com a vizinha de maior corte (num) / maior LGD (cat)", "arrow-right")
-        self.btn_merge_na = mk("Juntar faltante nesta folha", "warning",
-                               "Junta o nó de faltantes (NaN) deste split dentro da folha populada "
-                               "selecionada — a regra vira 'bin OU faltante'", "link")
+        self.btn_merge_na = mk("Juntar missings nesta folha", "warning",
+                               "Junta o nó de faltantes/missings (NaN) deste split dentro da folha "
+                               "populada selecionada — a regra vira 'bin OU missing'", "link")
         self.btn_suggest = mk("Sugerir split", "info",
                               "Recomenda a variável de maior IV para a folha selecionada", "lightbulb-o")
         self.btn_autofit = mk("Auto-fit (árvore)", "info",
                               "Constrói uma árvore gulosa por IV até a profundidade escolhida", "magic")
         self.sl_depth = W.IntSlider(description="profundidade", min=1, max=5, value=3,
                                     layout=W.Layout(width="98%"), style=dstyle)
+        self.sl_autoconc = W.FloatSlider(description="concentr. mín.", min=0.01, max=0.30,
+                                         step=0.01, value=0.05, readout_format=".0%",
+                                         layout=W.Layout(width="98%"), style=dstyle)
+        self.sl_autoconc.tooltip = ("Concentração mínima das folhas terminais do auto-fit "
+                                    "(min_bin_size): cada folha terá ao menos esta fração da folha-mãe")
         self.tx_experiment = W.Text(description="experimento", placeholder="opcional (usa o do notebook)",
                                     layout=full, style=dstyle)
         self.tx_runname = W.Text(description="run", placeholder="opcional",
@@ -202,7 +263,7 @@ class LGDSegmenterUI:
         self.sl_alpha = W.FloatSlider(description="alpha", min=0.01, max=0.50, step=0.01,
                                       value=0.05, readout_format=".2f", layout=full, style=dstyle)
         self.cb_automerge_na = W.Checkbox(value=False, indent=False,
-                                          description="auto-fundir também junta faltantes ao bin mais próximo",
+                                          description="também juntar faltantes ao bin mais próximo",
                                           layout=W.Layout(width="98%"))
         self.tx_json_path = W.Text(description="arquivo", value="arvore_lgd.json",
                                    layout=full, style=dstyle, placeholder="caminho .json")
@@ -226,6 +287,22 @@ class LGDSegmenterUI:
         self.btn_spark_apply = mk("Reconstruir folhas (Spark)", "primary",
                                   "Aplica a régua à tabela Spark (segmento, nota e LGD por linha), "
                                   "desde que as colunas tenham o mesmo nome", "table")
+        # --- controles da aba "Análise de variáveis" ---
+        self.dd_var = W.Dropdown(description="Variável", options=self.features,
+                                 layout=full, style=dstyle)
+        self.dd_var_leaf = W.Dropdown(description="Folha", layout=full, style=dstyle)
+        self.tx_var_time = W.Text(description="coluna safra", value=(self.date_col or "dt_ref"),
+                                  layout=full, style=dstyle,
+                                  placeholder="coluna de safra (ex.: dt_ref) — opcional")
+        self.btn_var_analyze = mk("Analisar variável", "primary",
+                                  "Calcula distribuição, estatísticas, PSI atual e o "
+                                  "comportamento por safra da variável na folha escolhida",
+                                  "search")
+        # --- preview da árvore como imagem, no fim do Construir (sem exportar) ---
+        self.btn_tree_preview = mk("Ver árvore (imagem)", "info",
+                                   "Renderiza a árvore como imagem aqui mesmo — sem exportar/salvar",
+                                   "sitemap")
+        self.btn_tree_preview_hide = mk("Ocultar", "", "Oculta a imagem da árvore", "eye-slash")
 
         self.btn_preview.on_click(self._on_preview)
         self.btn_split.on_click(self._on_split)
@@ -257,112 +334,210 @@ class LGDSegmenterUI:
         self.btn_plot.on_click(self._on_plot)
         self.btn_plot_hide.on_click(self._on_plot_hide)
         self.btn_spark_apply.on_click(self._on_spark_apply)
+        self.btn_var_analyze.on_click(self._on_var_analyze)
+        self.btn_tree_preview.on_click(self._on_tree_preview)
+        self.btn_tree_preview_hide.on_click(lambda _: setattr(self.out_tree_img, "value", ""))
         self.tg_mode.observe(self._on_mode_change, names="value")
         self.dd_feature.observe(self._on_mode_change, names="value")
+        self.cb_minbin.observe(lambda _: self._sync_optbin_visibility(), names="value")
+        self.cb_maxbin.observe(lambda _: self._sync_optbin_visibility(), names="value")
 
+        # HTML widgets (.value substitui o conteúdo de forma confiável em qualquer
+        # frontend — Jupyter e Databricks — evitando a duplicação que o
+        # Output+display+clear_output causa quando o clear não limpa).
         self.bar = W.HTML()
         self.out_tree = W.HTML()
-        self.out_metrics = W.Output(layout=W.Layout(overflow="auto"))
-        self.out_iv = W.Output(layout=W.Layout(overflow="auto"))
-        self.out_csi = W.Output(layout=W.Layout(overflow="auto"))
-        self.out_plot = W.Output(layout=W.Layout(overflow="auto"))
-        self.out_boot = W.Output(layout=W.Layout(overflow="auto"))
-        self.out_validate = W.Output(layout=W.Layout(overflow="auto"))
-        self.out_quality = W.Output(layout=W.Layout(overflow="auto"))
+        self.out_metrics = W.HTML()
+        self.out_iv = W.HTML()
+        self.out_leaf_hist = W.HTML()                     # LGD da folha
+        self.out_plot = W.HTML()
+        self.out_boot = W.HTML()
+        self.out_validate = W.HTML()
+        self.out_quality = W.HTML()
         self.out_log = W.Output(layout=W.Layout(max_height="320px", overflow="auto"))
-        self.out_preview_table = W.Output(layout=W.Layout(max_height="320px", overflow="auto"))
-        self.out_preview_chart = W.Output(layout=W.Layout(max_height="360px", overflow="auto"))
-        self.out_table = W.Output(layout=W.Layout(max_height="300px", overflow="auto"))
+        self.out_preview_chart = W.HTML()
+        self.out_table = W.HTML()
+        # aba "Análise de variável"
+        self.out_var_dist = W.HTML()
+        self.out_var_time = W.HTML()
+        self.out_var_psi = W.HTML()
+        self.out_var_table = W.HTML()
+        self.out_var_cards = W.HTML()
+        self.out_tree_img = W.HTML()                      # preview da árvore
         self.cat_box = W.VBox([], layout=W.Layout(width="98%", display="none",
                                                   border="1px solid #eef1f4",
                                                   padding="6px 8px", margin="2px 0"))
+        self.leaf_header = W.HTML()   # resumo da folha selecionada (centro do Construir)
 
-        card_build = W.VBox([
-            W.HTML("<div class='lgdui-h'>1 · Criar segmento</div>"),
-            W.HBox([self.btn_undo, self.btn_redo]),
-            self.dd_leaf, self.dd_feature, self.tg_mode, self.sl_bins, self.tx_cuts, self.cat_box,
-            W.HBox([self.btn_preview, self.btn_split]),
-            W.HBox([self.btn_lock, self.btn_unlock]),
-            W.HBox([self.btn_collapse]),
-            W.HBox([self.btn_merge_l, self.btn_merge_r]),
-            W.HBox([self.btn_merge_na]),
-            W.HTML("<div class='lgdui-h' style='margin-top:8px'>Assistente</div>"),
-            W.HBox([self.btn_suggest, self.btn_autofit]),
-            self.sl_depth,
-            W.HBox([self.btn_automerge]),
-            self.sl_alpha,
-            self.cb_automerge_na,
-        ], layout=W.Layout(width="49%"))
-        card_build.add_class("lgdui-card")
+        # ================================================================
+        # WORKBENCH EM ABAS
+        # Sempre visíveis no topo: banner + faixa de KPIs (saúde da árvore).
+        # As ações ficam organizadas em 4 abas; o LOG vai para um console
+        # persistente abaixo das abas, para que mensagens de qualquer aba
+        # apareçam (um widget só pode estar em um lugar da árvore de widgets).
+        # ================================================================
+        banner = W.HTML(_CSS +
+            "<div class='lgdui-banner'><div class='logo'>LGD</div>"
+            "<div><div class='t'>Segmentação de LGD</div>"
+            "<div class='s'>Construtor de árvore · optimal binning · PSI ao vivo (DES) · "
+            "teste de hipótese entre folhas adjacentes</div></div></div>")
+        bar_box = W.VBox([self.bar]); bar_box.add_class("lgdui-bar")
 
-        card_refine = W.VBox([
-            W.HTML("<div class='lgdui-h'>2 · Podar &amp; exportar</div>"),
-            W.HTML("<div class='lgdui-legend'>Poda = funde <b>folhas-irmãs</b>: une as que têm "
-                   "<b>repr. &lt; min repr%</b> (imateriais) ou <b>diferença de LGD &lt; ΔLGD "
-                   "mínimo</b> (ex.: 0,03 = 3%). O seletor <b>Teste</b> define o teste de hipótese "
-                   "do <b>p_vs_prox</b> (tabela de folhas) e do auto-fundir.</div>"),
-            self.sl_repr, self.sl_gap, self.dd_test,
-            W.HBox([self.btn_prune, self.btn_reset]),
-            self.btn_export,
-            W.HTML("<div class='lgdui-h' style='margin-top:8px'>Salvar / carregar árvore (JSON)</div>"),
-            self.tx_json_path,
-            W.HBox([self.btn_save_json, self.btn_load_json]),
-            W.HTML("<div class='lgdui-h' style='margin-top:8px'>Reconstruir folhas em tabela Spark</div>"),
-            self.tx_spark_in, self.tx_spark_out,
-            W.HBox([self.btn_spark_apply]),
-            W.HTML("<div class='lgdui-h' style='margin-top:8px'>Salvar no MLflow</div>"),
-            self.tx_model, self.cb_uc, self.tx_experiment, self.tx_runname,
-            W.HBox([self.btn_mlflow, self.btn_clear_log]),
-        ], layout=W.Layout(width="49%"))
-        card_refine.add_class("lgdui-card")
-
-        controls = W.HBox([card_build, card_refine],
-                          layout=W.Layout(justify_content="space-between"))
-
-        # Seção abaixo dos controles: log + tabela do preview + gráfico, lado a lado
-        col_log = W.VBox([W.HTML("<div class='lgdui-h'>Log</div>"), self.out_log],
-                         layout=W.Layout(width="27%"))
-        col_ptable = W.VBox([W.HTML("<div class='lgdui-h'>Preview · tabela</div>"),
-                             self.out_preview_table], layout=W.Layout(width="31%"))
-        col_pchart = W.VBox([W.HTML("<div class='lgdui-h'>Preview · representatividade × LGD</div>"),
-                             self.out_preview_chart], layout=W.Layout(width="40%"))
-        card_preview = W.VBox([
-            W.HTML("<div class='lgdui-h'>Preview / log</div>"),
-            W.HTML("<div class='lgdui-legend'>Mensagens das ações (log) e — ao clicar em "
-                   "👁 <b>Preview</b> — a <b>tabela</b> e o <b>gráfico</b> (barras = "
-                   "representatividade, linha = LGD médio) da divisão proposta.</div>"),
-            W.HBox([col_log, col_ptable, col_pchart],
-                   layout=W.Layout(justify_content="space-between", align_items="flex-start")),
-        ])
-        card_preview.add_class("lgdui-card")
-
+        # ---- legendas reutilizadas --------------------------------------
+        tree_legend = W.HTML(
+            "<div class='lgdui-legend'>cor do quadrado = LGD "
+            "(<span style='color:#1aa64b'>baixo</span> &rarr; "
+            "<span style='color:#caa000'>médio</span> &rarr; "
+            "<span style='color:#d6453e'>alto</span>) · 🔒 folha fechada</div>")
         iv_legend = W.HTML(
-            "<div class='lgdui-legend'>Information Value de cada variável na <b>folha "
-            "selecionada</b> (LGD binarizado pela mediana da folha) — indica qual variável "
-            "melhor separa o LGD ali. ★ = maior IV. Faixas: "
+            "<div class='lgdui-legend'><b>IV</b> (optbinning · alvo contínuo) = desvio médio "
+            "do LGD por faixa em relação à média da folha; poder de separação na <b>folha "
+            "selecionada</b> (★ = maior). Faixas: "
             "<span style='color:#137a3e'>forte</span> · "
             "<span style='color:#9a6b00'>médio</span> · fraco/inútil · "
-            "<span style='color:#6b3fa0'>suspeito</span> (alto demais, verifique vazamento)</div>")
-        card_iv = W.VBox([
-            W.HTML("<div class='lgdui-h'>Qual variável segmentar? (Information Value)</div>"),
-            iv_legend, self.out_iv])
-        card_iv.add_class("lgdui-card")
+            "<span style='color:#6b3fa0'>suspeito</span> (alto demais, verifique vazamento). "
+            "<b>bins</b> = nº de faixas ideais do binning ótimo na folha.</div>"
+            "<div class='lgdui-legend' style='margin-top:6px;padding-top:6px;"
+            "border-top:1px solid #eef1f4'><b>PSI</b> = estabilidade da variável (DES × demais "
+            "amostras), calculado <b>nos mesmos bins do IV</b>, pior caso: "
+            "<span style='color:#137a3e'>&lt;0.10 estável</span> · "
+            "<span style='color:#9a6b00'>0.10–0.25 atenção</span> · "
+            "<span style='color:#b3261e'>&ge;0.25 instável</span>.</div>")
 
-        csi_legend = W.HTML(
-            "<div class='lgdui-legend'>CSI por <b>variável de entrada</b>: estabilidade da "
-            "distribuição de cada característica entre a referência (DES) e as demais amostras "
-            "(bins fixados no DES). Aponta <b>qual variável</b> está migrando, mesmo antes de "
-            "entrar na árvore. Faixas: "
+        # ================================================================
+        # ABA ① CONSTRUIR — cockpit de 3 painéis
+        #   ESQUERDA: qual variável segmentar (IV + PSI por variável)
+        #   CENTRO:   folha selecionada · árvore/quebras · split · preview
+        #   DIREITA:  ações da folha · assistente · poda
+        # ================================================================
+        # ---- ESQUERDA: decisão — qual variável usar no próximo split -----
+        col_decision = W.VBox([
+            W.HTML("<div class='lgdui-h'>Qual variável segmentar? (IV &amp; PSI por variável)</div>"),
+            iv_legend, self.out_iv,
+            W.HTML("<div class='lgdui-h' style='margin-top:12px'>LGD médio da folha analisada</div>"),
+            W.HTML("<div class='lgdui-legend'>Distribuição do LGD dentro da folha selecionada "
+                   "(DES), com a média marcada.</div>"),
+            self.out_leaf_hist,
+        ], layout=W.Layout(width="32%"))
+        col_decision.add_class("lgdui-card")
+
+        # ---- CENTRO: folha selecionada · árvore · controles · preview ----
+        card_leaf = W.VBox([self.leaf_header]); card_leaf.add_class("lgdui-card")
+        # a árvore (monospace, sem quebra) rola dentro do painel; vem logo
+        # abaixo do cabeçalho de registros, com o rodapé de construção fixo.
+        tree_scroll = W.Box([self.out_tree],
+                            layout=W.Layout(overflow="auto", width="100%",
+                                            max_height="360px"))
+        card_tree = W.VBox([
+            W.HTML("<div class='lgdui-h'>Árvore &amp; quebras</div>"),
+            tree_legend, tree_scroll,
+            W.HTML("<div class='lgdui-h' style='margin-top:10px'>Auto-fit</div>"),
+            W.HTML("<div class='lgdui-legend'>Constrói a árvore gulosa por IV até a "
+                   "profundidade escolhida. <b>Concentr. mín.</b> = fração mínima de cada folha "
+                   "terminal (folhas menores são evitadas). Com uma <b>folha selecionada</b> "
+                   "(≠ raiz), cresce <b>apenas aquela folha</b>; na raiz, reconstrói tudo.</div>"),
+            self.sl_depth,
+            self.sl_autoconc,
+            W.HBox([self.btn_autofit, self.btn_reset]),
+        ])
+        card_tree.add_class("lgdui-card")
+        card_split = W.VBox([
+            W.HTML("<div class='lgdui-h'>Dividir a folha selecionada</div>"),
+            self.dd_leaf, self.dd_feature, self.tg_mode,
+            self.sl_bins, self.cb_minbin, self.sl_minbin, self.cb_maxbin, self.sl_maxbin,
+            self.tx_cuts, self.cat_box,
+            W.HBox([self.btn_preview, self.btn_split]),
+        ])
+        card_split.add_class("lgdui-card")
+        card_preview = W.VBox([
+            W.HTML("<div class='lgdui-h'>Pré-visualização da divisão</div>"),
+            self.out_preview_chart,
+        ])
+        card_preview.add_class("lgdui-card")
+        col_center = W.VBox([card_leaf, card_tree, card_split, card_preview],
+                            layout=W.Layout(width="44%"))
+
+        # ---- DIREITA: ações da folha · assistente · poda · atalhos -------
+        # botões em grade de 2 colunas iguais (mesmo tamanho de "box")
+        for _b in (self.btn_lock, self.btn_unlock, self.btn_collapse,
+                   self.btn_merge_l, self.btn_merge_r, self.btn_merge_na):
+            _b.layout.width = "auto"
+            _b.layout.margin = "0"
+        actions_grid = W.GridBox(
+            [self.btn_lock, self.btn_unlock, self.btn_collapse, self.btn_merge_na,
+             self.btn_merge_l, self.btn_merge_r],
+            layout=W.Layout(grid_template_columns="1fr 1fr", grid_gap="6px", width="100%"))
+        card_actions = W.VBox([
+            W.HTML("<div class='lgdui-h'>Ações da folha</div>"),
+            W.HBox([self.btn_undo, self.btn_redo]),
+            actions_grid,
+        ])
+        card_actions.add_class("lgdui-card")
+        card_assist = W.VBox([
+            W.HTML("<div class='lgdui-h'>Assistente</div>"),
+            W.HTML("<div class='lgdui-legend'><b>Sugerir split</b> — aponta a variável de "
+                   "<b>maior IV</b> na folha selecionada e já a deixa escolhida no modo Ótimo; "
+                   "depois é só rodar o 👁 Preview e ✂ Criar segmento.</div>"),
+            W.HBox([self.btn_suggest]),
+            W.HTML("<div class='lgdui-h' style='margin-top:12px'>Auto-fundir folhas-irmãs</div>"),
+            W.HTML("<div class='lgdui-legend'><b>Auto-fundir</b> — funde automaticamente os "
+                   "pares de <b>folhas-irmãs indistinguíveis</b>: quando o teste de hipótese "
+                   "entre elas dá <b>p &gt; alpha</b> (sem evidência de LGD diferente), as duas "
+                   "viram uma só. <b>alpha</b> = nível de significância: <b>quanto maior o "
+                   "alpha, mais folhas se fundem</b> (critério mais frouxo); alpha menor funde "
+                   "só as muito parecidas.</div>"),
+            self.sl_alpha,
+            self.cb_automerge_na,
+            W.HBox([self.btn_automerge]),
+            W.HTML("<div class='lgdui-h' style='margin-top:12px'>Podar folhas-irmãs</div>"),
+            W.HTML("<div class='lgdui-legend'><b>Podar</b> — funde folhas-irmãs com "
+                   "<b>repr. &lt; min repr%</b> (imateriais) ou <b>ΔLGD &lt; mínimo</b> "
+                   "(ex.: 0,03 = 3%). O seletor <b>Teste</b> define o p-valor da tabela de "
+                   "folhas (Diagnóstico) e do auto-fundir.</div>"),
+            self.sl_repr, self.sl_gap, self.dd_test,
+            W.HBox([self.btn_prune]),
+        ])
+        card_assist.add_class("lgdui-card")
+        col_right = W.VBox([card_actions, card_assist],
+                           layout=W.Layout(width="24%"))
+
+        build_cols = W.HBox([col_decision, col_center, col_right],
+                            layout=W.Layout(width="100%", align_items="flex-start",
+                                            justify_content="space-between"))
+        # preview da árvore como imagem, no fim do Construir (sem exportar)
+        self.btn_tree_preview.layout.width = "auto"
+        self.btn_tree_preview_hide.layout.width = "auto"
+        card_tree_img = W.VBox([
+            W.HBox([W.HTML("<div class='lgdui-h' style='margin:0;flex:1'>Preview da árvore "
+                           "(imagem)</div>"),
+                    self.btn_tree_preview, self.btn_tree_preview_hide],
+                   layout=W.Layout(align_items="center", width="100%")),
+            self.out_tree_img,
+        ])
+        card_tree_img.add_class("lgdui-card")
+        tab_build = W.VBox([build_cols, card_tree_img])
+
+        # ================================================================
+        # ABA ③ DIAGNÓSTICO — folhas · CSI · métricas · bootstrap · qualidade
+        # ================================================================
+        tbl_legend = W.HTML(
+            "<div class='lgdui-legend'>"
+            "<b>PSI por amostra</b> (estabilidade da folha entre DES e a amostra): "
             "<span style='background:#e6f6ec;padding:1px 5px;border-radius:3px'>&lt;0.10 estável</span> "
             "<span style='background:#fdf3da;padding:1px 5px;border-radius:3px'>0.10–0.25 atenção</span> "
-            "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>&ge;0.25 instável</span></div>")
-        card_csi = W.VBox([
-            W.HTML("<div class='lgdui-h'>PSI por variável (CSI · DES → demais amostras)</div>"),
-            csi_legend, self.out_csi])
-        card_csi.add_class("lgdui-card")
-        self._card_csi = card_csi
-
-        bar_box = W.VBox([self.bar]); bar_box.add_class("lgdui-bar")
+            "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>&ge;0.25 instável</span>"
+            "<br><b>p_vs_prox</b> = p-valor de um <b>teste de hipótese</b> que compara a "
+            "<b>distribuição de LGD</b> da folha com a da <b>irmã adjacente</b> (mesmo pai, "
+            "na amostra de referência DES). H₀: as duas irmãs têm o mesmo LGD. "
+            "O teste é o <b>Mann-Whitney U</b> (não-paramétrico, padrão) ou o <b>t de Welch</b> "
+            "(médias, variâncias desiguais) — escolha no seletor <b>Teste</b>. "
+            "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>p alto (&gt;0,05, em vermelho)</span> "
+            "⇒ <b>não</b> dá para distinguir as irmãs ⇒ candidatas a fusão; "
+            "<span style='color:#137a3e'>p baixo</span> ⇒ folhas bem separadas. "
+            "Só <b>irmãs</b> são comparadas (a última de cada grupo e o nó de faltantes ficam em branco).</div>")
+        card_table = W.VBox([W.HTML("<div class='lgdui-h'>Folhas criadas · PSI &amp; teste de hipótese (irmãs)</div>"),
+                             tbl_legend, self.out_table])
+        card_table.add_class("lgdui-card")
 
         metrics_legend = W.HTML(
             "<div class='lgdui-legend'>a régua prediz o LGD pela média do segmento na "
@@ -401,6 +576,14 @@ class LGDSegmenterUI:
         card_quality.add_class("lgdui-card")
         self._card_quality = card_quality
 
+        # PSI por variável (CSI) agora vive na aba Construir, mesclado ao IV
+        # (coluna esquerda "Qual variável segmentar?"). Aqui ficam só folhas,
+        # métricas da régua, bootstrap e qualidade dos segmentos.
+        tab_diag = W.VBox([card_table, card_metrics, card_boot, card_quality])
+
+        # ================================================================
+        # ABA ④ VALIDAR & EXPORTAR — validação regulatória · exportar régua
+        # ================================================================
         valid_legend = W.HTML(
             "<div class='lgdui-legend'>Validação regulatória: <b>monotonicidade</b> do LGD nas "
             "notas (DES e demais amostras), <b>calibração</b> previsto (DES) × realizado (OOT) por "
@@ -419,61 +602,115 @@ class LGDSegmenterUI:
         card_validacao.add_class("lgdui-card")
         self._card_validacao = card_validacao
 
-        tree_legend = W.HTML(
-            "<div class='lgdui-legend'>cor do quadrado = LGD "
-            "(<span style='color:#1aa64b'>baixo</span> &rarr; "
-            "<span style='color:#caa000'>médio</span> &rarr; "
-            "<span style='color:#d6453e'>alto</span>) · 🔒 folha fechada</div>")
-        card_tree = W.VBox([W.HTML("<div class='lgdui-h'>Árvore atual</div>"),
-                            tree_legend, self.out_tree,
-                            W.HTML("<div class='lgdui-h' style='margin-top:8px'>Imagem da árvore "
-                                   "(LGD médio &amp; % por folha)</div>"),
-                            self.tx_img_path,
-                            W.HBox([self.btn_plot, self.btn_plot_hide]), self.out_plot])
-        card_tree.add_class("lgdui-card")
+        card_export = W.VBox([
+            W.HTML("<div class='lgdui-h'>Exportar DataFrame rotulado</div>"),
+            W.HTML("<div class='lgdui-legend'>Gera <b>ui.result</b> (pandas) com a coluna de "
+                   "segmento e a nota por linha.</div>"),
+            W.HBox([self.btn_export]),
+            W.HTML("<div class='lgdui-h' style='margin-top:10px'>Salvar no MLflow</div>"),
+            self.tx_model, self.cb_uc, self.tx_experiment, self.tx_runname,
+            W.HBox([self.btn_mlflow]),
+            W.HTML("<div class='lgdui-h' style='margin-top:10px'>Reconstruir folhas em tabela Spark</div>"),
+            self.tx_spark_in, self.tx_spark_out,
+            W.HBox([self.btn_spark_apply]),
+        ])
+        card_export.add_class("lgdui-card")
+        tab_valid = W.VBox([card_validacao, card_export])
 
-        tbl_legend = W.HTML(
-            "<div class='lgdui-legend'>"
-            "<b>PSI por amostra</b> (estabilidade da folha entre DES e a amostra): "
-            "<span style='background:#e6f6ec;padding:1px 5px;border-radius:3px'>&lt;0.10 estável</span> "
-            "<span style='background:#fdf3da;padding:1px 5px;border-radius:3px'>0.10–0.25 atenção</span> "
-            "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>&ge;0.25 instável</span>"
-            "<br><b>p_vs_prox</b> = p-valor de um <b>teste de hipótese</b> que compara a "
-            "<b>distribuição de LGD</b> da folha com a da <b>irmã adjacente</b> (mesmo pai, "
-            "na amostra de referência DES). H₀: as duas irmãs têm o mesmo LGD. "
-            "O teste é o <b>Mann-Whitney U</b> (não-paramétrico, padrão) ou o <b>t de Welch</b> "
-            "(médias, variâncias desiguais) — escolha no seletor <b>Teste</b>. "
-            "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>p alto (&gt;0,05, em vermelho)</span> "
-            "⇒ <b>não</b> dá para distinguir as irmãs ⇒ candidatas a fusão; "
-            "<span style='color:#137a3e'>p baixo</span> ⇒ folhas bem separadas. "
-            "Só <b>irmãs</b> são comparadas (a última de cada grupo e o nó de faltantes ficam em branco).</div>")
-        card_table = W.VBox([W.HTML("<div class='lgdui-h'>Folhas criadas · PSI &amp; teste de hipótese (irmãs)</div>"),
-                             tbl_legend, self.out_table])
-        card_table.add_class("lgdui-card")
+        # ================================================================
+        # ABA ⑤ HISTÓRICO — persistência JSON · imagem da árvore
+        # ================================================================
+        card_json = W.VBox([
+            W.HTML("<div class='lgdui-h'>Salvar / carregar árvore (JSON)</div>"),
+            W.HTML("<div class='lgdui-legend'>Salva a estrutura completa (regras e folhas "
+                   "fechadas) num arquivo .json e recarrega depois. Para o histórico passo a "
+                   "passo, use ◀ Desfazer / Refazer ▶ na aba <b>Construir</b>.</div>"),
+            self.tx_json_path,
+            W.HBox([self.btn_save_json, self.btn_load_json]),
+        ])
+        card_json.add_class("lgdui-card")
+        card_img = W.VBox([
+            W.HTML("<div class='lgdui-h'>Imagem da árvore (LGD médio &amp; % por folha)</div>"),
+            self.tx_img_path,
+            W.HBox([self.btn_plot, self.btn_plot_hide]),
+            self.out_plot,
+        ])
+        card_img.add_class("lgdui-card")
+        tab_hist = W.VBox([card_json, card_img])
 
-        banner = W.HTML(_CSS +
-            "<div class='lgdui-banner'><div class='t'>🌳 Construtor de Segmentação de LGD</div>"
-            "<div class='s'>Optimal binning híbrido · PSI ao vivo (DES como referência) · "
-            "teste de hipótese entre folhas adjacentes</div></div>")
+        # ================================================================
+        # ABA ② ANÁLISE DE VARIÁVEL — perfil, distribuição e estabilidade
+        #   de UMA variável de entrada numa folha (estatísticas, PSI atual e
+        #   por safra, percentis por safra).
+        # ================================================================
+        # Layouts PRÓPRIOS (não mutar o objeto `full` compartilhado por outros widgets);
+        # rótulos curtos p/ sobrar espaço ao valor (nomes longos não cortam)
+        self.dd_var.layout = W.Layout(width="30%")
+        self.dd_var.style.description_width = "62px"
+        self.dd_var_leaf.layout = W.Layout(width="42%")
+        self.dd_var_leaf.style.description_width = "46px"
+        self.tx_var_time.layout = W.Layout(width="22%")
+        self.btn_var_analyze.layout = W.Layout(width="auto")
+        var_controls = W.VBox([
+            W.HTML("<div class='lgdui-h'>Análise de variáveis</div>"),
+            W.HTML("<div class='lgdui-legend'>Perfil de uma variável de entrada numa folha: "
+                   "distribuição, %missing, média/mediana/desvio, faixa de percentis, PSI atual "
+                   "e o comportamento por safra (percentis e PSI). Informe a <b>coluna de "
+                   "safra</b> (ex.: dt_ref) para as análises temporais.</div>"),
+            W.HBox([self.dd_var, self.dd_var_leaf, self.tx_var_time, self.btn_var_analyze],
+                   layout=W.Layout(align_items="flex-end", justify_content="space-between",
+                                   width="100%")),
+        ])
+        var_controls.add_class("lgdui-card")
+        card_var_dist = W.VBox([
+            W.HTML("<div class='lgdui-h'>Comportamento da variável · distribuição</div>"),
+            self.out_var_dist], layout=W.Layout(width="58%"))
+        card_var_dist.add_class("lgdui-card")
+        card_var_cards = W.VBox([
+            W.HTML("<div class='lgdui-h'>Resumo &amp; estabilidade</div>"),
+            self.out_var_cards], layout=W.Layout(width="40%"))
+        card_var_cards.add_class("lgdui-card")
+        var_row_a = W.HBox([card_var_dist, card_var_cards],
+                           layout=W.Layout(justify_content="space-between",
+                                           align_items="stretch", width="100%"))
+        card_var_time = W.VBox([
+            W.HTML("<div class='lgdui-h'>Comportamento ao longo do tempo · por safra</div>"),
+            W.HTML("<div class='lgdui-legend'>Numérica: percentis (min–max, p5–p95, média) por "
+                   "safra. Categórica: representatividade (%) de cada categoria por safra.</div>"),
+            self.out_var_time])
+        card_var_time.add_class("lgdui-card")
+        card_var_table = W.VBox([
+            W.HTML("<div class='lgdui-h'>Detalhe por safra</div>"),
+            self.out_var_table], layout=W.Layout(width="48%"))
+        card_var_table.add_class("lgdui-card")
+        card_var_psi = W.VBox([
+            W.HTML("<div class='lgdui-h'>PSI por safra · vs. data de referência (DES)</div>"),
+            self.out_var_psi], layout=W.Layout(width="50%"))
+        card_var_psi.add_class("lgdui-card")
+        var_row_b = W.HBox([card_var_table, card_var_psi],
+                           layout=W.Layout(justify_content="space-between",
+                                           align_items="flex-start", width="100%"))
+        tab_var = W.VBox([var_controls, var_row_a, card_var_time, var_row_b])
 
-        # Information Value (importância) e PSI por variável (CSI) lado a lado,
-        # separados por uma barra vertical intermediária.
-        if self.sample_col is not None:        # CSI/PSI exige amostras (DES vs OOT/…)
-            card_iv.layout.width = "48.5%"
-            card_csi.layout.width = "48.5%"
-            barra = W.HTML("<div style='width:2px;background:#d6dbe0;border-radius:1px;"
-                           "align-self:stretch;min-height:160px;margin:0 4px'></div>")
-            card_imp_psi = W.HBox([card_iv, barra, card_csi],
-                                  layout=W.Layout(width="100%", align_items="stretch",
-                                                  justify_content="space-between"))
-        else:
-            card_imp_psi = card_iv             # sem amostras não há PSI por variável
+        # ---- montagem das abas (Análise de variável vem em 2º) ----------
+        tabs = W.Tab(children=[tab_build, tab_var, tab_diag, tab_valid, tab_hist])
+        for i, titulo in enumerate(["① Construir", "② Análise de variável", "③ Diagnóstico",
+                                    "④ Validar & Exportar", "⑤ Histórico"]):
+            tabs.set_title(i, titulo)
+        tabs.add_class("lgdui-tabs")
 
-        # Ordem: segmentação → folhas → IV | PSI → métricas → bootstrap →
-        #        qualidade dos segmentos → validação
-        cards = [banner, controls, card_preview, bar_box, card_tree, card_table,
-                 card_imp_psi, card_metrics, card_boot, card_quality, card_validacao]
-        self.panel = W.VBox(cards)
+        # ---- console persistente (log de todas as abas) -----------------
+        self.btn_clear_log.layout.width = "150px"
+        console = W.VBox([
+            W.HBox([W.HTML("<div class='lgdui-h' style='margin-bottom:0'>"
+                           "Console · mensagens das ações</div>"),
+                    self.btn_clear_log],
+                   layout=W.Layout(justify_content="space-between", align_items="center")),
+            self.out_log,
+        ])
+        console.add_class("lgdui-card")
+
+        self.panel = W.VBox([banner, bar_box, tabs, console])
         self.panel.add_class("lgdui")
 
     # ==================================================================
@@ -508,31 +745,51 @@ class LGDSegmenterUI:
         return "green" if p < 0.10 else "yellow" if p < 0.25 else "red"
 
     def _status_html(self):
+        """Health strip (estilo mockup): células com rótulo maiúsculo, número
+        grande (mono) e, quando aplicável, um badge de status."""
         seg = self.seg
         n_folhas = sum(s["is_leaf"] for s in seg.segments.values())
         prof = max(s["depth"] for s in seg.segments.values())
         n_lock = len(self.locked & {sid for sid, s in seg.segments.items() if s["is_leaf"]})
-        pills = [f"<span class='pill pill-muted'>Folhas {n_folhas}</span>",
-                 f"<span class='pill pill-muted'>Profundidade {prof}</span>",
-                 f"<span class='pill pill-muted'>Fechadas {n_lock}</span>"]
+        hexc = {"green": "#157a52", "yellow": "#9a6f12", "red": "#b23a2a"}
+        bgc = {"green": "#e7f5ee", "yellow": "#fbf3e0", "red": "#fbe7e4"}
+
+        def cell(label, value, color="#1f2733", badge=None, cls=None):
+            bh = ""
+            if badge and cls:
+                bh = (f"<span style='font-size:10px;font-weight:600;color:{hexc[cls]};"
+                      f"background:{bgc[cls]};border-radius:20px;padding:2px 8px;"
+                      f"margin-left:7px'>{badge}</span>")
+            return (f"<div style='flex:1;min-width:86px;padding:8px 14px;"
+                    f"border-right:1px solid #eef0f3'>"
+                    f"<div style='font-size:10px;font-weight:600;letter-spacing:.07em;"
+                    f"text-transform:uppercase;color:#8a93a3;white-space:nowrap'>{label}</div>"
+                    f"<div style='display:flex;align-items:center;margin-top:2px'>"
+                    f"<span class='mono' style='font-size:19px;font-weight:600;color:{color}'>"
+                    f"{value}</span>{bh}</div></div>")
+        cells = [cell("Folhas", n_folhas), cell("Profundidade", prof),
+                 cell("Fechadas", n_lock)]
         if self.sample_col is not None and n_folhas >= 1:
             try:
                 for _, r in seg.psi().iterrows():
-                    cls = self._psi_class(r["psi"])
-                    pills.append(f"<span class='pill pill-{cls}'>PSI {r['amostra']} "
-                                 f"{r['psi']:.3f} · {r['classificacao']}</span>")
+                    c = self._psi_class(r["psi"])
+                    cells.append(cell(f"PSI {r['amostra']}", f"{r['psi']:.3f}",
+                                      badge=r["classificacao"], cls=c))
             except Exception:
                 pass
-        # badges de R² (régua como modelo)
         try:
             for _, r in seg.metrics().iterrows():
                 r2 = r["R2"]
-                cls = "muted" if pd.isna(r2) else ("green" if r2 >= 0.5 else "yellow" if r2 >= 0.2 else "red")
-                txt = "—" if pd.isna(r2) else f"{r2:.3f}"
-                pills.append(f"<span class='pill pill-{cls}'>R² {r['amostra']} {txt}</span>")
+                if pd.isna(r2):
+                    cells.append(cell(f"R² {r['amostra']}", "—", color="#8a93a3"))
+                else:
+                    c = "green" if r2 >= 0.5 else "yellow" if r2 >= 0.2 else "red"
+                    badge = "bom" if c == "green" else "atenção" if c == "yellow" else "fraco"
+                    cells.append(cell(f"R² {r['amostra']}", f"{r2:.3f}", color=hexc[c],
+                                      badge=badge, cls=c))
         except Exception:
             pass
-        return "<div>" + "".join(pills) + "</div>"
+        return f"<div style='display:flex;align-items:stretch'>{''.join(cells)}</div>"
 
     def _tree_html(self):
         seg = self.seg
@@ -551,10 +808,26 @@ class LGDSegmenterUI:
         def lgd_str(sid):
             if self.sample_col is not None:
                 parts = [f"{self.ref_sample} {self._node_lgd(sid, self.ref_sample):.3f}"]
-                for a in self._tree_nonref:          # só as amostras configuradas
+                for a in self._tree_nonref:          # só amostras COM LGD (sem ESTABILIDADE)
                     parts.append(f"{a} {self._node_lgd(sid, a):.3f}")
-                return " · ".join(parts)
+                return "LGD " + " ".join(parts)
             return f"LGD {self._node_lgd(sid):.3f}"
+
+        psi_hex = {"green": "#1aa64b", "yellow": "#caa000", "red": "#d6453e"}
+
+        def psi_str(sid):
+            # PSI da folha por amostra ≠ DES (OOT, ESTABILIDADE, …), colorido
+            if self.sample_col is None or not self._nonref:
+                return ""
+            parts = []
+            for a in self._nonref:
+                p = self._leaf_psi(sid, a)
+                if pd.isna(p):
+                    continue
+                ab = "ESTAB" if a == "ESTABILIDADE" else a
+                parts.append(f"<span style='color:{psi_hex[self._psi_class(p)]}'>"
+                             f"{ab} {p:.2f}</span>")
+            return (" · PSI " + " ".join(parts)) if parts else ""
 
         def lgd_of(sid):
             sub = self.df[seg.segments[sid]["mask"]]
@@ -574,15 +847,17 @@ class LGDSegmenterUI:
                   f"border-radius:2px;vertical-align:middle;margin:0 5px'></span>")
             tags = ""
             if s["is_leaf"]:
-                tags += f" · <b>nota {nota_map.get(sid, '?')}</b>"
+                tags += f" · <b>folha {nota_map.get(sid, '?')}</b>"
                 if sid in self.locked:
                     tags += " 🔒"
-            sel = "background:#fff3cd;border-radius:3px;" if (
-                s["is_leaf"] and sid == self.dd_leaf.value) else ""
+            sel = ("background:#eef1f5;border-radius:5px;box-shadow:inset 2px 0 0 #3b4a63;"
+                   if (s["is_leaf"] and sid == self.dd_leaf.value) else "")
+            psi_html = psi_str(sid) if s["is_leaf"] else ""
             rows.append(
                 f"<div style='{sel}white-space:pre;font-family:ui-monospace,Menlo,monospace;"
                 f"font-size:12px;padding:1px 2px'>{prefix}{conn}{sw}{rotulo(sid)}"
-                f"<span style='color:#8a97a3'>  (n={n}, {rep:.1f}% · {lgd_str(sid)})</span>{tags}</div>")
+                f"<span style='color:#8a97a3'>  (n={n}, {rep:.1f}% · {lgd_str(sid)}"
+                f"{psi_html})</span>{tags}</div>")
             ch = sorted(filhos.get(sid, []), key=lgd_of)
             for i, c in enumerate(ch):
                 child_prefix = "" if is_root else prefix + ("   " if is_last else "│  ")
@@ -628,32 +903,104 @@ class LGDSegmenterUI:
             txt = txt[:69] + "…"
         return ("🔒 " if sid in self.locked else "") + txt
 
+    def _leaf_header_html(self):
+        """Cartão-resumo da folha selecionada (centro da aba Construir): rótulo,
+        estado (aberta/fechada), nº da folha e métricas-chave — n, repr.%, LGD e
+        PSI por amostra. Espelha o painel 'folha selecionada' do cockpit."""
+        sid = self.dd_leaf.value
+        if sid is None or sid not in self.seg.segments:
+            return ("<div style='font-size:12px;color:#889'>Nenhuma folha selecionada — "
+                    "crie um split ou rode o Auto-fit na coluna do centro.</div>")
+        s = self.seg.segments[sid]
+        n = int(s["mask"].sum())
+        rep = 100 * n / len(self.df) if len(self.df) else 0.0
+        lo, hi = self._leaf_lgds()
+        ref = self.ref_sample if self.sample_col is not None else None
+        color = self._color(self._node_lgd(sid, ref), lo, hi)
+        nota_map, _ = self.seg._grade_map()
+        nota = nota_map.get(sid, "?")
+        label = ("TODA A CARTEIRA" if s["parent"] is None
+                 else self.seg._descrever(s["conditions"]))
+        if len(label) > 80:
+            label = label[:77] + "…"
+        badge = ("<span class='pill pill-yellow'>folha fechada 🔒</span>"
+                 if sid in self.locked
+                 else "<span class='pill pill-green'>folha aberta</span>")
+        psi_hex = {"green": "#137a3e", "yellow": "#9a6b00", "red": "#b3261e"}
+        # cada célula: (rótulo, valor, cor-do-valor | None)
+        cells = [("Volumetria", f"{n:,}".replace(",", "."), None),
+                 ("Repr.", f"{rep:.1f}%", None)]
+        if self.sample_col is not None:
+            cells.append((f"LGD {self.ref_sample}",
+                          f"{self._node_lgd(sid, self.ref_sample):.3f}", None))
+            for a in self._tree_nonref:
+                cells.append((f"LGD {a}", f"{self._node_lgd(sid, a):.3f}", None))
+            # PSI por amostra ≠ referência (OOT, ESTABILIDADE, … se a coluna existir)
+            for a in self._nonref:
+                p = self._leaf_psi(sid, a)
+                val = "—" if pd.isna(p) else f"{p:.3f}"
+                col = None if pd.isna(p) else psi_hex[self._psi_class(p)]
+                ab = "ESTAB" if a == "ESTABILIDADE" else a
+                cells.append((f"PSI {ab}", val, col))
+        else:
+            cells.append(("LGD", f"{self._node_lgd(sid):.3f}", None))
+        cells.append(("Folha", str(nota), None))
+
+        def cell(k, v, c):
+            sty = f" style='color:{c}'" if c else ""
+            return (f"<div class='lgdui-metric'><div class='k'>{k}</div>"
+                    f"<div class='v mono'{sty}>{v}</div></div>")
+        cell_html = "".join(cell(k, v, c) for k, v, c in cells)
+        return (
+            "<div style='display:flex;align-items:center;gap:9px;margin-bottom:11px;"
+            "flex-wrap:wrap'>"
+            f"<span style='width:13px;height:13px;border-radius:4px;background:{color};"
+            "flex:none'></span>"
+            f"<span style='font-size:15px;font-weight:600;color:#15324a'>{label}</span>"
+            f"{badge}</div><div class='lgdui-metrics'>{cell_html}</div>")
+
+    def _leaf_psi(self, sid, sample, eps=1e-6):
+        """PSI de uma folha entre a referência (DES) e `sample` — mesma fórmula
+        da tabela de folhas (_append_psi_cols), restrita a esta folha."""
+        import math
+        if self.sample_col is None or sample not in self._sample_masks:
+            return float("nan")
+        ref_mask = self._sample_masks.get(self.ref_sample)
+        if ref_mask is None:
+            return float("nan")
+        leaf = self.seg.segments[sid]["mask"]
+        s_mask = self._sample_masks[sample]
+        n_ref, n_s = int(ref_mask.sum()), int(s_mask.sum())
+        if n_ref == 0 or n_s == 0:
+            return float("nan")
+        p_ref = max((leaf & ref_mask).sum() / n_ref, eps)
+        p_cur = max((leaf & s_mask).sum() / n_s, eps)
+        return float((p_cur - p_ref) * math.log(p_cur / p_ref))
+
     def _refresh_table(self):
-        with self.out_table:
-            self.out_table.clear_output(wait=True)
-            lv = self.seg.leaves(with_psi=True, with_test=True, test=self.dd_test.value)
-            cols = ["nota_lgd", "descricao", "repr_%", "lgd_medio"]
-            cols += [c for c in lv.columns if c.startswith("psi_")]
-            if "p_vs_prox" in lv.columns:
-                cols.append("p_vs_prox")
-            display(self._style_leaves(lv[cols]))
+        lv = self.seg.leaves(with_psi=True, with_test=True, test=self.dd_test.value)
+        lv = lv.rename(columns={"nota_lgd": "folha"})   # chamamos de folha, não nota
+        cols = ["folha", "descricao", "repr_%", "lgd_medio"]
+        cols += [c for c in lv.columns if c.startswith("psi_")]
+        if "p_vs_prox" in lv.columns:
+            cols.append("p_vs_prox")
+        self.out_table.value = self._styler_html(self._style_leaves(lv[cols]),
+                                                 max_height="300px")
 
     def _refresh_metrics(self):
-        with self.out_metrics:
-            self.out_metrics.clear_output(wait=True)
-            m = self.seg.metrics()
+        m = self.seg.metrics()
 
-            def r2_bg(v):
-                if pd.isna(v):
-                    return "color:#aab"
-                c = "#e6f6ec" if v >= 0.5 else "#fdf3da" if v >= 0.2 else "#fde7e7"
-                return f"background-color:{c};font-weight:600"
-            sty = (m.style
-                   .map(r2_bg, subset=["R2"])
-                   .format({"MAE": "{:.4f}", "RMSE": "{:.4f}", "R2": "{:.4f}"}, na_rep="—")
-                   .hide(axis="index")
-                   .set_properties(**{"font-size": "13.5px"}))
-            display(sty)
+        def r2_bg(v):
+            if pd.isna(v):
+                return "color:#aab"
+            c = "#e6f6ec" if v >= 0.5 else "#fdf3da" if v >= 0.2 else "#fde7e7"
+            return f"background-color:{c};font-weight:600"
+        sty = (m.style
+               .map(r2_bg, subset=["R2"])
+               .format({"MAE": "{:.4f}", "RMSE": "{:.4f}", "R2": "{:.4f}"}, na_rep="—")
+               .hide(axis="index")
+               .set_properties(**{"font-size": "13.5px"}))
+        self.out_metrics.value = self._styler_html(sty)
 
     def _ordered_leaf_options(self):
         """Opções do dropdown na MESMA ordem da árvore (DFS, filhos por LGD),
@@ -699,21 +1046,24 @@ class LGDSegmenterUI:
             self.dd_leaf.value = cur
         elif opts:
             self.dd_leaf.value = opts[0][1]
+        # dropdown de folha da aba "Análise de variáveis": raiz + folhas
+        cur_v = self.dd_var_leaf.value
+        var_opts = [("TODA A CARTEIRA (raiz)", "root")] + opts
+        self.dd_var_leaf.options = var_opts
+        self.dd_var_leaf.value = cur_v if cur_v in [s for _, s in var_opts] else "root"
 
         self.bar.value = self._status_html()
         self.out_tree.value = self._tree_html()
+        self.leaf_header.value = self._leaf_header_html()
         self._refresh_iv()
+        self._refresh_leaf_hist()
         self._refresh_metrics()
         self._refresh_table()
         # o IC bootstrap e a imagem ficam obsoletos após mudanças na árvore
-        with self.out_boot:
-            self.out_boot.clear_output(wait=True)
-            display(W.HTML("<div style='font-size:12px;color:#889'>Árvore alterada — "
-                           "clique em <b>Calcular IC bootstrap</b> para (re)calcular.</div>"))
-        with self.out_plot:
-            self.out_plot.clear_output(wait=True)
-            display(W.HTML("<div style='font-size:12px;color:#889'>Árvore alterada — "
-                           "clique em <b>Ver / salvar árvore (imagem)</b> para renderizar.</div>"))
+        self.out_boot.value = ("<div style='font-size:12px;color:#889'>Árvore alterada — "
+                               "clique em <b>Calcular IC bootstrap</b> para (re)calcular.</div>")
+        self.out_plot.value = ("<div style='font-size:12px;color:#889'>Árvore alterada — "
+                               "clique em <b>Ver / salvar árvore (imagem)</b> para renderizar.</div>")
 
     # ==================================================================
     # Entrada / handlers
@@ -734,8 +1084,28 @@ class LGDSegmenterUI:
         self.sl_bins.layout.display = "none" if manual else ""           # máx. bins: só Ótimo
         self.tx_cuts.layout.display = "" if (manual and not cat) else "none"   # cortes: Manual numérico
         self.cat_box.layout.display = "" if (manual and cat) else "none"      # grupos: Manual categórico
+        self._sync_optbin_visibility()                                   # limites de bin: só Ótimo
         if manual and cat:
             self._rebuild_cat_box()
+
+    def _sync_optbin_visibility(self):
+        """Limites de tamanho de bin (min/max) aparecem só no modo Ótimo; cada
+        slider só quando o respectivo checkbox está marcado."""
+        otimo = self.tg_mode.value == "Ótimo"
+        self.cb_minbin.layout.display = "" if otimo else "none"
+        self.cb_maxbin.layout.display = "" if otimo else "none"
+        self.sl_minbin.layout.display = "" if (otimo and self.cb_minbin.value) else "none"
+        self.sl_maxbin.layout.display = "" if (otimo and self.cb_maxbin.value) else "none"
+
+    def _optbin_extra(self):
+        """kwargs de tamanho de bin (fração da folha) p/ o binning ótimo, conforme
+        os checkboxes marcados. Vazio = usa os defaults do optbinning."""
+        extra = {}
+        if self.cb_minbin.value:
+            extra["min_bin_size"] = float(self.sl_minbin.value)
+        if self.cb_maxbin.value:
+            extra["max_bin_size"] = float(self.sl_maxbin.value)
+        return extra
 
     def _rebuild_cat_box(self):
         """Monta um seletor de grupo por categoria presente na folha (ordenadas por LGD)."""
@@ -862,17 +1232,38 @@ class LGDSegmenterUI:
                   "rode o 👁 Preview e depois Criar segmento.")
 
     def _on_autofit(self, _):
+        sid = self._selected_leaf()
+        # com uma folha selecionada (≠ raiz) cresce SÓ aquela subárvore;
+        # na raiz (ou sem seleção) reconstrói a árvore inteira.
+        so_folha = sid is not None and sid != "root" and sid in self.seg.segments
+        depth = int(self.sl_depth.value)
+        conc = float(self.sl_autoconc.value)     # concentração mín. das folhas terminais
         with self.out_log:
             self.out_log.clear_output(wait=True)
-            print("Construindo árvore automática…")
+            alvo = self._leaf_label(sid) if so_folha else "TODA A CARTEIRA"
+            print(f"Auto-fit em '{alvo}' (profundidade ≤ {depth}, concentração ≥ {conc:.0%})…")
             self._checkpoint()
-            self.seg.fit_auto(max_depth=int(self.sl_depth.value))
-        self.locked.clear()
+            if so_folha:
+                self.seg.fit_auto(max_depth=depth, min_bin_size=conc,
+                                  subtree=sid, from_scratch=False)
+            else:
+                self.seg.fit_auto(max_depth=depth, min_bin_size=conc)
+        if so_folha:
+            self.locked &= set(self.seg.segments)   # só folhas removidas saem
+        else:
+            self.locked.clear()
         self._pending = None
         self._refresh()
+        if so_folha and sid in self.seg.segments and not self.seg.segments[sid]["is_leaf"]:
+            # a folha virou nó interno; seleciona a primeira nova folha da subárvore
+            novas = [s for s, v in self.seg.segments.items()
+                     if v["is_leaf"] and self.seg._is_descendant_or_self(s, sid)]
+            if novas:
+                self.dd_leaf.value = novas[0]
         with self.out_log:
             n = sum(s["is_leaf"] for s in self.seg.segments.values())
-            print(f"Auto-fit concluído: {n} folhas (profundidade ≤ {int(self.sl_depth.value)}). "
+            escopo = "nesta folha" if so_folha else "na árvore"
+            print(f"Auto-fit concluído {escopo}: {n} folhas no total. "
                   "Refine à mão: funda, recolha ou divida onde quiser.")
 
     def _on_mlflow(self, _):
@@ -969,79 +1360,306 @@ class LGDSegmenterUI:
 
     def _on_leaf_change(self, _):
         self.out_tree.value = self._tree_html()
+        self.leaf_header.value = self._leaf_header_html()
         self._refresh_iv()
+        self._refresh_leaf_hist()
         self._on_mode_change(None)   # recompõe os grupos categóricos para a nova folha
 
     def _refresh_iv(self):
-        with self.out_iv:
-            self.out_iv.clear_output(wait=True)
-            sid = self.dd_leaf.value
-            iv = self.seg.variable_iv(sid)
-            cut = iv.attrs.get("cutoff")
-            disp = iv.copy()
-            disp["variavel"] = disp["variavel"].map(
-                lambda v: self.seg.feature_labels.get(v, v))
-            if len(disp):
-                disp.loc[0, "variavel"] = "★ " + str(disp.loc[0, "variavel"])
+        sid = self.dd_leaf.value
+        # IV contínuo (optbinning) + PSI calculado nos MESMOS bins do IV
+        iv = self.seg.variable_iv(sid)
+        lgd_med = iv.attrs.get("lgd_medio")
+        has_psi = "pior_psi" in iv.columns
+        # n_bins = recomendação de faixas ideais; o PSI usa esses mesmos bins
+        disp = (iv[["variavel", "n_bins", "iv", "forca"]].copy()
+                .rename(columns={"n_bins": "bins"}))
+        if has_psi:
+            disp["psi"] = iv["pior_psi"].values
+            disp["psi_status"] = iv["psi_classificacao"].values
+        disp["variavel"] = disp["variavel"].map(
+            lambda v: self.seg.feature_labels.get(v, v))
+        if len(disp):
+            disp.loc[0, "variavel"] = "★ " + str(disp.loc[0, "variavel"])
+        # cabeçalhos curtos: a coluna de variável ganha mais espaço (não corta)
+        disp = disp.rename(columns={"variavel": "variável", "forca": "força",
+                                    "psi_status": "estab."})
 
-            def forca_bg(v):
-                return {
-                    "forte": "background-color:#e6f6ec;color:#137a3e;font-weight:600",
-                    "médio": "background-color:#fdf3da;color:#9a6b00;font-weight:600",
-                    "suspeito": "background-color:#efe7fb;color:#6b3fa0;font-weight:600",
-                }.get(v, "color:#8a97a3")
+        def forca_bg(v):
+            return {
+                "forte": "background-color:#e6f6ec;color:#137a3e;font-weight:600",
+                "médio": "background-color:#fdf3da;color:#9a6b00;font-weight:600",
+                "suspeito": "background-color:#efe7fb;color:#6b3fa0;font-weight:600",
+            }.get(v, "color:#8a97a3")
 
-            sty = (disp.style.format({"iv": "{:.4f}"}, na_rep="—")
-                   .hide(axis="index")
-                   .map(forca_bg, subset=["forca"])
-                   .set_properties(**{"font-size": "12px"}))
-            qual = "TODA A CARTEIRA" if (sid in (None, "root")) else self._leaf_label(sid)
-            hint = f"<div style='font-size:11px;color:#667;margin-bottom:4px'>folha: " \
-                   f"<b>{qual}</b> · corte do LGD (mediana) = {cut} · evento = LGD ≥ corte</div>"
-            display(W.HTML(hint))
-            display(sty)
+        def psi_bg(v):
+            if pd.isna(v):
+                return "color:#aab"
+            a = abs(v)
+            c = "#e6f6ec" if a < 0.10 else "#fdf3da" if a < 0.25 else "#fde7e7"
+            return f"background-color:{c};font-weight:600"
 
-    def _on_preview(self, _):
-        sid = self._selected_leaf()
-        self.out_preview_table.clear_output()
-        self.out_preview_chart.clear_output()
-        previews = None
+        def psi_status_bg(v):
+            return {
+                "estável": "color:#137a3e",
+                "atenção": "color:#9a6b00;font-weight:600",
+                "instável": "background-color:#fde7e7;color:#b3261e;font-weight:600",
+            }.get(v, "color:#8a97a3")
+
+        fmt = {"iv": "{:.4f}",
+               "bins": lambda v: "—" if (pd.isna(v) or v == 0) else f"{int(v)}"}
+        if has_psi:
+            fmt["psi"] = "{:.4f}"
+        sty = (disp.style.format(fmt, na_rep="—")
+               .hide(axis="index")
+               .map(forca_bg, subset=["força"])
+               .set_properties(**{"font-size": "12px"}))
+        if has_psi:
+            sty = (sty.map(psi_bg, subset=["psi"])
+                      .map(psi_status_bg, subset=["estab."]))
+        qual = "TODA A CARTEIRA" if (sid in (None, "root")) else self._leaf_label(sid)
+        hint = (f"<div style='font-size:11px;color:#667;margin-bottom:4px'>folha: "
+                f"<b>{qual}</b> · LGD médio (DES) = {lgd_med} · IV contínuo (optbinning)"
+                + (" · PSI nos mesmos bins do IV (DES × amostra)" if has_psi else "")
+                + "</div>")
+        self.out_iv.value = hint + self._styler_html(sty)
+
+    def _refresh_leaf_hist(self):
+        """Histograma do LGD da folha selecionada (DES), abaixo da tabela IV/PSI."""
+        sid = self.dd_leaf.value
+        if sid is None or sid not in self.seg.segments:
+            self.out_leaf_hist.value = "<div style='font-size:11px;color:#889'>—</div>"
+            return
+        try:
+            self.out_leaf_hist.value = self._fig_html(self.seg.plot_leaf_lgd_hist(sid))
+        except Exception as e:
+            self.out_leaf_hist.value = (f"<div style='font-size:11px;color:#b3261e'>"
+                                        f"(histograma não gerado: {type(e).__name__})</div>")
+
+    # ==================================================================
+    # Aba "Análise de variáveis"
+    # ==================================================================
+    def _var_cards_html(self, s, trend):
+        psi_hex = {"green": "#137a3e", "yellow": "#9a6b00", "red": "#b3261e"}
+
+        def card(k, v, sub=""):
+            subh = (f"<div style='font-size:10px;color:#8a93a3;margin-top:1px'>{sub}</div>"
+                    if sub else "")
+            return (f"<div class='lgdui-metric' style='padding:9px 11px'>"
+                    f"<div class='k'>{k}</div><div class='v mono'>{v}</div>{subh}</div>")
+        rows = []
+        miss = s.get("pct_missing")
+        rows.append(card("% de missing",
+                         f"{miss:.1f}%" if (miss is not None and miss == miss) else "—",
+                         f"{s.get('n_missing', 0)} de {s.get('n', 0)}"))
+        pior = s.get("pior_psi")
+        if pior is not None:
+            cls = self._psi_class(pior)
+            txt = {"green": "estável", "yellow": "atenção", "red": "instável"}[cls]
+            det = " ".join(
+                f"<span style='color:{psi_hex[self._psi_class(v)]}'>"
+                f"{'ESTAB' if a == 'ESTABILIDADE' else a} {v:.2f}</span>"
+                for a, v in (s.get("psi") or {}).items() if v is not None)
+            rows.append(card("PSI atual (pior caso)",
+                             f"<span style='color:{psi_hex[cls]}'>{pior:.3f}</span>",
+                             f"{det} · {txt}"))
+        if s.get("tipo") == "num" and s.get("p5") is not None:
+            rows.append(card("Faixa P5–P95", f"{s['p5']:.2f} – {s['p95']:.2f}",
+                             f"min {s.get('min', '—')} · max {s.get('max', '—')}"))
+        if trend:
+            arrow = "↑" if trend["pct"] >= 0 else "↓"
+            tc = ("#b3261e" if abs(trend["pct"]) >= 10
+                  else "#9a6b00" if abs(trend["pct"]) >= 3 else "#137a3e")
+            rows.append(card("Tendência da média",
+                             f"<span style='color:{tc}'>{arrow} {trend['pct']:+.0f}%</span>",
+                             f"{trend['de']:.2f} → {trend['para']:.2f} "
+                             f"({trend['ini']}→{trend['fim']}, {trend['n_safras']} safras)"))
+        iv = s.get("iv")
+        if iv is not None:
+            rows.append(card("IV (contínuo)", f"{iv:.4f}", s.get("forca", "—")))
+        stat_html = ""
+        if s.get("tipo") == "num" and s.get("media") is not None:
+            def st(k, kk):
+                v = s.get(kk)
+                return card(k, f"{v:.3f}" if v is not None else "—")
+            stat_html = ("<div class='lgdui-metrics' style='margin-top:8px'>"
+                         + st("Média", "media") + st("Mediana", "mediana")
+                         + st("Desvio", "desvio")
+                         + card("N", f"{s.get('n', 0):,}".replace(",", ".")) + "</div>")
+        elif s.get("tipo") == "cat" and s.get("top_categorias"):
+            linhas = "".join(
+                f"<div style='display:flex;justify-content:space-between;font-size:11.5px;"
+                f"padding:2px 0;border-top:1px solid #f1f3f6'><span>{c}</span>"
+                f"<span class='mono'>{p:.1f}%</span></div>"
+                for c, p in s["top_categorias"][:8])
+            stat_html = ("<div class='lgdui-metric' style='margin-top:8px;padding:8px 11px'>"
+                         "<div class='k'>Categorias (share)</div>" + linhas + "</div>")
+        return "<div class='lgdui-metrics'>" + "".join(rows) + "</div>" + stat_html
+
+    def _style_var_safra(self, bs):
+        cols = [c for c in ["safra", "min", "p5", "media", "p95", "max", "pct_missing"]
+                if c in bs.columns]
+        fmt = {c: "{:.3f}" for c in ("min", "p5", "media", "p95", "max") if c in cols}
+        if "pct_missing" in cols:
+            fmt["pct_missing"] = "{:.1f}%"
+        return (bs[cols].style.format(fmt, na_rep="—").hide(axis="index")
+                .set_properties(**{"font-size": "12px"}))
+
+    def _style_var_share(self, sh):
+        """Tabela de representatividade (%) por categoria e safra (categórica)."""
+        fmt = {c: "{:.1f}%" for c in sh.columns if c != "safra"}
+        return (sh.style.format(fmt, na_rep="—").hide(axis="index")
+                .set_properties(**{"font-size": "12px"}))
+
+    def _on_var_analyze(self, _):
+        feat = self.dd_var.value
+        sid = self.dd_var_leaf.value
+        tcol = self.tx_var_time.value.strip()
+        for o in (self.out_var_dist, self.out_var_time, self.out_var_psi, self.out_var_table):
+            o.value = ""                       # HTML widgets: limpa via .value
+        self.out_var_cards.value = ""
+
+        def err(what, e):
+            return (f"<div style='font-size:11px;color:#b3261e'>({what} não gerada: "
+                    f"{type(e).__name__})</div>")
+        bs, trend = None, None
         with self.out_log:
             self.out_log.clear_output(wait=True)
-            if sid is None:
-                print("Nenhuma folha selecionada."); return
-            if sid in self.locked:
-                print("⚠ Folha fechada — reabra (🔓) para dividir."); return
-            feature = self.dd_feature.value
+            if feat is None:
+                print("Selecione uma variável para analisar."); return
             try:
-                if self.tg_mode.value == "Ótimo":
-                    splits, extra = None, dict(max_n_bins=self.sl_bins.value)
-                else:
-                    splits, extra = self._parse_cuts(feature, sid), {}
-                    if not splits:
-                        print("⚠ Preencha 'Cortes' para o modo Manual."); return
-                previews = self.seg.show_grow(feature, splits=splits, only_segments=[sid], **extra)
-                self._pending = dict(feature=feature, splits=splits, only_segments=[sid], **extra)
+                summ = self.seg.variable_summary(feat, sid=sid)
             except Exception as e:
-                self._pending = None
-                print("Erro no preview:", type(e).__name__, e); return
-        if previews and sid in previews:
-            drop = [c for c in ["lgd_std"] if c in previews[sid]]
-            with self.out_preview_table:                 # tabela na 2ª coluna
-                display(previews[sid].drop(columns=drop))
-            with self.out_preview_chart:                 # gráfico na 3ª coluna
+                print("Erro no resumo da variável:", type(e).__name__, e); return
+            kind = summ.get("tipo")
+            # tendência da média só faz sentido p/ NUMÉRICA
+            if kind == "num" and tcol and tcol in self.df.columns:
                 try:
-                    fig = self.seg.plot_feature_lgd(
-                        feature, sid=sid, splits=splits,
-                        max_n_bins=extra.get("max_n_bins", 4))
-                    self._display_fig(fig, border=False)
+                    bs = self.seg.variable_by_safra(feat, tcol, sid=sid)
+                    med = bs["media"].dropna()
+                    if len(med) >= 2 and med.iloc[0] != 0:
+                        trend = {"pct": 100 * (med.iloc[-1] - med.iloc[0]) / abs(med.iloc[0]),
+                                 "n_safras": len(bs), "de": float(med.iloc[0]),
+                                 "para": float(med.iloc[-1]),
+                                 "ini": str(bs["safra"].iloc[0]),
+                                 "fim": str(bs["safra"].iloc[-1])}
                 except Exception as e:
-                    print("(gráfico não gerado:", type(e).__name__, e, ")")
+                    print("(percentis por safra:", type(e).__name__, e, ")")
+            lbl = self.seg.feature_labels.get(feat, feat)
+            print(f"Análise de '{lbl}' concluída"
+                  + (f" · folha {self._leaf_label(sid)}" if sid not in (None, 'root') else "")
+                  + ".")
+        self.out_var_cards.value = self._var_cards_html(summ, trend)
+        try:
+            self.out_var_dist.value = self._fig_html(
+                self.seg.plot_variable_distribution(feat, sid=sid))
+        except Exception as e:
+            self.out_var_dist.value = err("distribuição", e)
+        if tcol and tcol in self.df.columns:
+            try:
+                self.out_var_time.value = self._fig_html(
+                    self.seg.plot_variable_timeseries(feat, tcol, sid=sid))
+            except Exception as e:
+                self.out_var_time.value = err("série temporal", e)
+            try:
+                if kind == "cat":      # representatividade de cada categoria por safra
+                    self.out_var_table.value = self._styler_html(self._style_var_share(
+                        self.seg.variable_share_by_safra(feat, tcol, sid=sid)), max_height="360px")
+                else:                  # percentis por safra (numérica)
+                    bs2 = bs if bs is not None else self.seg.variable_by_safra(feat, tcol, sid=sid)
+                    self.out_var_table.value = self._styler_html(
+                        self._style_var_safra(bs2), max_height="360px")
+            except Exception as e:
+                self.out_var_table.value = err("tabela por safra", e)
+            try:
+                if self.sample_col is not None:
+                    self.out_var_psi.value = self._fig_html(
+                        self.seg.plot_variable_psi_by_safra(feat, tcol, sid=sid))
+                else:
+                    self.out_var_psi.value = ("<div style='font-size:12px;color:#889'>PSI por "
+                                              "safra requer amostras (DES/OOT).</div>")
+            except Exception as e:
+                self.out_var_psi.value = err("PSI por safra", e)
+        else:
+            self.out_var_time.value = ("<div style='font-size:12px;color:#889'>Informe a "
+                                       "<b>coluna de safra</b> (ex.: dt_ref) acima para ver o "
+                                       "comportamento ao longo do tempo, os percentis por safra "
+                                       "e o PSI por safra.</div>")
+
+    def _prepare_split(self):
+        """Monta self._pending a partir dos controles atuais (modo, variável,
+        cortes e limites de bin). Valida via show_grow. Retorna (ok, msg).
+        Usado tanto pelo Preview quanto pelo Criar segmento (que assim funciona
+        mesmo sem Preview prévio)."""
+        import contextlib
+        import io
+        sid = self._selected_leaf()
+        if sid is None:
+            return False, "Nenhuma folha selecionada."
+        if sid in self.locked:
+            return False, "⚠ Folha fechada — reabra (🔓) para dividir."
+        feature = self.dd_feature.value
+        try:
+            if self.tg_mode.value == "Ótimo":
+                splits = None
+                extra = dict(max_n_bins=self.sl_bins.value, **self._optbin_extra())
+            else:
+                splits, extra = self._parse_cuts(feature, sid), {}
+                if not splits:
+                    return False, "⚠ Preencha 'Cortes' para o modo Manual."
+            # valida a divisão (mesma resolução de bins do grow); silencia o dump
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.seg.show_grow(feature, splits=splits, only_segments=[sid], **extra)
+            self._pending = dict(feature=feature, splits=splits, only_segments=[sid], **extra)
+            return True, None
+        except Exception as e:
+            self._pending = None
+            return False, f"Erro ao preparar a divisão: {type(e).__name__}: {e}"
+
+    def _on_preview(self, _):
+        self.out_preview_chart.value = ""
+        with self.out_log:
+            self.out_log.clear_output(wait=True)
+            ok, msg = self._prepare_split()
+            if not ok:
+                print(msg); return
+            feature = self._pending["feature"]
+            kind = self._feature_kind()
+            graf = ("construção (barras × LGD) + histograma" if kind == "num"
+                    else "construção (barras × LGD)")
+            print(f"Preview de '{self.seg.feature_labels.get(feature, feature)}' "
+                  f"({graf}) — revise os gráficos e clique em ✂ Criar segmento.")
+        # gráfico(s) sem a tabela: CONSTRUÇÃO (barras de repr. × LGD) sempre, e —
+        # quando numérica — TAMBÉM o histograma. Concatenados num HTML widget.
+        p = self._pending
+        sid = p["only_segments"][0]
+        splits = p.get("splits")
+        mnb, mbs, xbs = p.get("max_n_bins", 4), p.get("min_bin_size", 0.05), p.get("max_bin_size")
+        partes = []
+        try:
+            partes.append(self._fig_html(self.seg.plot_feature_lgd(
+                p["feature"], sid=sid, splits=splits, max_n_bins=mnb,
+                min_bin_size=mbs, max_bin_size=xbs)))
+        except Exception as e:
+            partes.append(f"<div style='color:#b3261e;font-size:11px'>(gráfico de construção "
+                          f"não gerado: {type(e).__name__})</div>")
+        if self._feature_kind() == "num":
+            try:
+                partes.append(self._fig_html(self.seg.plot_feature_hist(
+                    p["feature"], sid=sid, splits=splits, max_n_bins=max(mnb, 6),
+                    min_bin_size=mbs, max_bin_size=xbs)))
+            except Exception as e:
+                partes.append(f"<div style='color:#b3261e;font-size:11px'>(histograma não "
+                              f"gerado: {type(e).__name__})</div>")
+        self.out_preview_chart.value = "".join(partes)
 
     def _on_split(self, _):
         with self.out_log:
-            if self._pending is None:
-                print("Rode o 👁 Preview antes de criar o segmento."); return
+            if self._pending is None:          # sem Preview: prepara a partir dos controles
+                ok, msg = self._prepare_split()
+                if not ok:
+                    self.out_log.clear_output(wait=True)
+                    print(msg); return
             try:
                 self._checkpoint()
                 self.seg.grow(**self._pending)
@@ -1153,72 +1771,82 @@ class LGDSegmenterUI:
         return "".join(rows)
 
     def _on_boot(self, _):
-        with self.out_boot:
-            self.out_boot.clear_output(wait=True)
-            try:
-                bc = self.seg.bootstrap_ci(n_boot=int(self.sl_boot.value))
-            except Exception as e:
-                print("Erro no bootstrap:", type(e).__name__, e); return
+        try:
+            bc = self.seg.bootstrap_ci(n_boot=int(self.sl_boot.value))
+        except Exception as e:
+            self.out_boot.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
+                                   f"bootstrap: {type(e).__name__}: {e}</div>")
+            return
 
-            # forest plot
-            display(W.HTML(self._boot_forest_html(bc)))
-
-            # tabela estilizada com aderência
-            def status_bg(v):
-                if v == "dentro":
-                    return "background-color:#e6f6ec;color:#137a3e;font-weight:600"
-                if v in ("acima", "abaixo"):
-                    return "background-color:#fde7e7;color:#b3261e;font-weight:600"
-                return "color:#aab"
-            fmt = {c: "{:.4f}" for c in bc.columns if c.startswith("lgd_")}
-            fmt.update({"ic_low": "{:.4f}", "ic_high": "{:.4f}", "amplitude": "{:.4f}"})
-            sty = bc.style.format(fmt, na_rep="—").hide(axis="index").set_properties(
-                **{"font-size": "12px"})
-            if "status_oot" in bc.columns:
-                sty = sty.map(status_bg, subset=["status_oot"])
-            if "aderente" in bc.columns:
-                n_ok = int((bc["aderente"] == True).sum())
-                n_tot = int(bc["aderente"].notna().sum())
-                chk = bc.attrs.get("check_sample")
-                print(f"Aderência {chk}: {n_ok}/{n_tot} folhas com LGD dentro do IC "
-                      f"bootstrap (n_boot={bc.attrs.get('n_boot')}).")
-            display(sty)
+        def status_bg(v):
+            if v == "dentro":
+                return "background-color:#e6f6ec;color:#137a3e;font-weight:600"
+            if v in ("acima", "abaixo"):
+                return "background-color:#fde7e7;color:#b3261e;font-weight:600"
+            return "color:#aab"
+        fmt = {c: "{:.4f}" for c in bc.columns if c.startswith("lgd_")}
+        fmt.update({"ic_low": "{:.4f}", "ic_high": "{:.4f}", "amplitude": "{:.4f}"})
+        sty = bc.style.format(fmt, na_rep="—").hide(axis="index").set_properties(
+            **{"font-size": "12px"})
+        if "status_oot" in bc.columns:
+            sty = sty.map(status_bg, subset=["status_oot"])
+        resumo = ""
+        if "aderente" in bc.columns:
+            n_ok = int((bc["aderente"] == True).sum())
+            n_tot = int(bc["aderente"].notna().sum())
+            chk = bc.attrs.get("check_sample")
+            resumo = (f"<div style='font-size:12px;color:#15324a;margin:6px 0'>Aderência "
+                      f"<b>{chk}</b>: {n_ok}/{n_tot} folhas com LGD dentro do IC bootstrap "
+                      f"(n_boot={bc.attrs.get('n_boot')}).</div>")
+        # forest plot (HTML) + resumo + tabela — tudo num único .value (não duplica)
+        self.out_boot.value = self._boot_forest_html(bc) + resumo + self._styler_html(sty)
 
     # ==================================================================
     # Validação (monotonicidade · calibração · backtest) e relatório
     # ==================================================================
     def _on_validate(self, _):
-        with self.out_validate:
-            self.out_validate.clear_output(wait=True)
-            # monotonicidade
+        parts = []
+        # monotonicidade
+        try:
+            mr = self.seg.monotonicity_report()
+            ok = bool(mr["monotonico"].all())
+            parts.append("<div style='font-size:12px;margin:2px 0 6px'>"
+                         + ("✅ LGD monotônico crescente em todas as amostras."
+                            if ok else "⚠️ Há inversões de monotonicidade (ver tabela).")
+                         + "</div>")
+            parts.append(self._df_html(mr[["amostra", "monotonico", "n_inversoes"]]))
+        except Exception as e:
+            parts.append(f"<div style='color:#b3261e;font-size:12px'>Erro na monotonicidade: "
+                         f"{type(e).__name__}</div>")
+        # calibração (previsto DES × realizado OOT)
+        if self.sample_col is not None:
             try:
-                mr = self.seg.monotonicity_report()
-                ok = bool(mr["monotonico"].all())
-                print("✅ LGD monotônico crescente em todas as amostras."
-                      if ok else "⚠️ Há inversões de monotonicidade (ver tabela).")
-                display(mr[["amostra", "monotonico", "n_inversoes"]])
+                parts.append("<div class='lgdui-h' style='margin-top:10px'>Calibração "
+                             "(previsto DES × realizado)</div>")
+                parts.append(self._fig_html(self.seg.plot_calibration()))
+                ct = self.seg.calibration_table().rename(columns={"nota_lgd": "folha"})
+                parts.append(self._df_html(ct[["folha", "n", "lgd_previsto",
+                                               "lgd_realizado", "gap"]]))
             except Exception as e:
-                print("Erro na monotonicidade:", type(e).__name__, e)
-            # calibração (previsto DES × realizado OOT)
-            if self.sample_col is not None:
-                try:
-                    self._display_fig(self.seg.plot_calibration(), border=False)
-                    ct = self.seg.calibration_table()
-                    display(ct[["nota_lgd", "n", "lgd_previsto", "lgd_realizado", "gap"]])
-                except Exception as e:
-                    print("Erro na calibração:", type(e).__name__, e)
-            # backtest por safra
-            tcol = self.tx_time_col.value.strip()
-            if not tcol:
-                print("(informe a coluna de tempo para o backtest)")
-            elif tcol not in self.df.columns:
-                print(f"(coluna de tempo '{tcol}' não existe no DataFrame — backtest pulado)")
-            else:
-                try:
-                    print(f"\nBacktest por '{tcol}':")
-                    display(self.seg.backtest(tcol))
-                except Exception as e:
-                    print("Erro no backtest:", type(e).__name__, e)
+                parts.append(f"<div style='color:#b3261e;font-size:12px'>Erro na calibração: "
+                             f"{type(e).__name__}</div>")
+        # backtest por safra
+        tcol = self.tx_time_col.value.strip()
+        if not tcol:
+            parts.append("<div style='font-size:12px;color:#889'>(informe a coluna de tempo "
+                         "para o backtest)</div>")
+        elif tcol not in self.df.columns:
+            parts.append(f"<div style='font-size:12px;color:#889'>(coluna de tempo '{tcol}' "
+                         f"não existe no DataFrame — backtest pulado)</div>")
+        else:
+            try:
+                parts.append(f"<div class='lgdui-h' style='margin-top:10px'>Backtest por "
+                             f"'{tcol}'</div>")
+                parts.append(self._df_html(self.seg.backtest(tcol), max_height="300px"))
+            except Exception as e:
+                parts.append(f"<div style='color:#b3261e;font-size:12px'>Erro no backtest: "
+                             f"{type(e).__name__}</div>")
+        self.out_validate.value = "".join(parts)
 
     def _on_report(self, _):
         with self.out_log:
@@ -1239,82 +1867,51 @@ class LGDSegmenterUI:
     # ==================================================================
     # Qualidade dos segmentos (dispersão · distribuição · preview da variável)
     # ==================================================================
-    def _display_fig(self, fig, border=True):
-        """Exibe uma figura matplotlib escalada para caber no painel (a versão
-        salva em arquivo continua em tamanho real). Evita a imagem ser cortada
-        quando a árvore tem muitas folhas."""
+    def _fig_html(self, fig, border=False):
+        """Converte uma figura matplotlib em <img> base64 (string HTML) para
+        atribuir a um widget HTML (.value) — sem display()/Output."""
         import base64
         import io as _io
-        import matplotlib.pyplot as plt
         buf = _io.BytesIO()
         fig.savefig(buf, format="png", dpi=fig.get_dpi(), bbox_inches="tight")
-        plt.close(fig)
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         style = "max-width:100%;height:auto"
         if border:
             style += ";border:1px solid #e6e8eb;border-radius:6px"
-        display(W.HTML(f"<img src='data:image/png;base64,{b64}' style='{style}'/>"))
+        return f"<img src='data:image/png;base64,{b64}' style='{style}'/>"
+
+    @staticmethod
+    def _styler_html(styler, max_height=None):
+        """HTML de um pandas Styler, opcionalmente num container rolável."""
+        html = styler.to_html()
+        if max_height:
+            return f"<div style='max-height:{max_height};overflow:auto'>{html}</div>"
+        return html
+
+    def _df_html(self, df, max_height=None):
+        """HTML de um DataFrame cru (sem índice), p/ atribuir a um widget HTML."""
+        return self._styler_html(
+            df.style.hide(axis="index").set_properties(**{"font-size": "12px"}), max_height)
+
+    def _display_fig(self, fig, border=True):
+        """Exibe uma figura num Output widget (usado só onde resta Output:
+        bootstrap e validação). A maioria dos painéis usa _fig_html + HTML."""
+        display(W.HTML(self._fig_html(fig, border=border)))
 
     def _on_box(self, _):
-        with self.out_quality:
-            self.out_quality.clear_output(wait=True)
-            try:
-                self._display_fig(self.seg.plot_leaf_boxplots(), border=False)
-            except Exception as e:
-                print("Erro no boxplot:", type(e).__name__, e)
+        try:
+            self.out_quality.value = self._fig_html(self.seg.plot_leaf_boxplots())
+        except Exception as e:
+            self.out_quality.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
+                                      f"boxplot: {type(e).__name__}: {e}</div>")
 
     def _on_hist(self, _):
-        with self.out_quality:
-            self.out_quality.clear_output(wait=True)
-            try:
-                # só a amostra de referência (DES), preenchido
-                self._display_fig(self.seg.plot_target_hist(), border=False)
-            except Exception as e:
-                print("Erro no histograma:", type(e).__name__, e)
-
-    # ==================================================================
-    # CSI por variável (estabilidade das entradas) — independe da árvore,
-    # por isso é calculado uma vez e cacheado.
-    # ==================================================================
-    def _refresh_csi(self):
-        if self.sample_col is None:
-            return
-        with self.out_csi:
-            self.out_csi.clear_output(wait=True)
-            if self._csi_cache is None:
-                try:
-                    self._csi_cache = self.seg.csi(features=self.features)
-                except Exception as e:
-                    display(W.HTML("<div style='font-size:12px;color:#b3261e'>"
-                                   f"Erro ao calcular CSI: {type(e).__name__}: {e}</div>"))
-                    return
-            disp = self._csi_cache.copy()
-            disp["variavel"] = disp["variavel"].map(
-                lambda v: self.seg.feature_labels.get(v, v))
-            csi_cols = [c for c in disp.columns
-                        if c.startswith("csi_") or c == "pior_csi"]
-
-            def csi_bg(v):
-                if pd.isna(v):
-                    return "color:#aab"
-                a = abs(v)
-                c = "#e6f6ec" if a < 0.10 else "#fdf3da" if a < 0.25 else "#fde7e7"
-                return f"background-color:{c};font-weight:600"
-
-            def cls_bg(v):
-                return {
-                    "estável": "color:#137a3e", "atenção": "color:#9a6b00;font-weight:600",
-                    "instável": "background-color:#fde7e7;color:#b3261e;font-weight:600",
-                }.get(v, "color:#8a97a3")
-
-            sty = disp.style
-            for c in csi_cols:
-                sty = sty.map(csi_bg, subset=[c])
-            if "classificacao" in disp.columns:
-                sty = sty.map(cls_bg, subset=["classificacao"])
-            sty = (sty.format({c: "{:.4f}" for c in csi_cols}, na_rep="—")
-                      .hide(axis="index").set_properties(**{"font-size": "12px"}))
-            display(sty)
+        try:
+            # só a amostra de referência (DES), preenchido
+            self.out_quality.value = self._fig_html(self.seg.plot_target_hist())
+        except Exception as e:
+            self.out_quality.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
+                                      f"histograma: {type(e).__name__}: {e}</div>")
 
     # ==================================================================
     # Undo / redo de splits (e demais alterações estruturais da árvore)
@@ -1444,23 +2041,30 @@ class LGDSegmenterUI:
     # Imagem da árvore (matplotlib)
     # ==================================================================
     def _on_plot(self, _):
-        with self.out_plot:
-            self.out_plot.clear_output(wait=True)
-            path = self.tx_img_path.value.strip() or None
-            try:
-                # arquivo salvo em tamanho real; exibição escalada para caber
-                fig = self.seg.plot_tree(save_path=path)   # repr. % + LGD (DES)
-                self._display_fig(fig)
-            except Exception as e:
-                print("Erro ao desenhar a árvore:", type(e).__name__, e)
-                return
+        path = self.tx_img_path.value.strip() or None
+        try:
+            # arquivo salvo em tamanho real; exibição escalada para caber
+            fig = self.seg.plot_tree(save_path=path)   # repr. % + LGD (DES)
+            self.out_plot.value = self._fig_html(fig, border=True)
+        except Exception as e:
+            self.out_plot.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao "
+                                   f"desenhar a árvore: {type(e).__name__}: {e}</div>")
+            return
         if path:
             with self.out_log:
                 self.out_log.clear_output(wait=True)
                 print(f"🖼️ imagem da árvore salva em '{path}' (tamanho real).")
 
     def _on_plot_hide(self, _):
-        self.out_plot.clear_output()      # recolhe (esvazia) a imagem
+        self.out_plot.value = ""          # recolhe (esvazia) a imagem
+
+    def _on_tree_preview(self, _):
+        """Preview da árvore como imagem, na própria aba Construir (sem exportar)."""
+        try:
+            self.out_tree_img.value = self._fig_html(self.seg.plot_tree(), border=True)
+        except Exception as e:
+            self.out_tree_img.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao "
+                                       f"desenhar a árvore: {type(e).__name__}: {e}</div>")
 
     def _ipython_display_(self):
         display(self.panel)

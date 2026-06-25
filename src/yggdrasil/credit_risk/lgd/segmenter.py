@@ -73,16 +73,19 @@ def _intervalo_por_extenso(lo: float, hi: float) -> str:
 
 
 def _classifica_iv(iv) -> str:
-    """Faixas usuais de força do Information Value."""
+    """Faixas de força do IV **contínuo** (optbinning): o IV é o desvio absoluto
+    médio ponderado do LGD por faixa em relação à média da folha (unidades de
+    LGD), bem menor que o IV binário clássico — por isso as faixas são
+    recalibradas para essa escala."""
     if iv is None or (isinstance(iv, float) and np.isnan(iv)):
         return "—"
-    if iv < 0.02:
+    if iv < 0.01:
         return "inútil"
-    if iv < 0.10:
+    if iv < 0.03:
         return "fraco"
-    if iv < 0.30:
+    if iv < 0.10:
         return "médio"
-    if iv < 0.50:
+    if iv < 0.35:
         return "forte"
     return "suspeito"
 
@@ -145,6 +148,7 @@ class SequentialLGDSegmenter:
         ref_sample: str = "DES",
         feature_labels: dict[str, str] | None = None,
         min_leaf_rows: int = 50,
+        date_col: str | None = None,
         verbose: bool = True,
     ):
         if ContinuousOptimalBinning is None:
@@ -154,6 +158,12 @@ class SequentialLGDSegmenter:
         self.target = target
         self.sample_col = sample_col
         self.ref_sample = ref_sample
+        # coluna de DATA/safra: NÃO entra na modelagem (fica fora das features);
+        # serve só para os gráficos no tempo (LGD/variável por safra, PSI por safra).
+        self.date_col = date_col
+        if date_col is not None and date_col not in self.df.columns:
+            raise ValueError(f"Coluna de data '{date_col}' não está no DataFrame "
+                             f"(colunas: {list(self.df.columns)}).")
         # rótulos amigáveis por variável para a descrição por extenso
         self.feature_labels = feature_labels or {}
         # mínimo de linhas (na amostra de ajuste) para tentar binning ótimo
@@ -234,7 +244,8 @@ class SequentialLGDSegmenter:
             return {"feature": feature, "kind": "num", "lo": b["lo"], "hi": b["hi"]}
         return {"feature": feature, "kind": "cat", "cats": list(b["cats"])}
 
-    def _resolve_bins(self, sub, feature, splits, dtype, max_n_bins, min_bin_size):
+    def _resolve_bins(self, sub, feature, splits, dtype, max_n_bins, min_bin_size,
+                      max_bin_size=None):
         """Resolve os bins de um ramo. Devolve (bins, modo, kind).
         - num: bins = [{'kind':'num','lo','hi'}, ...]
         - cat: bins = [{'kind':'cat','cats':[...]}, ...]
@@ -261,7 +272,8 @@ class SequentialLGDSegmenter:
                 else:
                     b = ContinuousOptimalBinning(
                         name=feature, dtype="numerical", max_n_bins=max_n_bins,
-                        min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
+                        min_bin_size=min_bin_size, max_bin_size=max_bin_size,
+                        monotonic_trend="auto_asc_desc")
                     cortes = _fit_optbinning_splits(b, x, y)
                 modo = "ótimo"
             if not cortes:
@@ -294,7 +306,8 @@ class SequentialLGDSegmenter:
             else:
                 b = ContinuousOptimalBinning(
                     name=feature, dtype="categorical", max_n_bins=max_n_bins,
-                    min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
+                    min_bin_size=min_bin_size, max_bin_size=max_bin_size,
+                    monotonic_trend="auto_asc_desc")
                 grupos = [list(arr) for arr in _fit_optbinning_splits(b, xs, ys)]
             modo = "ótimo"
         _NA_TOK = {"nan", "NaN", "<NA>", "None"}
@@ -339,7 +352,7 @@ class SequentialLGDSegmenter:
     #   dtype: None=auto-detecta, 'num' ou 'cat' para forçar
     # ------------------------------------------------------------------
     def show_grow(self, feature, splits=None, dtype=None, max_n_bins=4,
-                  min_bin_size=0.05, only_segments=None):
+                  min_bin_size=0.05, only_segments=None, max_bin_size=None):
         targets = {
             sid: s for sid, s in self.segments.items()
             if s["is_leaf"] and (only_segments is None or sid in only_segments)
@@ -349,7 +362,7 @@ class SequentialLGDSegmenter:
         for sid, seg in targets.items():
             sub = self.df[seg["mask"]]
             bins, modo, kind = self._resolve_bins(
-                sub, feature, splits, dtype, max_n_bins, min_bin_size)
+                sub, feature, splits, dtype, max_n_bins, min_bin_size, max_bin_size)
             if not bins:
                 print(f"[{sid}] sem corte válido em '{feature}' ({modo})")
                 continue
@@ -366,7 +379,7 @@ class SequentialLGDSegmenter:
     # GROW: efetiva o split (manual ou ótimo, num ou cat) em cada folha-alvo
     # ------------------------------------------------------------------
     def grow(self, feature, splits=None, dtype=None, max_n_bins=4,
-             min_bin_size=0.05, only_segments=None):
+             min_bin_size=0.05, only_segments=None, max_bin_size=None):
         targets = {
             sid: s for sid, s in self.segments.items()
             if s["is_leaf"] and (only_segments is None or sid in only_segments)
@@ -381,7 +394,7 @@ class SequentialLGDSegmenter:
                           f"({n_fit} < {self.min_leaf_rows}) — folha mantida")
                     continue
             bins, modo, kind = self._resolve_bins(
-                sub, feature, splits, dtype, max_n_bins, min_bin_size)
+                sub, feature, splits, dtype, max_n_bins, min_bin_size, max_bin_size)
             modo_usado = modo
             if not bins:
                 print(f"[{sid}] sem corte válido em '{feature}' ({modo}) — folha mantida")
@@ -1076,10 +1089,7 @@ class SequentialLGDSegmenter:
         if figsize is None:
             figsize = (max(7.0, (max(xs) - min(xs) + 2 * bw + 1.0) * 0.95),
                        max(3.5, (md + 1) * Y_GAP * 0.95))
-        if ax is None:
-            fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-        else:
-            fig = ax.figure
+        fig, ax = self._new_ax(figsize, dpi, ax)
 
         norm = Normalize(0.0, 1.0)        # escala de cor do LGD fixa de 0 a 1
         cmap_obj = plt.get_cmap(cmap)
@@ -1226,7 +1236,7 @@ class SequentialLGDSegmenter:
             raise ValueError("CSI requer sample_col definido (precisa de amostras "
                              "para comparar a referência com as demais).")
         if features is None:
-            skip = {self.target, self.sample_col}
+            skip = {self.target, self.sample_col, self.date_col}
             features = [c for c in self.df.columns if c not in skip]
 
         nonref = [a for a in self.df[self.sample_col].dropna().unique()
@@ -1529,10 +1539,7 @@ class SequentialLGDSegmenter:
             raise ImportError("plot_calibration requer matplotlib.") from e
         ct = self.calibration_table(check_sample)
         chk = ct.attrs.get("check_sample")
-        if ax is None:
-            fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-        else:
-            fig = ax.figure
+        fig, ax = self._new_ax(figsize, dpi, ax)
         x = ct["lgd_previsto"].to_numpy(dtype="float64")
         y = ct["lgd_realizado"].to_numpy(dtype="float64")
         lim_hi = float(np.nanmax([np.nanmax(x) if len(x) else 0,
@@ -1691,10 +1698,15 @@ class SequentialLGDSegmenter:
     # ==================================================================
     @staticmethod
     def _new_ax(figsize, dpi, ax):
-        import matplotlib.pyplot as plt
-        if ax is None:
-            return plt.subplots(figsize=figsize, dpi=dpi)
-        return ax.figure, ax
+        # Figura SEM pyplot (não entra no Gcf): evita o backend inline
+        # re-exibir o gráfico (duplicação) além do display explícito do widget.
+        if ax is not None:
+            return ax.figure, ax
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+        fig = Figure(figsize=figsize, dpi=dpi)
+        FigureCanvasAgg(fig)
+        return fig, fig.subplots()
 
     # ------------------------------------------------------------------
     # PLOT_LEAF_BOXPLOTS: dispersão do LGD DENTRO de cada folha (boxplot por
@@ -1796,7 +1808,7 @@ class SequentialLGDSegmenter:
     # ------------------------------------------------------------------
     def plot_feature_lgd(self, feature: str, sid: str | None = None, splits=None,
                          dtype=None, max_n_bins: int = 6, min_bin_size: float = 0.05,
-                         figsize=None, save_path: str | None = None,
+                         max_bin_size=None, figsize=None, save_path: str | None = None,
                          dpi: int = 150, ax=None):
         try:
             import matplotlib.pyplot as plt  # noqa: F401
@@ -1808,7 +1820,7 @@ class SequentialLGDSegmenter:
             sub = self.df[self.segments[sid]["mask"]]
         # `splits` (mesmos do preview/grow) garante que o gráfico bata com a tabela
         bins, modo, kind = self._resolve_bins(sub, feature, splits, dtype,
-                                              max_n_bins, min_bin_size)
+                                              max_n_bins, min_bin_size, max_bin_size)
         if not bins:
             raise ValueError(f"Sem faixas válidas para '{feature}' nesta folha.")
         tbl = self._bin_table(sub, feature, bins, len(self.df))
@@ -1822,9 +1834,10 @@ class SequentialLGDSegmenter:
         fig, ax = self._new_ax(figsize, dpi, ax)
         xs = list(range(len(labels)))
 
-        # BARRAS = representatividade (%), eixo da esquerda (azul)
-        col_bar, col_line = "#2a9d8f", "#d6453e"
-        bars = ax.bar(xs, reprs, color=col_bar, edgecolor="#1f6f63", alpha=0.85,
+        # BARRAS = representatividade/volumetria (%), eixo esquerdo (steelblue)
+        # LINHA  = LGD médio, eixo direito (crimson) — tema padrão da lib
+        col_bar, col_line = "steelblue", "crimson"
+        bars = ax.bar(xs, reprs, color=col_bar, edgecolor="#2f5d82", alpha=0.85,
                       width=0.62, label="Representatividade (%)")
         ax.set_ylabel("Representatividade (%)", color=col_bar, fontweight="bold")
         ax.tick_params(axis="y", labelcolor=col_bar)
@@ -1863,60 +1876,524 @@ class SequentialLGDSegmenter:
         return fig
 
     # ------------------------------------------------------------------
+    # PLOT_FEATURE_HIST: histograma de uma variável NUMÉRICA dentro de uma
+    #   folha, com linhas verticais nos cortes propostos (ótimo ou manual).
+    #   Mostra a forma da distribuição da variável antes de dividir. Para
+    #   variável categórica cai no plot_feature_lgd (barras × LGD).
+    # ------------------------------------------------------------------
+    def plot_feature_hist(self, feature: str, sid: str | None = None, splits=None,
+                          dtype=None, max_n_bins: int = 6, min_bin_size: float = 0.05,
+                          max_bin_size=None, bins_hist: int = 30, figsize=None,
+                          save_path: str | None = None, dpi: int = 150, ax=None):
+        try:
+            import matplotlib.pyplot as plt  # noqa: F401
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("plot_feature_hist requer matplotlib.") from e
+        if sid is None or sid not in self.segments:
+            sid, sub = "root", self.df
+        else:
+            sub = self.df[self.segments[sid]["mask"]]
+        kind = self._detect_kind(sub, feature, dtype)
+        if kind != "num":
+            # categórica não tem histograma — barras de representatividade × LGD
+            return self.plot_feature_lgd(feature, sid=sid, splits=splits, dtype=dtype,
+                                         max_n_bins=max_n_bins, min_bin_size=min_bin_size,
+                                         max_bin_size=max_bin_size, figsize=figsize,
+                                         save_path=save_path, dpi=dpi, ax=ax)
+        x = sub[feature].to_numpy(dtype="float64")
+        x = x[~np.isnan(x)]
+        if x.size == 0:
+            raise ValueError(f"Sem valores numéricos de '{feature}' nesta folha.")
+        # cortes (linhas verticais) a partir dos bins resolvidos
+        cortes, modo = [], "—"
+        try:
+            bins, modo, _ = self._resolve_bins(sub, feature, splits, dtype,
+                                               max_n_bins, min_bin_size, max_bin_size)
+            cortes = sorted({e for b in bins if b["kind"] == "num"
+                             for e in (b["lo"], b["hi"]) if np.isfinite(e)})
+        except Exception:
+            pass
+        if figsize is None:
+            figsize = (7.0, 4.4)
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        # barras = volumetria da variável (steelblue) · cortes = crimson
+        ax.hist(x, bins=bins_hist, color="steelblue", alpha=0.85, edgecolor="#2f5d82")
+        for c in cortes:
+            ax.axvline(c, color="crimson", lw=1.8, ls="--")
+        if cortes:
+            ax.plot([], [], color="crimson", lw=1.8, ls="--",
+                    label=f"cortes propostos ({len(cortes)})")
+            ax.legend(fontsize=9, framealpha=0.9)
+        rot = self.feature_labels.get(feature, feature)
+        ax.set_xlabel(rot)
+        ax.set_ylabel("frequência")
+        ax.set_title(f"Distribuição de '{rot}' na folha — {modo}", fontsize=11.5,
+                     fontweight="bold", color="#15324a")
+        ax.grid(axis="y", alpha=0.15)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    # ------------------------------------------------------------------
+    # PLOT_LEAF_LGD_HIST: histograma do LGD DENTRO de uma folha (referência
+    #   DES por padrão), com a média marcada — dispersão do LGD da folha.
+    # ------------------------------------------------------------------
+    def plot_leaf_lgd_hist(self, sid: str | None = None, sample: str | None = None,
+                           bins: int = 24, figsize=(5.2, 2.9),
+                           save_path: str | None = None, dpi: int = 150, ax=None):
+        try:
+            import matplotlib.pyplot as plt  # noqa: F401
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("plot_leaf_lgd_hist requer matplotlib.") from e
+        mask = (pd.Series(True, index=self.df.index)
+                if sid is None or sid not in self.segments
+                else self.segments[sid]["mask"].copy())
+        if sample is None and self.sample_col is not None:
+            sample = self.ref_sample
+        sfx = ""
+        if sample is not None and self.sample_col is not None:
+            mask = mask & (self.df[self.sample_col] == sample)
+            sfx = f" · {sample}"
+        y = self.df.loc[mask, self.target].to_numpy(dtype="float64")
+        y = y[~np.isnan(y)]
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        if y.size == 0:
+            ax.text(0.5, 0.5, "sem LGD nesta folha/amostra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889")
+            ax.axis("off"); fig.tight_layout()
+            return fig
+        ax.hist(y, bins=bins, range=(0, 1), color="steelblue", alpha=0.85,
+                edgecolor="#2f5d82")
+        m = float(np.mean(y))
+        ax.axvline(m, color="crimson", lw=1.8, ls="--", label=f"média {m:.3f}")
+        ax.legend(fontsize=8, framealpha=0.9)
+        ax.set_xlabel("LGD"); ax.set_ylabel("freq.")
+        ax.set_title(f"LGD médio da folha{sfx} (n={y.size})", fontsize=10.5,
+                     fontweight="bold", color="#15324a")
+        ax.set_xlim(0, 1); ax.grid(axis="y", alpha=0.15)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    # ==================================================================
+    # ANÁLISE DE VARIÁVEIS: perfil estatístico, distribuição e estabilidade
+    #   (PSI atual e por safra) de UMA variável de entrada, numa folha.
+    # ==================================================================
+    def _leaf_mask(self, sid):
+        if sid is None or sid not in self.segments:
+            return pd.Series(True, index=self.df.index)
+        return self.segments[sid]["mask"].copy()
+
+    def variable_summary(self, feature, sid=None, sample=None) -> dict:
+        """Resumo de uma variável numa folha (referência DES por padrão):
+        %missing, média/mediana/desvio, n, percentis (min, p5, p95, max), o IV
+        contínuo e o PSI atual por amostra (nos bins do IV)."""
+        sid = sid if (sid in self.segments) else "root"
+        mask = self._leaf_mask(sid)
+        if sample is None and self.sample_col is not None:
+            sample = self.ref_sample
+        if sample is not None and self.sample_col is not None:
+            mask = mask & (self.df[self.sample_col] == sample)
+        col = self.df.loc[mask, feature]
+        kind = self._detect_kind(self.df[mask], feature, None)
+        n = int(len(col)); n_miss = int(col.isna().sum())
+        res = {"variavel": feature, "tipo": kind, "amostra": sample, "n": n,
+               "n_missing": n_miss,
+               "pct_missing": round(100 * n_miss / n, 2) if n else float("nan")}
+        if kind == "num":
+            x = col.to_numpy(dtype="float64"); x = x[~np.isnan(x)]
+            if x.size:
+                res.update({
+                    "media": round(float(np.mean(x)), 4),
+                    "mediana": round(float(np.median(x)), 4),
+                    "desvio": round(float(np.std(x, ddof=1)) if x.size > 1 else 0.0, 4),
+                    "min": round(float(np.min(x)), 4),
+                    "p5": round(float(np.percentile(x, 5)), 4),
+                    "p95": round(float(np.percentile(x, 95)), 4),
+                    "max": round(float(np.max(x)), 4)})
+        else:
+            vc = col.dropna().astype(str).value_counts(normalize=True)
+            res["top_categorias"] = [(c, round(100 * p, 1)) for c, p in vc.head(8).items()]
+        # IV contínuo + PSI atual (nos mesmos bins) desta variável na folha
+        res["iv"], res["forca"], res["psi"], res["pior_psi"] = None, "—", {}, None
+        try:
+            ivt = self.variable_iv(sid, features=[feature], with_psi=True)
+            if len(ivt):
+                r0 = ivt.iloc[0]
+                res["iv"] = None if pd.isna(r0["iv"]) else float(r0["iv"])
+                res["forca"] = r0["forca"]
+                for c in ivt.columns:
+                    if c.startswith("psi_") and c != "psi_classificacao":
+                        res["psi"][c[4:]] = None if pd.isna(r0[c]) else float(r0[c])
+                if "pior_psi" in ivt.columns and not pd.isna(r0["pior_psi"]):
+                    res["pior_psi"] = float(r0["pior_psi"])
+        except Exception:
+            pass
+        return res
+
+    def variable_by_safra(self, feature, time_col=None, sid=None, sample=None) -> pd.DataFrame:
+        """Percentis (min, p5, média, p95, max) e %missing da variável NUMÉRICA
+        por safra (mês de `time_col`), dentro da folha. `time_col` default = date_col."""
+        time_col = time_col or self.date_col
+        if time_col is None:
+            raise ValueError("Informe time_col ou configure date_col no segmenter.")
+        mask = self._leaf_mask(sid)
+        if sample is not None and self.sample_col is not None:
+            mask = mask & (self.df[self.sample_col] == sample)
+        sub = self.df[mask]
+        if time_col not in sub.columns:
+            raise ValueError(f"Coluna de tempo '{time_col}' não existe no DataFrame.")
+        safra = pd.to_datetime(sub[time_col], errors="coerce").dt.to_period("M")
+        rows = []
+        for per, g in sub.groupby(safra):
+            col = g[feature]
+            x = col.to_numpy(dtype="float64"); x = x[~np.isnan(x)]
+            n = int(len(col)); n_miss = int(col.isna().sum())
+            row = {"safra": str(per), "n": n,
+                   "pct_missing": round(100 * n_miss / n, 1) if n else float("nan")}
+            if x.size:
+                row.update({"min": round(float(np.min(x)), 3),
+                            "p5": round(float(np.percentile(x, 5)), 3),
+                            "media": round(float(np.mean(x)), 3),
+                            "p95": round(float(np.percentile(x, 95)), 3),
+                            "max": round(float(np.max(x)), 3)})
+            else:
+                row.update({k: float("nan") for k in ("min", "p5", "media", "p95", "max")})
+            rows.append(row)
+        return pd.DataFrame(rows).sort_values("safra").reset_index(drop=True)
+
+    def variable_psi_by_safra(self, feature, time_col=None, sid=None, max_n_bins=10,
+                              min_bin_size=0.05, eps=1e-6) -> pd.DataFrame:
+        """PSI da variável por safra vs. a referência (DES), com os bins
+        fixados na DES da folha. `time_col` default = date_col."""
+        if self.sample_col is None:
+            raise ValueError("PSI por safra requer sample_col (referência DES).")
+        time_col = time_col or self.date_col
+        if time_col is None:
+            raise ValueError("Informe time_col ou configure date_col no segmenter.")
+        mask = self._leaf_mask(sid)
+        leaf = self.df[mask]
+        if time_col not in leaf.columns:
+            raise ValueError(f"Coluna de tempo '{time_col}' não existe no DataFrame.")
+        ref = leaf[leaf[self.sample_col] == self.ref_sample]
+        if len(ref) == 0:
+            raise ValueError("Sem dados da referência (DES) nesta folha.")
+        bins, _modo, _kind = self._resolve_bins(leaf, feature, None, None,
+                                                max_n_bins, min_bin_size)
+        if not bins:
+            return pd.DataFrame(columns=["safra", "n", "psi", "classificacao"])
+        n_ref = len(ref)
+        ref_pct = [max(int(self._mask_in(ref, feature, b).sum()) / n_ref, eps) for b in bins]
+        safra = pd.to_datetime(leaf[time_col], errors="coerce").dt.to_period("M")
+        rows = []
+        for per, g in leaf.groupby(safra):
+            n_g = len(g)
+            if n_g == 0:
+                continue
+            psi = 0.0
+            for b, p_ref in zip(bins, ref_pct):
+                p_cur = max(int(self._mask_in(g, feature, b).sum()) / n_g, eps)
+                psi += (p_cur - p_ref) * np.log(p_cur / p_ref)
+            rows.append({"safra": str(per), "n": n_g, "psi": round(float(psi), 4),
+                         "classificacao": _classifica_psi(psi)})
+        return pd.DataFrame(rows).sort_values("safra").reset_index(drop=True)
+
+    def plot_variable_distribution(self, feature, sid=None, sample=None, max_n_bins=8,
+                                   min_bin_size=0.03, figsize=(7.2, 3.1),
+                                   save_path=None, dpi=150, ax=None):
+        """Distribuição da variável na folha (barras por faixa; a barra de
+        faltantes aparece em destaque). Numérica usa os bins ótimos."""
+        try:
+            import matplotlib.pyplot as plt  # noqa: F401
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("plot_variable_distribution requer matplotlib.") from e
+        mask = self._leaf_mask(sid)
+        if sample is None and self.sample_col is not None:
+            sample = self.ref_sample
+        if sample is not None and self.sample_col is not None:
+            mask = mask & (self.df[self.sample_col] == sample)
+        sub = self.df[mask]
+        rot = self.feature_labels.get(feature, feature)
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        try:
+            bins, _modo, _kind = self._resolve_bins(sub, feature, None, None,
+                                                    max_n_bins, min_bin_size)
+        except Exception:
+            bins = []
+        if bins:
+            tbl = self._bin_table(sub, feature, bins, max(len(sub), 1))
+        else:
+            tbl = pd.DataFrame()
+        if tbl.empty:                         # fallback: histograma cru
+            x = sub[feature].to_numpy(dtype="float64"); x = x[~np.isnan(x)]
+            if x.size:
+                ax.hist(x, bins=20, color="steelblue", alpha=0.85, edgecolor="#2f5d82")
+        else:
+            labels = [s.split(": ", 1)[-1] for s in tbl["faixa"]]
+            reprs = tbl["repr_%"].to_numpy()
+            cols = ["#c98a8a" if "faltante" in f else "steelblue" for f in tbl["faixa"]]
+            xs = list(range(len(labels)))
+            ax.bar(xs, reprs, color=cols, edgecolor="#2f5d82", alpha=0.9, width=0.72)
+            for x0, rp in zip(xs, reprs):
+                ax.text(x0, rp, f"{rp:.0f}%", ha="center", va="bottom", fontsize=7.5,
+                        color="#15324a")
+            ax.set_xticks(xs); ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8)
+            ax.set_xlim(-0.75, len(labels) - 0.25)               # respiro nas bordas (eixo x)
+            ax.set_ylim(0, float(np.nanmax(reprs)) * 1.16 + 1)   # espaço p/ os rótulos %
+        ax.set_ylabel("% da folha")
+        ax.set_title(f"Distribuição de '{rot}'" + (f" · {sample}" if sample else ""),
+                     fontsize=11, fontweight="bold", color="#15324a")
+        ax.grid(axis="y", alpha=0.15)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def variable_share_by_safra(self, feature, time_col=None, sid=None, sample=None,
+                                top=8) -> pd.DataFrame:
+        """Representatividade (% por safra) de cada categoria de uma variável
+        CATEGÓRICA ao longo do tempo. Linhas = safra; colunas = categorias (as
+        `top` mais frequentes; o resto vira 'outras') + '(faltante)'."""
+        time_col = time_col or self.date_col
+        if time_col is None:
+            raise ValueError("Informe time_col ou configure date_col no segmenter.")
+        mask = self._leaf_mask(sid)
+        if sample is not None and self.sample_col is not None:
+            mask = mask & (self.df[self.sample_col] == sample)
+        sub = self.df[mask]
+        if time_col not in sub.columns:
+            raise ValueError(f"Coluna de tempo '{time_col}' não existe no DataFrame.")
+        safra = pd.to_datetime(sub[time_col], errors="coerce").dt.to_period("M").astype(str)
+        cat = sub[feature]
+        keep = list(cat.dropna().astype(str).value_counts().head(top).index)
+
+        def lab(v):
+            if pd.isna(v):
+                return "(faltante)"
+            s = str(v)
+            return s if s in keep else "outras"
+
+        tab = pd.crosstab(safra, cat.map(lab))
+        tab = tab[tab.index != "NaT"]
+        if tab.empty:
+            return pd.DataFrame(columns=["safra"])
+        pct = tab.div(tab.sum(axis=1), axis=0) * 100
+        order = [c for c in keep if c in pct.columns]
+        if "outras" in pct.columns:
+            order.append("outras")
+        if "(faltante)" in pct.columns:
+            order.append("(faltante)")
+        pct = pct[order].round(1).sort_index()
+        pct.index.name = "safra"
+        return pct.reset_index()
+
+    def plot_variable_share_timeseries(self, feature, time_col=None, sid=None, sample=None,
+                                       figsize=(8.6, 3.6), save_path=None, dpi=150, ax=None):
+        """Área empilhada da representatividade (%) de cada categoria por safra —
+        mostra como a distribuição da variável categórica migra no tempo."""
+        import matplotlib.colors as mcolors
+        sh = self.variable_share_by_safra(feature, time_col, sid=sid, sample=sample)
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        cats = [c for c in sh.columns if c != "safra"]
+        if sh.empty or not cats:
+            ax.text(0.5, 0.5, "sem dados por safra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        x = list(range(len(sh)))
+        cmap = mcolors.LinearSegmentedColormap.from_list("sc", ["steelblue", "crimson"])
+        base = [c for c in cats if c not in ("outras", "(faltante)")]
+        colors = []
+        for c in cats:
+            if c == "(faltante)":
+                colors.append("#c98a8a")
+            elif c == "outras":
+                colors.append("#b9c0cb")
+            else:
+                i = base.index(c)
+                colors.append(cmap(i / max(len(base) - 1, 1)))
+        ys = [sh[c].fillna(0).to_numpy() for c in cats]
+        ax.stackplot(x, ys, labels=cats, colors=colors, alpha=0.92)
+        ax.set_ylim(0, 100); ax.margins(x=0)
+        ax.set_xticks(x); ax.set_xticklabels(sh["safra"], rotation=45, ha="right", fontsize=8)
+        ax.set_ylabel("% da safra")
+        # legenda à DIREITA (vertical) — não colide com as datas do eixo x
+        ax.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5),
+                  framealpha=0.9, title="categoria")
+        rot = self.feature_labels.get(feature, feature)
+        ax.set_title(f"'{rot}' ao longo do tempo — representatividade por categoria",
+                     fontsize=11, fontweight="bold", color="#15324a")
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def plot_variable_timeseries(self, feature, time_col=None, sid=None, sample=None,
+                                 figsize=(8.6, 3.4), save_path=None, dpi=150, ax=None):
+        """Variável NUMÉRICA: percentis por safra (min–max, p5–p95, média).
+        Variável CATEGÓRICA: representatividade de cada categoria por safra."""
+        if self._detect_kind(self.df[self._leaf_mask(sid)], feature, None) == "cat":
+            return self.plot_variable_share_timeseries(
+                feature, time_col, sid=sid, sample=sample, figsize=(figsize[0], 3.6),
+                save_path=save_path, dpi=dpi, ax=ax)
+        bs = self.variable_by_safra(feature, time_col, sid=sid, sample=sample)
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        if bs.empty or bs["media"].notna().sum() == 0:
+            ax.text(0.5, 0.5, "sem dados por safra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        x = list(range(len(bs)))
+        ax.fill_between(x, bs["min"], bs["max"], color="steelblue", alpha=0.07)
+        ax.plot(x, bs["min"], color="#9bb7c9", lw=1.0)
+        ax.plot(x, bs["max"], color="#9bb7c9", lw=1.0, label="min / max")
+        ax.plot(x, bs["p5"], color="#6f93ad", lw=1.3, ls="--")
+        ax.plot(x, bs["p95"], color="#6f93ad", lw=1.3, ls="--", label="p5 / p95")
+        ax.plot(x, bs["media"], color="#15324a", lw=2.4, marker="o", markersize=4,
+                label="média")
+        ax.set_xticks(x); ax.set_xticklabels(bs["safra"], rotation=45, ha="right", fontsize=8)
+        ax.legend(fontsize=8, ncol=3, framealpha=0.9, loc="upper left")
+        rot = self.feature_labels.get(feature, feature)
+        ax.set_title(f"'{rot}' ao longo do tempo — percentis por safra",
+                     fontsize=11, fontweight="bold", color="#15324a")
+        ax.grid(alpha=0.12)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def plot_variable_psi_by_safra(self, feature, time_col=None, sid=None,
+                                   figsize=(9.6, 3.4), save_path=None, dpi=150, ax=None):
+        """PSI da variável por safra vs DES (barras coloridas por faixa de PSI)."""
+        ps = self.variable_psi_by_safra(feature, time_col, sid=sid)
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        if ps.empty:
+            ax.text(0.5, 0.5, "sem PSI por safra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        x = list(range(len(ps)))
+        cor = ["#1aa64b" if p < 0.10 else "#caa000" if p < 0.25 else "#d6453e"
+               for p in ps["psi"]]
+        ax.bar(x, ps["psi"], color=cor, alpha=0.92, width=0.78)
+        for x0, p in zip(x, ps["psi"]):
+            ax.text(x0, p, f"{p:.2f}", ha="center", va="bottom", fontsize=7, color="#555")
+        ax.axhline(0.10, color="#caa000", lw=0.8, ls="--")
+        ax.axhline(0.25, color="#d6453e", lw=0.8, ls="--")
+        ax.set_xticks(x); ax.set_xticklabels(ps["safra"], rotation=45, ha="right", fontsize=8)
+        ax.set_xlim(-0.7, len(ps) - 0.3)                          # respiro nas bordas (eixo x)
+        ax.set_ylim(0, float(np.nanmax(ps["psi"])) * 1.16 + 0.05)  # espaço p/ os rótulos
+        ax.set_ylabel("PSI")
+        rot = self.feature_labels.get(feature, feature)
+        ax.set_title(f"PSI de '{rot}' por safra vs DES (bins fixados na DES)",
+                     fontsize=11, fontweight="bold", color="#15324a")
+        ax.grid(axis="y", alpha=0.12)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    # ------------------------------------------------------------------
     # VARIABLE_IV: Information Value de cada variável candidata em relação à
     #   folha `sid`, para indicar qual variável usar no próximo split.
-    #   Como o LGD é contínuo, o alvo é binarizado (evento = LGD ≥ corte,
-    #   default = mediana da folha) e o IV é calculado via WoE sobre os MESMOS
-    #   bins ótimos que seriam usados no split. Ordena por IV desc.
+    #   O LGD é contínuo, então o IV é o do **optimal binning para alvo
+    #   contínuo** (optbinning): por bin, WoE = média_bin − média_global e
+    #   IV = Σ (n_i/N)·|média_bin − média_global| — o desvio absoluto médio
+    #   ponderado do LGD por faixa em relação à média da folha. Calculado na
+    #   amostra de referência (DES), sobre os MESMOS bins ótimos do split.
+    #   Quando há amostras, o PSI de cada variável é calculado sobre ESSES
+    #   MESMOS bins (DES × cada amostra, dentro da folha): colunas
+    #   ``psi_<amostra>``, ``pior_psi`` e ``psi_classificacao``.
     # ------------------------------------------------------------------
     def variable_iv(self, sid: str | None = None, features: list | None = None,
                     max_n_bins: int = 5, min_bin_size: float = 0.05,
-                    cutoff="median") -> pd.DataFrame:
+                    cutoff="median", with_psi: bool = True) -> pd.DataFrame:
         if features is None:
-            skip = {self.target, self.sample_col}
+            skip = {self.target, self.sample_col, self.date_col}
             features = [c for c in self.df.columns if c not in skip]
 
         if sid is None or sid == "root" or sid not in self.segments:
             leaf_mask = pd.Series(True, index=self.df.index)
         else:
             leaf_mask = self.segments[sid]["mask"]
-        ref_mask = (self.df[self.sample_col] == self.ref_sample
-                    if self.sample_col is not None else pd.Series(True, index=self.df.index))
-
-        base = self.df[leaf_mask & ref_mask]            # porção DES da folha
-        if len(base) >= 4 and base[self.target].nunique() > 1:
-            thr = base[self.target].median() if cutoff == "median" else float(cutoff)
-            event = (base[self.target].to_numpy() >= thr).astype(int)
-            N1, N0 = int(event.sum()), int(len(event) - event.sum())
+        if self.sample_col is not None:
+            ref_mask = self.df[self.sample_col] == self.ref_sample
+            nonref = [a for a in self.df[self.sample_col].dropna().unique()
+                      if a != self.ref_sample]
         else:
-            thr, event, N1, N0 = np.nan, None, 0, 0
+            ref_mask = pd.Series(True, index=self.df.index)
+            nonref = []
+        psi_on = with_psi and bool(nonref)
+
+        leaf = self.df[leaf_mask]
+        base = self.df[leaf_mask & ref_mask]            # porção DES da folha (referência)
+        yb = base[self.target].to_numpy(dtype="float64")
+        yb = yb[~np.isnan(yb)]
+        ok_base = yb.size >= 4 and np.unique(yb).size > 1
+        mean_global = float(yb.mean()) if ok_base else np.nan
+        n_base = int(yb.size)
+
+        # frames e contagens por amostra DENTRO da folha (para o PSI nos bins do IV)
+        ref_frame = cur_frames = None
+        n_ref_leaf = 0
+        if psi_on:
+            ref_frame = self.df[leaf_mask & (self.df[self.sample_col] == self.ref_sample)]
+            n_ref_leaf = len(ref_frame)
+            cur_frames = {a: self.df[leaf_mask & (self.df[self.sample_col] == a)]
+                          for a in nonref}
 
         rows = []
         for feat in features:
             iv, nb, kind = np.nan, 0, "—"
-            if N1 > 0 and N0 > 0:
+            psi_vals = {a: np.nan for a in nonref}
+            if ok_base:
                 try:
                     bins, _modo, kind = self._resolve_bins(
-                        self.df[leaf_mask], feat, None, None, max_n_bins, min_bin_size)
+                        leaf, feat, None, None, max_n_bins, min_bin_size)
                     nb = len(bins)
                     if bins:
+                        # IV contínuo (optbinning): Σ (n_i/N)·|média_bin − média_global|
                         iv = 0.0
+                        yb_feat = base[self.target].to_numpy(dtype="float64")
                         for b in bins:
                             m = self._mask_in(base, feat, b).to_numpy()
-                            n1, n0 = int(event[m].sum()), int((1 - event[m]).sum())
-                            p1, p0 = max(n1 / N1, 1e-6), max(n0 / N0, 1e-6)
-                            iv += (n1 / N1 - n0 / N0) * np.log(p1 / p0)
+                            yi = yb_feat[m]
+                            yi = yi[~np.isnan(yi)]
+                            if yi.size:
+                                iv += (yi.size / n_base) * abs(float(yi.mean()) - mean_global)
+                        # PSI sobre os MESMOS bins (DES × amostra, na folha)
+                        if psi_on and n_ref_leaf > 0:
+                            for a in nonref:
+                                n_a = len(cur_frames[a])
+                                if n_a == 0:
+                                    continue
+                                psi = 0.0
+                                for b in bins:
+                                    p_ref = max(int(self._mask_in(ref_frame, feat, b).sum())
+                                                / n_ref_leaf, 1e-6)
+                                    p_cur = max(int(self._mask_in(cur_frames[a], feat, b).sum())
+                                                / n_a, 1e-6)
+                                    psi += (p_cur - p_ref) * np.log(p_cur / p_ref)
+                                psi_vals[a] = round(float(psi), 4)
                 except Exception:
                     iv = np.nan
-            rows.append({
+            row = {
                 "variavel": feat, "tipo": kind, "n_bins": nb,
                 "iv": round(float(iv), 4) if not (iv is None or np.isnan(iv)) else np.nan,
                 "forca": _classifica_iv(iv),
-            })
+            }
+            if psi_on:
+                for a in nonref:
+                    row[f"psi_{a}"] = psi_vals[a]
+                validos = [v for v in psi_vals.values() if not pd.isna(v)]
+                pior = max(validos) if validos else np.nan
+                row["pior_psi"] = round(float(pior), 4) if not pd.isna(pior) else np.nan
+                row["psi_classificacao"] = _classifica_psi(pior) if not pd.isna(pior) else "—"
+            rows.append(row)
         out = (pd.DataFrame(rows)
                .sort_values("iv", ascending=False, na_position="last")
                .reset_index(drop=True))
-        out.attrs["cutoff"] = (round(float(thr), 4) if not np.isnan(thr) else np.nan)
+        out.attrs["lgd_medio"] = round(mean_global, 4) if not np.isnan(mean_global) else np.nan
+        out.attrs["cutoff"] = out.attrs["lgd_medio"]      # compat (agora é a média da folha)
         return out
 
 
@@ -2252,7 +2729,7 @@ class SequentialLGDSegmenter:
         if sid is None:
             sid = "root"
         iv = self.variable_iv(sid, features=features, max_n_bins=max_n_bins,
-                              min_bin_size=min_bin_size)
+                              min_bin_size=min_bin_size, with_psi=False)
         if len(iv) == 0 or pd.isna(iv.iloc[0]["iv"]):
             return {"sid": sid, "feature": None, "iv": None, "forca": None,
                     "ranking": iv, "msg": "nenhuma variável informativa para esta folha"}
@@ -2261,24 +2738,47 @@ class SequentialLGDSegmenter:
                 "iv": float(top["iv"]), "forca": top["forca"], "ranking": iv,
                 "msg": f"dividir por '{top['variavel']}' (IV={top['iv']:.4f}, {top['forca']})"}
 
+    def _is_descendant_or_self(self, sid, ancestor) -> bool:
+        """True se `sid` é o próprio `ancestor` ou um descendente dele."""
+        cur, guard = sid, 0
+        while cur is not None and cur in self.segments and guard < 10000:
+            if cur == ancestor:
+                return True
+            cur = self.segments[cur].get("parent")
+            guard += 1
+        return False
+
     # ------------------------------------------------------------------
-    # FIT_AUTO: constrói uma árvore inicial de forma gulosa — em cada folha
-    #   escolhe a variável de maior IV e divide com binning ótimo, até a
-    #   profundidade máxima ou IV abaixo do mínimo. Ponto de partida para
-    #   refinar à mão depois.
+    # FIT_AUTO: constrói uma árvore de forma gulosa — em cada folha escolhe a
+    #   variável de maior IV e divide com binning ótimo, até a profundidade
+    #   máxima ou IV abaixo do mínimo. Ponto de partida para refinar à mão.
+    #   Se `subtree` (id de folha) for dado, cresce APENAS a subárvore daquela
+    #   folha (até `max_depth` níveis abaixo dela), sem reiniciar nem tocar no
+    #   resto da árvore — útil para "auto-ajustar só esta folha".
     # ------------------------------------------------------------------
     def fit_auto(self, features: list | None = None, max_depth: int = 3,
                  min_iv: float = 0.02, max_n_bins: int = 2, min_bin_size: float = 0.05,
-                 from_scratch: bool = True, verbose: bool = True):
+                 from_scratch: bool = True, subtree: str | None = None,
+                 verbose: bool = True):
         import io
         import contextlib
-        if from_scratch:
-            root = self.segments["root"]
-            root["is_leaf"] = True
-            self.segments = {"root": root}
-        for depth in range(max_depth):
+        if subtree is not None and subtree not in self.segments:
+            raise ValueError(f"Folha '{subtree}' não existe na árvore atual.")
+        if subtree is None:                       # árvore inteira (comportamento padrão)
+            if from_scratch:
+                root = self.segments["root"]
+                root["is_leaf"] = True
+                self.segments = {"root": root}
+            base_depth = 0
+            def in_scope(_sid):
+                return True
+        else:                                     # só a subárvore da folha escolhida
+            base_depth = self.segments[subtree]["depth"]
+            def in_scope(_sid):
+                return self._is_descendant_or_self(_sid, subtree)
+        for depth in range(base_depth, base_depth + max_depth):
             atuais = [sid for sid, s in self.segments.items()
-                      if s["is_leaf"] and s["depth"] == depth]
+                      if s["is_leaf"] and s["depth"] == depth and in_scope(sid)]
             for sid in atuais:
                 if sid in self.segments and not self.segments[sid]["is_leaf"]:
                     continue
@@ -2286,7 +2786,7 @@ class SequentialLGDSegmenter:
                 if len(self._fit_frame(sub, min_bin_size)) < self.min_leaf_rows:
                     continue
                 iv = self.variable_iv(sid, features=features, max_n_bins=max_n_bins,
-                                      min_bin_size=min_bin_size)
+                                      min_bin_size=min_bin_size, with_psi=False)
                 if len(iv) == 0:
                     continue
                 top = iv.iloc[0]
@@ -2298,8 +2798,9 @@ class SequentialLGDSegmenter:
         n_folhas = sum(s["is_leaf"] for s in self.segments.values())
         prof = max(s["depth"] for s in self.segments.values())
         if verbose:
-            print(f"[fit_auto] árvore gulosa construída: profundidade {prof} "
-                  f"(máx {max_depth}), IV mínimo {min_iv} → {n_folhas} folhas")
+            escopo = "subárvore" if subtree is not None else "árvore gulosa"
+            print(f"[fit_auto] {escopo} construída: profundidade {prof} "
+                  f"(máx +{max_depth}), IV mínimo {min_iv} → {n_folhas} folhas")
         return self
 
     # ------------------------------------------------------------------
