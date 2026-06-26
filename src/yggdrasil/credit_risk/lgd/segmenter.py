@@ -965,17 +965,24 @@ class SequentialLGDSegmenter:
         n_ref = ref_mask.sum()
         ref_pct = {sid: ((masks[sid] & ref_mask).sum() / n_ref if n_ref else 0.0)
                    for sid in leaf_ids}
+        # representatividade (% da folha DENTRO da amostra) — começa pela referência;
+        # as demais amostras saem no laço abaixo, ao lado do respectivo PSI.
+        out[f"repr_{self.ref_sample}_%"] = [round(100 * ref_pct[sid], 1)
+                                            for sid in leaf_ids]
         for amostra in self.df[self.sample_col].dropna().unique():
             if amostra == self.ref_sample:
                 continue
             s_mask = self.df[self.sample_col] == amostra
             n_s = s_mask.sum()
-            col = []
+            psi_col, repr_col = [], []
             for sid in leaf_ids:
+                frac = (masks[sid] & s_mask).sum() / n_s if n_s else 0.0
                 p_ref = max(ref_pct[sid], eps)
-                p_cur = max((masks[sid] & s_mask).sum() / n_s if n_s else 0.0, eps)
-                col.append(round((p_cur - p_ref) * np.log(p_cur / p_ref), 4))
-            out[f"psi_{amostra}"] = col
+                p_cur = max(frac, eps)
+                psi_col.append(round((p_cur - p_ref) * np.log(p_cur / p_ref), 4))
+                repr_col.append(round(100 * frac, 1))
+            out[f"psi_{amostra}"] = psi_col
+            out[f"repr_{amostra}_%"] = repr_col
         return out
 
     # alvo (LGD) de uma folha, restrito à amostra de referência quando houver

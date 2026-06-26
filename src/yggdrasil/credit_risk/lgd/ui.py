@@ -111,6 +111,26 @@ class LGDSegmenterUI:
     # (distribuição da variável + cortes  e  histograma do LGD da folha)
     _PREVIEW_FIGSIZE = (6.0, 3.6)
 
+    # estilo das tabelas (Styler): bordas em cada célula p/ a divisão de colunas
+    # ficar nítida, cabeçalho grafite fixo no topo e linhas com zebra leve.
+    _TABLE_STYLES = [
+        {"selector": "", "props": [("border-collapse", "collapse"),
+                                   ("border", "1px solid #cdd5e0"),
+                                   ("width", "100%")]},
+        {"selector": "th, td", "props": [("border", "1px solid #e1e5ec"),
+                                         ("padding", "4px 9px"),
+                                         ("text-align", "right"),
+                                         ("white-space", "nowrap")]},
+        {"selector": "thead th", "props": [("background-color", "#eef1f5"),
+                                           ("color", "#27324a"),
+                                           ("font-weight", "600"),
+                                           ("border-bottom", "2px solid #b9c2d0"),
+                                           ("position", "sticky"),
+                                           ("top", "0"), ("z-index", "1")]},
+        {"selector": "tbody tr:nth-child(even) td", "props": [("background-color", "#fafbfc")]},
+        {"selector": "tbody tr:hover td", "props": [("background-color", "#eef3f8")]},
+    ]
+
     def __init__(self, df, target="lgd", sample_col=None, ref_sample="DES",
                  feature_labels=None, features=None, tree_samples=None, date_col=None):
         # tree_samples: amostras cujo LGD médio aparece nas folhas da árvore.
@@ -237,6 +257,15 @@ class LGDSegmenterUI:
                             "de LGD < ΔLGD mínimo", "cut")
         self.btn_reset = mk("Reset", "", "Recomeça do zero", "refresh")
         self.btn_export = mk("Exportar", "primary", "Gera ui.result com o rótulo", "download")
+        # copiar a tabela de folhas p/ o Excel (TSV pronto p/ colar)
+        self.btn_copy_table = W.Button(
+            description="Copiar p/ Excel (TSV)", icon="table",
+            tooltip="Gera a tabela em TSV — selecione tudo (Ctrl+A), copie (Ctrl+C) "
+                    "e cole no Excel: colunas certas e números em pt-BR",
+            layout=W.Layout(width="auto", margin="6px 0 2px"))
+        self.out_table_tsv = W.Textarea(
+            value="", layout=W.Layout(width="99%", height="150px", display="none"),
+            placeholder="TSV das folhas — selecione tudo (Ctrl+A) e copie (Ctrl+C)")
         self.btn_collapse = mk("Recolher p/ o pai", "danger",
                                "Desfaz o split: recolhe a folha de volta ao segmento pai", "compress")
         self.btn_merge_l = mk("Fundir ◀", "warning",
@@ -345,7 +374,9 @@ class LGDSegmenterUI:
                                   "Aplica a régua à tabela Spark (segmento, nota e LGD por linha), "
                                   "desde que as colunas tenham o mesmo nome", "table")
         # --- controles da aba "Análise de variáveis" ---
-        self.dd_var = W.Dropdown(description="Variável", options=self.features,
+        # opções com o NOME DE EXIBIÇÃO (feature_labels) — valor = nome da coluna
+        var_opts = [(self.seg.feature_labels.get(f, f), f) for f in self.features]
+        self.dd_var = W.Dropdown(description="Variável", options=var_opts,
                                  layout=full, style=dstyle)
         self.dd_var_leaf = W.Dropdown(description="Folha", layout=full, style=dstyle)
         self.tx_var_time = W.Text(description="coluna safra", value=(self.date_col or "dt_ref"),
@@ -370,6 +401,7 @@ class LGDSegmenterUI:
         self.btn_export.on_click(self._on_export)
         self.dd_leaf.observe(self._on_leaf_change, names="value")
         self.dd_test.observe(lambda _: self._refresh_table(), names="value")
+        self.btn_copy_table.on_click(self._on_copy_table)
         self.btn_collapse.on_click(self._on_collapse)
         self.btn_merge_l.on_click(lambda _: self._on_merge("left"))
         self.btn_merge_r.on_click(lambda _: self._on_merge("right"))
@@ -608,7 +640,7 @@ class LGDSegmenterUI:
             "<span style='background:#e6f6ec;padding:1px 5px;border-radius:3px'>&lt;0.10 estável</span> "
             "<span style='background:#fdf3da;padding:1px 5px;border-radius:3px'>0.10–0.25 atenção</span> "
             "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>&ge;0.25 instável</span>"
-            "<br><b>p_vs_prox</b> = p-valor de um <b>teste de hipótese</b> que compara a "
+            "<br><b>p (irmãs)</b> = p-valor de um <b>teste de hipótese</b> que compara a "
             "<b>distribuição de LGD</b> da folha com a da <b>irmã adjacente</b> (mesmo pai, "
             "na amostra de referência DES). H₀: as duas irmãs têm o mesmo LGD. "
             "O teste é o <b>Mann-Whitney U</b> (não-paramétrico, padrão) ou o <b>t de Welch</b> "
@@ -618,7 +650,8 @@ class LGDSegmenterUI:
             "<span style='color:#137a3e'>p baixo</span> ⇒ folhas bem separadas. "
             "Só <b>irmãs</b> são comparadas (a última de cada grupo e o nó de faltantes ficam em branco).</div>")
         card_table = W.VBox([W.HTML("<div class='lgdui-h'>Folhas criadas · PSI &amp; teste de hipótese (irmãs)</div>"),
-                             tbl_legend, self.out_table])
+                             tbl_legend, self.out_table,
+                             W.HBox([self.btn_copy_table]), self.out_table_tsv])
         card_table.add_class("lgdui-card")
 
         metrics_legend = W.HTML(
@@ -1087,15 +1120,21 @@ class LGDSegmenterUI:
             sty = sty.map(p_bg, subset=["p_vs_prox"])
         fmt = {"repr_%": "{:.1f}"}
         for c in lv.columns:
-            if c.startswith("lgd_"):        # LGD em % (coerente com a árvore)
+            if c.startswith("repr_") and c.endswith("_%"):   # % por amostra
+                fmt[c] = "{:.1f}"
+            elif c.startswith("lgd_"):      # LGD em % (coerente com a árvore)
                 fmt[c] = "{:.2%}"
             elif c.startswith("psi_"):      # PSI é adimensional → decimal
                 fmt[c] = "{:.4f}"
         if "p_vs_prox" in lv.columns:
             fmt["p_vs_prox"] = "{:.3f}"
-        return (sty.format(fmt, na_rep="—")
-                   .hide(axis="index")
-                   .set_properties(**{"font-size": "12px"}))
+        sty = (sty.format(fmt, na_rep="—")
+                  .hide(axis="index")
+                  .set_table_styles(self._TABLE_STYLES)
+                  .set_properties(**{"font-size": "12px"}))
+        if "descricao" in lv.columns:       # texto longo: alinha à esquerda
+            sty = sty.set_properties(subset=["descricao"], **{"text-align": "left"})
+        return sty
 
     def _leaf_label(self, sid):
         s = self.seg.segments[sid]
@@ -1321,15 +1360,78 @@ class LGDSegmenterUI:
         p_cur = max((leaf & s_mask).sum() / n_s, eps)
         return float((p_cur - p_ref) * math.log(p_cur / p_ref))
 
-    def _refresh_table(self):
+    def _leaf_table_spec(self):
+        """(lv, cols, headers) da tabela de folhas — fonte única para a versão
+        renderizada (HTML) e para a versão copiável (TSV p/ Excel)."""
         lv = self.seg.leaves(with_psi=True, with_test=True, test=self.dd_test.value)
         lv = lv.rename(columns={"nota_lgd": "folha"})   # chamamos de folha, não nota
-        cols = ["folha", "descricao", "repr_%", "lgd_medio"]
-        cols += [c for c in lv.columns if c.startswith("psi_")]
+
+        def ab(a):
+            return "ESTAB" if a == "ESTABILIDADE" else a
+
+        # Colunas em blocos legíveis: identificação · % por amostra · LGD médio
+        # por amostra (só as que têm alvo) · PSI por amostra · teste de hipótese.
+        # `headers` renomeia só a EXIBIÇÃO (a formatação segue pelos nomes reais).
+        cols = ["folha", "descricao"]
+        headers = {"folha": "folha", "descricao": "descrição"}
+        if self.sample_col is None:
+            for c, h in (("repr_%", "repr. %"), ("lgd_medio", "LGD médio")):
+                if c in lv.columns:
+                    cols.append(c); headers[c] = h
+        else:
+            for a in [self.ref_sample] + self._nonref:       # % DES · % OOT · % ESTAB
+                c = f"repr_{a}_%"
+                if c in lv.columns:
+                    cols.append(c); headers[c] = f"% {ab(a)}"
+            for a in [self.ref_sample] + self._lgd_nonref:   # LGD DES · LGD OOT
+                c = f"lgd_{a}"
+                if c in lv.columns:
+                    cols.append(c); headers[c] = f"LGD {ab(a)}"
+            for a in self._nonref:                           # PSI OOT · PSI ESTAB
+                c = f"psi_{a}"
+                if c in lv.columns:
+                    cols.append(c); headers[c] = f"PSI {ab(a)}"
         if "p_vs_prox" in lv.columns:
-            cols.append("p_vs_prox")
-        self.out_table.value = self._styler_html(self._style_leaves(lv[cols]),
-                                                 max_height="300px")
+            cols.append("p_vs_prox"); headers["p_vs_prox"] = "p (irmãs)"
+        return lv, cols, headers
+
+    def _refresh_table(self):
+        lv, cols, headers = self._leaf_table_spec()
+        sty = self._style_leaves(lv[cols]).relabel_index(
+            [headers[c] for c in cols], axis="columns")
+        self.out_table.value = self._styler_html(sty, max_height="320px")
+
+    def _leaves_tsv(self):
+        """Tabela de folhas em TSV (tab = coluna, números em pt-BR) — cola direto
+        no Excel: colunas separadas certas e células numéricas de verdade."""
+        lv, cols, headers = self._leaf_table_spec()
+
+        def br(x):   # pt-BR: vírgula decimal (Excel reconhece como número)
+            return str(x).replace(".", ",")
+
+        def fmt(col, v):
+            if pd.isna(v):
+                return ""                       # vazio (não "—") p/ a célula ficar limpa
+            if col.startswith("lgd_"):          # LGD em % (igual à tela)
+                return br(f"{v:.2%}")
+            if col.startswith("psi_"):
+                return br(f"{v:.4f}")
+            if col == "p_vs_prox":
+                return br(f"{v:.3f}")
+            if col == "repr_%" or (col.startswith("repr_") and col.endswith("_%")):
+                return br(f"{v:.1f}")
+            if isinstance(v, float):
+                return br(f"{v:g}")
+            return str(v)
+
+        linhas = ["\t".join(headers[c] for c in cols)]
+        for _, row in lv[cols].iterrows():
+            linhas.append("\t".join(fmt(c, row[c]) for c in cols))
+        return "\n".join(linhas)
+
+    def _on_copy_table(self, _):
+        self.out_table_tsv.value = self._leaves_tsv()
+        self.out_table_tsv.layout.display = ""      # revela a caixa p/ copiar
 
     def _refresh_metrics(self):
         m = self.seg.metrics()
@@ -2427,9 +2529,16 @@ class LGDSegmenterUI:
         return html
 
     def _df_html(self, df, max_height=None):
-        """HTML de um DataFrame cru (sem índice), p/ atribuir a um widget HTML."""
-        return self._styler_html(
-            df.style.hide(axis="index").set_properties(**{"font-size": "12px"}), max_height)
+        """HTML de um DataFrame cru (sem índice), p/ atribuir a um widget HTML.
+        Aplica bordas por célula (divisão de colunas nítida) e alinha à esquerda
+        as colunas de texto."""
+        sty = (df.style.hide(axis="index")
+                       .set_table_styles(self._TABLE_STYLES)
+                       .set_properties(**{"font-size": "12px"}))
+        txt_cols = [c for c in df.columns if df[c].dtype == object]
+        if txt_cols:
+            sty = sty.set_properties(subset=txt_cols, **{"text-align": "left"})
+        return self._styler_html(sty, max_height)
 
     def _display_fig(self, fig, border=True):
         """Exibe uma figura num Output widget (usado só onde resta Output:
