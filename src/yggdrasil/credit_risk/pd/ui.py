@@ -51,7 +51,7 @@ _CSS = """
 .pdui-banner .s { font-size:11.5px; color:var(--muted); margin-top:1px; }
 /* cards */
 .pdui-card { background:#fff; border:1px solid var(--line); border-radius:12px;
-  padding:13px 15px; box-shadow:0 1px 3px rgba(16,24,40,.06); margin-bottom:2px; }
+  padding:13px 15px; box-shadow:0 1px 3px rgba(16,24,40,.06); margin-bottom:11px; }
 .pdui-h { font-weight:600; font-size:11px; color:var(--muted); text-transform:uppercase;
   letter-spacing:.07em; margin-bottom:9px; }
 /* rótulos das faixas (cockpit/diagnóstico) e chips da folha ativa */
@@ -73,19 +73,33 @@ _CSS = """
 .pill-red    { background:#fbe7e4; color:#b23a2a; }
 .pdui-legend { font-size:11px; color:var(--muted); margin:6px 0 2px; line-height:1.55; }
 .pdui-tree { line-height:1.55; }
-/* abas do workbench */
-.pdui-tabs { margin-top:8px; }
-.pdui-tabs > .widget-tab-contents { padding:12px 2px 2px; background:transparent; }
+/* abas do workbench — estilo "segmented control" (pílulas) */
+.pdui-tabs { margin-top:10px; }
+.pdui-tabs > .widget-tab-contents { padding:14px 2px 2px; background:transparent; }
+.pdui-tabs .lm-TabBar.jupyter-widget-tab-nav,
+.pdui-tabs .p-TabBar.jupyter-widget-tab-nav { border-bottom:1px solid var(--line);
+  padding-bottom:9px; box-shadow:none; }
+.pdui-tabs .lm-TabBar-content, .pdui-tabs .p-TabBar-content { gap:7px;
+  align-items:stretch; border:none; }
 .pdui-tabs .lm-TabBar-tab, .pdui-tabs .p-TabBar-tab { font-size:13px;
   /* !important vence a regra de mesma especificidade do ipywidgets
-     (flex/max-width: var(--jp-widgets-horizontal-tab-width)) que cortava o título */
-  min-width:max-content !important; max-width:none !important; flex:0 0 auto !important; }
+     (flex/max-width: var(--jp-widgets-horizontal-tab-width)) que cortava o título) */
+  min-width:max-content !important; max-width:none !important; flex:0 0 auto !important;
+  margin:0 !important; padding:7px 15px !important;
+  border:1px solid var(--ac-border) !important; border-radius:10px !important;
+  background:#fff !important; color:var(--muted) !important; font-weight:500;
+  line-height:1.15; box-shadow:0 1px 2px rgba(16,24,40,.05) !important;
+  transition:background .15s, color .15s, border-color .15s, box-shadow .15s; }
+.pdui-tabs .lm-TabBar-tab:hover, .pdui-tabs .p-TabBar-tab:hover {
+  background:var(--ac-soft) !important; color:var(--ac-deep) !important;
+  border-color:var(--ac-border) !important; }
 .pdui-tabs .lm-TabBar-tabLabel, .pdui-tabs .p-TabBar-tabLabel {
   white-space:nowrap !important; overflow:visible !important;
   text-overflow:clip !important; max-width:none !important; }
 .pdui-tabs .lm-TabBar-tab.lm-mod-current,
-.pdui-tabs .p-TabBar-tab.p-mod-current { color:var(--ac-deep); font-weight:600;
-  box-shadow: inset 0 -2px 0 var(--ac); }
+.pdui-tabs .p-TabBar-tab.p-mod-current { color:#fff !important; font-weight:600;
+  background:var(--ac) !important; border-color:var(--ac) !important;
+  box-shadow:0 2px 7px rgba(39,50,74,.28) !important; }
 /* cabeçalho da folha selecionada (métricas em chips) — auto-fit estica os chips
    para preencher toda a largura (linhas com menos chips ficam mais largas) */
 .pdui-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(92px,1fr));
@@ -131,6 +145,58 @@ class PDSegmenterUI:
         {"selector": "tbody tr:nth-child(even) td", "props": [("background-color", "#fafbfc")]},
         {"selector": "tbody tr:hover td", "props": [("background-color", "#eef3f8")]},
     ]
+
+    # Camada de estilo das tabelas "Detalhe por safra": cabeçalho claro (via
+    # _TABLE_STYLES) + coluna 'safra' ancorada à esquerda (sticky horizontal).
+    _SAFRA_HEADER_STYLES = [
+        # cabeçalho idêntico ao das demais tabelas (claro, via _TABLE_STYLES);
+        # aqui só ancoramos a coluna 'safra' à esquerda (sticky horizontal).
+        {"selector": "tbody td:first-child", "props": [
+            ("text-align", "left"),
+            ("font-family", "'IBM Plex Sans',sans-serif"),
+            ("font-weight", "600"), ("color", "#27324a"),
+            ("position", "sticky"), ("left", "0"), ("z-index", "2"),
+            ("background-color", "#f4f6f9"),
+            ("border-right", "1px solid #cdd5e0")]},
+        {"selector": "thead th:first-child", "props": [
+            ("text-align", "left"), ("position", "sticky"),
+            ("left", "0"), ("z-index", "3")]},
+        {"selector": "tbody tr:nth-child(odd) td:first-child", "props": [
+            ("background-color", "#f4f6f9")]},
+        {"selector": "tbody tr:nth-child(even) td:first-child", "props": [
+            ("background-color", "#eef1f5")]},
+        {"selector": "tbody tr:hover td:first-child", "props": [
+            ("background-color", "#eef3f8")]},
+    ]
+
+    @staticmethod
+    def _blues_set_bad():
+        """Cópia do cmap 'Blues' com 'bad'/'under' brancos, p/ que uma coluna
+        categórica toda-NaN não vire barra preta sob background_gradient."""
+        import matplotlib as mpl
+        try:                                   # matplotlib >= 3.6
+            cmap = mpl.colormaps["Blues"].copy()
+        except Exception:                      # matplotlib < 3.6
+            import matplotlib.cm as cm
+            cmap = cm.get_cmap("Blues").copy()
+        cmap.set_bad("#ffffff")
+        cmap.set_under("#ffffff")
+        return cmap
+
+    @staticmethod
+    def _accent_ramp_css(v, vmin, vmax, *, ceiling=0.55, na="#ffffff"):
+        """Rampa branco → accent #3b4a63 interpolada à mão (tons pálidos).
+        Fallback do heatmap categórico quando background_gradient falha."""
+        if v is None or pd.isna(v):
+            return "background-color:%s;color:#6b7480" % na
+        span = (vmax - vmin)
+        t = 0.0 if span <= 0 else (float(v) - vmin) / span
+        t = min(max(t, 0.0), 1.0) * ceiling
+        r = int(round(255 + (59 - 255) * t))
+        g = int(round(255 + (74 - 255) * t))
+        b = int(round(255 + (99 - 255) * t))
+        fg = "#ffffff" if t > 0.40 else "#1f2733"
+        return "background-color:rgb(%d,%d,%d);color:%s" % (r, g, b, fg)
 
     def __init__(self, df, target="target", sample_col=None, ref_sample="DES",
                  feature_labels=None, features=None, tree_samples=None, date_col=None):
@@ -321,6 +387,18 @@ class PDSegmenterUI:
                            "Calcula o placar de saúde: discriminação (KS/AUC/Gini), estabilidade "
                            "(PSI/CSI), calibração (previsto×observado) e estrutura "
                            "(monotonicidade · distinção entre folhas-irmãs)", "stethoscope")
+        # --- comparação de folhas-irmãs (inversão entre amostras/safras) ---
+        sib_style = {"description_width": "118px"}
+        self.dd_sib_group = W.Dropdown(description="Grupo de irmãs", layout=full,
+                                       style=sib_style)
+        self.dd_sib_sample = W.Dropdown(description="amostra (safra)", layout=full,
+                                        style=sib_style)
+        self.tx_sib_time = W.Text(description="coluna safra", value=(self.date_col or "dt_ref"),
+                                  layout=full, style=sib_style,
+                                  placeholder="coluna de safra (ex.: dt_ref)")
+        self.btn_sib = mk("Analisar folhas-irmãs (inversão)", "primary",
+                          "Compara a PD média das folhas de mesmo pai por amostra e por "
+                          "safra e sinaliza inversões da ordem de risco", "exchange")
         # --- validação regulatória (monotonicidade, calibração, backtest) e relatório ---
         self.tx_time_col = W.Text(description="coluna tempo", value="dt_ref",
                                   layout=full, style=dstyle,
@@ -418,6 +496,14 @@ class PDSegmenterUI:
         self.btn_clear_log.on_click(self._on_clear_log)
         self.btn_boot.on_click(self._on_boot)
         self.btn_diag.on_click(self._on_diag)
+        self.btn_sib.on_click(self._on_sib_analyze)
+        # amostras p/ a análise por safra das folhas-irmãs (fixas — não mudam
+        # com a árvore): "todas" + a referência (DES) + as demais com PD.
+        sib_samples = [("todas as amostras", "__all__")]
+        if self.sample_col is not None:
+            sib_samples += [(self.ref_sample, self.ref_sample)]
+            sib_samples += [(a, a) for a in self._pd_nonref]
+        self.dd_sib_sample.options = sib_samples
         self.btn_validate.on_click(self._on_validate)
         self.btn_report.on_click(self._on_report)
         self.btn_roc.on_click(self._on_roc)
@@ -456,6 +542,7 @@ class PDSegmenterUI:
         self.out_validate = W.HTML()
         self.out_discrim = W.HTML()                       # ROC / KS
         self.out_quality = W.HTML()
+        self.out_sib = W.HTML()     # comparação de folhas-irmãs (inversão)
         self.out_diag = W.HTML()    # placar de saúde do modelo (Diagnóstico)
         self.out_log = W.Output(layout=W.Layout(max_height="320px", overflow="auto"))
         self.out_preview_chart = W.HTML()   # distribuição da variável + cortes (ao lado do histograma)
@@ -584,6 +671,8 @@ class PDSegmenterUI:
         # ---- DETALHE · linha 2: distribuição+cortes (preview) | histograma da PD
         card_preview = W.VBox([
             W.HTML("<div class='pdui-h'>Distribuição da variável · cortes sugeridos</div>"),
+            W.HTML("<div class='pdui-legend'>Distribuição da variável na folha selecionada "
+                   "(DES), com os cortes propostos marcados.</div>"),
             self.out_preview_chart,
         ], layout=W.Layout(width="49%")); card_preview.add_class("pdui-card")
         card_hist = W.VBox([
@@ -593,7 +682,7 @@ class PDSegmenterUI:
             self.out_leaf_hist,
         ], layout=W.Layout(width="49%")); card_hist.add_class("pdui-card")
         det_bottom = W.HBox([card_preview, card_hist],
-                            layout=W.Layout(width="100%", align_items="flex-start",
+                            layout=W.Layout(width="100%", align_items="stretch",
                                             justify_content="space-between"))
 
         # ---- Assistente: DESATIVADO por enquanto -------------------------
@@ -641,6 +730,30 @@ class PDSegmenterUI:
                              tbl_legend, self.out_table,
                              W.HBox([self.btn_copy_table]), self.out_table_tsv])
         card_table.add_class("pdui-card")
+
+        sib_legend = W.HTML(
+            "<div class='pdui-legend'>Compara a <b>PD média</b> das folhas de um mesmo "
+            "pai (<b>folhas-irmãs</b>) e checa se a <b>ordem de risco</b> se mantém. "
+            "A ordem de <b>referência</b> é a PD na <b>DES</b>; uma <b>inversão</b> ocorre "
+            "quando, numa amostra ou safra, uma folha de menor risco passa a ter PD "
+            "<i>maior</i> que uma irmã de maior risco (as linhas se cruzam). "
+            "O gráfico da esquerda mostra a PD por <b>amostra</b> (DES, OOT, …) e o da "
+            "direita por <b>safra</b> ao longo do tempo (faixas vermelhas = safras com "
+            "inversão). O <b>indicador</b> resume: "
+            "<span style='background:#e7f5ee;padding:1px 5px;border-radius:3px'>verde sem inversão</span> "
+            "<span style='background:#fbf3e0;padding:1px 5px;border-radius:3px'>amarelo inverte em algumas safras</span> "
+            "<span style='background:#fbe7e4;padding:1px 5px;border-radius:3px'>vermelho inverte entre amostras ou em muitas safras</span>.</div>")
+        card_sib = W.VBox([
+            W.HTML("<div class='pdui-h'>Folhas-irmãs · inversão entre amostras &amp; safras</div>"),
+            sib_legend,
+            W.HBox([self.dd_sib_group], layout=W.Layout(width="100%")),
+            W.HBox([self.tx_sib_time, self.dd_sib_sample],
+                   layout=W.Layout(width="100%")),
+            W.HBox([self.btn_sib]),
+            self.out_sib,
+        ], layout=W.Layout(width="100%"))
+        card_sib.add_class("pdui-card")
+        self._card_sib = card_sib
 
         discrim_legend = W.HTML(
             "<div class='pdui-legend'>Poder de <b>ordenação de risco</b> da régua (score = PD "
@@ -708,7 +821,8 @@ class PDSegmenterUI:
         sep_diag2 = W.HTML("<div class='pdui-band pdui-band-muted'>Evidência detalhada · "
                            "folhas · discriminação (ROC/KS) · métricas · IC bootstrap · qualidade</div>")
         tab_diag = W.VBox([sep_diag, card_score, sep_diag2,
-                           card_metrics, card_table, card_discrim, card_boot, card_quality])
+                           card_metrics, card_table, card_sib, card_discrim,
+                           card_boot, card_quality])
 
         # ================================================================
         # ABA ④ VALIDAR & EXPORTAR — duas faixas: validação · exportar/registrar
@@ -773,17 +887,17 @@ class PDSegmenterUI:
                    "◀ Desfazer / Refazer ▶ na aba <b>Construir</b>.</div>"),
             self.tx_json_path,
             W.HBox([self.btn_save_json, self.btn_load_json]),
-        ], layout=W.Layout(width="40%"))
+        ], layout=W.Layout(width="49%"))
         card_json.add_class("pdui-card")
         card_img = W.VBox([
             W.HTML("<div class='pdui-h'>Imagem da árvore (PD média &amp; % por folha)</div>"),
             self.tx_img_path,
             W.HBox([self.btn_plot, self.btn_plot_hide]),
             self.out_plot,
-        ], layout=W.Layout(width="58%"))
+        ], layout=W.Layout(width="49%"))
         card_img.add_class("pdui-card")
         hist_row = W.HBox([card_json, card_img],
-                          layout=W.Layout(width="100%", align_items="flex-start",
+                          layout=W.Layout(width="100%", align_items="stretch",
                                           justify_content="space-between"))
         tab_hist = W.VBox([sep_hist, hist_row])
 
@@ -1159,9 +1273,11 @@ class PDSegmenterUI:
         sty = (sty.format(fmt, na_rep="—")
                   .hide(axis="index")
                   .set_table_styles(self._TABLE_STYLES)
-                  .set_properties(**{"font-size": "12px"}))
-        if "descricao" in lv.columns:       # texto longo: alinha à esquerda
-            sty = sty.set_properties(subset=["descricao"], **{"text-align": "left"})
+                  .set_properties(**{"font-size": "12px"})
+                  # texto centralizado em toda a tabela (cabeçalho e células)
+                  .set_table_styles([{"selector": "th, td",
+                                      "props": [("text-align", "center")]}],
+                                    overwrite=False))
         return sty
 
     def _leaf_label(self, sid):
@@ -1331,10 +1447,21 @@ class PDSegmenterUI:
                + f"<div class='pdui-metrics'>{sec1}</div>"
                + sec_h("PD média &amp; incremento vs DES")
                + f"<div class='pdui-metrics'>{sec2}</div>")
+        h0_css = "font-size:10.5px;color:#8a93a3;margin:1px 0 6px;line-height:1.5"
         if test_rows:
-            out += sec_h("Aderência DES → amostra (teste de hipótese)") + test_rows
+            out += (sec_h("Aderência DES → amostra (teste de hipótese)")
+                    + f"<div style='{h0_css}'><b>H₀:</b> a folha tem a <b>mesma "
+                      "distribuição de PD</b> na DES e na amostra. "
+                      "<i>p&gt;0,05</i> ⇒ não rejeita H₀ (aderente); "
+                      "<i>p≤0,05</i> ⇒ rejeita H₀ (não aderente).</div>"
+                    + test_rows)
         if sib_rows:
-            out += sec_h("Distinção vs folha-irmã adjacente (mesmo pai)") + sib_rows
+            out += (sec_h("Distinção vs folha-irmã adjacente (mesmo pai)")
+                    + f"<div style='{h0_css}'><b>H₀:</b> as <b>duas folhas-irmãs têm a "
+                      "mesma PD</b>. <i>p≤0,05</i> ⇒ rejeita H₀ (folhas distintas); "
+                      "<i>p&gt;0,05</i> ⇒ não rejeita H₀ (indistinguíveis · candidatas "
+                      "a fusão).</div>"
+                    + sib_rows)
         if psi_rows:
             out += sec_h("Estabilidade · PSI") + psi_rows + psi_legend
         return out
@@ -1450,7 +1577,13 @@ class PDSegmenterUI:
                .map(auc_bg, subset=["AUC"])
                .format(fmt, na_rep="—")
                .hide(axis="index")
-               .set_properties(**{"font-size": "13.5px"}))
+               .set_table_styles(self._TABLE_STYLES)
+               .set_properties(**{"font-size": "12px"})
+               # mesmo visual da tabela de folhas: bordas + cabeçalho grafite +
+               # zebra + texto centralizado (cabeçalho e células)
+               .set_table_styles([{"selector": "th, td",
+                                   "props": [("text-align", "center")]}],
+                                 overwrite=False))
         self.out_metrics.value = self._styler_html(sty)
 
     def _ordered_leaf_options(self):
@@ -1501,6 +1634,14 @@ class PDSegmenterUI:
         var_opts = [("TODA A CARTEIRA (raiz)", "root")] + opts
         self.dd_var_leaf.options = var_opts
         self.dd_var_leaf.value = cur_v if cur_v in [s for _, s in var_opts] else "root"
+        # seletor de grupos de folhas-irmãs (aba Diagnóstico)
+        sib_opts = [(g["label"], g["parent"]) for g in self.seg.sibling_leaf_groups()]
+        cur_sib = self.dd_sib_group.value
+        self.dd_sib_group.options = sib_opts
+        if cur_sib in [p for _, p in sib_opts]:
+            self.dd_sib_group.value = cur_sib
+        elif sib_opts:
+            self.dd_sib_group.value = sib_opts[0][1]
 
         self.bar.value = self._status_html()
         self.out_tree.value = self._tree_html()
@@ -1846,38 +1987,79 @@ class PDSegmenterUI:
         disp = disp.rename(columns={"variavel": "variável", "forca": "força",
                                     "psi_status": "estab."})
 
-        def forca_bg(v):
+        # estilo editorial: sem grade vertical, só régua de cabeçalho + filetes
+        # horizontais; força/PSI como TEXTO colorido (sem preenchimentos).
+        iv_styles = [
+            {"selector": "", "props": [("border-collapse", "collapse"),
+                                       ("width", "100%")]},
+            {"selector": "th, td", "props": [("padding", "7px 12px"),
+                                             ("border", "none"),
+                                             ("border-bottom", "1px solid #eef1f4"),
+                                             ("white-space", "nowrap"),
+                                             ("text-align", "right")]},
+            {"selector": "thead th", "props": [("text-transform", "uppercase"),
+                                               ("font-size", "10px"),
+                                               ("letter-spacing", ".06em"),
+                                               ("color", "#8a93a3"),
+                                               ("font-weight", "600"),
+                                               ("padding-bottom", "6px"),
+                                               ("border-bottom", "1.5px solid #d7dde6")]},
+            {"selector": "thead th:first-child", "props": [("text-align", "left")]},
+            {"selector": "tbody td:first-child", "props": [("text-align", "left")]},
+            {"selector": "tbody tr:hover td", "props": [("background-color", "#f7f9fc")]},
+            {"selector": "tbody tr:last-child td", "props": [("border-bottom", "none")]},
+        ]
+
+        def forca_txt(v):
             return {
-                "forte": "background-color:#e6f6ec;color:#137a3e;font-weight:600",
-                "médio": "background-color:#fdf3da;color:#9a6b00;font-weight:600",
-                "suspeito": "background-color:#efe7fb;color:#6b3fa0;font-weight:600",
-            }.get(v, "color:#8a97a3")
+                "forte": "color:#137a3e;font-weight:600",
+                "médio": "color:#9a6b00;font-weight:600",
+                "suspeito": "color:#6b3fa0;font-weight:600",
+            }.get(v, "color:#9aa2b1")
 
-        def psi_bg(v):
+        def psi_txt(v):
             if pd.isna(v):
-                return "color:#aab"
+                return "color:#9aa2b1"
             a = abs(v)
-            c = "#e6f6ec" if a < 0.10 else "#fdf3da" if a < 0.25 else "#fde7e7"
-            return f"background-color:{c};font-weight:600"
+            c = "#137a3e" if a < 0.10 else "#9a6b00" if a < 0.25 else "#b3261e"
+            return f"color:{c};font-weight:600"
 
-        def psi_status_bg(v):
+        def estab_txt(v):
             return {
                 "estável": "color:#137a3e",
                 "atenção": "color:#9a6b00;font-weight:600",
-                "instável": "background-color:#fde7e7;color:#b3261e;font-weight:600",
-            }.get(v, "color:#8a97a3")
+                "instável": "color:#b3261e;font-weight:600",
+            }.get(v, "color:#9aa2b1")
+
+        def reco_row(r):
+            # variável recomendada (★, maior IV): filete de acento + negrito,
+            # tint quase imperceptível — destaque discreto, sem realce pesado.
+            if r.name != 0:
+                return [""] * len(r)
+            css = ["background-color:#fafbfd"] * len(r)
+            css[0] = ("background-color:#fafbfd;border-left:3px solid #3b4a63;"
+                      "font-weight:600;color:#27324a")
+            return css
 
         fmt = {"iv": "{:.4f}",
                "bins": lambda v: "—" if (pd.isna(v) or v == 0) else f"{int(v)}"}
         if has_psi:
             fmt["psi"] = "{:.4f}"
+        num_cols = [c for c in ["bins", "iv", "psi"] if c in disp.columns]
         sty = (disp.style.format(fmt, na_rep="—")
                .hide(axis="index")
-               .map(forca_bg, subset=["força"])
-               .set_properties(**{"font-size": "12px"}))
+               .set_table_styles(iv_styles)
+               .set_properties(**{"font-size": "12px", "color": "#3a4250"}))
+        if num_cols:
+            sty = sty.set_properties(subset=num_cols, **{
+                "font-family": "'IBM Plex Mono', ui-monospace, monospace",
+                "font-variant-numeric": "tabular-nums"})
+        if len(disp):
+            sty = sty.apply(reco_row, axis=1)
+        sty = sty.map(forca_txt, subset=["força"])
         if has_psi:
-            sty = (sty.map(psi_bg, subset=["psi"])
-                      .map(psi_status_bg, subset=["estab."]))
+            sty = (sty.map(psi_txt, subset=["psi"])
+                      .map(estab_txt, subset=["estab."]))
         qual = "TODA A CARTEIRA" if (sid in (None, "root")) else self._leaf_label(sid)
         hint = (f"<div style='font-size:11px;color:#667;margin-bottom:4px'>folha: "
                 f"<b>{qual}</b> · PD média (DES) = {pd_med} · IV binário (optbinning)"
@@ -1988,19 +2170,119 @@ class PDSegmenterUI:
         return html
 
     def _style_var_safra(self, bs):
-        cols = [c for c in ["safra", "min", "p5", "media", "p95", "max", "pct_missing"]
-                if c in bs.columns]
-        fmt = {c: "{:.3f}" for c in ("min", "p5", "media", "p95", "max") if c in cols}
+        """Detalhe por safra (numérica) — visual editorial: cabeçalho claro (como
+        as demais tabelas), coluna 'safra' ancorada, números mono, 'média' como
+        coluna-foco e %missing por severidade (só cor de texto)."""
+        order = ["safra", "min", "p5", "media", "p95", "max", "pct_missing"]
+        cols = [c for c in order if c in bs.columns]
+        bs = bs[cols].copy()
+
+        num_cols = [c for c in ("min", "p5", "media", "p95", "max") if c in cols]
+        fmt = {c: "{:.3f}" for c in num_cols}
         if "pct_missing" in cols:
             fmt["pct_missing"] = "{:.1f}%"
-        return (bs[cols].style.format(fmt, na_rep="—").hide(axis="index")
-                .set_properties(**{"font-size": "12px"}))
+        labels = {"safra": "safra", "min": "mín", "p5": "p5", "media": "média",
+                  "p95": "p95", "max": "máx", "pct_missing": "% falt."}
+
+        sty = (bs.style.format(fmt, na_rep="—")
+                       .hide(axis="index")
+                       .set_properties(**{"font-size": "12px"}))
+
+        val_cols = [c for c in cols if c != "safra"]
+        if val_cols:
+            sty = sty.set_properties(
+                subset=val_cols,
+                **{"font-family": "'IBM Plex Mono',ui-monospace,monospace",
+                   "font-variant-numeric": "tabular-nums"})
+
+        if "media" in cols:
+            sty = sty.set_properties(
+                subset=["media"],
+                **{"font-weight": "700", "color": "#27324a",
+                   "background-color": "#eef1f5",
+                   "border-left": "1px solid #cdd5e0",
+                   "border-right": "1px solid #cdd5e0"})
+
+        if "pct_missing" in cols:
+            def _sev(s):
+                out = []
+                for v in s:
+                    if pd.isna(v):
+                        out.append("color:#6b7480")
+                    elif v >= 20:
+                        out.append("color:#b3261e;font-weight:600")
+                    elif v > 0:
+                        out.append("color:#9a6b00;font-weight:600")
+                    else:
+                        out.append("color:#137a3e")
+                return out
+            sty = sty.apply(_sev, axis=0, subset=["pct_missing"])
+
+        extra = list(self._TABLE_STYLES) + list(self._SAFRA_HEADER_STYLES)
+        extra.append({"selector": "th, td", "props": [("padding", "5px 11px")]})
+        sty = sty.set_table_styles(extra)
+
+        sty = sty.relabel_index([labels.get(c, c) for c in cols], axis=1)
+        return sty
 
     def _style_var_share(self, sh):
-        """Tabela de representatividade (%) por categoria e safra (categórica)."""
-        fmt = {c: "{:.1f}%" for c in sh.columns if c != "safra"}
-        return (sh.style.format(fmt, na_rep="—").hide(axis="index")
-                .set_properties(**{"font-size": "12px"}))
+        """Detalhe por safra (categórica) — representatividade (%) por categoria
+        com heatmap monocromático grafite-azul (escala global 0..100, tons
+        pálidos), coluna 'safra' ancorada e baldes residuais em cinza."""
+        cols = list(sh.columns)
+        cat_cols = [c for c in cols if c != "safra"]
+        fmt = {c: "{:.1f}%" for c in cat_cols}
+
+        sty = (sh.style.format(fmt, na_rep="—")
+                       .hide(axis="index")
+                       .set_properties(**{"font-size": "12px"}))
+
+        if cat_cols:
+            sty = sty.set_properties(
+                subset=cat_cols,
+                **{"font-family": "'IBM Plex Mono',ui-monospace,monospace",
+                   "font-variant-numeric": "tabular-nums",
+                   "min-width": "56px"})
+
+        if cat_cols:
+            applied = False
+            try:
+                cmap = self._blues_set_bad()
+                sty = sty.background_gradient(
+                    cmap=cmap, subset=cat_cols, axis=None,
+                    vmin=0.0, vmax=100.0, low=0.0, high=0.55)
+                applied = True
+            except Exception:
+                applied = False
+
+            if applied:
+                def _ink(s):
+                    out = []
+                    for v in s:
+                        if pd.isna(v):
+                            out.append("color:#6b7480")
+                        elif v >= 70:
+                            out.append("color:#ffffff")
+                        else:
+                            out.append("color:#1f2733")
+                    return out
+                sty = sty.apply(_ink, axis=0, subset=cat_cols)
+            else:
+                def _heat(s):
+                    return [self._accent_ramp_css(v, 0.0, 100.0, ceiling=0.55)
+                            for v in s]
+                sty = sty.apply(_heat, axis=0, subset=cat_cols)
+
+        for special in ("outras", "(faltante)"):
+            if special in cat_cols:
+                sty = sty.set_properties(subset=[special], **{"color": "#6b7480"})
+
+        extra = list(self._TABLE_STYLES) + list(self._SAFRA_HEADER_STYLES)
+        extra.append({"selector": "th, td", "props": [("padding", "5px 10px")]})
+        sty = sty.set_table_styles(extra)
+
+        sty = sty.relabel_index(list(cols), axis=1)
+        return sty
 
     def _on_var_analyze(self, _):
         feat = self.dd_var.value
@@ -2321,16 +2603,10 @@ class PDSegmenterUI:
         auc = float(row_des["AUC"].iloc[0]) if len(row_des) else None
         gini = float(row_des["Gini"].iloc[0]) if (len(row_des) and "Gini" in met.columns) else None
 
-        # --- estabilidade: pior PSI da segmentação + pior CSI por variável ---
+        # --- estabilidade: pior PSI da segmentação (DES × amostras) ---
         psi_df = self.seg.psi() if self.sample_col is not None else None
         pior_psi = (float(psi_df["psi"].max())
                     if (psi_df is not None and len(psi_df)) else None)
-        csi_df = None
-        if self.sample_col is not None:
-            try:
-                csi_df = self.seg.csi()
-            except Exception:
-                csi_df = None
 
         # --- calibração: maior |gap| previsto(DES) × observado(OOT) ---
         calib, max_gap = None, None
@@ -2414,19 +2690,27 @@ class PDSegmenterUI:
                          f"color:{psi_hex[cls]}'>{r['classificacao']}</div></div>")
             ev += ("<div class='pdui-h' style='margin-top:14px'>Estabilidade · PSI da "
                    "segmentação (DES × amostras)</div>" + rows)
-        if csi_df is not None and len(csi_df):
-            cols = [c for c in ["variavel", "tipo", "pior_csi", "classificacao"]
-                    if c in csi_df.columns]
-            ev += ("<div class='pdui-h' style='margin-top:14px'>Estabilidade · CSI por "
-                   "variável (top 8)</div>" + self._df_html(csi_df[cols].head(8)))
         if calib is not None and len(calib):
             cols = [c for c in ["folha", "n", "pd_prevista", "pd_realizada", "gap"]
                     if c in calib.columns]
             ev += ("<div class='pdui-h' style='margin-top:14px'>Calibração · PD prevista (DES) × "
-                   "realizada</div>" + self._df_html(calib[cols], max_height="240px"))
+                   "realizada</div>" + self._df_html(calib[cols], max_height="240px",
+                                                     center=True))
+        # estrutura: monotonicidade + nº de inversões e QUAIS folhas invertem
+        def _inv_str(inv):
+            if not inv:
+                return "—"
+            return " · ".join(f"folha {a} ▸ folha {b}" for a, b in inv)
+        mono_disp = mono[["amostra", "monotonico", "n_inversoes"]].copy()
+        mono_disp["folhas que invertem"] = mono["inversoes"].apply(_inv_str)
+        mono_disp = mono_disp.rename(columns={"monotonico": "monotônico",
+                                              "n_inversoes": "nº inversões"})
         ev += ("<div class='pdui-h' style='margin-top:14px'>Estrutura · monotonicidade da "
                "PD por amostra</div>"
-               + self._df_html(mono[["amostra", "monotonico", "n_inversoes"]]))
+               "<div class='pdui-legend'>Cada inversão é um par de folhas adjacentes (pela "
+               "ordem da régua) cuja PD está fora de ordem — <b>folha a ▸ folha b</b> indica "
+               "que a folha <b>a</b> tem PD maior que a <b>b</b>, que deveria ser ≥.</div>"
+               + self._df_html(mono_disp, center=True))
         return scorecard + ev
 
     # ==================================================================
@@ -2512,16 +2796,22 @@ class PDSegmenterUI:
             return f"<div style='max-height:{max_height};overflow:auto'>{html}</div>"
         return html
 
-    def _df_html(self, df, max_height=None):
+    def _df_html(self, df, max_height=None, center=False):
         """HTML de um DataFrame cru (sem índice), p/ atribuir a um widget HTML.
-        Aplica bordas por célula (divisão de colunas nítida) e alinha à esquerda
-        as colunas de texto."""
+        Aplica bordas por célula (divisão de colunas nítida). Por padrão alinha à
+        esquerda as colunas de texto; com ``center=True`` centraliza tudo
+        (cabeçalho e células)."""
         sty = (df.style.hide(axis="index")
                        .set_table_styles(self._TABLE_STYLES)
                        .set_properties(**{"font-size": "12px"}))
-        txt_cols = [c for c in df.columns if df[c].dtype == object]
-        if txt_cols:
-            sty = sty.set_properties(subset=txt_cols, **{"text-align": "left"})
+        if center:
+            sty = sty.set_table_styles([{"selector": "th, td",
+                                         "props": [("text-align", "center")]}],
+                                       overwrite=False)
+        else:
+            txt_cols = [c for c in df.columns if df[c].dtype == object]
+            if txt_cols:
+                sty = sty.set_properties(subset=txt_cols, **{"text-align": "left"})
         return self._styler_html(sty, max_height)
 
     def _display_fig(self, fig, border=True):
@@ -2554,6 +2844,88 @@ class PDSegmenterUI:
         except Exception as e:
             self.out_quality.value = (f"<div style='color:#b3261e;font-size:12px'>Erro na "
                                       f"distribuição do score: {type(e).__name__}: {e}</div>")
+
+    # ==================================================================
+    # Folhas-irmãs: inversão da PD entre amostras e safras
+    # ==================================================================
+    def _sib_indicator_html(self, s):
+        """Indicador de inversão (pílula de status + contagens + safras)."""
+        pill = {"green": "pill-green", "yellow": "pill-yellow", "red": "pill-red"}[s["status"]]
+        rotulo = {"green": "Sem inversão", "yellow": "Inversão em algumas safras",
+                  "red": "Inversão relevante"}[s["status"]]
+        nota, pdr = s["nota"], s["pd_ref"]
+        ordem = " &lt; ".join(
+            f"folha {nota.get(sid)} ({pdr[sid]:.1%})" if not pd.isna(pdr[sid])
+            else f"folha {nota.get(sid)}" for sid in s["ordered"])
+        ams_inv = [r for r in s["samples"]
+                   if r["amostra"] != s["ref_sample"] and r["n_inv"] > 0]
+        if ams_inv:
+            am_txt = "; ".join(f"{r['amostra']}: {r['n_inv']}/{r['n_pares']} pares" for r in ams_inv)
+            am_line = (f"<b>Entre amostras:</b> "
+                       f"<span style='color:#b3261e'>{am_txt}</span>")
+        else:
+            am_line = "<b>Entre amostras:</b> <span style='color:#137a3e'>nenhuma inversão</span>"
+        if s.get("safra_err"):
+            sf_line = (f"<b>Entre safras:</b> <span style='color:#889'>não avaliado "
+                       f"({s['safra_err']})</span>")
+        elif s["n_safras"]:
+            pct = 100 * s["safra_rate"]
+            cor = "#b3261e" if s["safras_inv"] else "#137a3e"
+            sf_line = (f"<b>Entre safras:</b> <span style='color:{cor}'>"
+                       f"{s['safras_inv']}/{s['n_safras']} safras com inversão "
+                       f"({pct:.0f}%)</span>")
+            piores = [r for r in s["safras"] if r["n_inv"] > 0][:8]
+            if piores:
+                chips = " ".join(
+                    f"<span style='background:#fbe7e4;color:#b23a2a;border-radius:3px;"
+                    f"padding:1px 5px;font-size:10.5px' class='mono'>{r['safra']} "
+                    f"({r['n_inv']})</span>" for r in piores)
+                sf_line += f"<div style='margin-top:4px'>{chips}</div>"
+        else:
+            sf_line = "<b>Entre safras:</b> <span style='color:#889'>sem safras avaliáveis</span>"
+        return (
+            "<div class='pdui-card' style='margin:6px 0'>"
+            f"<div style='margin-bottom:6px'><span class='pill {pill}'>● {rotulo}</span>"
+            f"<span style='color:#6b7480;font-size:11.5px;margin-left:8px'>"
+            f"{s['n_pairs']} par(es) de irmãs comparados</span></div>"
+            f"<div style='font-size:12px;line-height:1.7'>{am_line}<br>{sf_line}</div>"
+            f"<div style='font-size:11px;color:#6b7480;margin-top:6px'>"
+            f"Ordem de referência (PD na {s['ref_sample']}): {ordem}</div>"
+            "</div>")
+
+    def _on_sib_analyze(self, _):
+        pid = self.dd_sib_group.value
+        if not pid:
+            self.out_sib.value = ("<div style='font-size:12px;color:#889'>Nenhum grupo de "
+                                  "folhas-irmãs — faça ao menos um split para criar folhas de "
+                                  "mesmo pai.</div>")
+            return
+        tcol = (self.tx_sib_time.value or "").strip() or None
+        samp = self.dd_sib_sample.value
+        samp = None if samp in (None, "__all__") else samp
+
+        def err(what, e):
+            return (f"<div style='font-size:11px;color:#b3261e'>({what} não gerado: "
+                    f"{type(e).__name__}: {e})</div>")
+
+        try:
+            summ = self.seg.sibling_inversion_summary(pid, time_col=tcol, sample=samp)
+            ind = self._sib_indicator_html(summ)
+        except Exception as e:
+            ind = err("indicador de inversão", e)
+        try:
+            h1 = self._fig_html(self.seg.plot_sibling_pd_by_sample(pid))
+        except Exception as e:
+            h1 = err("gráfico por amostra", e)
+        try:
+            h2 = self._fig_html(self.seg.plot_sibling_pd_by_safra(
+                pid, time_col=tcol, sample=samp))
+        except Exception as e:
+            h2 = err("gráfico por safra", e)
+        charts = (f"<div style='display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start'>"
+                  f"<div style='flex:1 1 320px;min-width:300px'>{h1}</div>"
+                  f"<div style='flex:1 1 420px;min-width:340px'>{h2}</div></div>")
+        self.out_sib.value = ind + charts
 
     # ==================================================================
     # Undo / redo de splits (e demais alterações estruturais da árvore)

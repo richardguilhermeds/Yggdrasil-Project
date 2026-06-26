@@ -2621,6 +2621,304 @@ class SequentialPDSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
+    # ==================================================================
+    # FOLHAS-IRMÃS: comparação da PD média entre folhas de MESMO PAI, por
+    #   amostra e por safra, com detecção de INVERSÃO de ordenação. Duas irmãs
+    #   "invertem" quando a ordem da PD média observada numa amostra/safra
+    #   contradiz a ordem de referência (PD na DES) — sinal de instabilidade
+    #   da segmentação (o ranking de risco não se sustenta no tempo/fora da
+    #   amostra de desenvolvimento).
+    # ==================================================================
+    def _ordered_samples_with_pd(self) -> list:
+        """Amostras que têm PD observada, com a referência (DES) à frente."""
+        if self.sample_col is None:
+            return []
+        samples = list(self.df[self.sample_col].dropna().unique())
+        com_pd = [a for a in samples
+                  if self.df.loc[self.df[self.sample_col] == a, self.target].notna().any()]
+        ref = [self.ref_sample] if self.ref_sample in com_pd else []
+        return ref + [a for a in com_pd if a != self.ref_sample]
+
+    def _sibling_meta(self, parent_sid, leaves=None):
+        """Metadados das folhas-irmãs de `parent_sid`:
+        (ordenadas_por_PD_DES, nota_por_sid, descrição_curta_por_sid,
+        pd_ref_por_sid). A ORDEM DE REFERÊNCIA é a PD média na DES (asc.)."""
+        lv = self.leaves()
+        nota = dict(zip(lv["segmento"], lv["nota_pd"]))
+        if leaves is None:
+            leaves = [sid for sid, s in self.segments.items()
+                      if s["parent"] == parent_sid and s["is_leaf"]]
+        pd_ref = {}
+        for sid in leaves:
+            v = self._leaf_target(sid)          # PD na referência (DES), sem NaN
+            pd_ref[sid] = float(v.mean()) if len(v) else float("nan")
+        ordered = sorted(leaves, key=lambda c: (np.inf if pd.isna(pd_ref[c])
+                                                else pd_ref[c], str(c)))
+        desc = {sid: self._descrever(self.segments[sid]["conditions"][-1:])
+                for sid in leaves}
+        return ordered, nota, desc, pd_ref
+
+    def sibling_leaf_groups(self, min_leaves: int = 2) -> list:
+        """Grupos de folhas-irmãs (mesmo pai, ≥`min_leaves` folhas). Cada item:
+        ``{'parent', 'leaves', 'notas', 'feature', 'label'}`` — pronto para um
+        seletor na UI. Ordenado pela menor nota do grupo (esquerda→direita)."""
+        grupos: dict = {}
+        for sid, s in self.segments.items():
+            if s["is_leaf"] and s["parent"] is not None:
+                grupos.setdefault(s["parent"], []).append(sid)
+        out = []
+        for pai, kids in grupos.items():
+            if len(kids) < min_leaves:
+                continue
+            ordered, nota, _desc, _pd = self._sibling_meta(pai, kids)
+            feat = None
+            for c in kids:                       # variável do split (cond. não-na)
+                conds = self.segments[c]["conditions"]
+                if conds and conds[-1]["kind"] != "na":
+                    feat = conds[-1]["feature"]
+                    break
+            rot = self.feature_labels.get(feat, feat) if feat else "?"
+            notas = [nota.get(c) for c in ordered]
+            ns = [n for n in notas if n is not None]
+            faixa = f"{min(ns)}–{max(ns)}" if ns else "?"
+            label = f"split '{rot}' · folhas {faixa} ({len(ordered)})"
+            pai_desc = self._descrever(self.segments[pai]["conditions"])
+            if self.segments[pai]["conditions"]:
+                label += f" · pai: {pai_desc}"
+            out.append({"parent": pai, "leaves": ordered, "notas": notas,
+                        "feature": feat, "label": label})
+        out.sort(key=lambda g: min([n for n in g["notas"] if n is not None] or [1e9]))
+        return out
+
+    def _sibling_sample_series(self, parent_sid, leaves=None):
+        """Série da PD média por AMOSTRA para cada folha-irmã.
+        Retorna (ordered, nota, desc, xs, series) com series[sid] = [médias]."""
+        ordered, nota, desc, _pd = self._sibling_meta(parent_sid, leaves)
+        samples = self._ordered_samples_with_pd()
+        usar = samples if samples else [None]
+        xs = samples if samples else ["todas"]
+        series: dict = {}
+        for sid in ordered:
+            m = self.segments[sid]["mask"]
+            vals = []
+            for a in usar:
+                mm = m & (self.df[self.sample_col] == a) if a is not None else m
+                v = self.df.loc[mm, self.target].to_numpy(dtype="float64")
+                v = v[~np.isnan(v)]
+                vals.append(float(v.mean()) if v.size else float("nan"))
+            series[sid] = vals
+        return ordered, nota, desc, xs, series
+
+    def _sibling_safra_series(self, parent_sid, time_col=None, sample=None,
+                              leaves=None, min_n: int = 1):
+        """Série da PD média por SAFRA (mês de `time_col`) para cada folha-irmã.
+        `sample` restringe a uma amostra (None = todas). Safras com < `min_n`
+        observações na folha viram NaN. Retorna (ordered, nota, desc, xs, series)."""
+        time_col = time_col or self.date_col
+        if time_col is None:
+            raise ValueError("Informe time_col ou configure date_col no segmenter.")
+        if time_col not in self.df.columns:
+            raise ValueError(f"Coluna de tempo '{time_col}' não existe no DataFrame.")
+        ordered, nota, desc, _pd = self._sibling_meta(parent_sid, leaves)
+        base = pd.Series(True, index=self.df.index)
+        if sample is not None and self.sample_col is not None:
+            base = base & (self.df[self.sample_col] == sample)
+        per_all = pd.to_datetime(self.df[time_col], errors="coerce").dt.to_period("M")
+        safras = sorted(per_all[base].dropna().unique())
+        xs = [str(p) for p in safras]
+        series: dict = {}
+        for sid in ordered:
+            m = self.segments[sid]["mask"] & base
+            per = per_all[m]
+            tgt = self.df.loc[m, self.target]
+            mu = tgt.groupby(per).mean()
+            cnt = tgt.groupby(per).count()
+            vals = []
+            for p in safras:
+                n = int(cnt.get(p, 0))
+                val = mu.get(p, float("nan"))
+                vals.append(float(val) if (n >= min_n and not pd.isna(val))
+                            else float("nan"))
+            series[sid] = vals
+        return ordered, nota, desc, xs, series
+
+    @staticmethod
+    def _count_inversions(ordered, values) -> tuple:
+        """Nº de pares de irmãs invertidos vs. a ordem de referência e nº de
+        pares comparáveis. `values` = dict sid->PD num ponto (amostra/safra).
+        Par (i<j na referência) inverte quando PD_i > PD_j."""
+        n_inv = n_pairs = 0
+        for a in range(len(ordered)):
+            va = values.get(ordered[a], float("nan"))
+            if pd.isna(va):
+                continue
+            for b in range(a + 1, len(ordered)):
+                vb = values.get(ordered[b], float("nan"))
+                if pd.isna(vb):
+                    continue
+                n_pairs += 1
+                if va > vb:
+                    n_inv += 1
+        return n_inv, n_pairs
+
+    def sibling_inversion_summary(self, parent_sid, time_col=None, sample=None,
+                                  min_n: int = 20) -> dict:
+        """Diagnóstico de inversão das folhas-irmãs de `parent_sid`. Compara a
+        ordem de PD de referência (DES) com a observada em cada AMOSTRA e em
+        cada SAFRA. Retorna contagens por amostra/safra e um veredito
+        (verde/amarelo/vermelho)."""
+        ordered, nota, desc, pd_ref = self._sibling_meta(parent_sid)
+        k = len(ordered)
+        n_pairs = k * (k - 1) // 2
+
+        _o, _n, _d, xs_s, ser_s = self._sibling_sample_series(parent_sid)
+        sample_rows = []
+        for j, xlab in enumerate(xs_s):
+            vals = {sid: ser_s[sid][j] for sid in ordered}
+            n_inv, npp = self._count_inversions(ordered, vals)
+            sample_rows.append({"amostra": xlab, "n_inv": n_inv, "n_pares": npp})
+
+        safra_rows, safra_err = [], None
+        try:
+            _o, _n, _d, xs_t, ser_t = self._sibling_safra_series(
+                parent_sid, time_col, sample, min_n=min_n)
+            for j, xlab in enumerate(xs_t):
+                vals = {sid: ser_t[sid][j] for sid in ordered}
+                n_inv, npp = self._count_inversions(ordered, vals)
+                if npp == 0:
+                    continue
+                safra_rows.append({"safra": xlab, "n_inv": n_inv, "n_pares": npp})
+        except Exception as e:                   # noqa: BLE001
+            safra_err = f"{type(e).__name__}: {e}"
+
+        sample_inv = sum(r["n_inv"] for r in sample_rows
+                         if r["amostra"] != self.ref_sample)
+        n_safras = len(safra_rows)
+        safras_inv = sum(1 for r in safra_rows if r["n_inv"] > 0)
+        safra_rate = (safras_inv / n_safras) if n_safras else 0.0
+        if sample_inv > 0 or safra_rate > 0.25:
+            status = "red"
+        elif safras_inv > 0:
+            status = "yellow"
+        else:
+            status = "green"
+        return {"ordered": ordered, "nota": nota, "desc": desc, "pd_ref": pd_ref,
+                "n_pairs": n_pairs, "samples": sample_rows, "safras": safra_rows,
+                "sample_inv": sample_inv, "n_safras": n_safras,
+                "safras_inv": safras_inv, "safra_rate": safra_rate,
+                "status": status, "ref_sample": self.ref_sample,
+                "safra_err": safra_err}
+
+    def sibling_pd_by_sample(self, parent_sid, leaves=None) -> pd.DataFrame:
+        """Tabela tidy: PD média de cada folha-irmã por amostra."""
+        ordered, nota, desc, xs, series = self._sibling_sample_series(parent_sid, leaves)
+        rows = []
+        for sid in ordered:
+            row = {"segmento": sid, "nota_pd": nota.get(sid), "descricao": desc[sid]}
+            for x, v in zip(xs, series[sid]):
+                row[x] = round(v, 4) if not pd.isna(v) else np.nan
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    def sibling_pd_by_safra(self, parent_sid, time_col=None, sample=None,
+                            leaves=None, min_n: int = 1) -> pd.DataFrame:
+        """Tabela tidy: PD média de cada folha-irmã por safra (linhas = safra)."""
+        ordered, nota, desc, xs, series = self._sibling_safra_series(
+            parent_sid, time_col, sample, leaves, min_n=min_n)
+        data = {"safra": xs}
+        for sid in ordered:
+            col = f"folha {nota.get(sid)}"
+            data[col] = [round(v, 4) if not pd.isna(v) else np.nan
+                         for v in series[sid]]
+        return pd.DataFrame(data)
+
+    def _sibling_colors(self, ordered):
+        """Cor por folha (verde→vermelho na ordem de PD) p/ os gráficos."""
+        import matplotlib.pyplot as plt
+        cmap = plt.get_cmap("RdYlGn_r")
+        k = len(ordered)
+        return {sid: cmap(i / (k - 1) if k > 1 else 0.5)
+                for i, sid in enumerate(ordered)}
+
+    def plot_sibling_pd_by_sample(self, parent_sid, leaves=None,
+                                  figsize=(7.6, 4.0), dpi=150,
+                                  save_path=None, ax=None):
+        """Linhas da PD média das folhas-irmãs por amostra (DES, OOT, …). Onde
+        as linhas se cruzam há INVERSÃO da ordem de risco entre as irmãs."""
+        try:
+            import matplotlib.pyplot as plt  # noqa: F401
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("plot_sibling_pd_by_sample requer matplotlib.") from e
+        ordered, nota, desc, xs, series = self._sibling_sample_series(parent_sid, leaves)
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        if not ordered or not xs:
+            ax.text(0.5, 0.5, "sem folhas-irmãs", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        cores = self._sibling_colors(ordered)
+        x = list(range(len(xs)))
+        for sid in ordered:
+            ax.plot(x, series[sid], marker="o", lw=1.9, ms=5.5,
+                    color=cores[sid], markeredgecolor="#33424f", markeredgewidth=0.6,
+                    label=f"folha {nota.get(sid)}")
+        ax.set_xticks(x); ax.set_xticklabels(xs, fontsize=9)
+        ax.set_xlim(-0.25, len(xs) - 0.75 + 0.5)
+        ax.set_ylabel("PD média"); ax.set_xlabel("amostra")
+        ax.set_title("PD média das folhas-irmãs por amostra",
+                     fontsize=11, fontweight="bold", color="#15324a")
+        ax.grid(axis="y", alpha=0.15)
+        ax.legend(fontsize=8, ncol=max(1, min(len(ordered), 4)),
+                  loc="best", framealpha=0.85)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def plot_sibling_pd_by_safra(self, parent_sid, time_col=None, sample=None,
+                                 leaves=None, min_n: int = 1,
+                                 figsize=(9.6, 4.0), dpi=150,
+                                 save_path=None, ax=None):
+        """Linhas da PD média das folhas-irmãs por safra ao longo do tempo. As
+        safras em que a ordem de risco inverte (vs. DES) ficam sombreadas em
+        vermelho — leitura rápida de instabilidade temporal."""
+        try:
+            import matplotlib.pyplot as plt  # noqa: F401
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("plot_sibling_pd_by_safra requer matplotlib.") from e
+        ordered, nota, desc, xs, series = self._sibling_safra_series(
+            parent_sid, time_col, sample, leaves, min_n=min_n)
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        if not ordered or not xs:
+            ax.text(0.5, 0.5, "sem dados por safra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        cores = self._sibling_colors(ordered)
+        x = list(range(len(xs)))
+        # sombreia as safras com inversão (≥1 par fora de ordem vs. referência)
+        for j in x:
+            vals = {sid: series[sid][j] for sid in ordered}
+            n_inv, npp = self._count_inversions(ordered, vals)
+            if npp and n_inv:
+                ax.axvspan(j - 0.5, j + 0.5, color="#d6453e", alpha=0.08, lw=0)
+        for sid in ordered:
+            ax.plot(x, series[sid], marker="o", lw=1.7, ms=4.5,
+                    color=cores[sid], markeredgecolor="#33424f", markeredgewidth=0.5,
+                    label=f"folha {nota.get(sid)}")
+        ax.set_xticks(x); ax.set_xticklabels(xs, rotation=45, ha="right", fontsize=8)
+        ax.set_xlim(-0.7, len(xs) - 0.3)
+        ax.set_ylabel("PD média"); ax.set_xlabel("safra")
+        sfx = f" · {sample}" if sample else " · todas as amostras"
+        ax.set_title(f"PD média das folhas-irmãs por safra{sfx}"
+                     "  ·  faixas vermelhas = inversão",
+                     fontsize=11, fontweight="bold", color="#15324a")
+        ax.grid(axis="y", alpha=0.15)
+        ax.legend(fontsize=8, ncol=max(1, min(len(ordered), 4)),
+                  loc="best", framealpha=0.85)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
     # ------------------------------------------------------------------
     # VARIABLE_IV: Information Value (WoE binário) de cada variável candidata em
     #   relação à folha `sid`, para indicar qual variável usar no próximo split.
