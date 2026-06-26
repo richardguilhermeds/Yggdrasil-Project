@@ -202,6 +202,22 @@ class SequentialPDSegmenter:
         self._psi_detalhe: list[dict] = []
         self._csi_detalhe: list[dict] = []
 
+    def _nonfeature_cols(self) -> set:
+        """Colunas que NÃO entram na modelagem (não viram variáveis candidatas):
+        o alvo, a coluna de amostra, a coluna de data de referência (``date_col``)
+        e **qualquer coluna datetime** — uma data nunca é variável do modelo aqui
+        (e o optbinning não a bina). Para datas que não sejam datetime (ex.: safra
+        yyyymm inteira), passe ``date_col`` no construtor para excluí-la também."""
+        skip = {self.target, self.sample_col, self.date_col}
+        skip.discard(None)
+        for c in self.df.columns:
+            try:
+                if pd.api.types.is_datetime64_any_dtype(self.df[c]):
+                    skip.add(c)
+            except Exception:
+                pass
+        return skip
+
     # ------------------------------------------------------------------
     # Helpers de bin genéricos (numérico OU categórico)
     # ------------------------------------------------------------------
@@ -254,13 +270,15 @@ class SequentialPDSegmenter:
         return y.astype(int)
 
     def _resolve_bins(self, sub, feature, splits, dtype, max_n_bins, min_bin_size,
-                      max_bin_size=None, relax_max=False):
+                      max_bin_size=None, relax_max=False, min_event_rate_diff=0.0):
         """Resolve os bins de um ramo. Devolve (bins, modo, kind).
         - num: bins = [{'kind':'num','lo','hi'}, ...]
         - cat: bins = [{'kind':'cat','cats':[...]}, ...]
         No modo ótimo, o binning binário é ajustado só na amostra de referência
         (DES). No modo manual: splits numérico = lista de cortes; splits
         categórico = lista de grupos (cada grupo é uma lista de categorias).
+        min_event_rate_diff: diferença mínima de taxa de default exigida entre bins
+        consecutivas no binning ótimo (optbinning); 0 = sem restrição.
         """
         kind = self._detect_kind(sub, feature, dtype)
 
@@ -285,6 +303,7 @@ class SequentialPDSegmenter:
                         b = OptimalBinning(
                             name=feature, dtype="numerical", max_n_bins=mnb,
                             min_bin_size=min_bin_size, max_bin_size=mbs,
+                            min_event_rate_diff=min_event_rate_diff,
                             monotonic_trend="auto_asc_desc")
                         return _fit_optbinning_splits(b, x, yb)
                     cortes = _opt(max_n_bins, max_bin_size)
@@ -329,6 +348,7 @@ class SequentialPDSegmenter:
                 b = OptimalBinning(
                     name=feature, dtype="categorical", max_n_bins=max_n_bins,
                     min_bin_size=min_bin_size, max_bin_size=max_bin_size,
+                    min_event_rate_diff=min_event_rate_diff,
                     monotonic_trend="auto_asc_desc")
                 grupos = [list(arr) for arr in _fit_optbinning_splits(b, xs, ys)]
             modo = "ótimo"
@@ -374,7 +394,8 @@ class SequentialPDSegmenter:
     #   dtype: None=auto-detecta, 'num' ou 'cat' para forçar
     # ------------------------------------------------------------------
     def show_grow(self, feature, splits=None, dtype=None, max_n_bins=4,
-                  min_bin_size=0.05, only_segments=None, max_bin_size=None):
+                  min_bin_size=0.05, only_segments=None, max_bin_size=None,
+                  min_event_rate_diff=0.0):
         targets = {
             sid: s for sid, s in self.segments.items()
             if s["is_leaf"] and (only_segments is None or sid in only_segments)
@@ -384,7 +405,8 @@ class SequentialPDSegmenter:
         for sid, seg in targets.items():
             sub = self.df[seg["mask"]]
             bins, modo, kind = self._resolve_bins(
-                sub, feature, splits, dtype, max_n_bins, min_bin_size, max_bin_size)
+                sub, feature, splits, dtype, max_n_bins, min_bin_size, max_bin_size,
+                min_event_rate_diff=min_event_rate_diff)
             if not bins:
                 print(f"[{sid}] sem corte válido em '{feature}' ({modo})")
                 continue
@@ -401,7 +423,8 @@ class SequentialPDSegmenter:
     # GROW: efetiva o split (manual ou ótimo, num ou cat) em cada folha-alvo
     # ------------------------------------------------------------------
     def grow(self, feature, splits=None, dtype=None, max_n_bins=4,
-             min_bin_size=0.05, only_segments=None, max_bin_size=None, relax_max=False):
+             min_bin_size=0.05, only_segments=None, max_bin_size=None, relax_max=False,
+             min_event_rate_diff=0.0):
         targets = {
             sid: s for sid, s in self.segments.items()
             if s["is_leaf"] and (only_segments is None or sid in only_segments)
@@ -417,7 +440,7 @@ class SequentialPDSegmenter:
                     continue
             bins, modo, kind = self._resolve_bins(
                 sub, feature, splits, dtype, max_n_bins, min_bin_size, max_bin_size,
-                relax_max=relax_max)
+                relax_max=relax_max, min_event_rate_diff=min_event_rate_diff)
             modo_usado = modo
             if not bins:
                 print(f"[{sid}] sem corte válido em '{feature}' ({modo}) — folha mantida")
@@ -1367,8 +1390,7 @@ class SequentialPDSegmenter:
             raise ValueError("CSI requer sample_col definido (precisa de amostras "
                              "para comparar a referência com as demais).")
         if features is None:
-            skip = {self.target, self.sample_col, self.date_col}
-            features = [c for c in self.df.columns if c not in skip]
+            features = [c for c in self.df.columns if c not in self._nonfeature_cols()]
 
         nonref = [a for a in self.df[self.sample_col].dropna().unique()
                   if a != self.ref_sample]
@@ -2088,8 +2110,8 @@ class SequentialPDSegmenter:
     # ------------------------------------------------------------------
     def plot_feature_pd(self, feature: str, sid: str | None = None, splits=None,
                         dtype=None, max_n_bins: int = 6, min_bin_size: float = 0.05,
-                        max_bin_size=None, figsize=None, save_path: str | None = None,
-                        dpi: int = 150, ax=None):
+                        max_bin_size=None, min_event_rate_diff=0.0, figsize=None,
+                        save_path: str | None = None, dpi: int = 150, ax=None):
         try:
             import matplotlib.pyplot as plt  # noqa: F401
         except ImportError as e:  # pragma: no cover
@@ -2100,7 +2122,8 @@ class SequentialPDSegmenter:
             sub = self.df[self.segments[sid]["mask"]]
         # `splits` (mesmos do preview/grow) garante que o gráfico bata com a tabela
         bins, modo, kind = self._resolve_bins(sub, feature, splits, dtype,
-                                              max_n_bins, min_bin_size, max_bin_size)
+                                              max_n_bins, min_bin_size, max_bin_size,
+                                              min_event_rate_diff=min_event_rate_diff)
         if not bins:
             raise ValueError(f"Sem faixas válidas para '{feature}' nesta folha.")
         tbl = self._bin_table(sub, feature, bins, len(self.df))
@@ -2164,8 +2187,8 @@ class SequentialPDSegmenter:
     # ------------------------------------------------------------------
     def plot_feature_hist(self, feature: str, sid: str | None = None, splits=None,
                           dtype=None, max_n_bins: int = 6, min_bin_size: float = 0.05,
-                          max_bin_size=None, bins_hist: int = 30, figsize=None,
-                          save_path: str | None = None, dpi: int = 150, ax=None):
+                          max_bin_size=None, min_event_rate_diff=0.0, bins_hist: int = 30,
+                          figsize=None, save_path: str | None = None, dpi: int = 150, ax=None):
         try:
             import matplotlib.pyplot as plt  # noqa: F401
         except ImportError as e:  # pragma: no cover
@@ -2179,8 +2202,9 @@ class SequentialPDSegmenter:
             # categórica não tem histograma — barras de representatividade × PD
             return self.plot_feature_pd(feature, sid=sid, splits=splits, dtype=dtype,
                                         max_n_bins=max_n_bins, min_bin_size=min_bin_size,
-                                        max_bin_size=max_bin_size, figsize=figsize,
-                                        save_path=save_path, dpi=dpi, ax=ax)
+                                        max_bin_size=max_bin_size,
+                                        min_event_rate_diff=min_event_rate_diff,
+                                        figsize=figsize, save_path=save_path, dpi=dpi, ax=ax)
         x = sub[feature].to_numpy(dtype="float64")
         x = x[~np.isnan(x)]
         if x.size == 0:
@@ -2189,7 +2213,8 @@ class SequentialPDSegmenter:
         cortes, modo = [], "—"
         try:
             bins, modo, _ = self._resolve_bins(sub, feature, splits, dtype,
-                                               max_n_bins, min_bin_size, max_bin_size)
+                                               max_n_bins, min_bin_size, max_bin_size,
+                                               min_event_rate_diff=min_event_rate_diff)
             cortes = sorted({e for b in bins if b["kind"] == "num"
                              for e in (b["lo"], b["hi"]) if np.isfinite(e)})
         except Exception:
@@ -2603,8 +2628,7 @@ class SequentialPDSegmenter:
                     max_n_bins: int = 5, min_bin_size: float = 0.05,
                     cutoff="median", with_psi: bool = True) -> pd.DataFrame:
         if features is None:
-            skip = {self.target, self.sample_col, self.date_col}
-            features = [c for c in self.df.columns if c not in skip]
+            features = [c for c in self.df.columns if c not in self._nonfeature_cols()]
 
         if sid is None or sid == "root" or sid not in self.segments:
             leaf_mask = pd.Series(True, index=self.df.index)
@@ -3059,6 +3083,77 @@ class SequentialPDSegmenter:
     #   folha (até `max_depth` níveis abaixo dela), sem reiniciar nem tocar no
     #   resto da árvore — útil para "auto-ajustar só esta folha".
     # ------------------------------------------------------------------
+    def _concentration_bins(self, sub, feature, min_leaf_repr, max_bin_repr, dtype=None):
+        """Bins de `feature` na folha `sub` que respeitam a concentração GLOBAL
+        (fração da carteira inteira, todas as amostras) — usado pelo auto-fit.
+
+        Uma restrição de concentração é de POPULAÇÃO, então partimos de cortes
+        finos por QUANTIL GLOBAL (numérico) ou de uma categoria por grupo ordenada
+        por PD em DES (categórico) e fundimos os bins adjacentes pequenos —
+        preferindo não estourar o máximo — até cada faixa/grupo ter ≥ `min_leaf_repr`
+        da carteira. (O optbinning não serve aqui: devolve o nº ótimo por IV, não
+        granularidade fina, e seu `min_bin_size` é relativo a DES, não global.)
+        Devolve (bins, kind) ou (None, kind) se a variável não respeita o mín/máx
+        (ex.: grupo de faltantes abaixo do mínimo, ou bin que não cabe entre mín/máx)."""
+        N = len(self.df)
+        if not N:
+            return None, "num"
+        kind = self._detect_kind(sub, feature, dtype)
+        na_present = bool(sub[feature].isna().any())
+
+        if kind == "num":
+            x = sub[feature].dropna().to_numpy(dtype="float64")
+            if x.size == 0 or np.unique(x).size < 2:
+                return None, kind
+            qs = np.quantile(x, np.linspace(0.0, 1.0, 25)[1:-1])   # ~24 faixas finas
+            cuts = sorted({round(float(c), 10) for c in qs})
+            edges = [-np.inf, *cuts, np.inf]
+            core = [{"kind": "num", "lo": edges[i], "hi": edges[i + 1]}
+                    for i in range(len(edges) - 1)]
+        else:
+            # uma categoria por grupo, ordenadas por PD em DES (contiguidade de risco)
+            ref = self._fit_frame(sub, 0.0).dropna(subset=[feature, self.target])
+            means = (ref.groupby(ref[feature].astype(str))[self.target].mean()
+                     .sort_values())
+            present = [str(c) for c in pd.unique(sub[feature].dropna().astype(str))]
+            ordered = [c for c in means.index if c in present]
+            ordered += [c for c in present if c not in ordered]
+            if len(ordered) < 2:
+                return None, kind
+            core = [{"kind": "cat", "cats": [c]} for c in ordered]
+
+        def grepr(b):
+            return int(self._mask_in(sub, feature, b).sum()) / N
+
+        na = [{"kind": "na"}] if na_present else []
+        if na and min_leaf_repr is not None and grepr(na[0]) < min_leaf_repr - 1e-9:
+            return None, kind
+
+        while len(core) > 1 and min_leaf_repr is not None:
+            reprs = [grepr(b) for b in core]
+            i = int(np.argmin(reprs))
+            if reprs[i] >= min_leaf_repr - 1e-9:
+                break
+            cands = [k for k in (i - 1, i + 1) if 0 <= k < len(core)]
+            ok = ([k for k in cands if reprs[i] + reprs[k] <= max_bin_repr + 1e-9]
+                  if max_bin_repr is not None else cands)
+            j = min(ok or cands, key=lambda k: reprs[k])
+            a, b2 = sorted((i, j))
+            if kind == "num":
+                core[a] = {"kind": "num", "lo": core[a]["lo"], "hi": core[b2]["hi"]}
+            else:
+                core[a] = {"kind": "cat", "cats": core[a]["cats"] + core[b2]["cats"]}
+            del core[b2]
+
+        if len(core) < 2:
+            return None, kind
+        out = core + na
+        if min_leaf_repr is not None and any(grepr(b) < min_leaf_repr - 1e-9 for b in out):
+            return None, kind
+        if max_bin_repr is not None and any(grepr(b) > max_bin_repr + 1e-9 for b in out):
+            return None, kind
+        return out, kind
+
     def fit_auto(self, features: list | None = None, max_depth: int = 3,
                  min_iv: float = 0.02, max_n_bins: int = 2, min_bin_size: float = 0.05,
                  from_scratch: bool = True, subtree: str | None = None,
@@ -3130,12 +3225,39 @@ class SequentialPDSegmenter:
                                       min_bin_size=loc_min, with_psi=False)
                 if len(iv) == 0:
                     continue
-                top = iv.iloc[0]
-                if pd.isna(top["iv"]) or top["iv"] < min_iv:
+                # Sem restrição de concentração: cresce a melhor variável por IV.
+                if min_leaf_repr is None and max_bin_repr is None:
+                    top = iv.iloc[0]
+                    if pd.isna(top["iv"]) or top["iv"] < min_iv:
+                        continue
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.grow(top["variavel"], only_segments=[sid], max_n_bins=mnb,
+                                  min_bin_size=loc_min, max_bin_size=loc_max, relax_max=True)
                     continue
-                with contextlib.redirect_stdout(io.StringIO()):
-                    self.grow(top["variavel"], only_segments=[sid], max_n_bins=mnb,
-                              min_bin_size=loc_min, max_bin_size=loc_max, relax_max=True)
+                # Com restrição: a concentração é medida GLOBALMENTE (todas as
+                # amostras); ajusta os cortes à concentração global e cresce a 1ª
+                # variável (por IV) que respeite o mín/máx por folha; senão terminal.
+                for _, row in iv.iterrows():
+                    if pd.isna(row["iv"]) or row["iv"] < min_iv:
+                        break
+                    var = row["variavel"]
+                    try:
+                        bins_fit, kind = self._concentration_bins(
+                            sub, var, min_leaf_repr, max_bin_repr)
+                    except Exception:
+                        continue
+                    if bins_fit is None:
+                        continue
+                    if kind == "num":
+                        splits = sorted({b["hi"] for b in bins_fit
+                                         if b["kind"] == "num" and np.isfinite(b["hi"])})
+                    else:
+                        splits = [b["cats"] for b in bins_fit if b["kind"] == "cat"]
+                    if not splits:
+                        continue
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.grow(var, splits=splits, only_segments=[sid])
+                    break
         n_folhas = sum(s["is_leaf"] for s in self.segments.values())
         prof = max(s["depth"] for s in self.segments.values())
         if verbose:

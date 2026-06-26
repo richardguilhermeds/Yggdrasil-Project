@@ -477,7 +477,7 @@ def test_ui_merge_missing_e_layout(tmp_path):
     ch = list(ui.panel.children)
     tabs = next(c for c in ch if isinstance(c, W.Tab))
     titulos = [tabs.get_title(i) for i in range(len(tabs.children))]
-    assert titulos == ["① Construir", "② Análise de variável", "③ Diagnóstico",
+    assert titulos == ["① Construir", "② Análise de variáveis", "③ Diagnóstico",
                        "④ Validar & Exportar", "⑤ Histórico"]
 
     def _all(w):                       # achata a subárvore de widgets
@@ -491,17 +491,33 @@ def test_ui_merge_missing_e_layout(tmp_path):
                 if isinstance(x, W.VBox) and x.children
                 and isinstance(x.children[0], W.HTML)]
 
-    # ① Construir = VBox [cockpit de 3 colunas, preview da árvore]
+    # ① Construir: topo = Árvore & quebras AO LADO do Information Value (mesmo
+    # HBox); régua da folha ativa; detalhe em 3 colunas (folha · dividir ·
+    # ações+auto-fit) e, abaixo, distribuição/cortes ao lado do histograma.
     construir = tabs.children[0]
-    build_cols = construir.children[0]
-    assert isinstance(build_cols, W.HBox) and len(build_cols.children) == 3
-    col_decision, col_center, _col_right = build_cols.children
-    # ESQUERDA: "Qual variável segmentar?" com IV + PSI por variável
-    assert any("Qual variável segmentar" in t for t in _titles_in(col_decision))
-    assert ui.out_iv in _all(col_decision)
-    # CENTRO: cabeçalho da folha (registros) e a árvore logo abaixo
-    assert ui.leaf_header in _all(col_center)
-    assert ui.out_tree in _all(col_center)
+    A = _all(construir)
+    top_cols = next(h for h in A if isinstance(h, W.HBox)
+                    and ui.out_tree in _all(h) and ui.out_iv in _all(h))
+    tree_card = next(c for c in top_cols.children if ui.out_tree in _all(c))
+    iv_card = next(c for c in top_cols.children if ui.out_iv in _all(c))
+    assert tree_card.layout.width and iv_card.layout.width   # lado a lado, larguras definidas
+    # faixa-detalhe: HBox de 3 colunas com a folha (detalhe), dividir e ações
+    det_row = next(h for h in A if isinstance(h, W.HBox) and len(h.children) == 3
+                   and ui.leaf_header in _all(h))
+    c1, c2, c3 = det_row.children
+    assert ui.leaf_header in _all(c1)               # folha (detalhe)
+    assert ui.dd_feature in _all(c2)                # dividir a folha
+    assert ui.out_preview_seg in _all(c2)           # segmentação proposta dentro de "Dividir"
+    assert ui.btn_lock in _all(c3) and ui.btn_merge_l in _all(c3)   # ações
+    assert ui.sl_depth in _all(c3)                  # auto-fit embaixo das ações
+    # distribuição da variável + cortes (preview) AO LADO do histograma do LGD
+    # da folha, num mesmo HBox
+    assert any(isinstance(h, W.HBox) and len(h.children) == 2
+               and ui.out_preview_chart in _all(h) and ui.out_leaf_hist in _all(h)
+               for h in A)
+    # régua da folha ativa no topo + preview da árvore (imagem) full-width no fim
+    assert ui.leaf_chips in A
+    assert ui.out_tree_img in _all(construir.children[-1])
 
     # ② Análise de variável é a 2ª aba (distribuição/PSI por safra)
     assert ui.out_var_dist in _all(tabs.children[1])

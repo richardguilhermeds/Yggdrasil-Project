@@ -439,7 +439,7 @@ def test_ui_merge_missing_e_layout(tmp_path):
     ch = list(ui.panel.children)
     tabs = next(c for c in ch if isinstance(c, W.Tab))
     titulos = [tabs.get_title(i) for i in range(len(tabs.children))]
-    assert titulos == ["① Construir", "② Análise de variável", "③ Diagnóstico",
+    assert titulos == ["① Construir", "② Análise de variáveis", "③ Diagnóstico",
                        "④ Validar & Exportar", "⑤ Histórico"]
 
     def _all(w):                       # achata a subárvore de widgets
@@ -453,20 +453,37 @@ def test_ui_merge_missing_e_layout(tmp_path):
                 if isinstance(x, W.VBox) and x.children
                 and isinstance(x.children[0], W.HTML)]
 
+    # ① Construir = "Cockpit em T": topo = Árvore & quebras AO LADO do IV; detalhe
+    # em 3 colunas (folha · dividir · ações+auto-fit); preview separado; placar no
+    # Diagnóstico.
     construir = tabs.children[0]
-    build_cols = construir.children[0]
-    assert isinstance(build_cols, W.HBox) and len(build_cols.children) == 3
-    col_decision, col_center, _col_right = build_cols.children
-    assert any("Qual variável segmentar" in t for t in _titles_in(col_decision))
-    assert ui.out_iv in _all(col_decision)
-    assert ui.leaf_header in _all(col_center)
-    assert ui.out_tree in _all(col_center)
+    A = _all(construir)
+    top_cols = next(h for h in A if isinstance(h, W.HBox)
+                    and ui.out_tree in _all(h) and ui.out_iv in _all(h))
+    tree_card = next(c for c in top_cols.children if ui.out_tree in _all(c))
+    iv_card = next(c for c in top_cols.children if ui.out_iv in _all(c))
+    assert tree_card.layout.width and iv_card.layout.width   # lado a lado
+    det_row = next(h for h in A if isinstance(h, W.HBox) and len(h.children) == 3
+                   and ui.leaf_header in _all(h))
+    c1, c2, c3 = det_row.children
+    assert ui.leaf_header in _all(c1)               # folha (detalhe)
+    assert ui.dd_feature in _all(c2)                # dividir a folha
+    assert ui.out_preview_seg in _all(c2)           # segmentação proposta dentro de "Dividir"
+    assert ui.btn_lock in _all(c3) and ui.btn_merge_l in _all(c3)   # ações
+    assert ui.sl_depth in _all(c3)                  # auto-fit embaixo das ações
+    assert ui.leaf_chips in A                        # régua da folha ativa
+    # distribuição+cortes (preview) ao lado do histograma da PD, num mesmo HBox
+    assert any(isinstance(h, W.HBox) and len(h.children) == 2
+               and ui.out_preview_chart in _all(h) and ui.out_leaf_hist in _all(h)
+               for h in A)
 
     assert ui.out_var_dist in _all(tabs.children[1])
 
-    diag_titles = _titles_in(tabs.children[2])
-    assert any("Folhas criadas" in t for t in diag_titles)
-    assert ui.out_iv not in _all(tabs.children[2])   # IV vive na aba Construir
+    # ③ Diagnóstico: placar de saúde (out_diag) + folhas; IV vive no Construir
+    diag = tabs.children[2]
+    assert ui.out_diag in _all(diag) and ui.btn_diag in _all(diag)
+    assert any("Folhas criadas" in t for t in _titles_in(diag))
+    assert ui.out_iv not in _all(diag)
 
     assert any(ui.out_log in _all(c) for c in ch if c is not tabs)
 
