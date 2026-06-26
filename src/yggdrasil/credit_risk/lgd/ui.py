@@ -145,6 +145,73 @@ class LGDSegmenterUI:
         {"selector": "tbody tr:hover td", "props": [("background-color", "#eef3f8")]},
     ]
 
+    # ------------------------------------------------------------------ #
+    # Camada compartilhada de estilo para as duas tabelas "Detalhe por    #
+    # safra": cabeçalho grafite + coluna 'safra' ancorada à esquerda.     #
+    # É concatenada (cópia) sobre self._TABLE_STYLES — nunca o muta.       #
+    # As regras de :first-child vencem em especificidade a regra zebra,   #
+    # então a coluna ancorada fica OPACA em todos os estados (sem bleed)  #
+    # e acompanha o hover da linha.                                       #
+    # ------------------------------------------------------------------ #
+    _SAFRA_HEADER_STYLES = [
+        {"selector": "thead th", "props": [
+            ("background-color", "#27324a"), ("color", "#f4f6f9"),
+            ("font-family", "'IBM Plex Sans',sans-serif"),
+            ("font-weight", "600"), ("letter-spacing", ".02em"),
+            ("border-color", "#27324a"),
+            ("border-bottom", "1px solid #1b2334")]},
+        # coluna 'safra' ancorada (sticky horizontal), legível em sans
+        {"selector": "tbody td:first-child", "props": [
+            ("text-align", "left"),
+            ("font-family", "'IBM Plex Sans',sans-serif"),
+            ("font-weight", "600"), ("color", "#27324a"),
+            ("position", "sticky"), ("left", "0"), ("z-index", "2"),
+            ("background-color", "#f4f6f9"),
+            ("border-right", "1px solid #cdd5e0")]},
+        {"selector": "thead th:first-child", "props": [
+            ("text-align", "left"), ("position", "sticky"),
+            ("left", "0"), ("z-index", "3")]},
+        # mantém a âncora opaca em todos os estados (vence a regra zebra)
+        {"selector": "tbody tr:nth-child(odd) td:first-child", "props": [
+            ("background-color", "#f4f6f9")]},
+        {"selector": "tbody tr:nth-child(even) td:first-child", "props": [
+            ("background-color", "#eef1f5")]},
+        {"selector": "tbody tr:hover td:first-child", "props": [
+            ("background-color", "#eef3f8")]},
+    ]
+
+    @staticmethod
+    def _blues_set_bad():
+        """Cópia do cmap 'Blues' com 'bad'/'under' brancos, p/ que uma coluna
+        categórica toda-NaN não vire barra preta sob background_gradient
+        (matplotlib pinta o valor 'bad' como #000000 por padrão)."""
+        import matplotlib as mpl
+        try:                                   # matplotlib >= 3.6
+            cmap = mpl.colormaps["Blues"].copy()
+        except Exception:                      # matplotlib < 3.6
+            import matplotlib.cm as cm
+            cmap = cm.get_cmap("Blues").copy()
+        cmap.set_bad("#ffffff")
+        cmap.set_under("#ffffff")
+        return cmap
+
+    @staticmethod
+    def _accent_ramp_css(v, vmin, vmax, *, ceiling=0.55, na="#ffffff"):
+        """Rampa branco → accent #3b4a63 (rgb 59,74,99) interpolada à mão, em
+        tons pálidos (ceiling limita a saturação). Fallback do heatmap
+        categórico quando matplotlib/background_gradient falha — emite
+        'background-color' inline e nunca produz preto. NaN → tint neutro."""
+        if v is None or pd.isna(v):
+            return "background-color:%s;color:#6b7480" % na
+        span = (vmax - vmin)
+        t = 0.0 if span <= 0 else (float(v) - vmin) / span
+        t = min(max(t, 0.0), 1.0) * ceiling
+        r = int(round(255 + (59 - 255) * t))
+        g = int(round(255 + (74 - 255) * t))
+        b = int(round(255 + (99 - 255) * t))
+        fg = "#ffffff" if t > 0.40 else "#1f2733"   # contraste em células escuras
+        return "background-color:rgb(%d,%d,%d);color:%s" % (r, g, b, fg)
+
     def __init__(self, df, target="lgd", sample_col=None, ref_sample="DES",
                  feature_labels=None, features=None, tree_samples=None, date_col=None):
         # tree_samples: amostras cujo LGD médio aparece nas folhas da árvore.
@@ -2090,19 +2157,146 @@ class LGDSegmenterUI:
         return html
 
     def _style_var_safra(self, bs):
-        cols = [c for c in ["safra", "min", "p5", "media", "p95", "max", "pct_missing"]
-                if c in bs.columns]
-        fmt = {c: "{:.3f}" for c in ("min", "p5", "media", "p95", "max") if c in cols}
+        """Detalhe por safra (numérica) — visual editorial: cabeçalho grafite,
+        coluna 'safra' ancorada, números mono, 'média' como coluna-foco e
+        %missing por severidade (só cor de texto)."""
+        order = ["safra", "min", "p5", "media", "p95", "max", "pct_missing"]
+        cols = [c for c in order if c in bs.columns]
+        bs = bs[cols].copy()
+
+        num_cols = [c for c in ("min", "p5", "media", "p95", "max") if c in cols]
+        fmt = {c: "{:.3f}" for c in num_cols}
         if "pct_missing" in cols:
             fmt["pct_missing"] = "{:.1f}%"
-        return (bs[cols].style.format(fmt, na_rep="—").hide(axis="index")
-                .set_properties(**{"font-size": "12px"}))
+        labels = {"safra": "safra", "min": "mín", "p5": "p5", "media": "média",
+                  "p95": "p95", "max": "máx", "pct_missing": "% falt."}
+
+        sty = (bs.style.format(fmt, na_rep="—")
+                       .hide(axis="index")
+                       .set_properties(**{"font-size": "12px"}))
+
+        # números: IBM Plex Mono + figuras tabulares (pontos decimais alinhados)
+        val_cols = [c for c in cols if c != "safra"]
+        if val_cols:
+            sty = sty.set_properties(
+                subset=val_cols,
+                **{"font-family": "'IBM Plex Mono',ui-monospace,monospace",
+                   "font-variant-numeric": "tabular-nums"})
+
+        # foco discreto na métrica-chave 'média': negrito + tint accent levíssimo.
+        # SEM heatmap — um gradiente em floats quase iguais inventaria tendência.
+        if "media" in cols:
+            sty = sty.set_properties(
+                subset=["media"],
+                **{"font-weight": "700", "color": "#27324a",
+                   "background-color": "#eef1f5",
+                   "border-left": "1px solid #cdd5e0",
+                   "border-right": "1px solid #cdd5e0"})
+
+        # severidade do missing: SÓ cor de texto (verde 0 / âmbar >0 / vermelho >=20)
+        if "pct_missing" in cols:
+            def _sev(s):
+                out = []
+                for v in s:
+                    if pd.isna(v):
+                        out.append("color:#6b7480")
+                    elif v >= 20:
+                        out.append("color:#b3261e;font-weight:600")
+                    elif v > 0:
+                        out.append("color:#9a6b00;font-weight:600")
+                    else:
+                        out.append("color:#137a3e")
+                return out
+            sty = sty.apply(_sev, axis=0, subset=["pct_missing"])
+
+        # estende (não muta) o estilo compartilhado: cópia + camada editorial.
+        extra = list(self._TABLE_STYLES) + list(self._SAFRA_HEADER_STYLES)
+        extra.append({"selector": "th, td", "props": [("padding", "5px 11px")]})
+        sty = sty.set_table_styles(extra)
+
+        # célula de cabeçalho da 'média' em accent cheio. Após relabel_index o
+        # subset por NOME some, então alvejamos por POSIÇÃO (nth-child). Sem <th>
+        # de índice após hide(axis="index"), a k-ésima coluna == th nth-child(k).
+        if "media" in cols:
+            mi = cols.index("media") + 1
+            sty = sty.set_table_styles(
+                [{"selector": "thead th:nth-child(%d)" % mi, "props": [
+                    ("background-color", "#3b4a63"), ("color", "#f4f6f9"),
+                    ("border-left", "1px solid #1b2334"),
+                    ("border-right", "1px solid #1b2334")]}],
+                overwrite=False)
+
+        # rótulos acentuados — DEPOIS de todo subset= styling
+        sty = sty.relabel_index([labels.get(c, c) for c in cols], axis=1)
+        return sty
 
     def _style_var_share(self, sh):
-        """Tabela de representatividade (%) por categoria e safra (categórica)."""
-        fmt = {c: "{:.1f}%" for c in sh.columns if c != "safra"}
-        return (sh.style.format(fmt, na_rep="—").hide(axis="index")
-                .set_properties(**{"font-size": "12px"}))
+        """Detalhe por safra (categórica) — representatividade (%) por categoria
+        com heatmap monocromático grafite-azul (escala global 0..100, tons
+        pálidos), coluna 'safra' ancorada e baldes residuais em cinza."""
+        cols = list(sh.columns)
+        cat_cols = [c for c in cols if c != "safra"]
+        fmt = {c: "{:.1f}%" for c in cat_cols}
+
+        sty = (sh.style.format(fmt, na_rep="—")
+                       .hide(axis="index")
+                       .set_properties(**{"font-size": "12px"}))
+
+        if cat_cols:
+            sty = sty.set_properties(
+                subset=cat_cols,
+                **{"font-family": "'IBM Plex Mono',ui-monospace,monospace",
+                   "font-variant-numeric": "tabular-nums",
+                   "min-width": "56px"})
+
+        # heatmap monocromático: escala GLOBAL fixa 0..100 e high=0.55 mantém os
+        # tons MUITO pálidos (topo ~#c3daee). Guardado por try/except.
+        if cat_cols:
+            applied = False
+            try:
+                # cmap com 'bad'/'under' neutros => coluna toda-NaN NÃO vira preto
+                cmap = self._blues_set_bad()
+                sty = sty.background_gradient(
+                    cmap=cmap, subset=cat_cols, axis=None,
+                    vmin=0.0, vmax=100.0, low=0.0, high=0.55)
+                applied = True
+            except Exception:
+                applied = False
+
+            if applied:
+                # força o texto da MARCA por cima do gradiente (vence por ordem
+                # de declaração); branco só nas células mais escuras (share alto).
+                def _ink(s):
+                    out = []
+                    for v in s:
+                        if pd.isna(v):
+                            out.append("color:#6b7480")
+                        elif v >= 70:
+                            out.append("color:#ffffff")
+                        else:
+                            out.append("color:#1f2733")
+                    return out
+                sty = sty.apply(_ink, axis=0, subset=cat_cols)
+            else:
+                # fallback sem matplotlib: rampa chapada branco -> accent #3b4a63
+                def _heat(s):
+                    return [self._accent_ramp_css(v, 0.0, 100.0, ceiling=0.55)
+                            for v in s]
+                sty = sty.apply(_heat, axis=0, subset=cat_cols)
+
+        # baldes residuais em cinza grafite p/ não competir com categorias reais
+        for special in ("outras", "(faltante)"):
+            if special in cat_cols:
+                sty = sty.set_properties(subset=[special], **{"color": "#6b7480"})
+
+        # estende (não muta) o estilo compartilhado + camada de cabeçalho/âncora
+        extra = list(self._TABLE_STYLES) + list(self._SAFRA_HEADER_STYLES)
+        extra.append({"selector": "th, td", "props": [("padding", "5px 10px")]})
+        sty = sty.set_table_styles(extra)
+
+        # rótulos — DEPOIS de todo subset= styling (passthrough preserva nomes)
+        sty = sty.relabel_index(list(cols), axis=1)
+        return sty
 
     def _on_var_analyze(self, _):
         feat = self.dd_var.value
