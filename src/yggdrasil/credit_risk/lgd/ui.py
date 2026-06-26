@@ -48,7 +48,7 @@ _CSS = """
 .lgdui-banner .s { font-size:11.5px; color:var(--muted); margin-top:1px; }
 /* cards */
 .lgdui-card { background:#fff; border:1px solid var(--line); border-radius:12px;
-  padding:13px 15px; box-shadow:0 1px 3px rgba(16,24,40,.06); margin-bottom:2px; }
+  padding:13px 15px; box-shadow:0 1px 3px rgba(16,24,40,.06); margin-bottom:11px; }
 .lgdui-h { font-weight:600; font-size:11px; color:var(--muted); text-transform:uppercase;
   letter-spacing:.07em; margin-bottom:9px; }
 /* rótulos das faixas do "cockpit em T" (topo sem rolagem · detalhe) */
@@ -71,19 +71,33 @@ _CSS = """
 .pill-red    { background:#fbe7e4; color:#b23a2a; }
 .lgdui-legend { font-size:11px; color:var(--muted); margin:6px 0 2px; line-height:1.55; }
 .lgdui-tree { line-height:1.55; }
-/* abas do workbench */
-.lgdui-tabs { margin-top:8px; }
-.lgdui-tabs > .widget-tab-contents { padding:12px 2px 2px; background:transparent; }
+/* abas do workbench — estilo "segmented control" (pílulas) */
+.lgdui-tabs { margin-top:10px; }
+.lgdui-tabs > .widget-tab-contents { padding:14px 2px 2px; background:transparent; }
+.lgdui-tabs .lm-TabBar.jupyter-widget-tab-nav,
+.lgdui-tabs .p-TabBar.jupyter-widget-tab-nav { border-bottom:1px solid var(--line);
+  padding-bottom:9px; box-shadow:none; }
+.lgdui-tabs .lm-TabBar-content, .lgdui-tabs .p-TabBar-content { gap:7px;
+  align-items:stretch; border:none; }
 .lgdui-tabs .lm-TabBar-tab, .lgdui-tabs .p-TabBar-tab { font-size:13px;
   /* !important vence a regra de mesma especificidade do ipywidgets
-     (flex/max-width: var(--jp-widgets-horizontal-tab-width)) que cortava o título */
-  min-width:max-content !important; max-width:none !important; flex:0 0 auto !important; }
+     (flex/max-width: var(--jp-widgets-horizontal-tab-width)) que cortava o título) */
+  min-width:max-content !important; max-width:none !important; flex:0 0 auto !important;
+  margin:0 !important; padding:7px 15px !important;
+  border:1px solid var(--ac-border) !important; border-radius:10px !important;
+  background:#fff !important; color:var(--muted) !important; font-weight:500;
+  line-height:1.15; box-shadow:0 1px 2px rgba(16,24,40,.05) !important;
+  transition:background .15s, color .15s, border-color .15s, box-shadow .15s; }
+.lgdui-tabs .lm-TabBar-tab:hover, .lgdui-tabs .p-TabBar-tab:hover {
+  background:var(--ac-soft) !important; color:var(--ac-deep) !important;
+  border-color:var(--ac-border) !important; }
 .lgdui-tabs .lm-TabBar-tabLabel, .lgdui-tabs .p-TabBar-tabLabel {
   white-space:nowrap !important; overflow:visible !important;
   text-overflow:clip !important; max-width:none !important; }
 .lgdui-tabs .lm-TabBar-tab.lm-mod-current,
-.lgdui-tabs .p-TabBar-tab.p-mod-current { color:var(--ac-deep); font-weight:600;
-  box-shadow: inset 0 -2px 0 var(--ac); }
+.lgdui-tabs .p-TabBar-tab.p-mod-current { color:#fff !important; font-weight:600;
+  background:var(--ac) !important; border-color:var(--ac) !important;
+  box-shadow:0 2px 7px rgba(39,50,74,.28) !important; }
 /* cabeçalho da folha selecionada (métricas em chips) — auto-fit estica os chips
    para preencher toda a largura: a linha do LGD (2 chips) ocupa 50% cada e alinha
    o fim do "LGD OOT" com o fim do "Repr. ESTAB" da linha de cima */
@@ -624,7 +638,7 @@ class LGDSegmenterUI:
             self.out_leaf_hist,
         ], layout=W.Layout(width="49%")); card_hist.add_class("lgdui-card")
         det_bottom = W.HBox([card_preview, card_hist],
-                            layout=W.Layout(width="100%", align_items="flex-start",
+                            layout=W.Layout(width="100%", align_items="stretch",
                                             justify_content="space-between"))
 
         # ---- Assistente: DESATIVADO por enquanto -------------------------
@@ -816,17 +830,17 @@ class LGDSegmenterUI:
                    "◀ Desfazer / Refazer ▶ na aba <b>Construir</b>.</div>"),
             self.tx_json_path,
             W.HBox([self.btn_save_json, self.btn_load_json]),
-        ], layout=W.Layout(width="40%"))
+        ], layout=W.Layout(width="49%"))
         card_json.add_class("lgdui-card")
         card_img = W.VBox([
             W.HTML("<div class='lgdui-h'>Imagem da árvore (LGD médio &amp; % por folha)</div>"),
             self.tx_img_path,
             W.HBox([self.btn_plot, self.btn_plot_hide]),
             self.out_plot,
-        ], layout=W.Layout(width="58%"))
+        ], layout=W.Layout(width="49%"))
         card_img.add_class("lgdui-card")
         hist_row = W.HBox([card_json, card_img],
-                          layout=W.Layout(width="100%", align_items="flex-start",
+                          layout=W.Layout(width="100%", align_items="stretch",
                                           justify_content="space-between"))
         tab_hist = W.VBox([sep_hist, hist_row])
 
@@ -1381,10 +1395,21 @@ class LGDSegmenterUI:
                + f"<div class='lgdui-metrics'>{sec1}</div>"
                + sec_h("LGD médio &amp; incremento vs DES")
                + f"<div class='lgdui-metrics'>{sec2}</div>")
+        h0_css = "font-size:10.5px;color:#8a93a3;margin:1px 0 6px;line-height:1.5"
         if test_rows:
-            out += sec_h("Aderência DES → amostra (teste de hipótese)") + test_rows
+            out += (sec_h("Aderência DES → amostra (teste de hipótese)")
+                    + f"<div style='{h0_css}'><b>H₀:</b> a folha tem a <b>mesma "
+                      "distribuição de LGD</b> na DES e na amostra. "
+                      "<i>p&gt;0,05</i> ⇒ não rejeita H₀ (aderente); "
+                      "<i>p≤0,05</i> ⇒ rejeita H₀ (não aderente).</div>"
+                    + test_rows)
         if sib_rows:
-            out += sec_h("Distinção vs folha-irmã adjacente (mesmo pai)") + sib_rows
+            out += (sec_h("Distinção vs folha-irmã adjacente (mesmo pai)")
+                    + f"<div style='{h0_css}'><b>H₀:</b> as <b>duas folhas-irmãs têm o "
+                      "mesmo LGD</b>. <i>p≤0,05</i> ⇒ rejeita H₀ (folhas distintas); "
+                      "<i>p&gt;0,05</i> ⇒ não rejeita H₀ (indistinguíveis · candidatas "
+                      "a fusão).</div>"
+                    + sib_rows)
         if psi_rows:
             out += sec_h("Estabilidade · PSI") + psi_rows + psi_legend
         return out
@@ -1929,11 +1954,28 @@ class LGDSegmenterUI:
             fmt["psi"] = "{:.4f}"
         sty = (disp.style.format(fmt, na_rep="—")
                .hide(axis="index")
-               .map(forca_bg, subset=["força"])
+               .set_table_styles(self._TABLE_STYLES)
                .set_properties(**{"font-size": "12px"}))
+        # números tabulares (mono) e coluna de variável à esquerda
+        num_cols = [c for c in ["bins", "iv", "psi"] if c in disp.columns]
+        if num_cols:
+            sty = sty.set_properties(subset=num_cols, **{
+                "font-family": "'IBM Plex Mono', ui-monospace, monospace",
+                "font-variant-numeric": "tabular-nums"})
+        if "variável" in disp.columns:
+            sty = sty.set_properties(subset=["variável"],
+                                     **{"text-align": "left", "font-weight": "500"})
+        # realça a linha recomendada (★ = maior IV); cores semânticas vêm depois
+        if len(disp):
+            sty = sty.apply(lambda r: (["background-color:#eef2f8"] * len(r)
+                                       if r.name == 0 else [""] * len(r)), axis=1)
+        sty = sty.map(forca_bg, subset=["força"])
         if has_psi:
             sty = (sty.map(psi_bg, subset=["psi"])
                       .map(psi_status_bg, subset=["estab."]))
+        # cabeçalhos: IV/PSI em maiúsculas
+        sty = sty.relabel_index([{"iv": "IV", "psi": "PSI"}.get(c, c)
+                                 for c in disp.columns], axis="columns")
         qual = "TODA A CARTEIRA" if (sid in (None, "root")) else self._leaf_label(sid)
         hint = (f"<div style='font-size:11px;color:#667;margin-bottom:4px'>folha: "
                 f"<b>{qual}</b> · LGD médio (DES) = {lgd_med} · IV contínuo (optbinning)"
