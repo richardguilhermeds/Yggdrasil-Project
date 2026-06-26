@@ -1176,9 +1176,11 @@ class LGDSegmenterUI:
         sty = (sty.format(fmt, na_rep="—")
                   .hide(axis="index")
                   .set_table_styles(self._TABLE_STYLES)
-                  .set_properties(**{"font-size": "12px"}))
-        if "descricao" in lv.columns:       # texto longo: alinha à esquerda
-            sty = sty.set_properties(subset=["descricao"], **{"text-align": "left"})
+                  .set_properties(**{"font-size": "12px"})
+                  # texto centralizado em toda a tabela (cabeçalho e células)
+                  .set_table_styles([{"selector": "th, td",
+                                      "props": [("text-align", "center")]}],
+                                    overwrite=False))
         return sty
 
     def _leaf_label(self, sid):
@@ -2383,18 +2385,10 @@ class LGDSegmenterUI:
         r2 = {r["amostra"]: r["R2"] for _, r in met.iterrows()}
         r2_des = r2.get(self.ref_sample, r2.get("todos"))
 
-        # --- estabilidade: pior PSI da segmentação + pior CSI por variável ---
+        # --- estabilidade: pior PSI da segmentação (DES × amostras) ---
         psi_df = self.seg.psi() if self.sample_col is not None else None
         pior_psi = (float(psi_df["psi"].max())
                     if (psi_df is not None and len(psi_df)) else None)
-        csi_df, pior_csi = None, None
-        if self.sample_col is not None:
-            try:
-                csi_df = self.seg.csi()
-                if csi_df["pior_csi"].notna().any():
-                    pior_csi = float(csi_df["pior_csi"].max())
-            except Exception:
-                csi_df = None
 
         # --- calibração: maior |gap| previsto(DES) × realizado(OOT) ---
         calib, max_gap = None, None
@@ -2479,19 +2473,27 @@ class LGDSegmenterUI:
                          f"color:{psi_hex[cls]}'>{r['classificacao']}</div></div>")
             ev += ("<div class='lgdui-h' style='margin-top:14px'>Estabilidade · PSI da "
                    "segmentação (DES × amostras)</div>" + rows)
-        if csi_df is not None and len(csi_df):
-            cols = [c for c in ["variavel", "tipo", "pior_csi", "classificacao"]
-                    if c in csi_df.columns]
-            ev += ("<div class='lgdui-h' style='margin-top:14px'>Estabilidade · CSI por "
-                   "variável (top 8)</div>" + self._df_html(csi_df[cols].head(8)))
         if calib is not None and len(calib):
             cols = [c for c in ["folha", "n", "lgd_previsto", "lgd_realizado", "gap"]
                     if c in calib.columns]
             ev += ("<div class='lgdui-h' style='margin-top:14px'>Calibração · previsto (DES) × "
-                   "realizado</div>" + self._df_html(calib[cols], max_height="240px"))
+                   "realizado</div>" + self._df_html(calib[cols], max_height="240px",
+                                                     center=True))
+        # estrutura: monotonicidade + nº de inversões e QUAIS folhas invertem
+        def _inv_str(inv):
+            if not inv:
+                return "—"
+            return " · ".join(f"folha {a} ▸ folha {b}" for a, b in inv)
+        mono_disp = mono[["amostra", "monotonico", "n_inversoes"]].copy()
+        mono_disp["folhas que invertem"] = mono["inversoes"].apply(_inv_str)
+        mono_disp = mono_disp.rename(columns={"monotonico": "monotônico",
+                                              "n_inversoes": "nº inversões"})
         ev += ("<div class='lgdui-h' style='margin-top:14px'>Estrutura · monotonicidade do "
                "LGD por amostra</div>"
-               + self._df_html(mono[["amostra", "monotonico", "n_inversoes"]]))
+               "<div class='lgdui-legend'>Cada inversão é um par de folhas adjacentes (pela "
+               "ordem da régua) cujo LGD está fora de ordem — <b>folha a ▸ folha b</b> indica "
+               "que a folha <b>a</b> tem LGD maior que a <b>b</b>, que deveria ser ≥.</div>"
+               + self._df_html(mono_disp, center=True))
         return scorecard + ev
 
     # ==================================================================
@@ -2581,16 +2583,22 @@ class LGDSegmenterUI:
             return f"<div style='max-height:{max_height};overflow:auto'>{html}</div>"
         return html
 
-    def _df_html(self, df, max_height=None):
+    def _df_html(self, df, max_height=None, center=False):
         """HTML de um DataFrame cru (sem índice), p/ atribuir a um widget HTML.
-        Aplica bordas por célula (divisão de colunas nítida) e alinha à esquerda
-        as colunas de texto."""
+        Aplica bordas por célula (divisão de colunas nítida). Por padrão alinha à
+        esquerda as colunas de texto; com ``center=True`` centraliza tudo
+        (cabeçalho e células)."""
         sty = (df.style.hide(axis="index")
                        .set_table_styles(self._TABLE_STYLES)
                        .set_properties(**{"font-size": "12px"}))
-        txt_cols = [c for c in df.columns if df[c].dtype == object]
-        if txt_cols:
-            sty = sty.set_properties(subset=txt_cols, **{"text-align": "left"})
+        if center:
+            sty = sty.set_table_styles([{"selector": "th, td",
+                                         "props": [("text-align", "center")]}],
+                                       overwrite=False)
+        else:
+            txt_cols = [c for c in df.columns if df[c].dtype == object]
+            if txt_cols:
+                sty = sty.set_properties(subset=txt_cols, **{"text-align": "left"})
         return self._styler_html(sty, max_height)
 
     def _display_fig(self, fig, border=True):
@@ -2608,7 +2616,8 @@ class LGDSegmenterUI:
     def _on_hist(self, _):
         try:
             # só a amostra de referência (DES), preenchido
-            self.out_quality.value = self._fig_html(self.seg.plot_target_hist())
+            self.out_quality.value = self._fig_html(
+                self.seg.plot_target_hist(color="steelblue"))
         except Exception as e:
             self.out_quality.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
                                       f"histograma: {type(e).__name__}: {e}</div>")
