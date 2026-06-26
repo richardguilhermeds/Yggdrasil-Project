@@ -154,12 +154,8 @@ class LGDSegmenterUI:
     # e acompanha o hover da linha.                                       #
     # ------------------------------------------------------------------ #
     _SAFRA_HEADER_STYLES = [
-        {"selector": "thead th", "props": [
-            ("background-color", "#27324a"), ("color", "#f4f6f9"),
-            ("font-family", "'IBM Plex Sans',sans-serif"),
-            ("font-weight", "600"), ("letter-spacing", ".02em"),
-            ("border-color", "#27324a"),
-            ("border-bottom", "1px solid #1b2334")]},
+        # cabeçalho idêntico ao das demais tabelas (claro, via _TABLE_STYLES);
+        # aqui só ancoramos a coluna 'safra' à esquerda (sticky horizontal).
         # coluna 'safra' ancorada (sticky horizontal), legível em sans
         {"selector": "tbody td:first-child", "props": [
             ("text-align", "left"),
@@ -2246,17 +2242,8 @@ class LGDSegmenterUI:
         extra.append({"selector": "th, td", "props": [("padding", "5px 11px")]})
         sty = sty.set_table_styles(extra)
 
-        # célula de cabeçalho da 'média' em accent cheio. Após relabel_index o
-        # subset por NOME some, então alvejamos por POSIÇÃO (nth-child). Sem <th>
-        # de índice após hide(axis="index"), a k-ésima coluna == th nth-child(k).
-        if "media" in cols:
-            mi = cols.index("media") + 1
-            sty = sty.set_table_styles(
-                [{"selector": "thead th:nth-child(%d)" % mi, "props": [
-                    ("background-color", "#3b4a63"), ("color", "#f4f6f9"),
-                    ("border-left", "1px solid #1b2334"),
-                    ("border-right", "1px solid #1b2334")]}],
-                overwrite=False)
+        # cabeçalho da 'média' sem accent escuro: fica igual ao das demais
+        # tabelas (claro); o leve tint no CORPO da coluna já marca o foco.
 
         # rótulos acentuados — DEPOIS de todo subset= styling
         sty = sty.relabel_index([labels.get(c, c) for c in cols], axis=1)
