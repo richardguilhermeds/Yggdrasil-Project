@@ -320,6 +320,18 @@ class LGDSegmenterUI:
                            "Calcula o placar de saúde: discriminação (R²/IV), estabilidade "
                            "(PSI/CSI), calibração (previsto×realizado) e estrutura "
                            "(monotonicidade · distinção entre folhas-irmãs)", "stethoscope")
+        # --- comparação de folhas-irmãs (inversão entre amostras/safras) ---
+        sib_style = {"description_width": "118px"}
+        self.dd_sib_group = W.Dropdown(description="Grupo de irmãs", layout=full,
+                                       style=sib_style)
+        self.dd_sib_sample = W.Dropdown(description="amostra (safra)", layout=full,
+                                        style=sib_style)
+        self.tx_sib_time = W.Text(description="coluna safra", value=(self.date_col or "dt_ref"),
+                                  layout=full, style=sib_style,
+                                  placeholder="coluna de safra (ex.: dt_ref)")
+        self.btn_sib = mk("Analisar folhas-irmãs (inversão)", "primary",
+                          "Compara o LGD médio das folhas de mesmo pai por amostra e por "
+                          "safra e sinaliza inversões da ordem de risco", "exchange")
         # --- validação regulatória (monotonicidade, calibração, backtest) e relatório ---
         self.tx_time_col = W.Text(description="coluna tempo", value="dt_ref",
                                   layout=full, style=dstyle,
@@ -416,6 +428,14 @@ class LGDSegmenterUI:
         self.btn_report.on_click(self._on_report)
         self.btn_box.on_click(self._on_box)
         self.btn_hist.on_click(self._on_hist)
+        self.btn_sib.on_click(self._on_sib_analyze)
+        # amostras p/ a análise por safra das folhas-irmãs (fixas — não mudam
+        # com a árvore): "todas" + a referência (DES) + as demais com LGD.
+        sib_samples = [("todas as amostras", "__all__")]
+        if self.sample_col is not None:
+            sib_samples += [(self.ref_sample, self.ref_sample)]
+            sib_samples += [(a, a) for a in self._lgd_nonref]
+        self.dd_sib_sample.options = sib_samples
         self.btn_undo.on_click(self._on_undo)
         self.btn_redo.on_click(self._on_redo)
         self.btn_automerge.on_click(self._on_automerge)
@@ -447,6 +467,7 @@ class LGDSegmenterUI:
         self.out_boot = W.HTML()
         self.out_validate = W.HTML()
         self.out_quality = W.HTML()
+        self.out_sib = W.HTML()     # comparação de folhas-irmãs (inversão)
         self.out_diag = W.HTML()    # placar de saúde do modelo (Diagnóstico)
         self.out_log = W.Output(layout=W.Layout(max_height="320px", overflow="auto"))
         self.out_preview_chart = W.HTML()   # distribuição da variável + cortes (ao lado do histograma)
@@ -654,6 +675,30 @@ class LGDSegmenterUI:
                              W.HBox([self.btn_copy_table]), self.out_table_tsv])
         card_table.add_class("lgdui-card")
 
+        sib_legend = W.HTML(
+            "<div class='lgdui-legend'>Compara o <b>LGD médio</b> das folhas de um mesmo "
+            "pai (<b>folhas-irmãs</b>) e checa se a <b>ordem de risco</b> se mantém. "
+            "A ordem de <b>referência</b> é o LGD na <b>DES</b>; uma <b>inversão</b> ocorre "
+            "quando, numa amostra ou safra, uma folha de menor risco passa a ter LGD "
+            "<i>maior</i> que uma irmã de maior risco (as linhas se cruzam). "
+            "O gráfico da esquerda mostra o LGD por <b>amostra</b> (DES, OOT, …) e o da "
+            "direita por <b>safra</b> ao longo do tempo (faixas vermelhas = safras com "
+            "inversão). O <b>indicador</b> resume: "
+            "<span style='background:#e7f5ee;padding:1px 5px;border-radius:3px'>verde sem inversão</span> "
+            "<span style='background:#fbf3e0;padding:1px 5px;border-radius:3px'>amarelo inverte em algumas safras</span> "
+            "<span style='background:#fbe7e4;padding:1px 5px;border-radius:3px'>vermelho inverte entre amostras ou em muitas safras</span>.</div>")
+        card_sib = W.VBox([
+            W.HTML("<div class='lgdui-h'>Folhas-irmãs · inversão entre amostras &amp; safras</div>"),
+            sib_legend,
+            W.HBox([self.dd_sib_group], layout=W.Layout(width="100%")),
+            W.HBox([self.tx_sib_time, self.dd_sib_sample],
+                   layout=W.Layout(width="100%")),
+            W.HBox([self.btn_sib]),
+            self.out_sib,
+        ], layout=W.Layout(width="100%"))
+        card_sib.add_class("lgdui-card")
+        self._card_sib = card_sib
+
         metrics_legend = W.HTML(
             "<div class='lgdui-legend'>a régua prediz o LGD pela média do segmento na "
             "referência (DES); avaliada como modelo em cada amostra · "
@@ -706,7 +751,7 @@ class LGDSegmenterUI:
         sep_diag2 = W.HTML("<div class='lgdui-band lgdui-band-muted'>Evidência detalhada · "
                            "folhas · métricas · IC bootstrap · qualidade</div>")
         tab_diag = W.VBox([sep_diag, card_score, sep_diag2,
-                           card_metrics, card_table, card_boot, card_quality])
+                           card_metrics, card_table, card_sib, card_boot, card_quality])
 
         # ================================================================
         # ABA ④ VALIDAR & EXPORTAR — duas faixas: validação · exportar/registrar
@@ -1496,6 +1541,14 @@ class LGDSegmenterUI:
         var_opts = [("TODA A CARTEIRA (raiz)", "root")] + opts
         self.dd_var_leaf.options = var_opts
         self.dd_var_leaf.value = cur_v if cur_v in [s for _, s in var_opts] else "root"
+        # seletor de grupos de folhas-irmãs (aba Diagnóstico)
+        sib_opts = [(g["label"], g["parent"]) for g in self.seg.sibling_leaf_groups()]
+        cur_sib = self.dd_sib_group.value
+        self.dd_sib_group.options = sib_opts
+        if cur_sib in [p for _, p in sib_opts]:
+            self.dd_sib_group.value = cur_sib
+        elif sib_opts:
+            self.dd_sib_group.value = sib_opts[0][1]
 
         self.bar.value = self._status_html()
         self.out_tree.value = self._tree_html()
@@ -2559,6 +2612,91 @@ class LGDSegmenterUI:
         except Exception as e:
             self.out_quality.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
                                       f"histograma: {type(e).__name__}: {e}</div>")
+
+    # ==================================================================
+    # Folhas-irmãs: inversão do LGD entre amostras e safras
+    # ==================================================================
+    def _sib_indicator_html(self, s):
+        """Indicador de inversão (pílula de status + contagens + safras)."""
+        pill = {"green": "pill-green", "yellow": "pill-yellow", "red": "pill-red"}[s["status"]]
+        rotulo = {"green": "Sem inversão", "yellow": "Inversão em algumas safras",
+                  "red": "Inversão relevante"}[s["status"]]
+        # ordem de referência (LGD na DES): folha a &lt; folha b &lt; ...
+        nota, lgd = s["nota"], s["lgd_ref"]
+        ordem = " &lt; ".join(
+            f"folha {nota.get(sid)} ({lgd[sid]:.1%})" if not pd.isna(lgd[sid])
+            else f"folha {nota.get(sid)}" for sid in s["ordered"])
+        # inversões por amostra (fora a referência)
+        ams_inv = [r for r in s["samples"]
+                   if r["amostra"] != s["ref_sample"] and r["n_inv"] > 0]
+        if ams_inv:
+            am_txt = "; ".join(f"{r['amostra']}: {r['n_inv']}/{r['n_pares']} pares" for r in ams_inv)
+            am_line = (f"<b>Entre amostras:</b> "
+                       f"<span style='color:#b3261e'>{am_txt}</span>")
+        else:
+            am_line = "<b>Entre amostras:</b> <span style='color:#137a3e'>nenhuma inversão</span>"
+        # safras
+        if s.get("safra_err"):
+            sf_line = (f"<b>Entre safras:</b> <span style='color:#889'>não avaliado "
+                       f"({s['safra_err']})</span>")
+        elif s["n_safras"]:
+            pct = 100 * s["safra_rate"]
+            cor = "#b3261e" if s["safras_inv"] else "#137a3e"
+            sf_line = (f"<b>Entre safras:</b> <span style='color:{cor}'>"
+                       f"{s['safras_inv']}/{s['n_safras']} safras com inversão "
+                       f"({pct:.0f}%)</span>")
+            piores = [r for r in s["safras"] if r["n_inv"] > 0][:8]
+            if piores:
+                chips = " ".join(
+                    f"<span style='background:#fbe7e4;color:#b23a2a;border-radius:3px;"
+                    f"padding:1px 5px;font-size:10.5px' class='mono'>{r['safra']} "
+                    f"({r['n_inv']})</span>" for r in piores)
+                sf_line += f"<div style='margin-top:4px'>{chips}</div>"
+        else:
+            sf_line = "<b>Entre safras:</b> <span style='color:#889'>sem safras avaliáveis</span>"
+        return (
+            "<div class='lgdui-card' style='margin:6px 0'>"
+            f"<div style='margin-bottom:6px'><span class='pill {pill}'>● {rotulo}</span>"
+            f"<span style='color:#6b7480;font-size:11.5px;margin-left:8px'>"
+            f"{s['n_pairs']} par(es) de irmãs comparados</span></div>"
+            f"<div style='font-size:12px;line-height:1.7'>{am_line}<br>{sf_line}</div>"
+            f"<div style='font-size:11px;color:#6b7480;margin-top:6px'>"
+            f"Ordem de referência (LGD na {s['ref_sample']}): {ordem}</div>"
+            "</div>")
+
+    def _on_sib_analyze(self, _):
+        pid = self.dd_sib_group.value
+        if not pid:
+            self.out_sib.value = ("<div style='font-size:12px;color:#889'>Nenhum grupo de "
+                                  "folhas-irmãs — faça ao menos um split para criar folhas de "
+                                  "mesmo pai.</div>")
+            return
+        tcol = (self.tx_sib_time.value or "").strip() or None
+        samp = self.dd_sib_sample.value
+        samp = None if samp in (None, "__all__") else samp
+
+        def err(what, e):
+            return (f"<div style='font-size:11px;color:#b3261e'>({what} não gerado: "
+                    f"{type(e).__name__}: {e})</div>")
+
+        try:
+            summ = self.seg.sibling_inversion_summary(pid, time_col=tcol, sample=samp)
+            ind = self._sib_indicator_html(summ)
+        except Exception as e:
+            ind = err("indicador de inversão", e)
+        try:
+            h1 = self._fig_html(self.seg.plot_sibling_lgd_by_sample(pid))
+        except Exception as e:
+            h1 = err("gráfico por amostra", e)
+        try:
+            h2 = self._fig_html(self.seg.plot_sibling_lgd_by_safra(
+                pid, time_col=tcol, sample=samp))
+        except Exception as e:
+            h2 = err("gráfico por safra", e)
+        charts = (f"<div style='display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start'>"
+                  f"<div style='flex:1 1 320px;min-width:300px'>{h1}</div>"
+                  f"<div style='flex:1 1 420px;min-width:340px'>{h2}</div></div>")
+        self.out_sib.value = ind + charts
 
     # ==================================================================
     # Undo / redo de splits (e demais alterações estruturais da árvore)
