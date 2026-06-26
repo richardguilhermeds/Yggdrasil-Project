@@ -696,6 +696,8 @@ class LGDSegmenterUI:
         # sugeridos (preview, ao clicar) e o HISTOGRAMA do LGD da folha.
         card_preview = W.VBox([
             W.HTML("<div class='lgdui-h'>Distribuição da variável · cortes sugeridos</div>"),
+            W.HTML("<div class='lgdui-legend'>Distribuição da variável na folha selecionada "
+                   "(DES), com os cortes propostos marcados.</div>"),
             self.out_preview_chart,
         ], layout=W.Layout(width="49%")); card_preview.add_class("lgdui-card")
         card_hist = W.VBox([
@@ -2021,28 +2023,11 @@ class LGDSegmenterUI:
             fmt["psi"] = "{:.4f}"
         sty = (disp.style.format(fmt, na_rep="—")
                .hide(axis="index")
-               .set_table_styles(self._TABLE_STYLES)
+               .map(forca_bg, subset=["força"])
                .set_properties(**{"font-size": "12px"}))
-        # números tabulares (mono) e coluna de variável à esquerda
-        num_cols = [c for c in ["bins", "iv", "psi"] if c in disp.columns]
-        if num_cols:
-            sty = sty.set_properties(subset=num_cols, **{
-                "font-family": "'IBM Plex Mono', ui-monospace, monospace",
-                "font-variant-numeric": "tabular-nums"})
-        if "variável" in disp.columns:
-            sty = sty.set_properties(subset=["variável"],
-                                     **{"text-align": "left", "font-weight": "500"})
-        # realça a linha recomendada (★ = maior IV); cores semânticas vêm depois
-        if len(disp):
-            sty = sty.apply(lambda r: (["background-color:#eef2f8"] * len(r)
-                                       if r.name == 0 else [""] * len(r)), axis=1)
-        sty = sty.map(forca_bg, subset=["força"])
         if has_psi:
             sty = (sty.map(psi_bg, subset=["psi"])
                       .map(psi_status_bg, subset=["estab."]))
-        # cabeçalhos: IV/PSI em maiúsculas
-        sty = sty.relabel_index([{"iv": "IV", "psi": "PSI"}.get(c, c)
-                                 for c in disp.columns], axis="columns")
         qual = "TODA A CARTEIRA" if (sid in (None, "root")) else self._leaf_label(sid)
         hint = (f"<div style='font-size:11px;color:#667;margin-bottom:4px'>folha: "
                 f"<b>{qual}</b> · LGD médio (DES) = {lgd_med} · IV contínuo (optbinning)"
