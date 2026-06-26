@@ -3109,10 +3109,11 @@ class LGDSegmenterUI:
         self.out_plot.value = ""          # recolhe (esvazia) a imagem
 
     def _on_tree_preview(self, _):
-        """Preview da árvore como imagem, na própria aba Construir (sem exportar)."""
+        """Preview da árvore como imagem, na própria aba Construir (sem exportar).
+        Sem realce da folha selecionada — a imagem mostra a árvore "neutra"."""
         try:
             self.out_tree_img.value = self._fig_html(
-                self.seg.plot_tree(highlight=self.dd_leaf.value), border=True)
+                self.seg.plot_tree(), border=True)
         except Exception as e:
             self.out_tree_img.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao "
                                        f"desenhar a árvore: {type(e).__name__}: {e}</div>")
