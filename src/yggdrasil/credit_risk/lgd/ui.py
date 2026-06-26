@@ -1996,38 +1996,79 @@ class LGDSegmenterUI:
         disp = disp.rename(columns={"variavel": "variável", "forca": "força",
                                     "psi_status": "estab."})
 
-        def forca_bg(v):
+        # estilo editorial: sem grade vertical, só régua de cabeçalho + filetes
+        # horizontais; força/PSI como TEXTO colorido (sem preenchimentos).
+        iv_styles = [
+            {"selector": "", "props": [("border-collapse", "collapse"),
+                                       ("width", "100%")]},
+            {"selector": "th, td", "props": [("padding", "7px 12px"),
+                                             ("border", "none"),
+                                             ("border-bottom", "1px solid #eef1f4"),
+                                             ("white-space", "nowrap"),
+                                             ("text-align", "right")]},
+            {"selector": "thead th", "props": [("text-transform", "uppercase"),
+                                               ("font-size", "10px"),
+                                               ("letter-spacing", ".06em"),
+                                               ("color", "#8a93a3"),
+                                               ("font-weight", "600"),
+                                               ("padding-bottom", "6px"),
+                                               ("border-bottom", "1.5px solid #d7dde6")]},
+            {"selector": "thead th:first-child", "props": [("text-align", "left")]},
+            {"selector": "tbody td:first-child", "props": [("text-align", "left")]},
+            {"selector": "tbody tr:hover td", "props": [("background-color", "#f7f9fc")]},
+            {"selector": "tbody tr:last-child td", "props": [("border-bottom", "none")]},
+        ]
+
+        def forca_txt(v):
             return {
-                "forte": "background-color:#e6f6ec;color:#137a3e;font-weight:600",
-                "médio": "background-color:#fdf3da;color:#9a6b00;font-weight:600",
-                "suspeito": "background-color:#efe7fb;color:#6b3fa0;font-weight:600",
-            }.get(v, "color:#8a97a3")
+                "forte": "color:#137a3e;font-weight:600",
+                "médio": "color:#9a6b00;font-weight:600",
+                "suspeito": "color:#6b3fa0;font-weight:600",
+            }.get(v, "color:#9aa2b1")
 
-        def psi_bg(v):
+        def psi_txt(v):
             if pd.isna(v):
-                return "color:#aab"
+                return "color:#9aa2b1"
             a = abs(v)
-            c = "#e6f6ec" if a < 0.10 else "#fdf3da" if a < 0.25 else "#fde7e7"
-            return f"background-color:{c};font-weight:600"
+            c = "#137a3e" if a < 0.10 else "#9a6b00" if a < 0.25 else "#b3261e"
+            return f"color:{c};font-weight:600"
 
-        def psi_status_bg(v):
+        def estab_txt(v):
             return {
                 "estável": "color:#137a3e",
                 "atenção": "color:#9a6b00;font-weight:600",
-                "instável": "background-color:#fde7e7;color:#b3261e;font-weight:600",
-            }.get(v, "color:#8a97a3")
+                "instável": "color:#b3261e;font-weight:600",
+            }.get(v, "color:#9aa2b1")
+
+        def reco_row(r):
+            # variável recomendada (★, maior IV): filete de acento + negrito,
+            # tint quase imperceptível — destaque discreto, sem realce pesado.
+            if r.name != 0:
+                return [""] * len(r)
+            css = ["background-color:#fafbfd"] * len(r)
+            css[0] = ("background-color:#fafbfd;border-left:3px solid #3b4a63;"
+                      "font-weight:600;color:#27324a")
+            return css
 
         fmt = {"iv": "{:.4f}",
                "bins": lambda v: "—" if (pd.isna(v) or v == 0) else f"{int(v)}"}
         if has_psi:
             fmt["psi"] = "{:.4f}"
+        num_cols = [c for c in ["bins", "iv", "psi"] if c in disp.columns]
         sty = (disp.style.format(fmt, na_rep="—")
                .hide(axis="index")
-               .map(forca_bg, subset=["força"])
-               .set_properties(**{"font-size": "12px"}))
+               .set_table_styles(iv_styles)
+               .set_properties(**{"font-size": "12px", "color": "#3a4250"}))
+        if num_cols:
+            sty = sty.set_properties(subset=num_cols, **{
+                "font-family": "'IBM Plex Mono', ui-monospace, monospace",
+                "font-variant-numeric": "tabular-nums"})
+        if len(disp):
+            sty = sty.apply(reco_row, axis=1)
+        sty = sty.map(forca_txt, subset=["força"])
         if has_psi:
-            sty = (sty.map(psi_bg, subset=["psi"])
-                      .map(psi_status_bg, subset=["estab."]))
+            sty = (sty.map(psi_txt, subset=["psi"])
+                      .map(estab_txt, subset=["estab."]))
         qual = "TODA A CARTEIRA" if (sid in (None, "root")) else self._leaf_label(sid)
         hint = (f"<div style='font-size:11px;color:#667;margin-bottom:4px'>folha: "
                 f"<b>{qual}</b> · LGD médio (DES) = {lgd_med} · IV contínuo (optbinning)"
