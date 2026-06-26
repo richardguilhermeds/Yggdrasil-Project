@@ -1586,7 +1586,13 @@ class LGDSegmenterUI:
                .map(r2_bg, subset=["R2"])
                .format({"MAE": "{:.4f}", "RMSE": "{:.4f}", "R2": "{:.4f}"}, na_rep="—")
                .hide(axis="index")
-               .set_properties(**{"font-size": "13.5px"}))
+               .set_table_styles(self._TABLE_STYLES)
+               .set_properties(**{"font-size": "12px"})
+               # mesmo visual da tabela de folhas: bordas + cabeçalho grafite +
+               # zebra + texto centralizado (cabeçalho e células)
+               .set_table_styles([{"selector": "th, td",
+                                   "props": [("text-align", "center")]}],
+                                 overwrite=False))
         self.out_metrics.value = self._styler_html(sty)
 
     def _ordered_leaf_options(self):
