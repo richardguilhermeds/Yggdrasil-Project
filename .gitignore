@@ -13,6 +13,11 @@ mlartifacts/
 mlflow.db
 **/mlruns/
 
+# Artefatos gerados pelos tutoriais (réguas/modelos salvos)
+notebooks/tutoriais/*.joblib
+notebooks/tutoriais/*.json.model.joblib
+notebooks/tutoriais/modelo_seg.json
+
 # Python
 __pycache__/
 *.py[cod]

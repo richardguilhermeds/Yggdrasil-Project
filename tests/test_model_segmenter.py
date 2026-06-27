@@ -150,6 +150,72 @@ def test_include_exclude_categoria(seg):
         seg.include("nao_existe")
 
 
+def test_manual_bins_numerico(seg):
+    # bins manuais sobrepõem o binning ótimo em toda a análise univariada
+    seg.set_manual_bins("feat_00", "-0.5, 0.5")
+    assert seg.manual_bins("feat_00") == [-0.5, 0.5]
+    assert seg.manual_bins_spec("feat_00") == "-0.5, 0.5"
+    vt = seg.variable_table("feat_00")
+    faixas = [f for f in vt["faixa"] if f != "(faltante)"]
+    assert faixas == ["(-inf, -0.5]", "(-0.5, 0.5]", "(0.5, inf]"]
+    # marcado no ranking
+    rk = seg.variable_iv().set_index("variavel")
+    assert bool(rk.loc["feat_00", "bins_manuais"]) is True
+    # limpar volta ao ótimo
+    seg.clear_manual_bins("feat_00")
+    assert seg.manual_bins("feat_00") is None
+    assert seg.manual_bins_spec("feat_00") == ""
+
+
+def test_manual_bins_categorico(seg):
+    seg.set_manual_bins("feat_cat", "A,B; C,D")
+    assert seg.manual_bins("feat_cat") == [["A", "B"], ["C", "D"]]
+    vt = seg.variable_table("feat_cat")
+    faixas = [f for f in vt["faixa"] if f != "(faltante)"]
+    assert faixas == ["{A, B}", "{C, D}"]
+    # texto vazio limpa
+    seg.set_manual_bins("feat_cat", "")
+    assert seg.manual_bins("feat_cat") is None
+    with pytest.raises(ValueError):
+        seg.set_manual_bins("nao_existe", "1,2")
+
+
+def test_manual_bins_persistencia(seg, tmp_path):
+    seg.set_manual_bins("feat_00", "-0.5, 0.5")
+    seg.set_manual_bins("feat_cat", "A; B,C,D")
+    p = tmp_path / "m.json"
+    seg.save(str(p))
+    seg2 = ModelSegmenter(seg.df, target="target", task_type=seg.task_type,
+                          sample_col="amostra", ref_sample="DES",
+                          date_col="dt_ref", verbose=False).load(str(p), seg.df)
+    assert seg2.manual_bins("feat_00") == [-0.5, 0.5]
+    assert seg2.manual_bins("feat_cat") == [["A"], ["B", "C", "D"]]
+
+
+def test_model_formula(seg):
+    seg.fit(_default_algo(seg.task_type))
+    coefs = seg.model_coefficients()
+    assert {"termo", "coef"}.issubset(coefs.columns)
+    assert "intercept" in coefs.attrs
+    # ordenado por |coef| desc
+    abs_coef = coefs["coef"].abs().to_numpy()
+    assert (np.diff(abs_coef) <= 1e-9).all()
+    fm = seg.model_formula()
+    assert {"intercept", "coef", "z_expr", "text", "latex"}.issubset(fm)
+    assert isinstance(fm["z_expr"], str) and fm["z_expr"]
+    if seg.task_type == "classification":
+        assert "odds_ratio" in coefs.columns
+        assert "logit" in fm["latex"]
+    else:
+        assert "odds_ratio" not in coefs.columns
+
+
+def test_model_formula_nao_linear(seg):
+    seg.fit("random_forest", hyperparams={"n_estimators": 30})
+    with pytest.raises(ValueError, match="Logística|Linear"):
+        seg.model_coefficients()
+
+
 def test_auto_select(seg):
     rk = seg.auto_select(min_iv=0.0)
     assert not rk.empty
@@ -449,3 +515,36 @@ def test_ui_fluxo_treina_e_ratings(task):
         assert ui.seg.score_ is not None
         ui._on_build_ratings(None)
         assert ui.seg.rating_ is not None
+
+
+def test_ui_bins_manuais_e_formula(task):
+    pytest.importorskip("ipywidgets")
+    import contextlib
+    import io
+    from yggdrasil.credit_risk.model import ModelSegmenterUI
+
+    df = _synthetic(task, com_cat=True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui = ModelSegmenterUI(df, target="target", task_type=task,
+                              sample_col="amostra", ref_sample="DES", date_col="dt_ref")
+        # bins manuais via os controles da Aba 2
+        ui.dd_var2.value = "feat_00"
+        ui._sync_bin_controls()
+        ui.tg_binmode.value = "Manual"
+        ui.tx_cuts.value = "-0.5, 0.5"
+        ui._on_apply_bins(None)
+        assert ui.seg.manual_bins("feat_00") == [-0.5, 0.5]
+        ui._on_clear_bins(None)
+        assert ui.seg.manual_bins("feat_00") is None
+
+        # visibilidade dos hiperparâmetros por algoritmo + fórmula
+        algo_lin = _default_algo(task)
+        ui.dd_algo.value = algo_lin
+        assert ui.formula_card.layout.display != "none"
+        ui.dd_algo.value = "random_forest"
+        assert ui.box_ensemble.layout.display != "none"
+        assert ui.formula_card.layout.display == "none"
+        ui.dd_algo.value = algo_lin
+        ui._on_fit(None)
+        ui._on_formula(None)
+        assert "mseg-formula" in ui.out_formula.value

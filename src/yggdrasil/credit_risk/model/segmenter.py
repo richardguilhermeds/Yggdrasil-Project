@@ -369,9 +369,15 @@ class ModelSegmenter:
                       sample=None):
         """Resolve os bins de uma variável na amostra de ajuste (DES por padrão).
         Usa ``OptimalBinning`` (classificação) ou ``ContinuousOptimalBinning``
-        (regressão). Devolve (bins, kind)."""
+        (regressão). Devolve (bins, kind).
+
+        Se ``splits`` não for informado e a variável tiver **bins manuais**
+        (``var_meta[feature]['splits']``, definidos via :meth:`set_manual_bins`),
+        eles são usados — sobrepondo o binning ótimo em toda a análise univariada."""
         if OptimalBinning is None:
             raise ImportError("optbinning não instalado. Rode: pip install optbinning")
+        if splits is None:
+            splits = self.var_meta.get(feature, {}).get("splits")
         fit = self._frame(sample)
         kind = self._detect_kind(feature, fit)
 
@@ -549,6 +555,7 @@ class ModelSegmenter:
                 row["estabilidade"] = _classifica_psi(pior)
             row["incluida"] = feat in self.included
             row["categoria"] = self.var_meta.get(feat, {}).get("categoria")
+            row["bins_manuais"] = bool(self.var_meta.get(feat, {}).get("splits"))
             rows.append(row)
         return (pd.DataFrame(rows)
                 .sort_values("iv", ascending=False, na_position="last")
@@ -1030,6 +1037,70 @@ class ModelSegmenter:
         self.var_meta.setdefault(feature, {})["categoria"] = categoria
         return self
 
+    # ---- bins manuais ("categorizar na mão", como nos projetos de árvore) ----
+    def _parse_bin_spec(self, feature, text):
+        """Interpreta a especificação de bins manuais digitada na UI.
+
+        * **Numérica** — lista de cortes: ``"0.7, 0.9"`` → ``[0.7, 0.9]``
+          (gera as faixas ``(-inf,0.7] (0.7,0.9] (0.9,inf]``).
+        * **Categórica** — grupos separados por ``;`` e categorias por ``,``:
+          ``"a, b; c"`` → ``[["a", "b"], ["c"]]``.
+
+        Devolve ``None`` quando o texto é vazio (volta ao binning ótimo)."""
+        text = (text or "").strip()
+        if not text:
+            return None
+        if self._detect_kind(feature) == "num":
+            cuts = []
+            for tok in text.replace(";", ",").split(","):
+                tok = tok.strip()
+                if not tok:
+                    continue
+                cuts.append(float(tok))
+            return sorted(set(cuts)) or None
+        grupos = []
+        for grp in text.split(";"):
+            cats = [c.strip() for c in grp.split(",") if c.strip()]
+            if cats:
+                grupos.append(cats)
+        return grupos or None
+
+    def set_manual_bins(self, feature, spec):
+        """Define **bins manuais** para a variável, sobrepondo o binning ótimo em
+        toda a análise univariada (tabela, IV, logodds/WoE, PSI, inversão).
+
+        ``spec`` pode ser o texto da UI (ver :meth:`_parse_bin_spec`), uma lista
+        já parseada (cortes numéricos ou grupos categóricos), ou ``None``/``""``
+        para limpar e voltar ao binning ótimo."""
+        if feature not in self.candidates:
+            raise ValueError(f"'{feature}' não é variável candidata.")
+        splits = self._parse_bin_spec(feature, spec) if isinstance(spec, (str, type(None))) \
+            else (list(spec) or None)
+        meta = self.var_meta.setdefault(feature, {})
+        if splits:
+            meta["splits"] = splits
+        else:
+            meta.pop("splits", None)
+        return self
+
+    def clear_manual_bins(self, feature):
+        """Remove os bins manuais da variável (volta ao binning ótimo)."""
+        self.var_meta.get(feature, {}).pop("splits", None)
+        return self
+
+    def manual_bins(self, feature):
+        """Bins manuais da variável (cortes ou grupos), ou ``None`` se ótimo."""
+        return self.var_meta.get(feature, {}).get("splits")
+
+    def manual_bins_spec(self, feature) -> str:
+        """Texto da UI equivalente aos bins manuais atuais (vazio se ótimo)."""
+        splits = self.manual_bins(feature)
+        if not splits:
+            return ""
+        if self._detect_kind(feature) == "num":
+            return ", ".join(_fmt(s) for s in splits)
+        return "; ".join(", ".join(map(str, g)) for g in splits)
+
     def selected_features(self) -> list:
         return [c for c in self.candidates if c in self.included]
 
@@ -1109,6 +1180,77 @@ class ModelSegmenter:
         self.score_ = self._compute_score(self.df)
         self._shap_cache = {}
         return self
+
+    # ---- fórmula do modelo linear/logístico (coeficientes) ----
+    def _design_feature_names(self, pre, use_labels=True) -> list:
+        """Nomes dos termos do desenho (saída do ``ColumnTransformer``), sem o
+        prefixo ``num__``/``cat__``. Aplica ``feature_labels`` quando possível."""
+        raw = None
+        if pre is not None and hasattr(pre, "get_feature_names_out"):
+            try:
+                raw = list(pre.get_feature_names_out())
+            except Exception:
+                raw = None
+        if raw is None:
+            raw = list(self.model_features)
+        out = []
+        for nm in raw:
+            for p in ("num__", "cat__"):
+                if nm.startswith(p):
+                    nm = nm[len(p):]
+                    break
+            if use_labels and nm in self.feature_labels:
+                nm = self.feature_labels[nm]
+            out.append(nm)
+        return out
+
+    def model_coefficients(self, use_labels=True) -> pd.DataFrame:
+        """Coeficientes do modelo **linear/logístico** ajustado: ``termo``, ``coef``
+        e — na classificação — ``odds_ratio`` (``exp(coef)``). O intercepto fica em
+        ``.attrs['intercept']``. Erro para modelos não-lineares (use SHAP)."""
+        if self.model is None:
+            raise RuntimeError("Ajuste o modelo antes (fit / set_model).")
+        if self.algorithm not in ("logistica", "linear"):
+            raise ValueError(
+                "Fórmula de coeficientes disponível apenas para Regressão "
+                f"Logística/Linear (algoritmo atual: {self.algorithm!r}). "
+                "Para modelos não-lineares use os gráficos SHAP.")
+        est = self.model.named_steps["est"] if hasattr(self.model, "named_steps") else self.model
+        pre = (self.model.named_steps.get("pre")
+               if hasattr(self.model, "named_steps") else None)
+        coef = np.ravel(np.asarray(getattr(est, "coef_", []), dtype="float64"))
+        intercept = float(np.ravel(np.asarray(getattr(est, "intercept_", [0.0])))[0])
+        names = self._design_feature_names(pre, use_labels=use_labels)
+        if len(names) != len(coef):                       # robustez a divergências
+            names = [f"x{i}" for i in range(len(coef))]
+        rows = [{"termo": nm, "coef": round(float(c), 6)} for nm, c in zip(names, coef)]
+        out = pd.DataFrame(rows, columns=["termo", "coef"])
+        if self.task_type == "classification" and not out.empty:
+            out["odds_ratio"] = np.exp(out["coef"]).round(4)
+        out = out.reindex(out["coef"].abs().sort_values(ascending=False).index).reset_index(drop=True)
+        out.attrs["intercept"] = round(intercept, 6)
+        return out
+
+    def model_formula(self, use_labels=True) -> dict:
+        """Fórmula legível do modelo linear/logístico. Devolve um ``dict`` com:
+        ``intercept``, ``coef`` (DataFrame ordenado por |coef|), ``z_expr`` (o
+        preditor linear como texto), ``text`` (forma completa) e ``latex``."""
+        coefs = self.model_coefficients(use_labels=use_labels)
+        intercept = float(coefs.attrs.get("intercept", 0.0))
+        parts = [f"{intercept:+.4f}"]
+        for _, r in coefs.iterrows():
+            parts.append(f"{r['coef']:+.4f}·[{r['termo']}]")
+        z_expr = "  ".join(parts)
+        if self.task_type == "classification":
+            text = (f"z = {z_expr}\n"
+                    "p = 1 / (1 + exp(−z))   ·   odds(p) = exp(z)")
+            latex = (r"\operatorname{logit}(p)=\ln\frac{p}{1-p}=z,\qquad "
+                     r"p=\dfrac{1}{1+e^{-z}}")
+        else:
+            text = f"ŷ = {z_expr}"
+            latex = r"\hat{y}=\beta_0+\sum_i \beta_i\,x_i"
+        return {"intercept": intercept, "coef": coefs, "z_expr": z_expr,
+                "text": text, "latex": latex}
 
     def _predict_score_array(self, model, X) -> np.ndarray:
         if self.task_type == "classification":

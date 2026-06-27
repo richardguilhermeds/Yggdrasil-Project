@@ -72,16 +72,52 @@ _CSS = """
 .mseg-metric { background:#f7f8fa; border:1px solid #eef0f3; border-radius:9px; padding:7px 10px; }
 .mseg-metric .k { font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:#8a93a3; }
 .mseg-metric .v { font-size:16px; font-weight:600; color:var(--ink); margin-top:2px; }
+/* abas — estilo "segmented control" (pílulas), alinhado às UIs lgd/pd */
 .mseg-tabs { margin-top:10px; }
-.mseg-tabs > .widget-tab-contents { padding:14px 2px 2px; background:transparent; }
+/* respiro entre a barra de abas e os cards do conteúdo abaixo
+   (!important vence a regra própria do ipywidgets p/ .widget-tab-contents) */
+.mseg-tabs > .widget-tab-contents { padding:30px 2px 2px !important; background:transparent; }
+.mseg-tabs .lm-TabBar.jupyter-widget-tab-nav,
+.mseg-tabs .p-TabBar.jupyter-widget-tab-nav { border-bottom:1px solid var(--line) !important;
+  padding-bottom:14px !important; margin-bottom:0 !important; box-shadow:none !important; }
+.mseg-tabs .lm-TabBar-content, .mseg-tabs .p-TabBar-content { gap:7px;
+  align-items:stretch; border:none; }
 .mseg-tabs .lm-TabBar-tab, .mseg-tabs .p-TabBar-tab { font-size:13px;
+  /* !important vence a regra de mesma especificidade do ipywidgets
+     (flex/max-width: var(--jp-widgets-horizontal-tab-width)) que cortava o título) */
   min-width:max-content !important; max-width:none !important; flex:0 0 auto !important;
-  margin:0 7px 0 0 !important; padding:7px 15px !important;
-  border:1px solid var(--ac-border) !important; border-radius:10px !important;
-  background:#fff !important; color:var(--muted) !important; font-weight:500; }
-.mseg-tabs .lm-TabBar-tab.lm-mod-current, .mseg-tabs .p-TabBar-tab.p-mod-current {
-  color:#fff !important; font-weight:600; background:var(--ac) !important;
-  border-color:var(--ac) !important; }
+  margin:0 !important; padding:8px 16px !important;
+  border:1px solid var(--line) !important; border-radius:9px !important;
+  background:#fff !important; color:var(--muted) !important; font-weight:500;
+  line-height:1.15; outline:none !important; box-shadow:none !important;
+  transition:background .15s, color .15s, border-color .15s; }
+/* o tema do Jupyter desenha a "barrinha azul" da aba ativa como um pseudo-
+   elemento ::before (background var(--jp-brand-color1)); aqui ele some de vez */
+.mseg-tabs .lm-TabBar-tab::before, .mseg-tabs .lm-TabBar-tab::after,
+.mseg-tabs .p-TabBar-tab::before, .mseg-tabs .p-TabBar-tab::after {
+  display:none !important; content:none !important; background:none !important; }
+.mseg-tabs .lm-TabBar-tab:hover, .mseg-tabs .p-TabBar-tab:hover {
+  background:var(--ac-soft) !important; color:var(--ac-deep) !important;
+  border-color:var(--ac-border) !important; }
+.mseg-tabs .lm-TabBar-tabLabel, .mseg-tabs .p-TabBar-tabLabel {
+  white-space:nowrap !important; overflow:visible !important;
+  text-overflow:clip !important; max-width:none !important; }
+.mseg-tabs .lm-TabBar-tab.lm-mod-current,
+.mseg-tabs .p-TabBar-tab.p-mod-current { color:#fff !important; font-weight:600;
+  background:var(--ac) !important; border:1px solid var(--ac) !important;
+  outline:none !important; box-shadow:none !important; }
+.mseg-tabs .lm-TabBar-tab.lm-mod-current:hover,
+.mseg-tabs .p-TabBar-tab.p-mod-current:hover {
+  background:var(--ac-deep) !important; color:#fff !important;
+  border-color:var(--ac-deep) !important; }
+/* fórmula do modelo — bloco mono com rolagem horizontal suave */
+.mseg-formula { background:#0f1620; color:#e8edf4; border-radius:10px; padding:12px 14px;
+  font-family:'IBM Plex Mono', ui-monospace, Menlo, Consolas, monospace; font-size:12.5px;
+  line-height:1.6; overflow-x:auto; white-space:pre; }
+.mseg-formula .b0 { color:#7fd1b9; } .mseg-formula .op { color:#9aa7b8; }
+.mseg-eq { font-size:13px; color:var(--ink); background:var(--ac-soft);
+  border:1px solid var(--ac-border); border-radius:9px; padding:8px 12px; margin-bottom:8px;
+  font-family:'IBM Plex Mono', ui-monospace, monospace; }
 .mseg .jupyter-button { border-radius:8px; font-family:inherit; }
 .mseg .jupyter-widgets { min-width:0 !important; }
 </style>
@@ -116,6 +152,7 @@ class ModelSegmenterUI:
         self._build()
         self._refresh_bar()
         self._refresh_vars()
+        self._sync_bin_controls()
 
     # ------------------------------------------------------------------ render utils
     def _fig_html(self, fig, border=False):
@@ -221,6 +258,26 @@ class ModelSegmenterUI:
                                style={"description_width": "initial"})
         self.btn_analyze = W.Button(description="Analisar variável", button_style="primary",
                                     icon="search")
+        # categorização "na mão" dos bins da variável (como nos projetos de árvore)
+        self.tg_binmode = W.ToggleButtons(options=["Ótimo", "Manual"], value="Ótimo",
+                                          style={"button_width": "auto"},
+                                          tooltips=["Binning ótimo (optbinning)",
+                                                    "Bins definidos na mão"])
+        self.tx_cuts = W.Text(value="", description="Bins:",
+                              placeholder="num: 0.7, 0.9   |   cat: A,B; C,D",
+                              style={"description_width": "initial"},
+                              layout=W.Layout(width="46%"))
+        self.btn_apply_bins = W.Button(description="Aplicar bins", icon="check",
+                                       button_style="success",
+                                       tooltip="Aplica os bins manuais a TODA a análise univariada "
+                                               "(tabela, IV, logodds, PSI e inversão)")
+        self.btn_clear_bins = W.Button(description="Bins ótimos", icon="magic",
+                                       tooltip="Remove os bins manuais e volta ao binning ótimo")
+        self.out_bin_hint = W.HTML()
+        self.btn_apply_bins.on_click(self._on_apply_bins)
+        self.btn_clear_bins.on_click(self._on_clear_bins)
+        self.tg_binmode.observe(lambda c: self._sync_binmode(), names="value")
+        self.dd_var2.observe(lambda c: self._sync_bin_controls(), names="value")
         self.out_an_cards = W.HTML()
         self.out_an_logodds = W.HTML()
         self.out_an_dist = W.HTML()
@@ -231,8 +288,16 @@ class ModelSegmenterUI:
         self.out_an_psi = W.HTML()
         self.btn_analyze.on_click(self._on_analyze)
 
+        bin_card = W.VBox([
+            W.HTML("<div class='mseg-h'>Categorizar a variável na mão (bins manuais)</div>"),
+            W.HBox([self.tg_binmode, self.tx_cuts, self.btn_apply_bins, self.btn_clear_bins]),
+            self.out_bin_hint,
+        ])
+        bin_card.add_class("mseg-card")
+
         tab_an = W.VBox([
             W.HBox([self.dd_var2, self.dd_sample2, self.tx_time2, self.btn_analyze]),
+            bin_card,
             self.out_an_cards,
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Logodds por faixa</div>"),
                             self.out_an_logodds], layout=W.Layout(width="50%")),
@@ -253,29 +318,54 @@ class ModelSegmenterUI:
         self.dd_algo = W.Dropdown(options=algos, value=algos[0][1], description="Algoritmo:",
                                   style={"description_width": "initial"})
         self.sl_n_est = W.IntSlider(value=200, min=50, max=600, step=50,
-                                    description="n_estimators")
-        self.cb_max_depth = W.Checkbox(value=False, description="limitar max_depth")
-        self.sl_max_depth = W.IntSlider(value=6, min=1, max=20, description="max_depth")
+                                    description="n_estimators",
+                                    style={"description_width": "initial"})
+        self.cb_max_depth = W.Checkbox(value=False, description="limitar max_depth",
+                                       indent=False)
+        self.sl_max_depth = W.IntSlider(value=6, min=1, max=20, description="max_depth",
+                                        style={"description_width": "initial"})
         self.tx_C = W.FloatText(value=1.0, description="C (regul.)",
                                 style={"description_width": "initial"})
+        self.tx_C.tooltip = "Inverso da regularização da Regressão Logística (menor C = mais regularização)"
+        # caixas que aparecem/somem conforme o algoritmo escolhido
+        self.box_logit = W.HBox([self.tx_C])
+        self.box_ensemble = W.VBox([self.sl_n_est,
+                                    W.HBox([self.cb_max_depth, self.sl_max_depth])])
         self.btn_fit = W.Button(description="Treinar modelo", button_style="primary",
                                 icon="cogs")
+        self.btn_formula = W.Button(description="Ver fórmula", icon="superscript",
+                                    tooltip="Mostra a equação ajustada (intercepto + coeficientes) "
+                                            "da Regressão Logística/Linear")
         self.btn_shap = W.Button(description="Calcular SHAP", icon="bar-chart")
         self.out_metrics = W.HTML()
+        self.out_formula = W.HTML()
         self.out_model_a = W.HTML()
         self.out_model_b = W.HTML()
         self.out_model_c = W.HTML()
         self.out_shap = W.HTML()
         self.out_shap_bar = W.HTML()
         self.btn_fit.on_click(self._on_fit)
+        self.btn_formula.on_click(self._on_formula)
         self.btn_shap.on_click(self._on_shap)
+        self.dd_algo.observe(lambda c: self._sync_algo_visibility(), names="value")
+        self.cb_max_depth.observe(lambda c: self._sync_algo_visibility(), names="value")
+
+        train_card = W.VBox([
+            W.HTML("<div class='mseg-h'>Treinar (ou usar modelo pré-ajustado via set_model)</div>"),
+            W.HBox([self.dd_algo]),
+            self.box_logit, self.box_ensemble,
+            W.HBox([self.btn_fit, self.btn_formula, self.btn_shap]),
+        ])
+        train_card.add_class("mseg-card")
+        self.formula_card = W.VBox([
+            W.HTML("<div class='mseg-h'>Fórmula do modelo (logística/linear)</div>"),
+            self.out_formula])
+        self.formula_card.add_class("mseg-card")
 
         tab_model = W.VBox([
-            W.HTML("<div class='mseg-h'>Treinar (ou usar modelo pré-ajustado via set_model)</div>"),
-            W.HBox([self.dd_algo, self.tx_C]),
-            W.HBox([self.sl_n_est, self.cb_max_depth, self.sl_max_depth]),
-            W.HBox([self.btn_fit, self.btn_shap]),
+            train_card,
             W.VBox([W.HTML("<div class='mseg-h'>Métricas por amostra</div>"), self.out_metrics]),
+            self.formula_card,
             W.HBox([W.VBox([self.out_model_a], layout=W.Layout(width="34%")),
                     W.VBox([self.out_model_b], layout=W.Layout(width="33%")),
                     W.VBox([self.out_model_c], layout=W.Layout(width="33%"))]),
@@ -284,6 +374,7 @@ class ModelSegmenterUI:
                     W.VBox([W.HTML("<div class='mseg-h'>SHAP — importância</div>"), self.out_shap_bar],
                            layout=W.Layout(width="45%"))]),
         ], layout=W.Layout(padding="2px"))
+        self._sync_algo_visibility()
 
         # ---------- Aba 4: Ratings & Score ----------
         self.dd_method = W.Dropdown(options=[("Decis", "decis"), ("Quantil + fusão", "quantil"),
@@ -395,6 +486,9 @@ class ModelSegmenterUI:
                     rk[c] = rk[c].map(lambda v: "" if pd.isna(v) else f"{v:.4f}")
             rk["incluida"] = rk["incluida"].map(lambda b: "✓" if b else "")
             rk["categoria"] = rk["categoria"].fillna("—")
+            if "bins_manuais" in rk.columns:
+                rk["bins_manuais"] = rk["bins_manuais"].map(lambda b: "✎" if b else "")
+                rk = rk.rename(columns={"bins_manuais": "manual"})
             self.out_vars.value = self._df_html(rk, max_height="320px")
         except Exception as e:
             self.out_vars.value = f"<i>falha ao calcular IV: {e}</i>"
@@ -469,7 +563,113 @@ class ModelSegmenterUI:
             cells += [card("média", s["media"]), card("mediana", s["mediana"])]
         return f"<div class='mseg-metrics'>{''.join(cells)}</div>"
 
+    # ---- bins manuais (categorizar "na mão") ----
+    def _sync_binmode(self):
+        """Mostra o campo de cortes/grupos só no modo Manual."""
+        manual = self.tg_binmode.value == "Manual"
+        self.tx_cuts.layout.display = "" if manual else "none"
+        self.btn_apply_bins.layout.display = "" if manual else "none"
+        kind = self.seg._detect_kind(self.dd_var2.value)
+        self.tx_cuts.placeholder = ("cortes, ex.: 0.7, 0.9" if kind == "num"
+                                    else "grupos, ex.: A,B; C,D")
+
+    def _sync_bin_controls(self):
+        """Sincroniza o modo/campo com os bins manuais da variável selecionada."""
+        feat = self.dd_var2.value
+        spec = self.seg.manual_bins_spec(feat)
+        self.tx_cuts.value = spec
+        self.tg_binmode.value = "Manual" if spec else "Ótimo"
+        self._sync_binmode()
+        self._render_bin_hint(feat)
+
+    def _render_bin_hint(self, feat):
+        if self.seg.manual_bins(feat):
+            self.out_bin_hint.value = (
+                "<div class='mseg-legend'>✎ Bins <b>manuais</b> ativos nesta variável — "
+                "aplicados à tabela, IV, logodds/WoE, PSI e inversão.</div>")
+        else:
+            self.out_bin_hint.value = (
+                "<div class='mseg-legend'>Binning <b>ótimo</b> (optbinning). "
+                "Numérica: cortes separados por vírgula. Categórica: grupos por "
+                "<code>;</code> e categorias por <code>,</code>.</div>")
+
+    def _on_apply_bins(self, b):
+        feat = self.dd_var2.value
+        try:
+            self.seg.set_manual_bins(feat, self.tx_cuts.value)
+            if not self.seg.manual_bins(feat):
+                self._log(f"[bins] '{feat}': nada para aplicar (campo vazio).")
+            else:
+                self._log(f"[bins] '{feat}': bins manuais aplicados.")
+            self._render_bin_hint(feat)
+            self._on_analyze(None)
+            self._refresh_vars()
+        except Exception as e:
+            self._log(f"[bins] erro: {e}")
+
+    def _on_clear_bins(self, b):
+        feat = self.dd_var2.value
+        self.seg.clear_manual_bins(feat)
+        self.tx_cuts.value = ""
+        self.tg_binmode.value = "Ótimo"
+        self._render_bin_hint(feat)
+        self._log(f"[bins] '{feat}': voltou ao binning ótimo.")
+        self._on_analyze(None)
+        self._refresh_vars()
+
     # ------------------------------------------------------------------ Aba 3 handlers
+    def _sync_algo_visibility(self):
+        """Mostra só os hiperparâmetros do algoritmo escolhido: C (logística),
+        n_estimators/max_depth (random forest · gradient boosting), nada (linear)."""
+        algo = self.dd_algo.value
+        self.box_logit.layout.display = "" if algo == "logistica" else "none"
+        self.box_ensemble.layout.display = (
+            "" if algo in ("random_forest", "gradient_boosting") else "none")
+        self.sl_max_depth.layout.display = "" if self.cb_max_depth.value else "none"
+        # a fórmula só faz sentido para modelos lineares/logísticos
+        linear = algo in ("logistica", "linear")
+        self.btn_formula.layout.display = "" if linear else "none"
+        self.formula_card.layout.display = "" if linear else "none"
+
+    def _render_formula(self):
+        if self.seg.algorithm not in ("logistica", "linear"):
+            self.out_formula.value = (
+                "<div class='mseg-legend'>Fórmula fechada indisponível para modelos "
+                "não-lineares — use os gráficos SHAP acima.</div>")
+            return
+        try:
+            fm = self.seg.model_formula()
+        except Exception as e:
+            self.out_formula.value = f"<i>{e}</i>"
+            return
+        if self.task_type == "classification":
+            eq = ("logit(p) = ln[ p / (1 − p) ] = z"
+                  "&nbsp;&nbsp;⇒&nbsp;&nbsp; p = 1 / (1 + e<sup>−z</sup>)")
+        else:
+            eq = "ŷ = z"
+        # z = intercepto + Σ coefᵢ·termoᵢ, colorindo o sinal
+        z = (f"<span class='b0'>z = {fm['intercept']:+.4f}</span>")
+        for _, r in fm["coef"].iterrows():
+            z += (f"  <span class='op'>{r['coef']:+.4f}</span>·"
+                  f"[{r['termo']}]")
+        coef = fm["coef"].copy()
+        coef.insert(0, "termo", coef.pop("termo"))
+        tbl = self._df_html(coef, max_height="260px")
+        self.out_formula.value = (
+            f"<div class='mseg-eq'>{eq}</div>"
+            f"<div class='mseg-formula'>{z}</div>"
+            "<div class='mseg-legend'>Termos ordenados por |coef|. "
+            + ("<b>odds_ratio</b> = e<sup>coef</sup>: efeito multiplicativo na razão de "
+               "chances por +1 unidade do termo." if self.task_type == "classification"
+               else "coeficiente = variação de ŷ por +1 unidade do termo.")
+            + "</div>" + tbl)
+
+    def _on_formula(self, b):
+        if self.seg.model is None:
+            self._log("[fórmula] treine o modelo primeiro.")
+            return
+        self._render_formula()
+
     def _collect_hyperparams(self, algo):
         if algo == "logistica":
             return {"C": float(self.tx_C.value)}
@@ -489,6 +689,7 @@ class ModelSegmenterUI:
             self._log(f"[fit] {algo} treinado com {len(self.seg.model_features)} variáveis.")
             self._render_metrics()
             self._render_model_plots()
+            self._render_formula()
             self._refresh_bar()
         except Exception as e:
             self._log(f"[fit] erro: {e}")
