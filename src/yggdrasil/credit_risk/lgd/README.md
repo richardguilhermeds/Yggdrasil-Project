@@ -98,7 +98,7 @@ seg.log_to_mlflow(
 ## Documentação
 
 Tutorial completo em [`docs/credit-risk/lgd-segmenter.md`](../../docs/credit-risk/lgd-segmenter.md)
-e notebook em [`notebooks/credit_risk/01_lgd_segmenter.ipynb`](../../notebooks/credit_risk/01_lgd_segmenter.ipynb).
+e notebook em [`notebooks/tutoriais/04_tutorial_lgd_segmenter.ipynb`](../../notebooks/tutoriais/04_tutorial_lgd_segmenter.ipynb).
 
 ## Testes
 

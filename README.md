@@ -41,12 +41,8 @@ Guias de onboarding para novos colaboradores
 Definições de jobs para orquestração dos pipelines. 
 
 ### `notebooks/`
-Ambiente de exploração e prototipagem. Organizado em:
-
-01_eda/ — Análise exploratória de dados
-02_feature_engineering/ — Prototipagem de features
-03_modeling/ — Experimentos de modelagem
-04_evaluation/ — Análise de resultados e interpretabilidade
+Ambiente de exploração e prototipagem. Os **tutoriais passo a passo** ficam centralizados em
+[`notebooks/tutoriais/`](notebooks/tutoriais/) (índice na seção "Tutoriais" abaixo).
 
 ⚠️ Notebooks não devem conter lógica de produção. Código validado deve ser migrado para src/.
 
@@ -105,11 +101,16 @@ resultado.reports             # relatório por grupo homogêneo
 ```
 
 > 📖 **Metodologia** (o *porquê* dos métodos — KS, PSI/CSI, WoE/IV, ratings com fusão monotônica, SHAP, veredito de EDA): [`docs/metodologia.md`](docs/metodologia.md).
-> 📓 **Tutoriais passo a passo** (cada módulo isolado):
-> [PD/classificação](notebooks/tutoriais/00_tutorial_yggdrasil.ipynb) ·
-> [LGD/regressão (alvo [0,1] bimodal)](notebooks/tutoriais/01_tutorial_lgd.ipynb) ·
-> [EDA de features](notebooks/tutoriais/02_tutorial_eda_features.ipynb).
-> Notebook orquestrador pronto para produção: [`notebooks/03_modeling/01_esteira_ml_mlflow.ipynb`](notebooks/03_modeling/01_esteira_ml_mlflow.ipynb).
+> 📓 **Tutoriais passo a passo** (todos centralizados em [`notebooks/tutoriais/`](notebooks/tutoriais/)):
+> [00 · visão geral / PD](notebooks/tutoriais/00_tutorial_yggdrasil.ipynb) ·
+> [01 · LGD/regressão (alvo [0,1] bimodal)](notebooks/tutoriais/01_tutorial_lgd.ipynb) ·
+> [02 · EDA de features](notebooks/tutoriais/02_tutorial_eda_features.ipynb) ·
+> [03 · seleção de features (PySpark)](notebooks/tutoriais/03_tutorial_feature_selection.ipynb) ·
+> [04 · segmentador LGD (UI)](notebooks/tutoriais/04_tutorial_lgd_segmenter.ipynb) ·
+> [05 · segmentador PD (UI)](notebooks/tutoriais/05_tutorial_pd_segmenter.ipynb) ·
+> [06 · construtor de modelos (UI)](notebooks/tutoriais/06_tutorial_model_segmenter.ipynb) ·
+> [07 · esteira ML + MLflow](notebooks/tutoriais/07_tutorial_esteira_ml_mlflow.ipynb) ·
+> [08 · relatórios de validação LGD](notebooks/tutoriais/08_tutorial_validacao_lgd.ipynb).
 
 ### 🔎 Esteira de EDA de features (`yggdrasil.eda`)
 
