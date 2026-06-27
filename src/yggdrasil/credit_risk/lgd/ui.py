@@ -73,11 +73,12 @@ _CSS = """
 .lgdui-tree { line-height:1.55; }
 /* abas do workbench — estilo "segmented control" (pílulas) */
 .lgdui-tabs { margin-top:10px; }
-/* respiro entre a barra de abas e os cards do conteúdo abaixo */
-.lgdui-tabs > .widget-tab-contents { padding:22px 2px 2px; background:transparent; }
+/* respiro entre a barra de abas e os cards do conteúdo abaixo
+   (!important vence a regra própria do ipywidgets p/ .widget-tab-contents) */
+.lgdui-tabs > .widget-tab-contents { padding:30px 2px 2px !important; background:transparent; }
 .lgdui-tabs .lm-TabBar.jupyter-widget-tab-nav,
-.lgdui-tabs .p-TabBar.jupyter-widget-tab-nav { border-bottom:1px solid var(--line);
-  padding-bottom:12px; box-shadow:none; }
+.lgdui-tabs .p-TabBar.jupyter-widget-tab-nav { border-bottom:1px solid var(--line) !important;
+  padding-bottom:14px !important; margin-bottom:0 !important; box-shadow:none !important; }
 .lgdui-tabs .lm-TabBar-content, .lgdui-tabs .p-TabBar-content { gap:7px;
   align-items:stretch; border:none; }
 .lgdui-tabs .lm-TabBar-tab, .lgdui-tabs .p-TabBar-tab { font-size:13px;
@@ -85,12 +86,15 @@ _CSS = """
      (flex/max-width: var(--jp-widgets-horizontal-tab-width)) que cortava o título) */
   min-width:max-content !important; max-width:none !important; flex:0 0 auto !important;
   margin:0 !important; padding:8px 16px !important;
-  /* zera a "barrinha azul" (border-top do tema JupyterLab) na aba ativa */
-  border:1px solid var(--line) !important; border-top:1px solid var(--line) !important;
-  border-radius:9px !important;
+  border:1px solid var(--line) !important; border-radius:9px !important;
   background:#fff !important; color:var(--muted) !important; font-weight:500;
-  line-height:1.15; box-shadow:none !important;
+  line-height:1.15; outline:none !important; box-shadow:none !important;
   transition:background .15s, color .15s, border-color .15s; }
+/* o tema do Jupyter desenha a "barrinha azul" da aba ativa como um pseudo-
+   elemento ::before (background var(--jp-brand-color1)); aqui ele some de vez */
+.lgdui-tabs .lm-TabBar-tab::before, .lgdui-tabs .lm-TabBar-tab::after,
+.lgdui-tabs .p-TabBar-tab::before, .lgdui-tabs .p-TabBar-tab::after {
+  display:none !important; content:none !important; background:none !important; }
 .lgdui-tabs .lm-TabBar-tab:hover, .lgdui-tabs .p-TabBar-tab:hover {
   background:var(--ac-soft) !important; color:var(--ac-deep) !important;
   border-color:var(--ac-border) !important; }
@@ -99,9 +103,8 @@ _CSS = """
   text-overflow:clip !important; max-width:none !important; }
 .lgdui-tabs .lm-TabBar-tab.lm-mod-current,
 .lgdui-tabs .p-TabBar-tab.p-mod-current { color:#fff !important; font-weight:600;
-  background:var(--ac) !important;
-  border:1px solid var(--ac) !important; border-top:1px solid var(--ac) !important;
-  box-shadow:none !important; }
+  background:var(--ac) !important; border:1px solid var(--ac) !important;
+  outline:none !important; box-shadow:none !important; }
 .lgdui-tabs .lm-TabBar-tab.lm-mod-current:hover,
 .lgdui-tabs .p-TabBar-tab.p-mod-current:hover {
   background:var(--ac-deep) !important; color:#fff !important;
