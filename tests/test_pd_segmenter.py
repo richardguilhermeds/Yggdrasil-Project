@@ -439,8 +439,8 @@ def test_ui_merge_missing_e_layout(tmp_path):
     ch = list(ui.panel.children)
     tabs = next(c for c in ch if isinstance(c, W.Tab))
     titulos = [tabs.get_title(i) for i in range(len(tabs.children))]
-    assert titulos == ["① Construir", "② Análise de variáveis", "③ Diagnóstico",
-                       "④ Validar & Exportar", "⑤ Histórico"]
+    assert titulos == ["Construir", "Análise de variáveis", "Diagnóstico",
+                       "Validar & Exportar", "Histórico"]
 
     def _all(w):                       # achata a subárvore de widgets
         acc = [w]
