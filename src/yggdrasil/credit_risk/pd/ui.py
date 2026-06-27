@@ -75,21 +75,24 @@ _CSS = """
 .pdui-tree { line-height:1.55; }
 /* abas do workbench — estilo "segmented control" (pílulas) */
 .pdui-tabs { margin-top:10px; }
-.pdui-tabs > .widget-tab-contents { padding:14px 2px 2px; background:transparent; }
+/* respiro entre a barra de abas e os cards do conteúdo abaixo */
+.pdui-tabs > .widget-tab-contents { padding:22px 2px 2px; background:transparent; }
 .pdui-tabs .lm-TabBar.jupyter-widget-tab-nav,
 .pdui-tabs .p-TabBar.jupyter-widget-tab-nav { border-bottom:1px solid var(--line);
-  padding-bottom:9px; box-shadow:none; }
+  padding-bottom:12px; box-shadow:none; }
 .pdui-tabs .lm-TabBar-content, .pdui-tabs .p-TabBar-content { gap:7px;
   align-items:stretch; border:none; }
 .pdui-tabs .lm-TabBar-tab, .pdui-tabs .p-TabBar-tab { font-size:13px;
   /* !important vence a regra de mesma especificidade do ipywidgets
-     (flex/max-width: var(--jp-widgets-horizontal-tab-width)) que cortava o título) */
+     (flex/max-width: var(--jp-widgets-horizontal-tab-width)) que cortava o título */
   min-width:max-content !important; max-width:none !important; flex:0 0 auto !important;
-  margin:0 !important; padding:7px 15px !important;
-  border:1px solid var(--ac-border) !important; border-radius:10px !important;
+  margin:0 !important; padding:8px 16px !important;
+  /* zera a "barrinha azul" (border-top do tema JupyterLab) na aba ativa */
+  border:1px solid var(--line) !important; border-top:1px solid var(--line) !important;
+  border-radius:9px !important;
   background:#fff !important; color:var(--muted) !important; font-weight:500;
-  line-height:1.15; box-shadow:0 1px 2px rgba(16,24,40,.05) !important;
-  transition:background .15s, color .15s, border-color .15s, box-shadow .15s; }
+  line-height:1.15; box-shadow:none !important;
+  transition:background .15s, color .15s, border-color .15s; }
 .pdui-tabs .lm-TabBar-tab:hover, .pdui-tabs .p-TabBar-tab:hover {
   background:var(--ac-soft) !important; color:var(--ac-deep) !important;
   border-color:var(--ac-border) !important; }
@@ -98,8 +101,13 @@ _CSS = """
   text-overflow:clip !important; max-width:none !important; }
 .pdui-tabs .lm-TabBar-tab.lm-mod-current,
 .pdui-tabs .p-TabBar-tab.p-mod-current { color:#fff !important; font-weight:600;
-  background:var(--ac) !important; border-color:var(--ac) !important;
-  box-shadow:0 2px 7px rgba(39,50,74,.28) !important; }
+  background:var(--ac) !important;
+  border:1px solid var(--ac) !important; border-top:1px solid var(--ac) !important;
+  box-shadow:none !important; }
+.pdui-tabs .lm-TabBar-tab.lm-mod-current:hover,
+.pdui-tabs .p-TabBar-tab.p-mod-current:hover {
+  background:var(--ac-deep) !important; color:#fff !important;
+  border-color:var(--ac-deep) !important; }
 /* cabeçalho da folha selecionada (métricas em chips) — auto-fit estica os chips
    para preencher toda a largura (linhas com menos chips ficam mais largas) */
 .pdui-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(92px,1fr));
@@ -953,8 +961,8 @@ class PDSegmenterUI:
 
         # ---- montagem das abas (Análise de variável vem em 2º) ----------
         tabs = W.Tab(children=[tab_build, tab_var, tab_diag, tab_valid, tab_hist])
-        for i, titulo in enumerate(["① Construir", "② Análise de variáveis", "③ Diagnóstico",
-                                    "④ Validar & Exportar", "⑤ Histórico"]):
+        for i, titulo in enumerate(["Construir", "Análise de variáveis", "Diagnóstico",
+                                    "Validar & Exportar", "Histórico"]):
             tabs.set_title(i, titulo)
         tabs.add_class("pdui-tabs")
 
