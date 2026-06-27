@@ -35,7 +35,7 @@ try:
 except Exception as e:  # pragma: no cover
     raise ImportError("Este módulo requer ipywidgets e IPython (Jupyter).") from e
 
-from .segmenter import ALGORITHMS, ModelSegmenter
+from .segmenter import ALGORITHMS, BOOSTING_ALGORITHMS, ModelSegmenter
 
 _CSS = """
 <style>
@@ -327,10 +327,14 @@ class ModelSegmenterUI:
         self.tx_C = W.FloatText(value=1.0, description="C (regul.)",
                                 style={"description_width": "initial"})
         self.tx_C.tooltip = "Inverso da regularização da Regressão Logística (menor C = mais regularização)"
+        self.tx_lr = W.FloatText(value=0.05, step=0.01, description="learning_rate",
+                                 style={"description_width": "initial"})
+        self.tx_lr.tooltip = "Taxa de aprendizado dos modelos de boosting (menor = mais árvores/regularização)"
         # caixas que aparecem/somem conforme o algoritmo escolhido
         self.box_logit = W.HBox([self.tx_C])
         self.box_ensemble = W.VBox([self.sl_n_est,
                                     W.HBox([self.cb_max_depth, self.sl_max_depth])])
+        self.box_lr = W.HBox([self.tx_lr])
         self.btn_fit = W.Button(description="Treinar modelo", button_style="primary",
                                 icon="cogs")
         self.btn_formula = W.Button(description="Ver fórmula", icon="superscript",
@@ -353,7 +357,7 @@ class ModelSegmenterUI:
         train_card = W.VBox([
             W.HTML("<div class='mseg-h'>Treinar (ou usar modelo pré-ajustado via set_model)</div>"),
             W.HBox([self.dd_algo]),
-            self.box_logit, self.box_ensemble,
+            self.box_logit, self.box_ensemble, self.box_lr,
             W.HBox([self.btn_fit, self.btn_formula, self.btn_shap]),
         ])
         train_card.add_class("mseg-card")
@@ -622,9 +626,10 @@ class ModelSegmenterUI:
         """Mostra só os hiperparâmetros do algoritmo escolhido: C (logística),
         n_estimators/max_depth (random forest · gradient boosting), nada (linear)."""
         algo = self.dd_algo.value
+        ensemble = algo not in ("logistica", "linear")
         self.box_logit.layout.display = "" if algo == "logistica" else "none"
-        self.box_ensemble.layout.display = (
-            "" if algo in ("random_forest", "gradient_boosting") else "none")
+        self.box_ensemble.layout.display = "" if ensemble else "none"
+        self.box_lr.layout.display = "" if algo in BOOSTING_ALGORITHMS else "none"
         self.sl_max_depth.layout.display = "" if self.cb_max_depth.value else "none"
         # a fórmula só faz sentido para modelos lineares/logísticos
         linear = algo in ("logistica", "linear")
@@ -680,6 +685,8 @@ class ModelSegmenterUI:
             hp["max_depth"] = int(self.sl_max_depth.value)
         elif algo == "gradient_boosting":
             hp["max_depth"] = 3
+        if algo in BOOSTING_ALGORITHMS:
+            hp["learning_rate"] = float(self.tx_lr.value)
         return hp
 
     def _on_fit(self, b):

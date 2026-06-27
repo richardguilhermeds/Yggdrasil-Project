@@ -13,8 +13,9 @@ e :class:`~yggdrasil.credit_risk.pd.SequentialPDSegmenter` — que constroem uma
    e *inversão* da ordem de risco entre amostras/safras), para **categorizar** e
    **decidir o que entra no modelo** (``include`` / ``exclude`` / ``auto_select``).
 2. **Ajuste de um modelo** — Regressão Logística/Linear ou ML (RandomForest,
-   GradientBoosting), treinado na própria interface (``fit``) ou recebido pronto
-   (``set_model``). Registry extensível em :data:`ALGORITHMS`.
+   ExtraTrees, GradientBoosting, HistGradientBoosting e — via pacotes opcionais —
+   LightGBM, XGBoost, CatBoost), treinado na própria interface (``fit``) ou
+   recebido pronto (``set_model``). Registry extensível em :data:`ALGORITHMS`.
 3. **Métricas** do modelo por amostra (KS/AUC/Gini/Acc/F1 na classificação;
    RMSE/MAE/R² na regressão) e **SHAP** do modelo criado.
 4. **Score → ratings**: a resposta do modelo é segmentada em faixas homogêneas
@@ -45,17 +46,28 @@ except ImportError:  # pragma: no cover
 SCHEMA = "yggdrasil.credit_risk.model/1"
 
 #: Algoritmos suportados (registry extensível). Cada entrada indica em quais
-#: ``task_type`` é válido e o rótulo amigável para a UI. Plugar LightGBM/XGBoost
-#: depois é só adicionar uma entrada aqui e o ramo correspondente em
-#: :func:`_build_estimator`.
+#: ``task_type`` é válido, o rótulo amigável para a UI e o ``extra`` de instalação
+#: (pacote opcional via ``pip install "yggdrasil[<extra>]"``; ``None`` = só sklearn).
+#: Plugar um novo algoritmo é adicionar uma entrada aqui e o ramo correspondente
+#: em :func:`_build_estimator`.
+_BOTH = ("classification", "regression")
 ALGORITHMS: dict[str, dict] = {
-    "logistica": {"label": "Regressão Logística", "tasks": ("classification",)},
-    "linear": {"label": "Regressão Linear", "tasks": ("regression",)},
-    "random_forest": {"label": "Random Forest",
-                      "tasks": ("classification", "regression")},
-    "gradient_boosting": {"label": "Gradient Boosting",
-                          "tasks": ("classification", "regression")},
+    "logistica": {"label": "Regressão Logística", "tasks": ("classification",),
+                  "extra": None},
+    "linear": {"label": "Regressão Linear", "tasks": ("regression",), "extra": None},
+    "random_forest": {"label": "Random Forest", "tasks": _BOTH, "extra": None},
+    "extra_trees": {"label": "Extra Trees", "tasks": _BOTH, "extra": None},
+    "gradient_boosting": {"label": "Gradient Boosting", "tasks": _BOTH, "extra": None},
+    "hist_gradient_boosting": {"label": "Hist Gradient Boosting", "tasks": _BOTH,
+                               "extra": None},
+    "lightgbm": {"label": "LightGBM", "tasks": _BOTH, "extra": "lgbm"},
+    "xgboost": {"label": "XGBoost", "tasks": _BOTH, "extra": "xgboost"},
+    "catboost": {"label": "CatBoost", "tasks": _BOTH, "extra": "catboost"},
 }
+
+#: Algoritmos de boosting (expõem ``learning_rate`` na UI).
+BOOSTING_ALGORITHMS = ("gradient_boosting", "hist_gradient_boosting",
+                       "lightgbm", "xgboost", "catboost")
 
 _EPS = 1e-6
 
@@ -174,8 +186,25 @@ def _new_ax(figsize, dpi, ax):
     return fig, fig.subplots()
 
 
+def _require(module: str, algorithm: str):
+    """Importa um pacote opcional (LightGBM/XGBoost/CatBoost) com mensagem de
+    instalação amigável quando ausente."""
+    import importlib
+    extra = ALGORITHMS.get(algorithm, {}).get("extra") or module
+    try:
+        return importlib.import_module(module)
+    except ImportError as e:  # pragma: no cover - depende do ambiente
+        raise ImportError(
+            f"O algoritmo {algorithm!r} requer o pacote opcional '{module}'. "
+            f"Instale com: pip install \"yggdrasil[{extra}]\"  (ou pip install {module})."
+        ) from e
+
+
 def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None):
-    """Instancia o estimador sklearn do algoritmo escolhido (registry extensível)."""
+    """Instancia o estimador do algoritmo escolhido (registry extensível).
+
+    sklearn é sempre disponível; LightGBM/XGBoost/CatBoost são pacotes opcionais
+    importados sob demanda (ver :func:`_require`)."""
     hp = dict(hyperparams or {})
     if algorithm not in ALGORITHMS:
         raise ValueError(f"Algoritmo desconhecido: {algorithm!r}. "
@@ -184,6 +213,7 @@ def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None):
         raise ValueError(
             f"Algoritmo {algorithm!r} não suporta task_type={task_type!r} "
             f"(suporta {ALGORITHMS[algorithm]['tasks']}).")
+    is_clf = task_type == "classification"
 
     if algorithm == "logistica":
         from sklearn.linear_model import LogisticRegression
@@ -193,20 +223,60 @@ def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None):
         from sklearn.linear_model import LinearRegression
         return LinearRegression(**hp)
     if algorithm == "random_forest":
-        if task_type == "classification":
-            from sklearn.ensemble import RandomForestClassifier as RF
-        else:
-            from sklearn.ensemble import RandomForestRegressor as RF
+        from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+        RF = RandomForestClassifier if is_clf else RandomForestRegressor
         hp.setdefault("n_estimators", 200)
         hp.setdefault("random_state", 42)
         return RF(**hp)
+    if algorithm == "extra_trees":
+        from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
+        ET = ExtraTreesClassifier if is_clf else ExtraTreesRegressor
+        hp.setdefault("n_estimators", 200)
+        hp.setdefault("random_state", 42)
+        return ET(**hp)
     if algorithm == "gradient_boosting":
-        if task_type == "classification":
-            from sklearn.ensemble import GradientBoostingClassifier as GB
-        else:
-            from sklearn.ensemble import GradientBoostingRegressor as GB
+        from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
+        GB = GradientBoostingClassifier if is_clf else GradientBoostingRegressor
         hp.setdefault("random_state", 42)
         return GB(**hp)
+    if algorithm == "hist_gradient_boosting":
+        from sklearn.ensemble import (HistGradientBoostingClassifier,
+                                      HistGradientBoostingRegressor)
+        HGB = HistGradientBoostingClassifier if is_clf else HistGradientBoostingRegressor
+        if "n_estimators" in hp:                       # nome unificado na UI → max_iter
+            hp["max_iter"] = hp.pop("n_estimators")
+        hp.setdefault("random_state", 42)
+        return HGB(**hp)
+    if algorithm == "lightgbm":
+        lgb = _require("lightgbm", algorithm)
+        Est = lgb.LGBMClassifier if is_clf else lgb.LGBMRegressor
+        hp.setdefault("n_estimators", 300)
+        hp.setdefault("learning_rate", 0.05)
+        hp.setdefault("random_state", 42)
+        hp.setdefault("verbose", -1)
+        return Est(**hp)
+    if algorithm == "xgboost":
+        xgb = _require("xgboost", algorithm)
+        Est = xgb.XGBClassifier if is_clf else xgb.XGBRegressor
+        hp.setdefault("n_estimators", 300)
+        hp.setdefault("learning_rate", 0.05)
+        hp.setdefault("random_state", 42)
+        hp.setdefault("verbosity", 0)
+        hp.setdefault("tree_method", "hist")
+        return Est(**hp)
+    if algorithm == "catboost":
+        cb = _require("catboost", algorithm)
+        Est = cb.CatBoostClassifier if is_clf else cb.CatBoostRegressor
+        if "n_estimators" in hp:                        # nomes próprios do CatBoost
+            hp["iterations"] = hp.pop("n_estimators")
+        if "max_depth" in hp:
+            hp["depth"] = min(int(hp.pop("max_depth")), 16)  # teto do CatBoost
+        hp.setdefault("iterations", 300)
+        hp.setdefault("learning_rate", 0.05)
+        hp.setdefault("random_seed", 42)
+        hp.setdefault("verbose", False)
+        hp.setdefault("allow_writing_files", False)     # não polui o diretório
+        return Est(**hp)
     raise ValueError(algorithm)  # pragma: no cover
 
 

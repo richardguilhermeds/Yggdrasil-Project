@@ -31,6 +31,13 @@ ui = ["ipywidgets>=8.0", "ipython>=8.0"]
 # Geração/aplicação da régua de LGD em PySpark (no Databricks o pyspark já vem
 # no cluster; instale só fora dele).
 spark = ["pyspark>=3.4"]
+# Algoritmos de boosting opcionais para o ModelSegmenter (RandomForest,
+# ExtraTrees, GradientBoosting e HistGradientBoosting já vêm via scikit-learn).
+lgbm = ["lightgbm>=4.0"]
+xgboost = ["xgboost>=2.0"]
+catboost = ["catboost>=1.2"]
+# Atalho: todos os motores de boosting opcionais de uma vez.
+boosting = ["lightgbm>=4.0", "xgboost>=2.0", "catboost>=1.2"]
 # Ferramentas de desenvolvimento, testes e execução de notebooks.
 dev = [
     "pytest>=7.4",

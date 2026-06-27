@@ -46,7 +46,20 @@ Réguas sequenciais com UI interativa (5 abas): binning ótimo/manual, faltantes
 - **`pd/`** — `SequentialPDSegmenter` + `PDSegmenterUI`. Alvo **binário** (default): IV WoE (escala Siddiqi), KS/AUC/Gini/Acurácia/F1, gráficos ROC/KS/taxa-default/distribuição.
 
 ### 5. 🤖 Segmentador orientado a modelo (`yggdrasil.credit_risk.model`)
-`ModelSegmenter` + `ModelSegmenterUI` — **unifica classificação e regressão** via `task_type`. Fluxo: análise univariada (logodds/WoE, IV, distribuição, inversão de bins entre amostras/safras) → seleção/categorização de variáveis → ajuste do modelo (`logistica`/`linear`/`random_forest`/`gradient_boosting`, ou modelo pré-ajustado) → métricas + SHAP → **score → ratings** (decis/quantil/arvore/optbin). Persistência em JSON (config) + `.model.joblib` (modelo + estratégia). UI em 5 abas: Variáveis · Análise de variáveis · Modelo (+SHAP) · Ratings & Score · Validar & Exportar.
+`ModelSegmenter` + `ModelSegmenterUI` — **unifica classificação e regressão** via `task_type`. Fluxo: análise univariada (logodds/WoE, IV, distribuição, inversão de bins entre amostras/safras, com opção de **bins manuais**) → seleção/categorização de variáveis → ajuste do modelo → métricas + **fórmula** (coeficientes/odds-ratio nos modelos lineares) + SHAP → **score → ratings** (decis/quantil/arvore/optbin). Persistência em JSON (config) + `.model.joblib` (modelo + estratégia). UI em 5 abas: Variáveis · Análise de variáveis · Modelo (+SHAP) · Ratings & Score · Validar & Exportar.
+
+Algoritmos disponíveis (registry extensível em `ALGORITHMS`):
+
+| Algoritmo | Tarefas | Dependência |
+|---|---|---|
+| Regressão Logística / Linear | clf / reg | scikit-learn (core) |
+| Random Forest · Extra Trees | clf + reg | scikit-learn (core) |
+| Gradient Boosting · Hist Gradient Boosting | clf + reg | scikit-learn (core) |
+| **LightGBM** | clf + reg | extra `[lgbm]` |
+| **XGBoost** | clf + reg | extra `[xgboost]` |
+| **CatBoost** | clf + reg | extra `[catboost]` |
+
+> Também aceita um modelo já treinado via `set_model(...)`. Os motores de boosting opcionais são importados sob demanda — sem o pacote, o erro orienta a instalação do extra correto.
 
 ---
 
@@ -71,8 +84,11 @@ Réguas sequenciais com UI interativa (5 abas): binning ótimo/manual, faltantes
 pip install -e ".[dev]"          # núcleo + ferramentas de teste/notebook
 pip install -e ".[ui]"           # opcional: UIs interativas (ipywidgets)
 pip install -e ".[spark]"        # opcional: geração/aplicação de régua em PySpark (fora do Databricks)
+pip install -e ".[boosting]"     # opcional: LightGBM + XGBoost + CatBoost para o ModelSegmenter
 pip install -e ".[pycaret]"      # opcional: treino automatizado via PyCaret
 ```
+
+> Os motores de boosting também podem ser instalados individualmente: `.[lgbm]`, `.[xgboost]` ou `.[catboost]`.
 
 > Localmente, o MLflow 3.x exige `MLFLOW_ALLOW_FILE_STORE=true` para usar o backend `./mlruns` (os notebooks já definem isso). No Databricks, use o tracking do workspace.
 

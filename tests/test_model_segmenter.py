@@ -250,6 +250,61 @@ def test_fit_random_forest_e_metrics(seg):
         assert m[m["amostra"] == "DES"].iloc[0]["r2"] > 0.3
 
 
+# algoritmos nativos do scikit-learn (sempre disponíveis)
+_SKLEARN_ML_ALGOS = ["extra_trees", "hist_gradient_boosting"]
+# algoritmos de pacotes opcionais (gated por importorskip)
+_OPTIONAL_ALGOS = [("lightgbm", "lightgbm"), ("xgboost", "xgboost"),
+                   ("catboost", "catboost")]
+
+
+@pytest.mark.parametrize("algo", _SKLEARN_ML_ALGOS)
+def test_fit_algoritmos_sklearn(seg, algo):
+    seg.fit(algo, hyperparams={"n_estimators": 40})
+    assert seg.score_ is not None and seg.score_.notna().all()
+    des = seg.metrics().query("amostra == 'DES'").iloc[0]
+    if seg.task_type == "classification":
+        assert seg.score_.between(0, 1).all()
+        assert des["auc"] > 0.6
+    else:
+        assert des["r2"] > 0.3
+
+
+@pytest.mark.parametrize("algo,module", _OPTIONAL_ALGOS)
+def test_fit_algoritmos_boosting_opcionais(seg, algo, module):
+    pytest.importorskip(module)
+    seg.fit(algo, hyperparams={"n_estimators": 50, "learning_rate": 0.1})
+    assert seg.score_ is not None and seg.score_.notna().all()
+    des = seg.metrics().query("amostra == 'DES'").iloc[0]
+    if seg.task_type == "classification":
+        assert seg.score_.between(0, 1).all()
+        assert des["auc"] > 0.6
+    else:
+        assert des["r2"] > 0.3
+
+
+def test_algoritmo_opcional_ausente_erro_amigavel(seg):
+    # sem o pacote instalado, o erro orienta a instalação do extra correto
+    import importlib.util
+    if importlib.util.find_spec("lightgbm") is not None:
+        pytest.skip("lightgbm instalado; erro de ausência não se aplica")
+    with pytest.raises(ImportError, match=r"yggdrasil\[lgbm\]"):
+        seg.fit("lightgbm", hyperparams={"n_estimators": 10})
+
+
+def test_registry_algoritmos():
+    from yggdrasil.credit_risk.model.segmenter import ALGORITHMS, BOOSTING_ALGORITHMS
+    for a in ["random_forest", "extra_trees", "gradient_boosting",
+              "hist_gradient_boosting", "lightgbm", "xgboost", "catboost"]:
+        assert a in ALGORITHMS
+        assert ALGORITHMS[a]["tasks"] == ("classification", "regression")
+    assert ALGORITHMS["lightgbm"]["extra"] == "lgbm"
+    assert ALGORITHMS["xgboost"]["extra"] == "xgboost"
+    assert ALGORITHMS["catboost"]["extra"] == "catboost"
+    assert set(BOOSTING_ALGORITHMS) <= set(ALGORITHMS)
+    # os modelos de boosting do sklearn não exigem pacote externo
+    assert ALGORITHMS["hist_gradient_boosting"]["extra"] is None
+
+
 def test_set_model_externo(seg):
     from sklearn.dummy import DummyClassifier, DummyRegressor
     feats = ["feat_00", "feat_01"]
@@ -548,3 +603,30 @@ def test_ui_bins_manuais_e_formula(task):
         ui._on_fit(None)
         ui._on_formula(None)
         assert "mseg-formula" in ui.out_formula.value
+
+
+def test_ui_controles_boosting(task):
+    pytest.importorskip("ipywidgets")
+    import contextlib
+    import io
+    from yggdrasil.credit_risk.model import ModelSegmenterUI
+
+    df = _synthetic(task, com_cat=True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui = ModelSegmenterUI(df, target="target", task_type=task,
+                              sample_col="amostra", ref_sample="DES", date_col="dt_ref")
+        # extra_trees: ensemble, sem learning_rate
+        ui.dd_algo.value = "extra_trees"
+        assert ui.box_ensemble.layout.display != "none"
+        assert ui.box_lr.layout.display == "none"
+        hp = ui._collect_hyperparams("extra_trees")
+        assert "n_estimators" in hp and "learning_rate" not in hp
+        # hist_gradient_boosting: boosting → learning_rate visível e coletado
+        ui.dd_algo.value = "hist_gradient_boosting"
+        assert ui.box_lr.layout.display != "none"
+        assert ui.formula_card.layout.display == "none"
+        hp = ui._collect_hyperparams("hist_gradient_boosting")
+        assert "learning_rate" in hp
+        # treina de fato um motor nativo do sklearn pela UI
+        ui._on_fit(None)
+        assert ui.seg.score_ is not None
