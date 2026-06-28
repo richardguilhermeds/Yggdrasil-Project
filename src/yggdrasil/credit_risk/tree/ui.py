@@ -312,7 +312,7 @@ class TreeSegmenterUI:
         self.tg_mode = W.ToggleButtons(options=["Ótimo", "Manual"], value="Ótimo",
                                        style={"button_width": "auto"},
                                        layout=W.Layout(width="100%"))
-        self.sl_bins = W.IntSlider(description="máx. bins", min=2, max=8, value=4,
+        self.sl_bins = W.IntSlider(description="máx. bins", min=2, max=15, value=4,
                                    layout=W.Layout(width="98%"), style=dstyle)
         # critério do split desta folha (modo Ótimo): optbin (multi-bin) ou CART/CHAID
         if self._is_clf:
