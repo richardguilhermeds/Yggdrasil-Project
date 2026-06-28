@@ -1877,8 +1877,36 @@ class ModelSegmenter:
             out[col_rating] = self.rating_
         return out
 
-    def predict(self, X: pd.DataFrame, col_score="score", col_rating="rating") -> pd.DataFrame:
-        """Aplica modelo (+rating) a novos dados. Devolve score e rating por linha."""
+    def rating_ruler(self, sample=None, col_rating="rating",
+                     col_value="valor_previsto") -> pd.DataFrame:
+        """Régua **rating → valor previsto do alvo**: o valor representativo de cada
+        rating, definido como a média do alvo observado na amostra de referência
+        (``ref_sample``/DES por padrão). É o "LGD/PD previsto daquele rating", usado
+        para escorar uma base. Requer :meth:`build_ratings` já chamado.
+
+        Devolve um DataFrame ordenado pelos rótulos, com ``col_rating``, ``n`` e
+        ``col_value``."""
+        rating = self._rating_series()
+        sample = sample or self.ref_sample
+        if self.sample_col is None:
+            mask = pd.Series(True, index=self.df.index)
+        else:
+            mask = self.df[self.sample_col] == sample
+        rows = []
+        for lab in self.rating_labels_:
+            m = (rating == lab) & mask
+            rows.append({col_rating: lab, "n": int(m.sum()),
+                         col_value: round(self._risco(self.df.loc[m, self.target]), 6)})
+        return pd.DataFrame(rows)
+
+    def predict(self, X: pd.DataFrame, col_score="score", col_rating="rating",
+                col_value=None, ruler_sample=None) -> pd.DataFrame:
+        """Aplica modelo (+rating) a novos dados. Devolve score e rating por linha.
+
+        Se ``col_value`` for informado (ex.: ``"valor_previsto"``), anexa também o
+        **valor previsto do alvo daquele rating** — a régua de :meth:`rating_ruler`
+        calibrada na amostra ``ruler_sample`` (DES por padrão), i.e. o LGD/PD
+        previsto por rating."""
         if self.model is None:
             raise RuntimeError("Ajuste/defina o modelo antes (fit / set_model).")
         sc = pd.Series(self._predict_score_array(self.model, X[self.model_features]),
@@ -1889,6 +1917,11 @@ class ModelSegmenter:
             cfg = self._make_cfg("_amostra")
             wf["_amostra"] = self.ref_sample
             out[col_rating] = self.rating_strategy.transform(wf, cfg).values
+            if col_value is not None:
+                ruler = self.rating_ruler(sample=ruler_sample, col_rating=col_rating,
+                                          col_value=col_value)
+                mapping = dict(zip(ruler[col_rating], ruler[col_value]))
+                out[col_value] = out[col_rating].map(mapping)
         return out
 
     def to_dict(self) -> dict:

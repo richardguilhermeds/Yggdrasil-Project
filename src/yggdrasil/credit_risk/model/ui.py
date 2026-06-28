@@ -6,18 +6,20 @@ Camada interativa (ipywidgets) sobre o :class:`ModelSegmenter` — unifica a UI 
 do ``LGDSegmenterUI`` (abas, IV, inversão, placar), porém para um fluxo orientado
 a modelo:
 
-* **① Variáveis** — analisa cada variável (logodds/WoE, IV, inversão) e decide
+* **Variáveis** — analisa cada variável (logodds/WoE, IV, inversão) e decide
   o que entra no modelo (incluir/categorizar; auto-seleção por IV/PSI/monotonia);
-* **② Análise de variáveis** — mergulho por variável: logodds por faixa,
+* **Análise de variáveis** — mergulho por variável: logodds por faixa,
   distribuição, inversão entre amostras/safras, série temporal e PSI por safra;
-* **③ Modelo** — escolhe o algoritmo (Logística/Linear, RandomForest,
-  GradientBoosting) e treina (ou usa um modelo pré-ajustado); métricas por amostra,
-  gráficos do modelo e **SHAP**;
-* **④ Ratings & Score** — segmenta o score em ratings (decis/quantil/árvore/optbin),
+* **Modelo** — escolhe o algoritmo (Logística/Linear, RandomForest, ExtraTrees,
+  GradientBoosting, HistGradientBoosting e — via extras — LightGBM/XGBoost/CatBoost)
+  e treina (ou usa um modelo pré-ajustado); métricas por amostra, gráficos do
+  modelo, fórmula (modelos lineares) e **SHAP**;
+* **Ratings & Score** — segmenta o score em ratings (decis/quantil/árvore/optbin),
   com o número escolhido pelo usuário; tabela, badrate, distribuição e inversão
   entre ratings;
-* **⑤ Validar & Exportar** — backtest por safra, PSI, exportar DataFrame rotulado,
-  salvar/carregar e registrar no MLflow.
+* **Validar & Exportar** — backtest por safra, PSI, **escorar uma base** (rating +
+  valor previsto do alvo daquele rating, via :meth:`ModelSegmenter.rating_ruler`),
+  exportar DataFrame rotulado, salvar/carregar e registrar no MLflow.
 
     from yggdrasil.credit_risk.model import ModelSegmenterUI
     ui = ModelSegmenterUI(df, target="target", task_type="classification",
@@ -73,10 +75,12 @@ _CSS = """
 .mseg-metric .k { font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:#8a93a3; }
 .mseg-metric .v { font-size:16px; font-weight:600; color:var(--ink); margin-top:2px; }
 /* abas — estilo "segmented control" (pílulas), alinhado às UIs lgd/pd */
-.mseg-tabs { margin-top:10px; }
+.mseg-tabs { margin-top:10px; border:none !important; box-shadow:none !important; }
 /* respiro entre a barra de abas e os cards do conteúdo abaixo
-   (!important vence a regra própria do ipywidgets p/ .widget-tab-contents) */
-.mseg-tabs > .widget-tab-contents { padding:30px 2px 2px !important; background:transparent; }
+   (!important vence a regra própria do ipywidgets p/ .widget-tab-contents);
+   border/box-shadow:none remove a "caixa" padrão do Tab ao redor de tudo */
+.mseg-tabs > .widget-tab-contents { padding:30px 2px 2px !important; background:transparent;
+  border:none !important; box-shadow:none !important; }
 .mseg-tabs .lm-TabBar.jupyter-widget-tab-nav,
 .mseg-tabs .p-TabBar.jupyter-widget-tab-nav { border-bottom:1px solid var(--line) !important;
   padding-bottom:14px !important; margin-bottom:0 !important; box-shadow:none !important; }
@@ -149,6 +153,7 @@ class ModelSegmenterUI:
         self.task_type = task_type
         self.date_col = date_col
         self.result = None
+        self.score_df = None   # base externa opcional p/ escorar (ui.score_df = df_novo)
         self._build()
         self._refresh_bar()
         self._refresh_vars()
@@ -240,7 +245,8 @@ class ModelSegmenterUI:
             W.HTML("<div class='mseg-h'>Seleção & categorização de variáveis</div>"),
             W.HBox([self.sl_min_iv, self.sl_max_psi, self.cb_require_mono, self.btn_auto]),
             W.HBox([self.sel_included, W.VBox([self.btn_apply_sel, self.btn_incl_all,
-                                               self.btn_clear, self.btn_refresh_vars])]),
+                                               self.btn_clear, self.btn_refresh_vars])],
+                   layout=W.Layout(align_items="flex-start")),
             W.HBox([self.dd_var, self.dd_categoria, self.btn_set_cat]),
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Ranking (IV / força / inversão / PSI)</div>"),
                             self.out_vars], layout=W.Layout(width="58%")),
@@ -431,8 +437,18 @@ class ModelSegmenterUI:
         self.tx_model = W.Text(value="", description="Modelo (UC):",
                                style={"description_width": "initial"})
         self.btn_mlflow = W.Button(description="Registrar no MLflow", icon="database")
+        # escorar base: rating + valor previsto do alvo por rating (a "régua")
+        self.tx_value_col = W.Text(value="valor_previsto", description="Coluna do valor:",
+                                   style={"description_width": "initial"})
+        self.btn_ruler = W.Button(description="Ver régua (rating → valor)", icon="list-ol")
+        self.btn_score = W.Button(description="Escorar base", button_style="primary",
+                                  icon="bolt")
+        self.out_ruler = W.HTML()
+        self.out_score = W.HTML()
         self.btn_backtest.on_click(self._on_backtest)
         self.btn_export.on_click(self._on_export)
+        self.btn_ruler.on_click(self._on_ruler)
+        self.btn_score.on_click(self._on_score)
         self.btn_save.on_click(self._on_save)
         self.btn_load.on_click(self._on_load)
         self.btn_mlflow.on_click(self._on_mlflow)
@@ -444,6 +460,15 @@ class ModelSegmenterUI:
                     W.VBox([W.HTML("<div class='mseg-h'>PSI dos ratings</div>"),
                             self.out_psi], layout=W.Layout(width="40%"))]),
             W.HBox([self.btn_export]), self.out_export,
+            W.HTML("<div class='mseg-h'>Escorar base — rating + valor previsto do alvo "
+                   "por rating (régua)</div>"),
+            W.HTML("<div class='mseg-legend'>Escora a base carregada (ou <code>ui.score_df = "
+                   "df_novo</code> para uma base externa) e devolve <code>score</code>, "
+                   "<code>rating</code> e o valor previsto do alvo daquele rating (ex.: LGD "
+                   "previsto). Resultado em <code>ui.result</code>.</div>"),
+            W.HBox([self.tx_value_col, self.btn_ruler, self.btn_score]),
+            self.out_ruler,
+            self.out_score,
             W.HTML("<div class='mseg-h'>Salvar / carregar (JSON + modelo joblib)</div>"),
             W.HBox([self.tx_save, self.btn_save, self.btn_load]),
             W.HTML("<div class='mseg-h'>Registrar no MLflow</div>"),
@@ -451,8 +476,8 @@ class ModelSegmenterUI:
         ], layout=W.Layout(padding="2px"))
 
         self.tabs = W.Tab(children=[tab_vars, tab_an, tab_model, tab_rating, tab_export])
-        for i, t in enumerate(["① Variáveis", "② Análise de variáveis", "③ Modelo",
-                               "④ Ratings & Score", "⑤ Validar & Exportar"]):
+        for i, t in enumerate(["Variáveis", "Análise de variáveis", "Modelo",
+                               "Ratings & Score", "Validar & Exportar"]):
             self.tabs.set_title(i, t)
         self.tabs.add_class("mseg-tabs")
 
@@ -779,6 +804,39 @@ class ModelSegmenterUI:
             self._log("[export] DataFrame rotulado em ui.result.")
         except Exception as e:
             self._log(f"[export] erro: {e}")
+
+    def _on_ruler(self, b):
+        try:
+            col_value = self.tx_value_col.value.strip() or "valor_previsto"
+            ruler = self.seg.rating_ruler(col_value=col_value)
+            self.out_ruler.value = self._df_html(ruler.round(6), max_height="280px")
+            self._log(f"[régua] {len(ruler)} ratings (valor na amostra "
+                      f"{self.seg.ref_sample}).")
+        except Exception as e:
+            self.out_ruler.value = f"<i>{e}</i>"
+            self._log(f"[régua] erro: {e}")
+
+    def _on_score(self, b):
+        try:
+            base = self.score_df if self.score_df is not None else self.seg.df
+            origem = "ui.score_df" if self.score_df is not None else "base carregada"
+            col_value = self.tx_value_col.value.strip() or "valor_previsto"
+            scored = self.seg.predict(base, col_value=col_value)
+            out = base.copy()
+            for c in scored.columns:
+                out[c] = scored[c]
+            self.result = out
+            cols = ", ".join(f"<code>{c}</code>" for c in scored.columns)
+            self.out_score.value = (
+                f"<div class='mseg-legend'>Base escorada ({origem}): "
+                f"{out.shape[0]} linhas × {out.shape[1]} colunas, em <code>ui.result</code>. "
+                f"Colunas adicionadas: {cols}.</div>"
+                + self._df_html(scored.head(10).round(6)))
+            self._log(f"[escorar] {origem} escorada em ui.result "
+                      f"({out.shape[0]} linhas).")
+        except Exception as e:
+            self.out_score.value = f"<i>{e}</i>"
+            self._log(f"[escorar] erro: {e}")
 
     def _on_save(self, b):
         try:

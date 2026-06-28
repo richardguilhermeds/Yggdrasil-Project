@@ -554,6 +554,8 @@ def test_ui_layout_abas(task):
     assert any("Variáveis" in t or "variáveis" in t for t in titulos)
     assert any("Modelo" in t for t in titulos)
     assert any("Rating" in t for t in titulos)
+    # abas sem numeração (①–⑤), alinhado às UIs lgd/pd
+    assert all(not t[:1] in "①②③④⑤" for t in titulos)
 
 
 def test_ui_fluxo_treina_e_ratings(task):
@@ -630,3 +632,59 @@ def test_ui_controles_boosting(task):
         # treina de fato um motor nativo do sklearn pela UI
         ui._on_fit(None)
         assert ui.seg.score_ is not None
+
+
+def test_rating_ruler_e_predict_valor(seg):
+    seg.fit(_default_algo(seg.task_type))
+    seg.build_ratings(method="quantil", n_ratings=5)
+    ruler = seg.rating_ruler(col_value="valor_previsto")
+    assert list(ruler.columns) == ["rating", "n", "valor_previsto"]
+    assert len(ruler) == len(seg.rating_labels_)
+    assert ruler["n"].sum() > 0
+    # predict com col_value anexa o valor previsto do alvo daquele rating
+    novo = seg.df[seg.df["amostra"] == "OOT"].copy()
+    out = seg.predict(novo, col_value="valor_previsto")
+    assert {"score", "rating", "valor_previsto"}.issubset(out.columns)
+    assert len(out) == len(novo)
+    # cada valor_previsto bate exatamente com a régua para aquele rating
+    mapa = dict(zip(ruler["rating"], ruler["valor_previsto"]))
+    esperado = out["rating"].map(mapa)
+    mask = out["rating"].notna()
+    assert (out.loc[mask, "valor_previsto"].fillna(-999.0)
+            == esperado.loc[mask].fillna(-999.0)).all()
+    # sem col_value mantém o comportamento antigo (sem coluna de valor)
+    out2 = seg.predict(novo)
+    assert "valor_previsto" not in out2.columns
+    assert {"score", "rating"}.issubset(out2.columns)
+
+
+def test_rating_ruler_sem_ratings_erro(seg):
+    seg.fit(_default_algo(seg.task_type))
+    with pytest.raises(RuntimeError):
+        seg.rating_ruler()
+
+
+def test_ui_escorar_base(task):
+    pytest.importorskip("ipywidgets")
+    import contextlib
+    import io
+    from yggdrasil.credit_risk.model import ModelSegmenterUI
+
+    df = _synthetic(task, com_cat=True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui = ModelSegmenterUI(df, target="target", task_type=task,
+                              sample_col="amostra", ref_sample="DES", date_col="dt_ref")
+        ui.seg.fit(_default_algo(task))
+        ui.seg.build_ratings(method="quantil", n_ratings=5)
+        # régua rating -> valor
+        ui._on_ruler(None)
+        assert "<table" in ui.out_ruler.value
+        # escora a base carregada → ui.result com score/rating/valor_previsto
+        ui._on_score(None)
+        assert ui.result is not None
+        assert {"score", "rating", "valor_previsto"}.issubset(ui.result.columns)
+        # escora base externa via ui.score_df
+        ui.score_df = df[df["amostra"] == "OOT"].copy()
+        ui._on_score(None)
+        assert len(ui.result) == int((df["amostra"] == "OOT").sum())
+        assert "valor_previsto" in ui.result.columns

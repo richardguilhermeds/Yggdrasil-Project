@@ -74,10 +74,12 @@ _CSS = """
 .pdui-legend { font-size:11px; color:var(--muted); margin:6px 0 2px; line-height:1.55; }
 .pdui-tree { line-height:1.55; }
 /* abas do workbench — estilo "segmented control" (pílulas) */
-.pdui-tabs { margin-top:10px; }
+.pdui-tabs { margin-top:10px; border:none !important; box-shadow:none !important; }
 /* respiro entre a barra de abas e os cards do conteúdo abaixo
-   (!important vence a regra própria do ipywidgets p/ .widget-tab-contents) */
-.pdui-tabs > .widget-tab-contents { padding:30px 2px 2px !important; background:transparent; }
+   (!important vence a regra própria do ipywidgets p/ .widget-tab-contents);
+   border/box-shadow:none remove a "caixa" padrão do Tab ao redor de tudo */
+.pdui-tabs > .widget-tab-contents { padding:30px 2px 2px !important; background:transparent;
+  border:none !important; box-shadow:none !important; }
 .pdui-tabs .lm-TabBar.jupyter-widget-tab-nav,
 .pdui-tabs .p-TabBar.jupyter-widget-tab-nav { border-bottom:1px solid var(--line) !important;
   padding-bottom:14px !important; margin-bottom:0 !important; box-shadow:none !important; }

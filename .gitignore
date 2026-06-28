@@ -30,6 +30,6 @@ dist/
 htmlcov/
 
 # Ambientes virtuais
-.venv/
+.venv*/
 venv/
 env/
