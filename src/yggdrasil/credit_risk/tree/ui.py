@@ -1530,6 +1530,13 @@ class TreeSegmenterUI:
         badge = ("<span class='pill pill-yellow'>folha fechada 🔒</span>"
                  if sid in self.locked
                  else "<span class='pill pill-green'>folha aberta</span>")
+        # selo: esta folha recebe os faltantes (NaN) no scoring (include_na) —
+        # atribuição conservadora à folha-irmã de pior risco quando o split não
+        # gerou nó de faltantes próprio
+        na_badge = ("<span class='pill' style='background:#fbe7e4;color:#b23a2a' "
+                    "title='Recebe os faltantes (NaN) no scoring — atribuição "
+                    "conservadora à folha-irmã de pior risco'>+ faltantes</span>"
+                    if any(c.get("include_na") for c in s["conditions"]) else "")
 
         def ab(a):
             return "ESTAB" if a == "ESTABILIDADE" else a
@@ -1547,7 +1554,7 @@ class TreeSegmenterUI:
             f"<span style='width:13px;height:13px;border-radius:4px;background:{color};"
             "flex:none'></span>"
             f"<span style='font-size:15px;font-weight:600;color:#15324a'>{label}</span>"
-            f"{badge}<span class='pill pill-muted'>folha {nota}</span></div>")
+            f"{badge}{na_badge}<span class='pill pill-muted'>folha {nota}</span></div>")
 
         sec_h = ("<div class='treeui-h' style='margin-top:11px'>{}</div>").format
 
