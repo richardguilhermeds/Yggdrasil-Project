@@ -788,8 +788,9 @@ def test_ui_bins_manuais_e_formula(task):
         assert ui.formula_card.layout.display == "none"
         ui.dd_algo.value = algo_lin
         ui._on_fit(None)
-        # a fórmula é renderizada automaticamente ao treinar (sem botão dedicado)
-        assert "mseg-formula" in ui.out_formula.value
+        # a fórmula é renderizada automaticamente ao treinar (sem botão dedicado);
+        # a tabela de coeficientes é o elemento principal
+        assert "mseg-coef" in ui.out_formula.value
 
 
 def test_ui_controles_boosting(task):

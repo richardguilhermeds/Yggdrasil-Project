@@ -1217,18 +1217,16 @@ class ModelSegmenterUI:
         else:
             eq = "ŷ = z"
 
-        # z = intercepto + Σ coefᵢ·termoᵢ — cada termo é uma "pílula" que quebra linha,
-        # com o sinal do coeficiente colorido (verde sobe z, vermelho desce z)
-        chips = [f"<span class='mseg-term mseg-b0'>{b0:+.4f}</span>"]
+        # z = intercepto + Σ coefᵢ·termoᵢ numa LINHA de equação limpa e discreta
+        # (coeficiente colorido pelo sinal); o detalhe rigoroso fica na TABELA abaixo.
+        parts = [f"<span class='mseg-{'pos' if b0 >= 0 else 'neg'}-tx'>{b0:+.4f}</span>"]
         for _, r in coef.iterrows():
             c = float(r["coef"]); cls = "pos" if c >= 0 else "neg"
-            chips.append(
-                f"<span class='mseg-term mseg-{cls}'>"
-                f"<span class='mseg-op'>{'+' if c >= 0 else '−'}</span>"
-                f"<span class='mseg-cf'>{abs(c):.4f}</span>"
-                f"<span class='mseg-mul'>×</span>"
-                f"<span class='mseg-vn'>{r['termo']}</span></span>")
-        z_html = "<span class='mseg-zlead'>z =</span>" + "".join(chips)
+            parts.append(
+                f" <span style='color:#9aa3ad'>{'+' if c >= 0 else '−'}</span> "
+                f"<span class='mseg-{cls}-tx'>{abs(c):.4f}</span>"
+                f"<span style='color:#9aa3ad'>·</span>{r['termo']}")
+        z_html = "<span style='color:#6b7480;font-weight:600'>z =</span> " + "".join(parts)
 
         # tabela de coeficientes com barra de magnitude (|coef|) e leitura do efeito
         cmax = float(coef["coef"].abs().max()) or 1.0
@@ -1289,11 +1287,13 @@ class ModelSegmenterUI:
                "p&lt;0,05 · <code>.</code> p&lt;0,10 · <code>n.s.</code> não significativo. "
                "Aproximação (a logística do sklearn é regularizada)." if has_p else "")
             + "</div>")
+        # a TABELA é o elemento principal; as equações (link + preditor) ficam
+        # discretas acima e a explicação vem por último.
         self.out_formula.value = (
             f"<div class='mseg-eq'>{eq}</div>"
-            f"<div class='mseg-formula'>{z_html}</div>"
-            f"{legend}"
-            f"<div style='max-height:320px;overflow:auto'>{table}</div>")
+            f"<div class='mseg-eq' style='line-height:1.95'>{z_html}</div>"
+            f"<div style='max-height:460px;overflow:auto;margin-top:6px'>{table}</div>"
+            f"{legend}")
 
     def _collect_hyperparams(self, algo):
         if algo == "logistica":

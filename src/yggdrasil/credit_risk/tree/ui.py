@@ -2681,7 +2681,7 @@ class TreeSegmenterUI:
         if tcol and tcol in self.df.columns:
             try:
                 self.out_var_time.value = self._fig_html(
-                    self.seg.plot_variable_timeseries(feat, tcol, sid=sid))
+                    self.seg.plot_variable_timeseries(feat, tcol, sid=sid), full_width=True)
             except Exception as e:
                 self.out_var_time.value = err("série temporal", e)
             try:
@@ -3192,14 +3192,18 @@ class TreeSegmenterUI:
     # ==================================================================
     # Discriminação (ROC · KS) e qualidade dos segmentos
     # ==================================================================
-    def _fig_html(self, fig, border=False):
-        """Converte uma figura matplotlib em <img> base64 (string HTML)."""
+    def _fig_html(self, fig, border=False, full_width=False):
+        """Converte uma figura matplotlib em <img> base64 (string HTML).
+
+        ``full_width=True`` faz a imagem ESTICAR até a largura do container
+        (``width:100%``) em vez de só limitar (``max-width:100%``) — elimina o
+        espaço em branco à direita em cartões largos."""
         import base64
         import io as _io
         buf = _io.BytesIO()
         fig.savefig(buf, format="png", dpi=fig.get_dpi(), bbox_inches="tight")
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-        style = "max-width:100%;height:auto"
+        style = ("width:100%;height:auto" if full_width else "max-width:100%;height:auto")
         if border:
             style += ";border:1px solid #e6e8eb;border-radius:6px"
         return f"<img src='data:image/png;base64,{b64}' style='{style}'/>"
@@ -3251,14 +3255,14 @@ class TreeSegmenterUI:
     # ambos renderizam em out_discrim (toggle no card de discriminação)
     def _on_box(self, _):
         try:
-            self.out_discrim.value = self._fig_html(self.seg.plot_leaf_boxplots())
+            self.out_discrim.value = self._fig_html(self.seg.plot_leaf_boxplots(), full_width=True)
         except Exception as e:
             self.out_discrim.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
                                       f"boxplot: {type(e).__name__}: {e}</div>")
 
     def _on_hist(self, _):
         try:
-            self.out_discrim.value = self._fig_html(self.seg.plot_target_hist(color="steelblue"))
+            self.out_discrim.value = self._fig_html(self.seg.plot_target_hist(color="steelblue"), full_width=True)
         except Exception as e:
             self.out_discrim.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
                                       f"histograma: {type(e).__name__}: {e}</div>")

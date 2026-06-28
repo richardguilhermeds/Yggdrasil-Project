@@ -2026,7 +2026,7 @@ class TreeSegmenter:
         return fig
 
     def plot_target_hist(self, sample: str | None = None, bins: int = 30,
-                         color: str = "#2a9d8f", figsize=(7.0, 4.2),
+                         color: str = "#2a9d8f", figsize=(12.0, 3.8),
                          save_path: str | None = None, dpi: int = 150, ax=None):
         """Histograma do alvo na carteira (regressão) — revela bimodalidade
         (massa em 0 e/ou 1) e concentração."""
@@ -2903,7 +2903,7 @@ class TreeSegmenter:
         return fig
 
     def plot_variable_timeseries(self, feature, time_col=None, sid=None, sample=None,
-                                 figsize=(8.6, 3.4), save_path=None, dpi=150, ax=None):
+                                 figsize=(12.0, 3.4), save_path=None, dpi=150, ax=None):
         """Variável NUMÉRICA: percentis por safra (min–max, p5–p95, média).
         Variável CATEGÓRICA: representatividade de cada categoria por safra."""
         if self._detect_kind(self.df[self._leaf_mask(sid)], feature, None) == "cat":
