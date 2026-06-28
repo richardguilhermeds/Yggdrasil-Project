@@ -426,7 +426,8 @@ class ModelSegmenterUI:
             "É um <b>rótulo de triagem</b> que você dá a cada variável para registrar a sua "
             "decisão durante a análise. Ele aparece na coluna <code>categoria</code> do ranking e "
             "é só documentação: <b>não treina nem remove a variável sozinho</b> — quem define o que "
-            "entra no modelo é a lista <b>“No modelo”</b> (botão <i>Aplicar seleção</i>)."
+            "entra no modelo é a lista <b>“No modelo”</b>, controlada pelos botões "
+            "<i>Incluir variável no modelo</i> / <i>Excluir do modelo</i> (uma por vez)."
             "<ul>"
             "<li><span class='mseg-cat mseg-cat-keep'>✓ manter</span> &nbsp;variável boa, "
             "deve entrar no modelo.</li>"
@@ -472,8 +473,12 @@ class ModelSegmenterUI:
                                      tooltip="Classifica TODAS as variáveis em manter / revisar / "
                                              "descartar pela regra (IV · PSI · monotonia). "
                                              "Só rotula — não altera a seleção do modelo.")
-        self.btn_apply_sel = W.Button(description="Aplicar seleção", button_style="success",
-                                      icon="check")
+        self.btn_include = W.Button(description="Incluir variável no modelo",
+                                    button_style="success", icon="plus",
+                                    tooltip="Inclui no modelo a variável escolhida em 'Variável:' "
+                                            "— uma por vez, aditivo (não substitui as já incluídas).")
+        self.btn_exclude = W.Button(description="Excluir do modelo", icon="minus",
+                                    tooltip="Remove do modelo a variável escolhida em 'Variável:'.")
         self.btn_set_cat = W.Button(description="Categorizar", icon="tag")
         self.btn_incl_all = W.Button(description="Incluir todas", icon="plus")
         self.btn_clear = W.Button(description="Limpar", icon="trash")
@@ -489,7 +494,8 @@ class ModelSegmenterUI:
 
         self.btn_auto.on_click(self._on_auto_select)
         self.btn_auto_cat.on_click(self._on_auto_categorize)
-        self.btn_apply_sel.on_click(self._on_apply_sel)
+        self.btn_include.on_click(self._on_include_var)
+        self.btn_exclude.on_click(self._on_exclude_var)
         self.btn_set_cat.on_click(self._on_set_cat)
         self.btn_incl_all.on_click(lambda b: (self.seg.include_all(), self._sync_sel(),
                                               self._refresh_vars(), self._refresh_bar()))
@@ -498,9 +504,9 @@ class ModelSegmenterUI:
         self.btn_refresh_vars.on_click(lambda b: self._refresh_vars())
         self.btn_clear_derived.on_click(self._on_clear_derived)
         # botões largos (~19%) → só uma pequena folga entre eles na linha
-        for _b in (self.btn_apply_sel, self.btn_incl_all, self.btn_clear,
+        for _b in (self.btn_incl_all, self.btn_clear,
                    self.btn_refresh_vars, self.btn_clear_derived):
-            _b.layout = W.Layout(width="19%")
+            _b.layout = W.Layout(width="24%")
         self.dd_var.observe(lambda c: self._refresh_var_preview(), names="value")
         # clicar numa variável na lista "No modelo" também atualiza a prévia/análise
         self.sel_included.observe(self._on_sel_click, names="value")
@@ -509,11 +515,13 @@ class ModelSegmenterUI:
             W.HTML("<div class='mseg-h'>Seleção & categorização de variáveis</div>"),
             W.HBox([self.sl_min_iv, self.sl_max_psi, self.cb_require_mono,
                     self.btn_auto, self.btn_auto_cat]),
+            # incluir/excluir UMA variável por vez — a escolhida em 'Variável:'
+            W.HBox([self.dd_var, self.btn_include, self.btn_exclude]),
             W.VBox([self.sel_included,
-                    W.HBox([self.btn_apply_sel, self.btn_incl_all, self.btn_clear,
+                    W.HBox([self.btn_incl_all, self.btn_clear,
                             self.btn_refresh_vars, self.btn_clear_derived],
                            layout=W.Layout(justify_content="space-between", width="99%"))]),
-            W.HBox([self.dd_var, self.dd_categoria, self.btn_set_cat]),
+            W.HBox([self.dd_categoria, self.btn_set_cat]),
             self.out_cat_hint,
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Ranking (IV / força / inversão / PSI)</div>"),
                             self.out_vars], layout=W.Layout(width="58%")),
@@ -967,10 +975,21 @@ class ModelSegmenterUI:
         except Exception as e:
             self._log(f"[auto-categoria] erro: {e}")
 
-    def _on_apply_sel(self, b):
-        self.seg.included = set(self.sel_included.value)
-        self._refresh_vars(); self._refresh_bar()
-        self._log(f"[seleção] {len(self.seg.included)} variáveis no modelo.")
+    def _on_include_var(self, b):
+        feat = self.dd_var.value
+        if not feat:
+            return
+        self.seg.include(feat)
+        self._sync_sel(); self._refresh_vars(); self._refresh_bar()
+        self._log(f"[incluir] '{feat}' no modelo · {len(self.seg.included)} no total.")
+
+    def _on_exclude_var(self, b):
+        feat = self.dd_var.value
+        if not feat:
+            return
+        self.seg.exclude(feat)
+        self._sync_sel(); self._refresh_vars(); self._refresh_bar()
+        self._log(f"[excluir] '{feat}' fora do modelo · {len(self.seg.included)} no total.")
 
     def _on_sel_click(self, change):
         """Ao clicar numa variável na lista 'No modelo', aponta a prévia (gráfico de
