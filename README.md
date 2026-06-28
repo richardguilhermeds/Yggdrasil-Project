@@ -171,6 +171,6 @@ Todos centralizados em **[`notebooks/tutoriais/`](notebooks/tutoriais/)** (passo
 
 **Richard Guilherme** — Cientista de Dados com foco em **risco de crédito** (PD/LGD/EAD), modelagem regulatória (CMN 4.966/2021, IFRS 9) e MLOps em Databricks.
 
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-Richard%20Guilherme-0A66C2?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/richardguilhermeds/)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Richard%20Guilherme-0A66C2?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/richardguilhermeda/)
 
 > 🔗 Conecte-se no LinkedIn para acompanhar projetos e conteúdos de ciência de dados e risco de crédito.
