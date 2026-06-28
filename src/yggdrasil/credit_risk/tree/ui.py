@@ -1,21 +1,22 @@
 """
-PDSegmenterUI
-=============
-Camada interativa (ipywidgets) sobre o `SequentialPDSegmenter`.
+TreeSegmenterUI
+===============
+Camada interativa (ipywidgets) sobre o `TreeSegmenter`, **unificada por**
+``task_type`` ("classification" = PD/alvo binário · "regression" = LGD/alvo
+contínuo) — a mesma UI atende os dois, mudando só o parâmetro.
 
-Construa a árvore de segmentação de PD (modelo de classificação) clicando em
-botões, dentro do Jupyter, operando sobre o DataFrame e o alvo binário reais.
-Recursos:
-- árvore colorida por PD que se atualiza a cada ação;
+Construa a árvore de segmentação clicando em botões, dentro do Jupyter, operando
+sobre o DataFrame e o alvo reais. Recursos:
+- árvore colorida pelo alvo médio que se atualiza a cada ação;
 - **PSI ao vivo** por amostra (OOT, ESTABILIDADE, ...) no topo do painel;
-- **discriminação ao vivo** (KS e AUC por amostra) na faixa de KPIs;
+- **discriminação ao vivo** por amostra: KS/AUC (classificação) ou R² (regressão);
 - tabela de folhas com **PSI por amostra** e **p-valor** do teste entre folhas adjacentes;
-- curvas **ROC** e **KS**, taxa de default por folha e distribuição do score;
+- gráficos por tarefa: ROC/KS/taxa-default/distribuição (clf) ou boxplot/histograma (reg);
 - travar folhas como finais (cadeado), podar, resetar e exportar o DataFrame rotulado.
 
-    from yggdrasil.credit_risk.pd import PDSegmenterUI
-    ui = PDSegmenterUI(df, target="target", sample_col="amostra",
-                       ref_sample="DES", feature_labels=labels)
+    from yggdrasil.credit_risk.tree import TreeSegmenterUI
+    ui = TreeSegmenterUI(df, target="target", task_type="classification",
+                         sample_col="amostra", ref_sample="DES", feature_labels=labels)
     ui
 """
 from __future__ import annotations
@@ -28,42 +29,42 @@ try:
 except Exception as e:  # pragma: no cover
     raise ImportError("Este módulo requer ipywidgets e IPython (Jupyter).") from e
 
-from .segmenter import SequentialPDSegmenter
+from .segmenter import TreeSegmenter
 
 
 _CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
-.pdui { --ac:#3b4a63; --ac-deep:#27324a; --ac-soft:#eef1f5; --ac-border:#cdd5e0;
+.treeui { --ac:#3b4a63; --ac-deep:#27324a; --ac-soft:#eef1f5; --ac-border:#cdd5e0;
   --ink:#1f2733; --muted:#6b7480; --line:#e7e9ee;
   font-family:'IBM Plex Sans', -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
   color:var(--ink); }
-.pdui .mono { font-family:'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas,
+.treeui .mono { font-family:'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas,
   monospace; font-variant-numeric: tabular-nums; }
 /* top bar (estilo mockup): branca, com chip PD grafite */
-.pdui-banner { display:flex; align-items:center; gap:11px; background:#fff;
+.treeui-banner { display:flex; align-items:center; gap:11px; background:#fff;
   border:1px solid var(--line); border-radius:13px; padding:11px 16px; margin-bottom:10px;
   box-shadow:0 1px 3px rgba(16,24,40,.08); }
-.pdui-banner .logo { width:30px; height:30px; border-radius:9px; background:var(--ac);
+.treeui-banner .logo { width:30px; height:30px; border-radius:9px; background:var(--ac);
   color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700;
   font-size:12px; flex:none; }
-.pdui-banner .t { font-size:15px; font-weight:600; color:var(--ink); line-height:1.2; }
-.pdui-banner .s { font-size:11.5px; color:var(--muted); margin-top:1px; }
+.treeui-banner .t { font-size:15px; font-weight:600; color:var(--ink); line-height:1.2; }
+.treeui-banner .s { font-size:11.5px; color:var(--muted); margin-top:1px; }
 /* cards */
-.pdui-card { background:#fff; border:1px solid var(--line); border-radius:12px;
+.treeui-card { background:#fff; border:1px solid var(--line); border-radius:12px;
   padding:13px 15px; box-shadow:0 1px 3px rgba(16,24,40,.06); margin-bottom:11px; }
-.pdui-h { font-weight:600; font-size:11px; color:var(--muted); text-transform:uppercase;
+.treeui-h { font-weight:600; font-size:11px; color:var(--muted); text-transform:uppercase;
   letter-spacing:.07em; margin-bottom:9px; }
 /* rótulos das faixas (cockpit/diagnóstico) e chips da folha ativa */
-.pdui-band { font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.08em;
+.treeui-band { font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.08em;
   color:var(--ac); margin:6px 2px 4px; }
-.pdui-band-muted { color:#9aa2b1; margin-top:14px; }
-.pdui-chips { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:0 2px 4px; }
-.pdui-chips .lab { font-size:11px; color:var(--muted); margin-right:2px; }
-.pdui-chips .chip { font-size:11px; font-family:'IBM Plex Mono', ui-monospace, monospace;
+.treeui-band-muted { color:#9aa2b1; margin-top:14px; }
+.treeui-chips { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:0 2px 4px; }
+.treeui-chips .lab { font-size:11px; color:var(--muted); margin-right:2px; }
+.treeui-chips .chip { font-size:11px; font-family:'IBM Plex Mono', ui-monospace, monospace;
   padding:2px 9px; border-radius:999px; border:1px solid var(--line); background:#fff; }
 /* faixa de KPIs (health strip) sempre visível acima das abas */
-.pdui-bar { background:#fff; border:1px solid var(--line); border-radius:11px;
+.treeui-bar { background:#fff; border:1px solid var(--line); border-radius:11px;
   box-shadow:0 1px 3px rgba(16,24,40,.05); padding:0; overflow-x:auto; }
 .pill { display:inline-block; padding:3px 10px; border-radius:999px; font-size:11.5px;
   font-weight:600; margin:2px 4px 2px 0; }
@@ -71,21 +72,21 @@ _CSS = """
 .pill-green  { background:#e7f5ee; color:#157a52; }
 .pill-yellow { background:#fbf3e0; color:#9a6f12; }
 .pill-red    { background:#fbe7e4; color:#b23a2a; }
-.pdui-legend { font-size:11px; color:var(--muted); margin:6px 0 2px; line-height:1.55; }
-.pdui-tree { line-height:1.55; }
+.treeui-legend { font-size:11px; color:var(--muted); margin:6px 0 2px; line-height:1.55; }
+.treeui-tree { line-height:1.55; }
 /* abas do workbench — estilo "segmented control" (pílulas) */
-.pdui-tabs { margin-top:10px; border:none !important; box-shadow:none !important; }
+.treeui-tabs { margin-top:10px; border:none !important; box-shadow:none !important; }
 /* respiro entre a barra de abas e os cards do conteúdo abaixo
    (!important vence a regra própria do ipywidgets p/ .widget-tab-contents);
    border/box-shadow:none remove a "caixa" padrão do Tab ao redor de tudo */
-.pdui-tabs > .widget-tab-contents { padding:30px 2px 2px !important; background:transparent;
+.treeui-tabs > .widget-tab-contents { padding:30px 2px 2px !important; background:transparent;
   border:none !important; box-shadow:none !important; }
-.pdui-tabs .lm-TabBar.jupyter-widget-tab-nav,
-.pdui-tabs .p-TabBar.jupyter-widget-tab-nav { border-bottom:1px solid var(--line) !important;
+.treeui-tabs .lm-TabBar.jupyter-widget-tab-nav,
+.treeui-tabs .p-TabBar.jupyter-widget-tab-nav { border-bottom:1px solid var(--line) !important;
   padding-bottom:14px !important; margin-bottom:0 !important; box-shadow:none !important; }
-.pdui-tabs .lm-TabBar-content, .pdui-tabs .p-TabBar-content { gap:7px;
+.treeui-tabs .lm-TabBar-content, .treeui-tabs .p-TabBar-content { gap:7px;
   align-items:stretch; border:none; }
-.pdui-tabs .lm-TabBar-tab, .pdui-tabs .p-TabBar-tab { font-size:13px;
+.treeui-tabs .lm-TabBar-tab, .treeui-tabs .p-TabBar-tab { font-size:13px;
   /* !important vence a regra de mesma especificidade do ipywidgets
      (flex/max-width: var(--jp-widgets-horizontal-tab-width)) que cortava o título */
   min-width:max-content !important; max-width:none !important; flex:0 0 auto !important;
@@ -96,45 +97,45 @@ _CSS = """
   transition:background .15s, color .15s, border-color .15s; }
 /* o tema do Jupyter desenha a "barrinha azul" da aba ativa como um pseudo-
    elemento ::before (background var(--jp-brand-color1)); aqui ele some de vez */
-.pdui-tabs .lm-TabBar-tab::before, .pdui-tabs .lm-TabBar-tab::after,
-.pdui-tabs .p-TabBar-tab::before, .pdui-tabs .p-TabBar-tab::after {
+.treeui-tabs .lm-TabBar-tab::before, .treeui-tabs .lm-TabBar-tab::after,
+.treeui-tabs .p-TabBar-tab::before, .treeui-tabs .p-TabBar-tab::after {
   display:none !important; content:none !important; background:none !important; }
-.pdui-tabs .lm-TabBar-tab:hover, .pdui-tabs .p-TabBar-tab:hover {
+.treeui-tabs .lm-TabBar-tab:hover, .treeui-tabs .p-TabBar-tab:hover {
   background:var(--ac-soft) !important; color:var(--ac-deep) !important;
   border-color:var(--ac-border) !important; }
-.pdui-tabs .lm-TabBar-tabLabel, .pdui-tabs .p-TabBar-tabLabel {
+.treeui-tabs .lm-TabBar-tabLabel, .treeui-tabs .p-TabBar-tabLabel {
   white-space:nowrap !important; overflow:visible !important;
   text-overflow:clip !important; max-width:none !important; }
-.pdui-tabs .lm-TabBar-tab.lm-mod-current,
-.pdui-tabs .p-TabBar-tab.p-mod-current { color:#fff !important; font-weight:600;
+.treeui-tabs .lm-TabBar-tab.lm-mod-current,
+.treeui-tabs .p-TabBar-tab.p-mod-current { color:#fff !important; font-weight:600;
   background:var(--ac) !important; border:1px solid var(--ac) !important;
   outline:none !important; box-shadow:none !important; }
-.pdui-tabs .lm-TabBar-tab.lm-mod-current:hover,
-.pdui-tabs .p-TabBar-tab.p-mod-current:hover {
+.treeui-tabs .lm-TabBar-tab.lm-mod-current:hover,
+.treeui-tabs .p-TabBar-tab.p-mod-current:hover {
   background:var(--ac-deep) !important; color:#fff !important;
   border-color:var(--ac-deep) !important; }
 /* cabeçalho da folha selecionada (métricas em chips) — auto-fit estica os chips
    para preencher toda a largura (linhas com menos chips ficam mais largas) */
-.pdui-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(92px,1fr));
+.treeui-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(92px,1fr));
   gap:6px; }
-.pdui-metric { background:#f7f8fa; border:1px solid #eef0f3; border-radius:9px;
+.treeui-metric { background:#f7f8fa; border:1px solid #eef0f3; border-radius:9px;
   padding:7px 10px; overflow:hidden; }
-.pdui-metric .k { font-size:10px; text-transform:uppercase; letter-spacing:.04em;
+.treeui-metric .k { font-size:10px; text-transform:uppercase; letter-spacing:.04em;
   color:#8a93a3; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.pdui-metric .v { font-size:16px; font-weight:600; color:var(--ink); margin-top:2px;
+.treeui-metric .v { font-size:16px; font-weight:600; color:var(--ink); margin-top:2px;
   white-space:nowrap; }
 /* botões: cantos mais suaves, alinhados ao mockup */
-.pdui .jupyter-button { border-radius:8px; font-family:inherit; }
+.treeui .jupyter-button { border-radius:8px; font-family:inherit; }
 /* sliders/controles encolhem para caber na coluna (min-width:0 libera o flex)
    e os cards clipam qualquer sobra horizontal — elimina a barra de rolagem
    horizontal que aparecia embaixo dos cards na aba Construir */
-.pdui .jupyter-widgets { min-width:0 !important; }
-.pdui-card { overflow-x:clip; }
+.treeui .jupyter-widgets { min-width:0 !important; }
+.treeui-card { overflow-x:clip; }
 </style>
 """
 
 
-class PDSegmenterUI:
+class TreeSegmenterUI:
     # mesma figsize p/ os dois gráficos lado a lado da faixa de detalhe
     # (distribuição da variável + cortes  e  histograma da PD/target da folha)
     _PREVIEW_FIGSIZE = (6.0, 3.6)
@@ -211,14 +212,19 @@ class PDSegmenterUI:
         fg = "#ffffff" if t > 0.40 else "#1f2733"
         return "background-color:rgb(%d,%d,%d);color:%s" % (r, g, b, fg)
 
-    def __init__(self, df, target="target", sample_col=None, ref_sample="DES",
+    def __init__(self, df, target="target", task_type="classification",
+                 sample_col=None, ref_sample="DES",
                  feature_labels=None, features=None, tree_samples=None, date_col=None):
-        # tree_samples: amostras cuja PD média aparece nas folhas da árvore.
+        # task_type: "classification" (PD, alvo binário) ou "regression" (LGD,
+        # alvo contínuo) — define métricas, IV, cor e os gráficos exibidos.
+        # tree_samples: amostras cujo alvo médio aparece nas folhas da árvore.
         # None = todas; ex.: tree_samples=["DES","OOT"] mostra só DES e OOT.
         # date_col: coluna de data/safra — FORA da modelagem, só p/ gráficos no tempo.
+        self.task_type = task_type
+        self._is_clf = task_type == "classification"
         self._tree_samples_cfg = tree_samples
         self.date_col = date_col
-        self._kwargs = dict(target=target, sample_col=sample_col,
+        self._kwargs = dict(target=target, task_type=task_type, sample_col=sample_col,
                             ref_sample=ref_sample, feature_labels=feature_labels,
                             date_col=date_col, verbose=False)
         self.df = df
@@ -234,7 +240,7 @@ class PDSegmenterUI:
             features = [c for c in df.columns if c not in skip]
         self.features = features
 
-        self.seg = SequentialPDSegmenter(df, **self._kwargs)
+        self.seg = TreeSegmenter(df, **self._kwargs)
         self.locked: set = set()
         self._pending = None
         self.result = None
@@ -310,7 +316,7 @@ class PDSegmenterUI:
                                         value=0.02, readout_format=".3f",
                                         layout=W.Layout(width="98%"), style=dstyle)
         self.sl_mindiff.tooltip = ("Diferença mínima de taxa de default entre duas bins "
-                                   "consecutivas no binning ótimo (min_event_rate_diff)")
+                                   "consecutivas no binning ótimo (min_mean_diff)")
         self.tx_cuts = W.Text(description="Cortes", layout=W.Layout(width="98%"), style=dstyle,
                               placeholder="num: 0.7,0.9  |  cat: a,b; c")
 
@@ -361,6 +367,37 @@ class PDSegmenterUI:
                               "Constrói uma árvore gulosa por IV até a profundidade escolhida", "magic")
         self.sl_depth = W.IntSlider(description="profundidade", min=1, max=5, value=3,
                                     layout=W.Layout(width="98%"), style=dstyle)
+        # critério do split automático: "optbin" (binning ótimo multi-bin) ou um
+        # critério CART/CHAID (split binário). Opções conforme o tipo de alvo.
+        if self._is_clf:
+            crit_opts = [("Binning ótimo (IV multi-bin)", "optbin"), ("Gini (CART)", "gini"),
+                         ("Entropy / Information Gain", "entropy"), ("KS (separação good/bad)", "ks"),
+                         ("IV gain", "iv"), ("Qui-quadrado (CHAID)", "chi2")]
+        else:
+            crit_opts = [("Binning ótimo (IV multi-bin)", "optbin"),
+                         ("Redução de variância", "variance"),
+                         ("Redução de MAE (robusto)", "mae"), ("F-test / ANOVA", "ftest")]
+        self.dd_criterion = W.Dropdown(description="critério", options=crit_opts,
+                                       value="optbin", layout=W.Layout(width="98%"), style=dstyle)
+        self.dd_criterion.tooltip = ("Como escolher os cortes no Auto-fit: binning ótimo "
+                                     "(multi-bin por IV) ou um critério de split binário (CART/CHAID).")
+        # ---- widgets da aba "Avançado" (sugerir splits, importância, SQL, diff) ----
+        self.btn_suggest3 = mk("Sugerir TOP 3 splits", "info",
+                               "Lista as 3 melhores variáveis p/ dividir a folha selecionada", "lightbulb-o")
+        self.out_suggest = W.HTML()
+        self.btn_importance = mk("Calcular importância", "info",
+                                 "Importância das variáveis que entraram na árvore", "bar-chart")
+        self.out_importance = W.HTML()
+        self.btn_sql = mk("Gerar SQL (CASE WHEN)", "primary",
+                          "Gera a régua como SQL copiável", "database")
+        self.tx_sql_table = W.Text(description="tabela", value="minha_tabela",
+                                   layout=W.Layout(width="60%"), style=dstyle)
+        self.out_sql = W.Textarea(layout=W.Layout(width="99%", height="240px"))
+        self.tx_diff_path = W.Text(description="árvore B (JSON)", placeholder="caminho do .json salvo",
+                                   layout=W.Layout(width="95%"), style=dstyle)
+        self.btn_diff = mk("Comparar com árvore B", "warning",
+                           "Carrega outra árvore (JSON) e compara com a atual", "exchange")
+        self.out_diff = W.HTML()
         # concentração das folhas no auto-fit — REPRESENTATIVIDADE GLOBAL (% da
         # carteira inteira). Cada uma só atua se o respectivo checkbox estiver marcado.
         self.cb_autoconc_min = W.Checkbox(value=True, indent=False,
@@ -419,7 +456,7 @@ class PDSegmenterUI:
         self.btn_validate = mk("Validar (monoton. · calibração · backtest)", "info",
                                "Mostra monotonicidade das notas, calibração prevista×realizada e "
                                "backtest por safra", "check-square-o")
-        self.tx_report_path = W.Text(description="relatório", value="relatorio_validacao_pd.md",
+        self.tx_report_path = W.Text(description="relatório", value="relatorio_validacao.md",
                                      layout=full, style=dstyle, placeholder="caminho .md")
         self.btn_report = mk("Gerar relatório de validação (MD)", "success",
                              "Gera um documento Markdown com árvore, folhas, PSI, CSI, discriminação, "
@@ -504,6 +541,10 @@ class PDSegmenterUI:
         self.btn_merge_r.on_click(lambda _: self._on_merge("right"))
         self.btn_merge_na.on_click(self._on_merge_missing)
         self.btn_suggest.on_click(self._on_suggest)
+        self.btn_suggest3.on_click(self._on_suggest3)
+        self.btn_importance.on_click(self._on_importance)
+        self.btn_sql.on_click(self._on_sql)
+        self.btn_diff.on_click(self._on_diff)
         self.btn_autofit.on_click(self._on_autofit)
         self.btn_mlflow.on_click(self._on_mlflow)
         self.btn_clear_log.on_click(self._on_clear_log)
@@ -519,10 +560,20 @@ class PDSegmenterUI:
         self.dd_sib_sample.options = sib_samples
         self.btn_validate.on_click(self._on_validate)
         self.btn_report.on_click(self._on_report)
-        self.btn_roc.on_click(self._on_roc)
-        self.btn_ks.on_click(self._on_ks)
-        self.btn_badrate.on_click(self._on_badrate)
-        self.btn_scoredist.on_click(self._on_scoredist)
+        if self._is_clf:
+            self.btn_roc.on_click(self._on_roc)
+            self.btn_ks.on_click(self._on_ks)
+            self.btn_badrate.on_click(self._on_badrate)
+            self.btn_scoredist.on_click(self._on_scoredist)
+        else:
+            # regressão: reusa os 2 primeiros botões p/ boxplot e histograma do
+            # alvo; esconde os 2 específicos de classificação (taxa default/dist.)
+            self.btn_roc.description = "📦 Boxplot por folha"
+            self.btn_ks.description = "📊 Histograma do alvo"
+            self.btn_roc.on_click(self._on_box)
+            self.btn_ks.on_click(self._on_hist)
+            self.btn_badrate.layout.display = "none"
+            self.btn_scoredist.layout.display = "none"
         self.btn_undo.on_click(self._on_undo)
         self.btn_redo.on_click(self._on_redo)
         self.btn_automerge.on_click(self._on_automerge)
@@ -582,26 +633,26 @@ class PDSegmenterUI:
         # apareçam (um widget só pode estar em um lugar da árvore de widgets).
         # ================================================================
         banner = W.HTML(_CSS +
-            "<div class='pdui-banner'><div class='logo'>PD</div>"
+            "<div class='treeui-banner'><div class='logo'>PD</div>"
             "<div><div class='t'>Segmentação de PD</div>"
             "<div class='s'>Construtor de árvore · optimal binning binário · KS/AUC ao vivo · "
             "PSI ao vivo (DES) · teste de hipótese entre folhas adjacentes</div></div></div>")
-        bar_box = W.VBox([self.bar]); bar_box.add_class("pdui-bar")
+        bar_box = W.VBox([self.bar]); bar_box.add_class("treeui-bar")
 
         # ---- legendas reutilizadas --------------------------------------
         tree_legend = W.HTML(
-            "<div class='pdui-legend'>cor do quadrado = PD "
+            "<div class='treeui-legend'>cor do quadrado = PD "
             "(<span style='color:#1aa64b'>baixa</span> &rarr; "
             "<span style='color:#caa000'>média</span> &rarr; "
             "<span style='color:#d6453e'>alta</span>) · 🔒 folha fechada</div>")
         iv_legend = W.HTML(
-            "<div class='pdui-legend'><b>IV</b> (optbinning · WoE binário) = poder de "
+            "<div class='treeui-legend'><b>IV</b> (optbinning · WoE binário) = poder de "
             "separação da variável na <b>folha selecionada</b> (★ = maior). Faixas (Siddiqi): "
             "<span style='color:#137a3e'>forte (0,3–0,5)</span> · "
             "<span style='color:#9a6b00'>médio (0,1–0,3)</span> · fraco/inútil (&lt;0,1) · "
             "<span style='color:#6b3fa0'>suspeito (&ge;0,5)</span> (alto demais, verifique vazamento). "
             "<b>bins</b> = nº de faixas ideais do binning ótimo na folha.</div>"
-            "<div class='pdui-legend' style='margin-top:6px;padding-top:6px;"
+            "<div class='treeui-legend' style='margin-top:6px;padding-top:6px;"
             "border-top:1px solid #eef1f4'><b>PSI</b> = estabilidade da variável (DES × demais "
             "amostras), calculado <b>nos mesmos bins do IV</b>, pior caso: "
             "<span style='color:#137a3e'>&lt;0.10 estável</span> · "
@@ -615,40 +666,40 @@ class PDSegmenterUI:
         #     distribuição da variável+cortes | histograma da PD da folha
         #   RODAPÉ: Preview da árvore (imagem) em largura total  (Assistente OFF)
         # ================================================================
-        sep_top = W.HTML("<div class='pdui-band'>① Topo · loop árvore → folha → IV → agir</div>")
+        sep_top = W.HTML("<div class='treeui-band'>① Topo · loop árvore → folha → IV → agir</div>")
 
         tree_scroll = W.Box([self.out_tree],
                             layout=W.Layout(overflow="auto", width="100%",
                                             max_height="420px"))
         card_tree = W.VBox([
-            W.HTML("<div class='pdui-h'>Árvore &amp; quebras</div>"),
+            W.HTML("<div class='treeui-h'>Árvore &amp; quebras</div>"),
             tree_legend, tree_scroll,
         ], layout=W.Layout(width="54%"))
-        card_tree.add_class("pdui-card")
+        card_tree.add_class("treeui-card")
         card_iv = W.VBox([
-            W.HTML("<div class='pdui-h'>Information Value · qual variável segmentar</div>"),
+            W.HTML("<div class='treeui-h'>Information Value · qual variável segmentar</div>"),
             iv_legend, self.out_iv,
         ], layout=W.Layout(width="44%"))
-        card_iv.add_class("pdui-card")
+        card_iv.add_class("treeui-card")
         top_cols = W.HBox([card_tree, card_iv],
                           layout=W.Layout(width="100%", align_items="flex-start",
                                           justify_content="space-between"))
 
         # ---- DETALHE · linha 1: folha (detalhe) | dividir | ações + auto-fit
-        sep_det = W.HTML("<div class='pdui-band pdui-band-muted'>② Detalhe / inspeção — "
+        sep_det = W.HTML("<div class='treeui-band treeui-band-muted'>② Detalhe / inspeção — "
                          "role quando precisar</div>")
-        card_leaf = W.VBox([self.leaf_header]); card_leaf.add_class("pdui-card")
+        card_leaf = W.VBox([self.leaf_header]); card_leaf.add_class("treeui-card")
         det_c1 = W.VBox([card_leaf], layout=W.Layout(width="30%"))
 
         card_split = W.VBox([
-            W.HTML("<div class='pdui-h'>Dividir a folha selecionada</div>"),
+            W.HTML("<div class='treeui-h'>Dividir a folha selecionada</div>"),
             self.dd_leaf, self.dd_feature, self.tg_mode,
             self.sl_bins, self.cb_minbin, self.sl_minbin, self.cb_maxbin, self.sl_maxbin,
             self.cb_mindiff, self.sl_mindiff,
             self.tx_cuts, self.cat_box,
             W.HBox([self.btn_preview, self.btn_split]),
             self.out_preview_seg,
-        ]); card_split.add_class("pdui-card")
+        ]); card_split.add_class("treeui-card")
         det_c2 = W.VBox([card_split], layout=W.Layout(width="44%"))
 
         for _b in (self.btn_lock, self.btn_unlock, self.btn_collapse,
@@ -656,25 +707,26 @@ class PDSegmenterUI:
             _b.layout.width = "100%"
             _b.layout.margin = "2px 0"
         card_actions = W.VBox([
-            W.HTML("<div class='pdui-h'>Ações da folha</div>"),
+            W.HTML("<div class='treeui-h'>Ações da folha</div>"),
             W.HBox([self.btn_undo, self.btn_redo]),
             self.btn_lock, self.btn_unlock, self.btn_collapse,
             W.HBox([self.btn_merge_l, self.btn_merge_r]),   # fundir ◀ / ▶ lado a lado
             self.btn_merge_na,
         ], layout=W.Layout(width="100%"))
-        card_actions.add_class("pdui-card")
+        card_actions.add_class("treeui-card")
         card_autofit = W.VBox([
-            W.HTML("<div class='pdui-h'>Auto-fit</div>"),
-            W.HTML("<div class='pdui-legend'>Constrói a árvore gulosa por IV até a "
+            W.HTML("<div class='treeui-h'>Auto-fit</div>"),
+            W.HTML("<div class='treeui-legend'>Constrói a árvore gulosa por IV até a "
                    "profundidade escolhida. As concentrações são <b>% da carteira inteira</b>: "
                    "<b>mín.</b> evita folhas terminais pequenas; <b>máx.</b> impede que uma "
                    "quebra concentre demais. Com uma <b>folha selecionada</b> (≠ raiz), cresce "
                    "<b>apenas aquela folha</b>; na raiz, reconstrói tudo.</div>"),
             self.sl_depth,
+            self.dd_criterion,
             self.cb_autoconc_min, self.sl_autoconc_min,
             self.cb_autoconc_max, self.sl_autoconc_max,
             W.HBox([self.btn_autofit, self.btn_reset]),
-        ]); card_autofit.add_class("pdui-card")
+        ]); card_autofit.add_class("treeui-card")
         det_c3 = W.VBox([card_actions, card_autofit], layout=W.Layout(width="24%"))
 
         det_row = W.HBox([det_c1, det_c2, det_c3],
@@ -683,17 +735,17 @@ class PDSegmenterUI:
 
         # ---- DETALHE · linha 2: distribuição+cortes (preview) | histograma da PD
         card_preview = W.VBox([
-            W.HTML("<div class='pdui-h'>Distribuição da variável · cortes sugeridos</div>"),
-            W.HTML("<div class='pdui-legend'>Distribuição da variável na folha selecionada "
+            W.HTML("<div class='treeui-h'>Distribuição da variável · cortes sugeridos</div>"),
+            W.HTML("<div class='treeui-legend'>Distribuição da variável na folha selecionada "
                    "(DES), com os cortes propostos marcados.</div>"),
             self.out_preview_chart,
-        ], layout=W.Layout(width="49%")); card_preview.add_class("pdui-card")
+        ], layout=W.Layout(width="49%")); card_preview.add_class("treeui-card")
         card_hist = W.VBox([
-            W.HTML("<div class='pdui-h'>PD da folha (taxa de default · DES)</div>"),
-            W.HTML("<div class='pdui-legend'>Taxa de default da folha selecionada (DES), com IC "
+            W.HTML("<div class='treeui-h'>PD da folha (taxa de default · DES)</div>"),
+            W.HTML("<div class='treeui-legend'>Taxa de default da folha selecionada (DES), com IC "
                    "de Wilson e a PD da carteira como referência.</div>"),
             self.out_leaf_hist,
-        ], layout=W.Layout(width="49%")); card_hist.add_class("pdui-card")
+        ], layout=W.Layout(width="49%")); card_hist.add_class("treeui-card")
         det_bottom = W.HBox([card_preview, card_hist],
                             layout=W.Layout(width="100%", align_items="stretch",
                                             justify_content="space-between"))
@@ -706,17 +758,17 @@ class PDSegmenterUI:
         # (o seletor "Teste" mora aqui; com o Assistente off, usa o padrão Mann-Whitney)
 
         # ---- RODAPÉ: Preview da árvore (imagem), largura total -----------
-        sep_img = W.HTML("<div class='pdui-band pdui-band-muted'>③ Preview da árvore — "
+        sep_img = W.HTML("<div class='treeui-band treeui-band-muted'>③ Preview da árvore — "
                          "imagem em largura total</div>")
         self.btn_tree_preview.layout.width = "auto"
         self.btn_tree_preview_hide.layout.width = "auto"
         card_tree_img = W.VBox([
-            W.HBox([W.HTML("<div class='pdui-h' style='margin:0;flex:1'>Preview da árvore "
+            W.HBox([W.HTML("<div class='treeui-h' style='margin:0;flex:1'>Preview da árvore "
                            "(imagem)</div>"),
                     self.btn_tree_preview, self.btn_tree_preview_hide],
                    layout=W.Layout(align_items="center", width="100%")),
             self.out_tree_img,
-        ], layout=W.Layout(width="100%")); card_tree_img.add_class("pdui-card")
+        ], layout=W.Layout(width="100%")); card_tree_img.add_class("treeui-card")
 
         tab_build = W.VBox([sep_top, self.leaf_chips, top_cols,
                             sep_det, det_row, det_bottom, sep_img, card_tree_img])
@@ -725,7 +777,7 @@ class PDSegmenterUI:
         # ABA ③ DIAGNÓSTICO — folhas · discriminação · métricas · bootstrap · qualidade
         # ================================================================
         tbl_legend = W.HTML(
-            "<div class='pdui-legend'>"
+            "<div class='treeui-legend'>"
             "<b>PSI por amostra</b> (estabilidade da folha entre DES e a amostra): "
             "<span style='background:#e6f6ec;padding:1px 5px;border-radius:3px'>&lt;0.10 estável</span> "
             "<span style='background:#fdf3da;padding:1px 5px;border-radius:3px'>0.10–0.25 atenção</span> "
@@ -739,13 +791,13 @@ class PDSegmenterUI:
             "⇒ <b>não</b> dá para distinguir as irmãs ⇒ candidatas a fusão; "
             "<span style='color:#137a3e'>p baixo</span> ⇒ folhas bem separadas. "
             "Só <b>irmãs</b> são comparadas (a última de cada grupo e o nó de faltantes ficam em branco).</div>")
-        card_table = W.VBox([W.HTML("<div class='pdui-h'>Folhas criadas · PSI &amp; teste de hipótese (irmãs)</div>"),
+        card_table = W.VBox([W.HTML("<div class='treeui-h'>Folhas criadas · PSI &amp; teste de hipótese (irmãs)</div>"),
                              tbl_legend, self.out_table,
                              W.HBox([self.btn_copy_table]), self.out_table_tsv])
-        card_table.add_class("pdui-card")
+        card_table.add_class("treeui-card")
 
         sib_legend = W.HTML(
-            "<div class='pdui-legend'>Compara a <b>PD média</b> das folhas de um mesmo "
+            "<div class='treeui-legend'>Compara a <b>PD média</b> das folhas de um mesmo "
             "pai (<b>folhas-irmãs</b>) e checa se a <b>ordem de risco</b> se mantém. "
             "A ordem de <b>referência</b> é a PD na <b>DES</b>; uma <b>inversão</b> ocorre "
             "quando, numa amostra ou safra, uma folha de menor risco passa a ter PD "
@@ -757,7 +809,7 @@ class PDSegmenterUI:
             "<span style='background:#fbf3e0;padding:1px 5px;border-radius:3px'>amarelo inverte em algumas safras</span> "
             "<span style='background:#fbe7e4;padding:1px 5px;border-radius:3px'>vermelho inverte entre amostras ou em muitas safras</span>.</div>")
         card_sib = W.VBox([
-            W.HTML("<div class='pdui-h'>Folhas-irmãs · inversão entre amostras &amp; safras</div>"),
+            W.HTML("<div class='treeui-h'>Folhas-irmãs · inversão entre amostras &amp; safras</div>"),
             sib_legend,
             W.HBox([self.dd_sib_group], layout=W.Layout(width="100%")),
             W.HBox([self.tx_sib_time, self.dd_sib_sample],
@@ -765,73 +817,73 @@ class PDSegmenterUI:
             W.HBox([self.btn_sib]),
             self.out_sib,
         ], layout=W.Layout(width="100%"))
-        card_sib.add_class("pdui-card")
+        card_sib.add_class("treeui-card")
         self._card_sib = card_sib
 
         discrim_legend = W.HTML(
-            "<div class='pdui-legend'>Poder de <b>ordenação de risco</b> da régua (score = PD "
+            "<div class='treeui-legend'>Poder de <b>ordenação de risco</b> da régua (score = PD "
             "prevista por folha). <b>KS</b> = máxima separação entre as acumuladas de bons e "
             "maus; <b>AUC</b>/<b>Gini</b> = área sob a ROC. Avalie quando a árvore estiver "
             "fechada.</div>")
         card_discrim = W.VBox([
-            W.HTML("<div class='pdui-h'>Discriminação · curva ROC &amp; curva KS</div>"),
+            W.HTML("<div class='treeui-h'>Discriminação · curva ROC &amp; curva KS</div>"),
             discrim_legend,
             W.HBox([self.btn_roc, self.btn_ks]),
             self.out_discrim,
         ])
-        card_discrim.add_class("pdui-card")
+        card_discrim.add_class("treeui-card")
 
         metrics_legend = W.HTML(
-            "<div class='pdui-legend'>a régua prediz a PD pela taxa de default do segmento na "
+            "<div class='treeui-legend'>a régua prediz a PD pela taxa de default do segmento na "
             "referência (DES); avaliada como modelo em cada amostra · "
             "<b>KS</b>/<b>AUC</b>/<b>Gini</b> altos = a segmentação ordena bem o risco · "
             "<b>Acurácia</b>/<b>F1</b> no corte KS-ótimo</div>")
         card_metrics = W.VBox([
-            W.HTML("<div class='pdui-h'>Discriminação (régua como modelo de PD)</div>"),
+            W.HTML("<div class='treeui-h'>Discriminação (régua como modelo de PD)</div>"),
             metrics_legend, self.out_metrics])
-        card_metrics.add_class("pdui-card")
+        card_metrics.add_class("treeui-card")
 
         boot_legend = W.HTML(
-            "<div class='pdui-legend'>IC da PD (taxa de default) por folha via bootstrap na "
+            "<div class='treeui-legend'>IC da PD (taxa de default) por folha via bootstrap na "
             "referência (DES). Se houver OOT, mostra a PD de OOT e verifica a "
             "<b>aderência</b>: <span style='color:#137a3e'>dentro</span> do IC = estável; "
             "<span style='color:#b3261e'>acima/abaixo</span> = PD deslocou além da incerteza "
             "amostral. Calcule quando a árvore estiver fechada.</div>")
         card_boot = W.VBox([
-            W.HTML("<div class='pdui-h'>Intervalos de confiança (bootstrap) &amp; aderência OOT</div>"),
+            W.HTML("<div class='treeui-h'>Intervalos de confiança (bootstrap) &amp; aderência OOT</div>"),
             boot_legend,
             W.HBox([self.sl_boot, self.btn_boot],
                    layout=W.Layout(align_items="center")),
             self.out_boot])
-        card_boot.add_class("pdui-card")
+        card_boot.add_class("treeui-card")
 
         quality_legend = W.HTML(
-            "<div class='pdui-legend'>Qualidade dos segmentos: <b>taxa de default por folha</b> "
+            "<div class='treeui-legend'>Qualidade dos segmentos: <b>taxa de default por folha</b> "
             "(com IC de Wilson — separação de risco e incerteza) e <b>distribuição do score</b> "
             "por classe (quanto mais separadas as massas de bons e maus, melhor o KS/AUC). "
             "<i>A PD por faixa da variável aparece embaixo da tabela ao clicar em 👁 Preview.</i></div>")
         card_quality = W.VBox([
-            W.HTML("<div class='pdui-h'>Qualidade dos segmentos</div>"),
+            W.HTML("<div class='treeui-h'>Qualidade dos segmentos</div>"),
             quality_legend,
             W.HBox([self.btn_badrate, self.btn_scoredist]),
             self.out_quality,
         ])
-        card_quality.add_class("pdui-card")
+        card_quality.add_class("treeui-card")
         self._card_quality = card_quality
 
         # ---- PLACAR DE SAÚDE DO MODELO (visão estatística de relance) -------
-        sep_diag = W.HTML("<div class='pdui-band'>Placar de saúde do modelo · "
+        sep_diag = W.HTML("<div class='treeui-band'>Placar de saúde do modelo · "
                           "discriminação · estabilidade · calibração · estrutura</div>")
         card_score = W.VBox([
-            W.HTML("<div class='pdui-legend'>Veredito de relance em 4 dimensões "
+            W.HTML("<div class='treeui-legend'>Veredito de relance em 4 dimensões "
                    "(verde/amarelo/vermelho) reunindo os testes das outras abas — AUC/Gini/KS, "
                    "PSI/CSI, calibração prevista×observada e monotonicidade · distinção entre "
                    "folhas-irmãs — com a evidência logo abaixo. Clique para (re)calcular.</div>"),
             W.HBox([self.btn_diag]),
             self.out_diag,
         ], layout=W.Layout(width="100%"))
-        card_score.add_class("pdui-card")
-        sep_diag2 = W.HTML("<div class='pdui-band pdui-band-muted'>Evidência detalhada · "
+        card_score.add_class("treeui-card")
+        sep_diag2 = W.HTML("<div class='treeui-band treeui-band-muted'>Evidência detalhada · "
                            "folhas · discriminação (ROC/KS) · métricas · IC bootstrap · qualidade</div>")
         tab_diag = W.VBox([sep_diag, card_score, sep_diag2,
                            card_metrics, card_table, card_sib, card_discrim,
@@ -840,50 +892,50 @@ class PDSegmenterUI:
         # ================================================================
         # ABA ④ VALIDAR & EXPORTAR — duas faixas: validação · exportar/registrar
         # ================================================================
-        sep_val = W.HTML("<div class='pdui-band'>① Validação regulatória · "
+        sep_val = W.HTML("<div class='treeui-band'>① Validação regulatória · "
                          "monotonicidade · calibração · backtest</div>")
         valid_legend = W.HTML(
-            "<div class='pdui-legend'>Roda as três checagens: <b>monotonicidade</b> da PD nas "
+            "<div class='treeui-legend'>Roda as três checagens: <b>monotonicidade</b> da PD nas "
             "notas (DES e demais amostras), <b>calibração</b> prevista (DES) × realizada (OOT) por "
             "folha, e <b>backtest</b> da PD prevista × realizada por safra (informe a coluna de "
             "tempo). O <b>relatório</b> reúne tudo num Markdown com as imagens.</div>")
         card_validacao = W.VBox([
-            W.HTML("<div class='pdui-h'>Rodar validação</div>"),
+            W.HTML("<div class='treeui-h'>Rodar validação</div>"),
             valid_legend,
             W.HBox([self.tx_time_col, self.btn_validate],
                    layout=W.Layout(align_items="center")),
             self.out_validate,
-            W.HTML("<div class='pdui-h' style='margin-top:10px'>Relatório de validação (Markdown)</div>"),
+            W.HTML("<div class='treeui-h' style='margin-top:10px'>Relatório de validação (Markdown)</div>"),
             W.HBox([self.tx_report_path, self.btn_report],
                    layout=W.Layout(align_items="center")),
         ], layout=W.Layout(width="100%"))
-        card_validacao.add_class("pdui-card")
+        card_validacao.add_class("treeui-card")
         self._card_validacao = card_validacao
 
-        sep_exp = W.HTML("<div class='pdui-band pdui-band-muted'>② Exportar &amp; registrar</div>")
+        sep_exp = W.HTML("<div class='treeui-band treeui-band-muted'>② Exportar &amp; registrar</div>")
         card_export_df = W.VBox([
-            W.HTML("<div class='pdui-h'>Exportar DataFrame rotulado</div>"),
-            W.HTML("<div class='pdui-legend'>Gera <b>ui.result</b> (pandas) com a coluna de "
+            W.HTML("<div class='treeui-h'>Exportar DataFrame rotulado</div>"),
+            W.HTML("<div class='treeui-legend'>Gera <b>ui.result</b> (pandas) com a coluna de "
                    "segmento e a nota (folha) por linha.</div>"),
             W.HBox([self.btn_export]),
         ], layout=W.Layout(width="100%"))
-        card_export_df.add_class("pdui-card")
+        card_export_df.add_class("treeui-card")
         card_mlflow = W.VBox([
-            W.HTML("<div class='pdui-h'>Registrar no MLflow / Unity Catalog</div>"),
-            W.HTML("<div class='pdui-legend'>Loga régua, métricas e o modelo pyfunc e registra a "
+            W.HTML("<div class='treeui-h'>Registrar no MLflow / Unity Catalog</div>"),
+            W.HTML("<div class='treeui-legend'>Loga régua, métricas e o modelo pyfunc e registra a "
                    "versão no Model Registry.</div>"),
             self.tx_model, self.cb_uc, self.tx_experiment, self.tx_runname,
             W.HBox([self.btn_mlflow]),
         ], layout=W.Layout(width="50%"))
-        card_mlflow.add_class("pdui-card")
+        card_mlflow.add_class("treeui-card")
         card_spark = W.VBox([
-            W.HTML("<div class='pdui-h'>Reconstruir folhas em tabela Spark</div>"),
-            W.HTML("<div class='pdui-legend'>Aplica a régua a uma tabela Spark (segmento, nota e "
+            W.HTML("<div class='treeui-h'>Reconstruir folhas em tabela Spark</div>"),
+            W.HTML("<div class='treeui-legend'>Aplica a régua a uma tabela Spark (segmento, nota e "
                    "PD por linha), gravando opcionalmente o resultado.</div>"),
             self.tx_spark_in, self.tx_spark_out,
             W.HBox([self.btn_spark_apply]),
         ], layout=W.Layout(width="48%"))
-        card_spark.add_class("pdui-card")
+        card_spark.add_class("treeui-card")
         export_row = W.HBox([card_mlflow, card_spark],
                             layout=W.Layout(width="100%", align_items="flex-start",
                                             justify_content="space-between"))
@@ -892,23 +944,23 @@ class PDSegmenterUI:
         # ================================================================
         # ABA ⑤ HISTÓRICO — persistência (JSON) · imagem da árvore (lado a lado)
         # ================================================================
-        sep_hist = W.HTML("<div class='pdui-band'>Histórico &amp; persistência</div>")
+        sep_hist = W.HTML("<div class='treeui-band'>Histórico &amp; persistência</div>")
         card_json = W.VBox([
-            W.HTML("<div class='pdui-h'>Salvar / carregar árvore (JSON)</div>"),
-            W.HTML("<div class='pdui-legend'>Salva a estrutura completa (regras e folhas "
+            W.HTML("<div class='treeui-h'>Salvar / carregar árvore (JSON)</div>"),
+            W.HTML("<div class='treeui-legend'>Salva a estrutura completa (regras e folhas "
                    "fechadas) num .json e recarrega depois. Para o passo a passo, use "
                    "◀ Desfazer / Refazer ▶ na aba <b>Construir</b>.</div>"),
             self.tx_json_path,
             W.HBox([self.btn_save_json, self.btn_load_json]),
         ], layout=W.Layout(width="49%"))
-        card_json.add_class("pdui-card")
+        card_json.add_class("treeui-card")
         card_img = W.VBox([
-            W.HTML("<div class='pdui-h'>Imagem da árvore (PD média &amp; % por folha)</div>"),
+            W.HTML("<div class='treeui-h'>Imagem da árvore (PD média &amp; % por folha)</div>"),
             self.tx_img_path,
             W.HBox([self.btn_plot, self.btn_plot_hide]),
             self.out_plot,
         ], layout=W.Layout(width="49%"))
-        card_img.add_class("pdui-card")
+        card_img.add_class("treeui-card")
         hist_row = W.HBox([card_json, card_img],
                           layout=W.Layout(width="100%", align_items="stretch",
                                           justify_content="space-between"))
@@ -924,8 +976,8 @@ class PDSegmenterUI:
         self.tx_var_time.layout = W.Layout(width="22%")
         self.btn_var_analyze.layout = W.Layout(width="auto")
         var_controls = W.VBox([
-            W.HTML("<div class='pdui-h'>Análise de variáveis</div>"),
-            W.HTML("<div class='pdui-legend'>Perfil de uma variável de entrada numa folha: "
+            W.HTML("<div class='treeui-h'>Análise de variáveis</div>"),
+            W.HTML("<div class='treeui-legend'>Perfil de uma variável de entrada numa folha: "
                    "distribuição, %missing, média/mediana/desvio, faixa de percentis, PSI atual "
                    "e o comportamento por safra (percentis e PSI). Informe a <b>coluna de "
                    "safra</b> (ex.: dt_ref) para as análises temporais.</div>"),
@@ -933,57 +985,89 @@ class PDSegmenterUI:
                    layout=W.Layout(align_items="flex-end", justify_content="space-between",
                                    width="100%")),
         ])
-        var_controls.add_class("pdui-card")
+        var_controls.add_class("treeui-card")
         card_var_dist = W.VBox([
-            W.HTML("<div class='pdui-h'>Comportamento da variável · distribuição</div>"),
+            W.HTML("<div class='treeui-h'>Comportamento da variável · distribuição</div>"),
             self.out_var_dist], layout=W.Layout(width="52%"))
-        card_var_dist.add_class("pdui-card")
+        card_var_dist.add_class("treeui-card")
         card_var_cards = W.VBox([
-            W.HTML("<div class='pdui-h'>Resumo &amp; estabilidade</div>"),
+            W.HTML("<div class='treeui-h'>Resumo &amp; estabilidade</div>"),
             self.out_var_cards], layout=W.Layout(width="46%"))
-        card_var_cards.add_class("pdui-card")
+        card_var_cards.add_class("treeui-card")
         var_row_a = W.HBox([card_var_dist, card_var_cards],
                            layout=W.Layout(justify_content="space-between",
                                            align_items="stretch", width="100%"))
         card_var_time = W.VBox([
-            W.HTML("<div class='pdui-h'>Comportamento ao longo do tempo · por safra</div>"),
-            W.HTML("<div class='pdui-legend'>Numérica: percentis (min–max, p5–p95, média) por "
+            W.HTML("<div class='treeui-h'>Comportamento ao longo do tempo · por safra</div>"),
+            W.HTML("<div class='treeui-legend'>Numérica: percentis (min–max, p5–p95, média) por "
                    "safra. Categórica: representatividade (%) de cada categoria por safra.</div>"),
             self.out_var_time])
-        card_var_time.add_class("pdui-card")
+        card_var_time.add_class("treeui-card")
         card_var_table = W.VBox([
-            W.HTML("<div class='pdui-h'>Detalhe por safra</div>"),
+            W.HTML("<div class='treeui-h'>Detalhe por safra</div>"),
             self.out_var_table], layout=W.Layout(width="48%"))
-        card_var_table.add_class("pdui-card")
+        card_var_table.add_class("treeui-card")
         card_var_psi = W.VBox([
-            W.HTML("<div class='pdui-h'>PSI por safra · vs. data de referência (DES)</div>"),
+            W.HTML("<div class='treeui-h'>PSI por safra · vs. data de referência (DES)</div>"),
             self.out_var_psi], layout=W.Layout(width="50%"))
-        card_var_psi.add_class("pdui-card")
+        card_var_psi.add_class("treeui-card")
         var_row_b = W.HBox([card_var_table, card_var_psi],
                            layout=W.Layout(justify_content="space-between",
                                            align_items="flex-start", width="100%"))
         tab_var = W.VBox([var_controls, var_row_a, card_var_time, var_row_b])
 
+        # ---- ABA AVANÇADO: sugerir splits · auto-merge · importância · SQL · diff ----
+        card_sug = W.VBox([
+            W.HTML("<div class='treeui-h'>Sugerir splits (TOP 3)</div>"),
+            W.HTML("<div class='treeui-legend'>As 3 variáveis de maior IV para a <b>folha "
+                   "selecionada</b> (aba Construir), com nº de bins, PSI por amostra (OOT/"
+                   "ESTABILIDADE), se a separação de risco passa no teste de hipótese e o IV.</div>"),
+            self.btn_suggest3, self.out_suggest]); card_sug.add_class("treeui-card")
+        card_merge = W.VBox([
+            W.HTML("<div class='treeui-h'>Auto-merge de folhas semelhantes</div>"),
+            W.HTML("<div class='treeui-legend'>Funde folhas-irmãs com risco estatisticamente "
+                   "<b>indistinguível</b> (p &gt; α no teste entre adjacentes).</div>"),
+            self.sl_alpha, self.cb_automerge_na, self.btn_automerge]); card_merge.add_class("treeui-card")
+        card_imp = W.VBox([
+            W.HTML("<div class='treeui-h'>Importância das variáveis (na árvore)</div>"),
+            W.HTML("<div class='treeui-legend'>Ganho de IV ponderado pela representatividade do nó, "
+                   "somado por variável que <b>entrou</b> na árvore.</div>"),
+            self.btn_importance, self.out_importance]); card_imp.add_class("treeui-card")
+        card_sql = W.VBox([
+            W.HTML("<div class='treeui-h'>Exportar como SQL (CASE WHEN)</div>"),
+            W.HTML("<div class='treeui-legend'>Régua pronta para copiar e colar. Ajuste o nome da "
+                   "tabela de origem.</div>"),
+            W.HBox([self.tx_sql_table, self.btn_sql]), self.out_sql]); card_sql.add_class("treeui-card")
+        card_diff = W.VBox([
+            W.HTML("<div class='treeui-h'>Comparar duas árvores (versões)</div>"),
+            W.HTML("<div class='treeui-legend'>Carrega outra árvore salva em JSON e compara com a "
+                   "atual: migração de notas, concordância e métricas lado a lado.</div>"),
+            W.HBox([self.tx_diff_path, self.btn_diff]), self.out_diff]); card_diff.add_class("treeui-card")
+        tab_avancado = W.VBox([
+            W.HBox([card_sug, card_merge],
+                   layout=W.Layout(justify_content="space-between", width="100%")),
+            card_imp, card_sql, card_diff])
+
         # ---- montagem das abas (Análise de variável vem em 2º) ----------
-        tabs = W.Tab(children=[tab_build, tab_var, tab_diag, tab_valid, tab_hist])
+        tabs = W.Tab(children=[tab_build, tab_var, tab_diag, tab_valid, tab_avancado, tab_hist])
         for i, titulo in enumerate(["Construir", "Análise de variáveis", "Diagnóstico",
-                                    "Validar & Exportar", "Histórico"]):
+                                    "Validar & Exportar", "Avançado", "Histórico"]):
             tabs.set_title(i, titulo)
-        tabs.add_class("pdui-tabs")
+        tabs.add_class("treeui-tabs")
 
         # ---- console persistente (log de todas as abas) -----------------
         self.btn_clear_log.layout.width = "150px"
         console = W.VBox([
-            W.HBox([W.HTML("<div class='pdui-h' style='margin-bottom:0'>"
+            W.HBox([W.HTML("<div class='treeui-h' style='margin-bottom:0'>"
                            "Console · mensagens das ações</div>"),
                     self.btn_clear_log],
                    layout=W.Layout(justify_content="space-between", align_items="center")),
             self.out_log,
         ])
-        console.add_class("pdui-card")
+        console.add_class("treeui-card")
 
         self.panel = W.VBox([banner, bar_box, tabs, console])
-        self.panel.add_class("pdui")
+        self.panel.add_class("treeui")
 
     # ==================================================================
     # Render
@@ -998,16 +1082,16 @@ class PDSegmenterUI:
         g = int(166 - (166 - 69) * max(0, 2 * t - 1)) if t > 0.5 else 166
         return f"rgb({r},{g},69)"
 
-    def _node_pd(self, sid, sample=None):
+    def _node_value(self, sid, sample=None):
         m = self.seg.segments[sid]["mask"]
         if sample is not None and sample in self._sample_masks:
             m = m & self._sample_masks[sample]
         sub = self.df[m]
         return sub[self.target].mean() if len(sub) else float("nan")
 
-    def _leaf_pds(self):
+    def _leaf_values(self):
         ref = self.ref_sample if self.sample_col is not None else None
-        vals = [self._node_pd(sid, ref)
+        vals = [self._node_value(sid, ref)
                 for sid, s in self.seg.segments.items() if s["is_leaf"]]
         vals = [v for v in vals if not pd.isna(v)]
         return (min(vals), max(vals)) if vals else (0.0, 1.0)
@@ -1016,7 +1100,7 @@ class PDSegmenterUI:
     def _psi_class(p):
         return "green" if p < 0.10 else "yellow" if p < 0.25 else "red"
 
-    def _sample_pd_test(self, sid, a, b, min_n=8):
+    def _sample_value_test(self, sid, a, b, min_n=8):
         """Teste de hipótese comparando a PD (taxa de default) da MESMA folha entre
         as amostras `a` (ex.: DES) e `b` (ex.: OOT) — aderência da PD entre amostras.
         Usa o teste do seletor (Mann-Whitney ou Welch t).
@@ -1075,7 +1159,7 @@ class PDSegmenterUI:
         PD DES, volumetria e repr.) — o detalhe completo fica na faixa de baixo."""
         sid = self.dd_leaf.value
         if sid is None or sid not in self.seg.segments:
-            return ("<div class='pdui-chips'><span class='lab'>Nenhuma folha "
+            return ("<div class='treeui-chips'><span class='lab'>Nenhuma folha "
                     "selecionada</span></div>")
         s = self.seg.segments[sid]
         nota_map, _ = self.seg._grade_map()
@@ -1083,7 +1167,7 @@ class PDSegmenterUI:
         n = int(s["mask"].sum())
         rep = 100 * n / len(self.df) if len(self.df) else 0.0
         ref = self.ref_sample if self.sample_col is not None else None
-        pdv = self._node_pd(sid, ref)
+        pdv = self._node_value(sid, ref)
         pd_txt = "—" if pd.isna(pdv) else f"{pdv * 100:.2f}%"
         label = ("TODA A CARTEIRA" if s["parent"] is None
                  else self.seg._descrever(s["conditions"]))
@@ -1092,7 +1176,7 @@ class PDSegmenterUI:
         vol = f"{n:,}".replace(",", ".")
         lock = " 🔒" if sid in self.locked else ""
         return (
-            "<div class='pdui-chips'><span class='lab'>folha ativa</span>"
+            "<div class='treeui-chips'><span class='lab'>folha ativa</span>"
             f"<span class='chip'><b>#{nota}</b> · {label}{lock}</span>"
             f"<span class='chip'>PD {pd_txt}</span>"
             f"<span class='chip'>vol {vol}</span>"
@@ -1131,29 +1215,37 @@ class PDSegmenterUI:
                                       badge=r["classificacao"], cls=c))
             except Exception:
                 pass
-        # discriminação: KS e AUC por amostra (substituem o R² da LGD)
+        # discriminação ao vivo: KS/AUC (classificação) ou R² (regressão)
         try:
             for _, r in seg.metrics().iterrows():
-                ks, auc = r["KS"], r["AUC"]
-                if pd.isna(ks):
-                    cells.append(cell(f"KS {r['amostra']}", "—", color="#8a93a3"))
+                if self._is_clf:
+                    ks, auc = r["KS"], r["AUC"]
+                    if pd.isna(ks):
+                        cells.append(cell(f"KS {r['amostra']}", "—", color="#8a93a3"))
+                    else:
+                        c = "green" if ks >= 0.30 else "yellow" if ks >= 0.20 else "red"
+                        badge = "bom" if c == "green" else "atenção" if c == "yellow" else "fraco"
+                        cells.append(cell(f"KS {r['amostra']}", f"{ks:.3f}", color=hexc[c],
+                                          badge=badge, cls=c))
+                    if pd.isna(auc):
+                        cells.append(cell(f"AUC {r['amostra']}", "—", color="#8a93a3"))
+                    else:
+                        c = "green" if auc >= 0.70 else "yellow" if auc >= 0.60 else "red"
+                        cells.append(cell(f"AUC {r['amostra']}", f"{auc:.3f}", color=hexc[c]))
                 else:
-                    c = "green" if ks >= 0.30 else "yellow" if ks >= 0.20 else "red"
-                    badge = "bom" if c == "green" else "atenção" if c == "yellow" else "fraco"
-                    cells.append(cell(f"KS {r['amostra']}", f"{ks:.3f}", color=hexc[c],
-                                      badge=badge, cls=c))
-                if pd.isna(auc):
-                    cells.append(cell(f"AUC {r['amostra']}", "—", color="#8a93a3"))
-                else:
-                    c = "green" if auc >= 0.70 else "yellow" if auc >= 0.60 else "red"
-                    cells.append(cell(f"AUC {r['amostra']}", f"{auc:.3f}", color=hexc[c]))
+                    r2 = r["R2"]
+                    if pd.isna(r2):
+                        cells.append(cell(f"R² {r['amostra']}", "—", color="#8a93a3"))
+                    else:
+                        c = "green" if r2 >= 0.5 else "yellow" if r2 >= 0.2 else "red"
+                        cells.append(cell(f"R² {r['amostra']}", f"{r2:.3f}", color=hexc[c]))
         except Exception:
             pass
         return f"<div style='display:flex;align-items:stretch'>{''.join(cells)}</div>"
 
     def _min_nota_fn(self, filhos, nota_map):
         """min_nota(sid) = menor nota do ramo — ordena os filhos esquerda→direita
-        de forma consistente com a numeração (nota_pd = posição na árvore)."""
+        de forma consistente com a numeração (nota = posição na árvore)."""
         cache: dict = {}
 
         def min_nota(sid):
@@ -1174,7 +1266,7 @@ class PDSegmenterUI:
             filhos.setdefault(s["parent"], []).append(sid)
         nota_map, _ = seg._grade_map()
         min_nota = self._min_nota_fn(filhos, nota_map)
-        lo, hi = self._leaf_pds()
+        lo, hi = self._leaf_values()
         n_total = len(self.df)
         rows = []
 
@@ -1182,13 +1274,13 @@ class PDSegmenterUI:
             sub = self.df[seg.segments[sid]["mask"]]
             return len(sub), 100 * len(sub) / n_total
 
-        def pd_str(sid):
+        def value_str(sid):
             if self.sample_col is not None:
-                parts = [f"{self.ref_sample} {self._node_pd(sid, self.ref_sample) * 100:.2f}%"]
+                parts = [f"{self.ref_sample} {self._node_value(sid, self.ref_sample) * 100:.2f}%"]
                 for a in self._tree_nonref:          # só amostras COM alvo (sem ESTABILIDADE)
-                    parts.append(f"{a} {self._node_pd(sid, a) * 100:.2f}%")
+                    parts.append(f"{a} {self._node_value(sid, a) * 100:.2f}%")
                 return "PD " + " ".join(parts)
-            return f"PD {self._node_pd(sid) * 100:.2f}%"
+            return f"PD {self._node_value(sid) * 100:.2f}%"
 
         psi_hex = {"green": "#1aa64b", "yellow": "#caa000", "red": "#d6453e"}
         # "barrinha" vertical que separa o bloco PD do bloco PSI na linha da folha
@@ -1219,7 +1311,7 @@ class PDSegmenterUI:
             s = seg.segments[sid]
             conn = "" if is_root else ("└─ " if is_last else "├─ ")
             ref = self.ref_sample if self.sample_col is not None else None
-            color = self._color(self._node_pd(sid, ref), lo, hi)
+            color = self._color(self._node_value(sid, ref), lo, hi)
             sw = (f"<span style='display:inline-block;width:11px;height:11px;background:{color};"
                   f"border-radius:2px;vertical-align:middle;margin:0 5px'></span>")
             is_sel = (s["is_leaf"] and sid == self.dd_leaf.value)
@@ -1241,7 +1333,7 @@ class PDSegmenterUI:
             # linha 2 — métricas EMBAIXO: volumetria, representatividade, PD e PSI
             vol = f"{n:,}".replace(",", ".")        # separador de milhar pt-BR
             linha2 = (f"<div style='{mono};font-size:11px;color:#7c8893;padding:0 2px 3px'>"
-                      f"{cont}    vol {vol} · repr. {rep:.1f}%{sep_bar}{pd_str(sid)}{psi_html}</div>")
+                      f"{cont}    vol {vol} · repr. {rep:.1f}%{sep_bar}{value_str(sid)}{psi_html}</div>")
             wrap = ("background:#fff5e6;border-radius:5px;box-shadow:inset 3px 0 0 #e8870b"
                     if is_sel else "")
             rows.append(f"<div style='{wrap}'>{linha1}{linha2}</div>")
@@ -1251,7 +1343,7 @@ class PDSegmenterUI:
                 rec(c, child_prefix, i == len(ch) - 1, False)
 
         rec("root", "", True, True)
-        return "<div class='pdui-tree'>" + "".join(rows) + "</div>"
+        return "<div class='treeui-tree'>" + "".join(rows) + "</div>"
 
     def _style_leaves(self, lv):
         psi_cols = [c for c in lv.columns if c.startswith("psi_")]
@@ -1313,9 +1405,9 @@ class PDSegmenterUI:
         s = self.seg.segments[sid]
         leaf = s["mask"]
         n = int(leaf.sum())
-        lo, hi = self._leaf_pds()
+        lo, hi = self._leaf_values()
         ref = self.ref_sample if self.sample_col is not None else None
-        color = self._color(self._node_pd(sid, ref), lo, hi)
+        color = self._color(self._node_value(sid, ref), lo, hi)
         nota_map, _ = self.seg._grade_map()
         nota = nota_map.get(sid, "?")
         label = ("TODA A CARTEIRA" if s["parent"] is None
@@ -1333,7 +1425,7 @@ class PDSegmenterUI:
             sty = f" style='color:{c}'" if c else ""
             sub_html = (f"<div style='font-size:10.5px;margin-top:1px;white-space:nowrap;"
                         f"color:#8a93a3'>{sub}</div>") if sub else ""
-            return (f"<div class='pdui-metric'><div class='k'>{k}</div>"
+            return (f"<div class='treeui-metric'><div class='k'>{k}</div>"
                     f"<div class='v mono'{sty}>{v}</div>{sub_html}</div>")
 
         head = (
@@ -1344,14 +1436,14 @@ class PDSegmenterUI:
             f"<span style='font-size:15px;font-weight:600;color:#15324a'>{label}</span>"
             f"{badge}<span class='pill pill-muted'>folha {nota}</span></div>")
 
-        sec_h = ("<div class='pdui-h' style='margin-top:11px'>{}</div>").format
+        sec_h = ("<div class='treeui-h' style='margin-top:11px'>{}</div>").format
 
         if self.sample_col is None:
             rep = 100 * n / len(self.df) if len(self.df) else 0.0
             cells = (chip("Volumetria", f"{n:,}".replace(",", "."))
                      + chip("Repr.", f"{rep:.1f}%")
-                     + chip("PD", f"{self._node_pd(sid) * 100:.2f}%"))
-            return head + f"<div class='pdui-metrics'>{cells}</div>"
+                     + chip("PD", f"{self._node_value(sid) * 100:.2f}%"))
+            return head + f"<div class='treeui-metrics'>{cells}</div>"
 
         sm = self._sample_masks
         ordered_nonref = list(self._pd_nonref) + list(self._psi_only)
@@ -1366,11 +1458,11 @@ class PDSegmenterUI:
             sec1 += chip(f"Repr. {ab(a)}", "—" if pd.isna(rp) else f"{rp:.1f}%")
 
         # 2) PD média (DES e demais) + incremento de cada amostra vs DES
-        pd_ref = self._node_pd(sid, self.ref_sample)
+        pd_ref = self._node_value(sid, self.ref_sample)
         sec2 = chip(f"PD {self.ref_sample}",
                     "—" if pd.isna(pd_ref) else f"{pd_ref * 100:.2f}%", sub="referência")
         for a in self._pd_nonref:
-            v = self._node_pd(sid, a)
+            v = self._node_value(sid, a)
             if pd.isna(v) or pd.isna(pd_ref):
                 sec2 += chip(f"PD {ab(a)}", "—" if pd.isna(v) else f"{v * 100:.2f}%")
                 continue
@@ -1383,7 +1475,7 @@ class PDSegmenterUI:
         # 3) Aderência DES → amostra (teste de hipótese: nome + p-valor)
         test_rows = ""
         for a in self._pd_nonref:
-            name, p, na, nb = self._sample_pd_test(sid, self.ref_sample, a)
+            name, p, na, nb = self._sample_value_test(sid, self.ref_sample, a)
             if pd.isna(p):
                 pv, verdict = "—", "<span class='pill pill-muted'>amostra insuficiente</span>"
             else:
@@ -1457,9 +1549,9 @@ class PDSegmenterUI:
 
         out = (head
                + sec_h("Volumetria &amp; representatividade")
-               + f"<div class='pdui-metrics'>{sec1}</div>"
+               + f"<div class='treeui-metrics'>{sec1}</div>"
                + sec_h("PD média &amp; incremento vs DES")
-               + f"<div class='pdui-metrics'>{sec2}</div>")
+               + f"<div class='treeui-metrics'>{sec2}</div>")
         h0_css = "font-size:10.5px;color:#8a93a3;margin:1px 0 6px;line-height:1.5"
         if test_rows:
             out += (sec_h("Aderência DES → amostra (teste de hipótese)")
@@ -1501,7 +1593,7 @@ class PDSegmenterUI:
         """(lv, cols, headers) da tabela de folhas — fonte única para a versão
         renderizada (HTML) e para a versão copiável (TSV p/ Excel)."""
         lv = self.seg.leaves(with_psi=True, with_test=True, test=self.dd_test.value)
-        lv = lv.rename(columns={"nota_pd": "folha"})   # chamamos de folha, não nota
+        lv = lv.rename(columns={"nota": "folha"})   # chamamos de folha, não nota
 
         def ab(a):
             return "ESTAB" if a == "ESTABILIDADE" else a
@@ -1512,7 +1604,7 @@ class PDSegmenterUI:
         cols = ["folha", "descricao"]
         headers = {"folha": "folha", "descricao": "descrição"}
         if self.sample_col is None:
-            for c, h in (("repr_%", "repr. %"), ("pd_medio", "PD média")):
+            for c, h in (("repr_%", "repr. %"), ("valor_medio", "PD média")):
                 if c in lv.columns:
                     cols.append(c); headers[c] = h
         else:
@@ -1521,7 +1613,7 @@ class PDSegmenterUI:
                 if c in lv.columns:
                     cols.append(c); headers[c] = f"% {ab(a)}"
             for a in [self.ref_sample] + self._pd_nonref:    # PD DES · PD OOT
-                c = f"pd_{a}"
+                c = f"valor_{a}"
                 if c in lv.columns:
                     cols.append(c); headers[c] = f"PD {ab(a)}"
             for a in self._nonref:                           # PSI OOT · PSI ESTAB
@@ -1584,10 +1676,20 @@ class PDSegmenterUI:
                 return "color:#aab"
             c = "#e6f6ec" if v >= 0.70 else "#fdf3da" if v >= 0.60 else "#fde7e7"
             return f"background-color:{c};font-weight:600"
-        fmt = {c: "{:.4f}" for c in ("taxa_default", "KS", "AUC", "Gini", "Acuracia", "F1")}
-        sty = (m.style
-               .map(ks_bg, subset=["KS"])
-               .map(auc_bg, subset=["AUC"])
+
+        def r2_bg(v):
+            if pd.isna(v):
+                return "color:#aab"
+            c = "#e6f6ec" if v >= 0.5 else "#fdf3da" if v >= 0.2 else "#fde7e7"
+            return f"background-color:{c};font-weight:600"
+
+        if self._is_clf:
+            fmt = {c: "{:.4f}" for c in ("taxa_default", "KS", "AUC", "Gini", "Acuracia", "F1")}
+            sty = (m.style.map(ks_bg, subset=["KS"]).map(auc_bg, subset=["AUC"]))
+        else:
+            fmt = {c: "{:.4f}" for c in ("MAE", "RMSE", "R2")}
+            sty = m.style.map(r2_bg, subset=["R2"])
+        sty = (sty
                .format(fmt, na_rep="—")
                .hide(axis="index")
                .set_table_styles(self._TABLE_STYLES)
@@ -1611,7 +1713,7 @@ class PDSegmenterUI:
         n_total = len(self.df)
         min_nota = self._min_nota_fn(filhos, nota_map)
 
-        def pd_of(sid):
+        def value_of(sid):
             sub = self.df[seg.segments[sid]["mask"]]
             return sub[self.target].mean() if len(sub) else float("inf")
 
@@ -1625,7 +1727,7 @@ class PDSegmenterUI:
                 rep = 100 * s["mask"].sum() / n_total
                 lock = "🔒 " if sid in self.locked else ""
                 nota = nota_map.get(sid, "?")
-                label = f"[{nota:>2}] {lock}{own}  (PD {pd_of(sid) * 100:.2f}% · {rep:.0f}%)"
+                label = f"[{nota:>2}] {lock}{own}  (PD {value_of(sid) * 100:.2f}% · {rep:.0f}%)"
                 opts.append((label, sid))
             for c in sorted(filhos.get(sid, []), key=min_nota):   # esquerda→direita
                 rec(c)
@@ -1686,6 +1788,13 @@ class PDSegmenterUI:
 
     def _on_mode_change(self, _):
         """Mostra o controle certo conforme modo e tipo da variável."""
+        # Trocar folha/variável/modo invalida qualquer preview pendente — senão o
+        # "Criar segmento" aplicaria o split na folha/variável antiga (capturada no
+        # Preview), e não na seleção atual exibida nos controles.
+        self._pending = None
+        if hasattr(self, "out_preview_seg"):      # widgets ainda não existem na 1ª chamada (__init__)
+            self.out_preview_seg.value = ""
+            self.out_preview_chart.value = ""
         manual = self.tg_mode.value == "Manual"
         cat = self._feature_kind() == "cat"
         self.sl_bins.layout.display = "none" if manual else ""           # máx. bins: só Ótimo
@@ -1720,7 +1829,7 @@ class PDSegmenterUI:
         if self.cb_maxbin.value:
             extra["max_bin_size"] = float(self.sl_maxbin.value)
         if self.cb_mindiff.value:
-            extra["min_event_rate_diff"] = float(self.sl_mindiff.value)
+            extra["min_mean_diff"] = float(self.sl_mindiff.value)
         return extra
 
     def _rebuild_cat_box(self):
@@ -1771,7 +1880,7 @@ class PDSegmenterUI:
         sid = self._selected_leaf()
         with self.out_log:
             self.out_log.clear_output(wait=True)
-            if sid is None:
+            if sid is None or sid not in self.seg.segments:
                 print("Nenhuma folha selecionada."); return
             parent = self.seg.segments[sid]["parent"]
             if parent is None:
@@ -1847,10 +1956,99 @@ class PDSegmenterUI:
             print("Já deixei a variável selecionada no modo Ótimo — "
                   "rode o 👁 Preview e depois Criar segmento.")
 
+    def _df_html(self, df):
+        """Renderiza um DataFrame com o visual padrão das tabelas da UI."""
+        try:
+            sty = (df.style.hide(axis="index")
+                   .set_table_styles(self._TABLE_STYLES)
+                   .set_properties(**{"font-size": "12px", "text-align": "center"})
+                   .set_table_styles([{"selector": "th, td",
+                                       "props": [("text-align", "center")]}], overwrite=False))
+            return self._styler_html(sty)
+        except Exception:
+            return df.to_html(index=False, border=0)
+
+    def _on_suggest3(self, _):
+        sid = self._selected_leaf()
+        with self.out_log:
+            self.out_log.clear_output(wait=True)
+            if sid is None:
+                self.out_suggest.value = "<i>Selecione uma folha na aba Construir.</i>"
+                return
+            try:
+                sug = self.seg.suggest_splits(sid, top=3)
+            except Exception as e:
+                self.out_suggest.value = (f"<div style='color:#b3261e;font-size:12px'>Erro: "
+                                          f"{type(e).__name__}: {e}</div>")
+                return
+            if sug.empty:
+                self.out_suggest.value = "<i>Nenhuma variável informativa para esta folha.</i>"
+                print("Sugestão: nenhuma variável com IV suficiente nesta folha.")
+                return
+            disp = sug.copy()
+            disp["passa_teste"] = disp["passa_teste"].map({True: "✅", False: "—"})
+            disp = disp.rename(columns={"n_bins": "nº bins", "passa_teste": "passa teste"})
+            self.out_suggest.value = self._df_html(disp)
+            print(f"TOP {len(sug)} splits sugeridos para a folha selecionada.")
+
+    def _on_importance(self, _):
+        with self.out_log:
+            self.out_log.clear_output(wait=True)
+            try:
+                fi = self.seg.feature_importance()
+            except Exception as e:
+                self.out_importance.value = (f"<div style='color:#b3261e;font-size:12px'>Erro: "
+                                             f"{type(e).__name__}: {e}</div>")
+                return
+            if fi.empty:
+                self.out_importance.value = ("<i>A árvore ainda não tem splits — construa a "
+                                             "segmentação primeiro.</i>")
+                return
+            self.out_importance.value = self._df_html(fi)
+            print("Importância das variáveis na árvore calculada.")
+
+    def _on_sql(self, _):
+        with self.out_log:
+            self.out_log.clear_output(wait=True)
+            tbl = (self.tx_sql_table.value or "minha_tabela").strip()
+            try:
+                self.out_sql.value = self.seg.to_sql(table=tbl)
+                print("SQL gerado — selecione tudo na caixa e copie (Ctrl+C).")
+            except Exception as e:
+                self.out_sql.value = f"-- Erro ao gerar SQL: {type(e).__name__}: {e}"
+
+    def _on_diff(self, _):
+        from .segmenter import TreeSegmenter
+        with self.out_log:
+            self.out_log.clear_output(wait=True)
+            path = (self.tx_diff_path.value or "").strip()
+            if not path:
+                self.out_diff.value = "<i>Informe o caminho do JSON da árvore B.</i>"
+                return
+            try:
+                other = TreeSegmenter.load(path, self.df)
+                d = self.seg.diff_trees(other)
+            except Exception as e:
+                self.out_diff.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao "
+                                       f"comparar: {type(e).__name__}: {e}</div>")
+                return
+            mig = d["migracao"].copy()
+            mig.index = [f"A·{i}" for i in mig.index]
+            mig.columns = [f"B·{c}" for c in mig.columns]
+            html = (f"<div class='treeui-legend'>Concordância de notas (A=B): "
+                    f"<b>{d['concordancia']:.1%}</b></div>"
+                    + self._df_html(d["resumo"])
+                    + "<div class='treeui-h' style='margin-top:8px'>Migração de notas "
+                      "(linhas = árvore A · colunas = árvore B)</div>"
+                    + mig.to_html(border=0))
+            self.out_diff.value = html
+            print(f"Comparação concluída — concordância {d['concordancia']:.1%}.")
+
     def _on_autofit(self, _):
         sid = self._selected_leaf()
         so_folha = sid is not None and sid != "root" and sid in self.seg.segments
         depth = int(self.sl_depth.value)
+        criterion = self.dd_criterion.value
         cmin = float(self.sl_autoconc_min.value) if self.cb_autoconc_min.value else None
         cmax = float(self.sl_autoconc_max.value) if self.cb_autoconc_max.value else None
         with self.out_log:
@@ -1862,10 +2060,11 @@ class PDSegmenterUI:
             if cmax is not None:
                 lim.append(f"quebra ≤ {cmax:.0%}")
             slim = (", " + " · ".join(lim)) if lim else ""
-            print(f"Auto-fit em '{alvo}' (profundidade ≤ {depth}{slim})…")
+            scrit = "" if criterion == "optbin" else f", critério={criterion}"
+            print(f"Auto-fit em '{alvo}' (profundidade ≤ {depth}{slim}{scrit})…")
             self._checkpoint()
             self.seg.fit_auto(max_depth=depth, min_leaf_repr=cmin, max_bin_repr=cmax,
-                              subtree=sid if so_folha else None,
+                              criterion=criterion, subtree=sid if so_folha else None,
                               from_scratch=not so_folha)
         if so_folha:
             self.locked &= set(self.seg.segments)   # só folhas removidas saem
@@ -1954,13 +2153,13 @@ class PDSegmenterUI:
             if out_name:
                 try:
                     out.write.mode("overwrite").saveAsTable(out_name)
-                    print(f"✓ tabela '{out_name}' gravada (segmento_pd, nota_pd, pd_regua).")
+                    print(f"✓ tabela '{out_name}' gravada (segmento, nota, valor_regua).")
                 except Exception as e:
                     print(f"Régua aplicada, mas falhou ao gravar '{out_name}':",
                           type(e).__name__, e)
             print(f"✓ régua aplicada em '{name}'. Spark DataFrame em  ui.spark_result.")
             try:
-                dist = out.groupBy("nota_pd").count().orderBy("nota_pd").toPandas()
+                dist = out.groupBy("nota").count().orderBy("nota").toPandas()
                 display(dist)
             except Exception as e:
                 print("(não consegui resumir a distribuição:", type(e).__name__, e, ")")
@@ -1986,7 +2185,7 @@ class PDSegmenterUI:
     def _refresh_iv(self):
         sid = self.dd_leaf.value
         iv = self.seg.variable_iv(sid)
-        pd_med = iv.attrs.get("pd_medio")
+        pd_med = iv.attrs.get("valor_medio")
         has_psi = "pior_psi" in iv.columns
         disp = (iv[["variavel", "n_bins", "iv", "forca"]].copy()
                 .rename(columns={"n_bins": "bins"}))
@@ -2104,7 +2303,7 @@ class PDSegmenterUI:
             sty = f" style='color:{vcolor}'" if vcolor else ""
             subh = (f"<div style='font-size:10px;color:#8a93a3;margin-top:2px;"
                     f"line-height:1.35'>{sub}</div>" if sub else "")
-            return (f"<div class='pdui-metric' style='padding:9px 11px'>"
+            return (f"<div class='treeui-metric' style='padding:9px 11px'>"
                     f"<div class='k'>{k}</div><div class='v mono'{sty}>{v}</div>{subh}</div>")
 
         def fnum(x, nd=2):
@@ -2112,7 +2311,7 @@ class PDSegmenterUI:
 
         def grid(cards, ncol, top=False):
             mt = "margin-top:6px;" if top else ""
-            return (f"<div class='pdui-metrics' style='{mt}grid-template-columns:"
+            return (f"<div class='treeui-metrics' style='{mt}grid-template-columns:"
                     f"repeat({ncol},minmax(0,1fr))'>" + "".join(cards) + "</div>")
 
         miss = s.get("pct_missing")
@@ -2138,7 +2337,7 @@ class PDSegmenterUI:
                 f"padding:3px 0;border-top:1px solid #f1f3f6'><span>{c}</span>"
                 f"<span class='mono'>{p:.1f}%</span></div>"
                 for c, p in s["top_categorias"][:8])
-            html += ("<div class='pdui-metric' style='margin-top:6px;padding:8px 11px'>"
+            html += ("<div class='treeui-metric' style='margin-top:6px;padding:8px 11px'>"
                      "<div class='k'>Categorias (share)</div>" + linhas + "</div>")
 
         psi = {a: v for a, v in (s.get("psi") or {}).items() if v is not None}
@@ -2166,7 +2365,7 @@ class PDSegmenterUI:
                       "<span style='color:#2bb673'>■</span> &lt;0,10 estável &nbsp;"
                       "<span style='color:#e6b800'>■</span> 0,10–0,25 atenção &nbsp;"
                       "<span style='color:#e0584f'>■</span> &gt;0,25 instável</div>")
-            html += ("<div class='pdui-h' style='margin-top:13px'>Estabilidade · PSI por "
+            html += ("<div class='treeui-h' style='margin-top:13px'>Estabilidade · PSI por "
                      "amostra (vs. DES)</div>" + rows + legend)
 
         if trend:
@@ -2415,12 +2614,12 @@ class PDSegmenterUI:
         sid = p["only_segments"][0]
         splits = p.get("splits")
         mnb, mbs, xbs = p.get("max_n_bins", 4), p.get("min_bin_size", 0.05), p.get("max_bin_size")
-        mmd = p.get("min_event_rate_diff", 0.0)
+        mmd = p.get("min_mean_diff", 0.0)
         # SEGMENTAÇÃO PROPOSTA (barras repr. × PD por faixa) — dentro de "Dividir".
         try:
-            self.out_preview_seg.value = self._fig_html(self.seg.plot_feature_pd(
+            self.out_preview_seg.value = self._fig_html(self.seg.plot_feature_value(
                 p["feature"], sid=sid, splits=splits, max_n_bins=mnb,
-                min_bin_size=mbs, max_bin_size=xbs, min_event_rate_diff=mmd))
+                min_bin_size=mbs, max_bin_size=xbs, min_mean_diff=mmd))
         except Exception as e:
             self.out_preview_seg.value = (f"<div style='color:#b3261e;font-size:11px'>"
                                           f"(segmentação não gerada: {type(e).__name__})</div>")
@@ -2429,7 +2628,7 @@ class PDSegmenterUI:
             try:
                 self.out_preview_chart.value = self._fig_html(self.seg.plot_feature_hist(
                     p["feature"], sid=sid, splits=splits, max_n_bins=max(mnb, 6),
-                    min_bin_size=mbs, max_bin_size=xbs, min_event_rate_diff=mmd,
+                    min_bin_size=mbs, max_bin_size=xbs, min_mean_diff=mmd,
                     figsize=self._PREVIEW_FIGSIZE))
             except Exception as e:
                 self.out_preview_chart.value = (f"<div style='color:#b3261e;font-size:11px'>"
@@ -2475,7 +2674,7 @@ class PDSegmenterUI:
             self.out_log.clear_output(wait=True)
             try:
                 self._checkpoint()
-                self.seg.prune(min_repr=self.sl_repr.value, min_pd_gap=self.sl_gap.value,
+                self.seg.prune(min_repr=self.sl_repr.value, min_valor_gap=self.sl_gap.value,
                                protect=set(self.locked))
             except Exception as e:
                 print("Erro na poda:", type(e).__name__, e); return
@@ -2484,7 +2683,7 @@ class PDSegmenterUI:
 
     def _on_reset(self, _):
         self._checkpoint()
-        self.seg = SequentialPDSegmenter(self.df, **self._kwargs)
+        self.seg = TreeSegmenter(self.df, **self._kwargs)
         self.locked.clear()
         self._pending = None
         with self.out_log:
@@ -2493,7 +2692,7 @@ class PDSegmenterUI:
         self._refresh()
 
     def _on_export(self, _):
-        self.result = self.seg.assign("segmento_pd")
+        self.result = self.seg.assign("segmento")
         with self.out_log:
             self.out_log.clear_output(wait=True)
             print("DataFrame rotulado em  ui.result  · shape", self.result.shape)
@@ -2504,10 +2703,10 @@ class PDSegmenterUI:
         ref = bc.attrs.get("sample") or "todos"
         chk = bc.attrs.get("check_sample")
         lo_col, hi_col = "ic_low", "ic_high"
-        ref_col = f"pd_{ref}"
+        ref_col = f"valor_{ref}"
         vals = []
         for _, r in bc.iterrows():
-            for c in [lo_col, hi_col, ref_col] + ([f"pd_{chk}"] if chk else []):
+            for c in [lo_col, hi_col, ref_col] + ([f"valor_{chk}"] if chk else []):
                 if c in bc and not pd.isna(r[c]):
                     vals.append(r[c])
         if not vals:
@@ -2530,8 +2729,8 @@ class PDSegmenterUI:
                    f"<div style='position:absolute;left:{xp:.1f}%;top:4px;width:2px;height:12px;"
                    f"background:#0f3d57' title='DES'></div>")
             ootmark = ""
-            if chk and not pd.isna(r.get(f"pd_{chk}", float("nan"))):
-                xo = pos(r[f"pd_{chk}"])
+            if chk and not pd.isna(r.get(f"valor_{chk}", float("nan"))):
+                xo = pos(r[f"valor_{chk}"])
                 inside = r.get("aderente")
                 col = "#1aa64b" if inside else "#d6453e"
                 ootmark = (f"<div style='position:absolute;left:{xo:.1f}%;top:3px;width:10px;"
@@ -2540,7 +2739,7 @@ class PDSegmenterUI:
             label = (r["descricao"][:40] + "…") if len(r["descricao"]) > 40 else r["descricao"]
             rows.append(
                 f"<div style='display:flex;align-items:center;margin:3px 0'>"
-                f"<div style='width:34px;color:#555'>[{r['nota_pd']}]</div>"
+                f"<div style='width:34px;color:#555'>[{r['nota']}]</div>"
                 f"<div style='width:300px;color:#333;white-space:nowrap;overflow:hidden;"
                 f"text-overflow:ellipsis'>{label}</div>"
                 f"<div style='position:relative;flex:1;height:20px;background:#f3f6f9;"
@@ -2608,13 +2807,18 @@ class PDSegmenterUI:
         bgc = {"green": "#e7f5ee", "yellow": "#fbf3e0", "red": "#fbe7e4"}
         words = {"green": "OK", "yellow": "ATENÇÃO", "red": "CRÍTICO"}
 
-        # --- discriminação: AUC/Gini em DES ---
+        # --- discriminação em DES: AUC/Gini (clf) ou R² (reg) ---
         met = self.seg.metrics()
         row_des = met[met["amostra"] == self.ref_sample]
         if not len(row_des):
             row_des = met[met["amostra"] == "todos"]
-        auc = float(row_des["AUC"].iloc[0]) if len(row_des) else None
-        gini = float(row_des["Gini"].iloc[0]) if (len(row_des) and "Gini" in met.columns) else None
+        if self._is_clf:
+            auc = float(row_des["AUC"].iloc[0]) if len(row_des) else None
+            gini = float(row_des["Gini"].iloc[0]) if (len(row_des) and "Gini" in met.columns) else None
+            r2 = None
+        else:
+            auc = gini = None
+            r2 = float(row_des["R2"].iloc[0]) if len(row_des) else None
 
         # --- estabilidade: pior PSI da segmentação (DES × amostras) ---
         psi_df = self.seg.psi() if self.sample_col is not None else None
@@ -2625,7 +2829,7 @@ class PDSegmenterUI:
         calib, max_gap = None, None
         if self.sample_col is not None:
             try:
-                calib = self.seg.calibration_table().rename(columns={"nota_pd": "folha"})
+                calib = self.seg.calibration_table().rename(columns={"nota": "folha"})
                 if "gap" in calib.columns and calib["gap"].notna().any():
                     max_gap = float(calib["gap"].abs().max())
             except Exception:
@@ -2643,11 +2847,16 @@ class PDSegmenterUI:
             n_pares = n_indist = 0
 
         def v_disc():
-            if auc is None or auc != auc:
+            if self._is_clf:
+                if auc is None or auc != auc:
+                    return "yellow", "—"
+                c = "green" if auc >= 0.70 else "yellow" if auc >= 0.60 else "red"
+                g = f" · Gini {gini:.3f}" if (gini is not None and gini == gini) else ""
+                return c, f"AUC DES {auc:.3f}{g}"
+            if r2 is None or r2 != r2:
                 return "yellow", "—"
-            c = "green" if auc >= 0.70 else "yellow" if auc >= 0.60 else "red"
-            g = f" · Gini {gini:.3f}" if (gini is not None and gini == gini) else ""
-            return c, f"AUC DES {auc:.3f}{g}"
+            c = "green" if r2 >= 0.5 else "yellow" if r2 >= 0.2 else "red"
+            return c, f"R² DES {r2:.3f}"
 
         def v_estab():
             if pior_psi is None:
@@ -2673,12 +2882,12 @@ class PDSegmenterUI:
                 ("Estrutura", "folhas monotônicas e distintas?", *v_estrut())]
 
         def light(dim, q, c, val):
-            return (f"<div class='pdui-metric' style='padding:11px 13px;border-left:4px solid "
+            return (f"<div class='treeui-metric' style='padding:11px 13px;border-left:4px solid "
                     f"{psi_hex[c]};background:{bgc[c]}'>"
                     f"<div class='k' style='color:{psi_hex[c]}'>{dim} · {words[c]}</div>"
                     f"<div class='v mono' style='color:{psi_hex[c]};font-size:15px'>{val}</div>"
                     f"<div style='font-size:10px;color:#6b7480;margin-top:3px'>{q}</div></div>")
-        scorecard = ("<div class='pdui-metrics' style='grid-template-columns:"
+        scorecard = ("<div class='treeui-metrics' style='grid-template-columns:"
                      "repeat(4,minmax(0,1fr))'>"
                      + "".join(light(*d) for d in dims) + "</div>")
 
@@ -2701,12 +2910,12 @@ class PDSegmenterUI:
                          f"color:{psi_hex[cls]}'>{p:.3f}</div>{bar(p)}"
                          f"<div style='width:62px;text-align:right;font-size:10.5px;"
                          f"color:{psi_hex[cls]}'>{r['classificacao']}</div></div>")
-            ev += ("<div class='pdui-h' style='margin-top:14px'>Estabilidade · PSI da "
+            ev += ("<div class='treeui-h' style='margin-top:14px'>Estabilidade · PSI da "
                    "segmentação (DES × amostras)</div>" + rows)
         if calib is not None and len(calib):
-            cols = [c for c in ["folha", "n", "pd_prevista", "pd_realizada", "gap"]
+            cols = [c for c in ["folha", "n", "valor_previsto", "valor_realizado", "gap"]
                     if c in calib.columns]
-            ev += ("<div class='pdui-h' style='margin-top:14px'>Calibração · PD prevista (DES) × "
+            ev += ("<div class='treeui-h' style='margin-top:14px'>Calibração · PD prevista (DES) × "
                    "realizada</div>" + self._df_html(calib[cols], max_height="240px",
                                                      center=True))
         # estrutura: monotonicidade + nº de inversões e QUAIS folhas invertem
@@ -2718,9 +2927,9 @@ class PDSegmenterUI:
         mono_disp["folhas que invertem"] = mono["inversoes"].apply(_inv_str)
         mono_disp = mono_disp.rename(columns={"monotonico": "monotônico",
                                               "n_inversoes": "nº inversões"})
-        ev += ("<div class='pdui-h' style='margin-top:14px'>Estrutura · monotonicidade da "
+        ev += ("<div class='treeui-h' style='margin-top:14px'>Estrutura · monotonicidade da "
                "PD por amostra</div>"
-               "<div class='pdui-legend'>Cada inversão é um par de folhas adjacentes (pela "
+               "<div class='treeui-legend'>Cada inversão é um par de folhas adjacentes (pela "
                "ordem da régua) cuja PD está fora de ordem — <b>folha a ▸ folha b</b> indica "
                "que a folha <b>a</b> tem PD maior que a <b>b</b>, que deveria ser ≥.</div>"
                + self._df_html(mono_disp, center=True))
@@ -2744,12 +2953,12 @@ class PDSegmenterUI:
                          f"{type(e).__name__}</div>")
         if self.sample_col is not None:
             try:
-                parts.append("<div class='pdui-h' style='margin-top:10px'>Calibração "
+                parts.append("<div class='treeui-h' style='margin-top:10px'>Calibração "
                              "(prevista DES × realizada)</div>")
                 parts.append(self._fig_html(self.seg.plot_calibration()))
-                ct = self.seg.calibration_table().rename(columns={"nota_pd": "folha"})
-                parts.append(self._df_html(ct[["folha", "n", "pd_prevista",
-                                               "pd_realizada", "gap"]]))
+                ct = self.seg.calibration_table().rename(columns={"nota": "folha"})
+                parts.append(self._df_html(ct[["folha", "n", "valor_previsto",
+                                               "valor_realizado", "gap"]]))
             except Exception as e:
                 parts.append(f"<div style='color:#b3261e;font-size:12px'>Erro na calibração: "
                              f"{type(e).__name__}</div>")
@@ -2762,7 +2971,7 @@ class PDSegmenterUI:
                          f"não existe no DataFrame — backtest pulado)</div>")
         else:
             try:
-                parts.append(f"<div class='pdui-h' style='margin-top:10px'>Backtest por "
+                parts.append(f"<div class='treeui-h' style='margin-top:10px'>Backtest por "
                              f"'{tcol}'</div>")
                 parts.append(self._df_html(self.seg.backtest(tcol), max_height="300px"))
             except Exception as e:
@@ -2858,6 +3067,21 @@ class PDSegmenterUI:
             self.out_quality.value = (f"<div style='color:#b3261e;font-size:12px'>Erro na "
                                       f"distribuição do score: {type(e).__name__}: {e}</div>")
 
+    # plots de REGRESSÃO (alvo contínuo): dispersão e distribuição do alvo
+    def _on_box(self, _):
+        try:
+            self.out_discrim.value = self._fig_html(self.seg.plot_leaf_boxplots())
+        except Exception as e:
+            self.out_discrim.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
+                                      f"boxplot: {type(e).__name__}: {e}</div>")
+
+    def _on_hist(self, _):
+        try:
+            self.out_quality.value = self._fig_html(self.seg.plot_target_hist(color="steelblue"))
+        except Exception as e:
+            self.out_quality.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
+                                      f"histograma: {type(e).__name__}: {e}</div>")
+
     # ==================================================================
     # Folhas-irmãs: inversão da PD entre amostras e safras
     # ==================================================================
@@ -2897,7 +3121,7 @@ class PDSegmenterUI:
         else:
             sf_line = "<b>Entre safras:</b> <span style='color:#889'>sem safras avaliáveis</span>"
         return (
-            "<div class='pdui-card' style='margin:6px 0'>"
+            "<div class='treeui-card' style='margin:6px 0'>"
             f"<div style='margin-bottom:6px'><span class='pill {pill}'>● {rotulo}</span>"
             f"<span style='color:#6b7480;font-size:11.5px;margin-left:8px'>"
             f"{s['n_pairs']} par(es) de irmãs comparados</span></div>"
@@ -2927,11 +3151,11 @@ class PDSegmenterUI:
         except Exception as e:
             ind = err("indicador de inversão", e)
         try:
-            h1 = self._fig_html(self.seg.plot_sibling_pd_by_sample(pid))
+            h1 = self._fig_html(self.seg.plot_sibling_value_by_sample(pid))
         except Exception as e:
             h1 = err("gráfico por amostra", e)
         try:
-            h2 = self._fig_html(self.seg.plot_sibling_pd_by_safra(
+            h2 = self._fig_html(self.seg.plot_sibling_value_by_safra(
                 pid, time_col=tcol, sample=samp))
         except Exception as e:
             h2 = err("gráfico por safra", e)
@@ -3001,7 +3225,7 @@ class PDSegmenterUI:
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
                     self.seg.auto_merge(alpha=self.sl_alpha.value,
-                                        min_pd_gap=self.sl_gap.value,
+                                        min_valor_gap=self.sl_gap.value,
                                         test=self.dd_test.value,
                                         protect=set(self.locked),
                                         include_missing=self.cb_automerge_na.value)

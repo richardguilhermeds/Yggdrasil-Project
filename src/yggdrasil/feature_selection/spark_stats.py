@@ -3,7 +3,7 @@
 Todas as funções recebem um Spark DataFrame e devolvem resultados pequenos já
 coletados no driver (``pandas.Series`` / ``pandas.DataFrame``), prontos para a
 lógica de consenso. O import do ``pyspark`` é *gated* (mesmo padrão de
-:meth:`yggdrasil.credit_risk.lgd.segmenter.SequentialLGDSegmenter.apply_spark`):
+:meth:`yggdrasil.credit_risk.tree.segmenter.TreeSegmenter.apply_spark`):
 o módulo importa sem pyspark instalado e só falha — com mensagem clara — ao
 executar uma função distribuída.
 """

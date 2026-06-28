@@ -24,6 +24,25 @@ from ..utils import idx_para_letra
 from .monotonic import fundir_por_inversao
 
 
+def quantile_edges(scores_dev: np.ndarray, q: np.ndarray) -> np.ndarray:
+    """Cortes de quantil do score com bordas abertas ``[-inf, ..., inf]``.
+
+    Helper compartilhado por :class:`DecileRating` e :class:`QuantileMonotonicRating`.
+    Trata o caso degenerado de **score (quase) constante** no DES: aí ``np.unique``
+    dos quantis devolve um único elemento e sobrescrever ``edges[0]``/``edges[-1]``
+    no mesmo elemento produziria ``[inf]`` — em ``_raw_groups`` isso vira
+    ``np.clip(idx, 0, -1)`` (limite mínimo > máximo), atribuindo o grupo inválido
+    ``-1`` a todas as linhas. Nesse caso devolvemos ``[-inf, inf]``, gerando um único
+    grupo válido ``0`` (rating único, coerente com score sem poder discriminante).
+    """
+    edges = np.unique(np.quantile(scores_dev, q)).astype(float)
+    if edges.size < 2:
+        return np.array([-np.inf, np.inf])
+    edges[0] = -np.inf
+    edges[-1] = np.inf
+    return edges
+
+
 class RatingStrategy(ABC):
     """Classe base para metodologias de grupos homogêneos."""
 

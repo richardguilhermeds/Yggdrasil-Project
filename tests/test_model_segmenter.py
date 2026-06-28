@@ -788,7 +788,7 @@ def test_ui_bins_manuais_e_formula(task):
         assert ui.formula_card.layout.display == "none"
         ui.dd_algo.value = algo_lin
         ui._on_fit(None)
-        ui._on_formula(None)
+        # a fórmula é renderizada automaticamente ao treinar (sem botão dedicado)
         assert "mseg-formula" in ui.out_formula.value
 
 
@@ -873,3 +873,68 @@ def test_ui_escorar_base(task):
         ui._on_score(None)
         assert len(ui.result) == int((df["amostra"] == "OOT").sum())
         assert "valor_previsto" in ui.result.columns
+
+
+# ----------------------------------------------------------------------
+# Tuning bayesiano (Optuna) — gated por optuna instalado
+# ----------------------------------------------------------------------
+def test_tune_optuna(task):
+    pytest.importorskip("optuna")
+    df = _synthetic(task, n=1500, seed=2)
+    seg = ModelSegmenter(df, target="target", task_type=task, sample_col="amostra",
+                         ref_sample="DES", verbose=False)
+    seg.auto_select(min_iv=0.0)
+    res = seg.tune_optuna(algorithm="random_forest", n_trials=5, fit_best=True)
+    assert res["algorithm"] == "random_forest"
+    assert res["metric"] == ("auc" if task == "classification" else "r2")
+    assert res["n_trials"] == 5 and isinstance(res["best_params"], dict)
+    assert seg.score_ is not None              # fit_best treinou o modelo
+    assert seg.tuning_["best_value"] == res["best_value"]
+
+
+def test_tune_optuna_algoritmo_nao_tunavel(task):
+    pytest.importorskip("optuna")
+    df = _synthetic(task, n=800, seed=2)
+    seg = ModelSegmenter(df, target="target", task_type=task, sample_col="amostra",
+                         ref_sample="DES", verbose=False)
+    seg.auto_select(min_iv=0.0)
+    alvo = "linear" if task == "regression" else "logistica"
+    if alvo == "linear":                       # linear não é tunável
+        with pytest.raises(ValueError, match="tunável"):
+            seg.tune_optuna(algorithm="linear", n_trials=3)
+
+
+def test_ui_tune_optuna(task):
+    pytest.importorskip("optuna")
+    pytest.importorskip("ipywidgets")
+    import contextlib
+    import io
+    from yggdrasil.credit_risk.model import ModelSegmenterUI
+
+    df = _synthetic(task, n=1500, seed=2)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui = ModelSegmenterUI(df, target="target", task_type=task,
+                              sample_col="amostra", ref_sample="DES", date_col="dt_ref")
+        ui.seg.auto_select(min_iv=0.0)
+        ui.dd_algo.value = "random_forest"
+        ui.sl_trials.value = 5
+        ui._on_tune(None)
+    assert "Optuna" in ui.out_tune.value and "Erro" not in ui.out_tune.value
+    assert ui.seg.score_ is not None
+    assert "<table" in ui.out_metrics.value
+    # barra de progresso preenchida até o fim e marcada como concluída
+    assert ui.pb_tune.max == 5 and ui.pb_tune.value == 5
+    assert ui.pb_tune.bar_style == "success" and ui.btn_tune.disabled is False
+
+
+def test_tune_optuna_progress_callback(task):
+    pytest.importorskip("optuna")
+    df = _synthetic(task, n=1200, seed=4)
+    seg = ModelSegmenter(df, target="target", task_type=task, sample_col="amostra",
+                         ref_sample="DES", verbose=False)
+    seg.auto_select(min_iv=0.0)
+    calls = []
+    seg.tune_optuna(algorithm="random_forest", n_trials=4, fit_best=False,
+                    progress_callback=lambda d, t, b: calls.append((d, t)))
+    assert len(calls) == 4                       # um callback por trial
+    assert calls[-1] == (4, 4)                   # último reporta conclusão

@@ -40,10 +40,21 @@ Análise exploratória inicial das features: missing (global e por safra), perce
 ### 3. 🧮 Esteira de seleção de features em PySpark (`yggdrasil.feature_selection`)
 Seleção **por book** (grupo de features por palavra-chave/prefixo, ex.: `serasa`, `bvs`) sobre um Spark DataFrame. Pipeline por book: missing → variância → importância (RF `pyspark.ml` + IV/KS/AUC/Gini/corr_target) → redundância (Pearson+Spearman) → **Boruta** (Spark-native com shadows; fallback driver/sklearn) → **consenso** (`selecionada` + `motivo`). Saída: tabela/painéis por book + ranking global. Backend `"spark"|"driver"`.
 
-### 4. 🌳 Segmentadores de risco de crédito por árvore de bins (`yggdrasil.credit_risk.lgd` / `.pd`)
-Réguas sequenciais com UI interativa (5 abas): binning ótimo/manual, faltantes em bin própria, notas por folha, IV, PSI/CSI, bootstrap, calibração, backtest, save/load JSON e `predict`/`to_pyspark`/`apply_spark`/`log_to_mlflow`.
-- **`lgd/`** — `SequentialLGDSegmenter` + `LGDSegmenterUI`. Alvo **contínuo** (LGD): binning contínuo, IV contínuo, métricas MAE/RMSE/R².
-- **`pd/`** — `SequentialPDSegmenter` + `PDSegmenterUI`. Alvo **binário** (default): IV WoE (escala Siddiqi), KS/AUC/Gini/Acurácia/F1, gráficos ROC/KS/taxa-default/distribuição.
+### 4. 🌳 Árvore de segmentação de risco de crédito (`yggdrasil.credit_risk.tree`)
+`TreeSegmenter` + `TreeSegmenterUI` — **uma única classe/UI que atende PD e LGD**, escolhendo o comportamento por `task_type` (substitui as antigas classes separadas `SequentialPDSegmenter`/`SequentialLGDSegmenter`). Régua sequencial com UI interativa (5 abas): binning ótimo/manual, faltantes em bin própria, notas por folha, IV, PSI/CSI, bootstrap, calibração, backtest, save/load JSON e `predict`/`to_pyspark`/`apply_spark`/`log_to_mlflow`.
+- **`task_type="classification"`** (PD) — alvo **binário**: binning binário, IV WoE (escala Siddiqi), KS/AUC/Gini/Acurácia/F1, gráficos ROC/KS/taxa-default/distribuição.
+- **`task_type="regression"`** (LGD) — alvo **contínuo**: binning contínuo, IV contínuo, métricas MAE/RMSE/R², boxplot/histograma do alvo.
+
+Aba **Avançado** + métodos: **critério de split selecionável** no Auto-fit (`criterion=` em `fit_auto`/`grow`: `optbin` · clf: `gini`/`entropy`/`ks`/`iv`/`chi2` · reg: `variance`/`mae`/`ftest`); **`suggest_splits()`** (TOP-N variáveis com nº de bins, PSI por amostra, teste de hipótese e IV); **`feature_importance()`** das variáveis que entraram na árvore; **auto-merge** de folhas indistinguíveis (`auto_merge`); **`to_sql()`** (régua como `CASE WHEN` copiável); **`diff_trees()`** (migração de notas + métricas entre duas versões).
+
+```python
+from yggdrasil.credit_risk.tree import TreeSegmenter
+seg = TreeSegmenter(df, target="target", task_type="classification",  # ou "regression"
+                    sample_col="amostra", ref_sample="DES")
+seg.fit_auto(max_depth=3, criterion="ks")     # ou "optbin" (padrão), "gini", ...
+seg.suggest_splits(top=3); seg.feature_importance(); seg.metrics()
+print(seg.to_sql(table="carteira"))           # régua como CASE WHEN
+```
 
 ### 5. 🤖 Segmentador orientado a modelo (`yggdrasil.credit_risk.model`)
 `ModelSegmenter` + `ModelSegmenterUI` — **unifica classificação e regressão** via `task_type`. Fluxo: análise univariada (logodds/WoE, IV, distribuição, inversão de bins entre amostras/safras, com opção de **bins manuais**) → seleção/categorização de variáveis → ajuste do modelo → métricas + **fórmula** (coeficientes/odds-ratio nos modelos lineares) + SHAP → **score → ratings** (decis/quantil/arvore/optbin). Persistência em JSON (config) + `.model.joblib` (modelo + estratégia). UI em 5 abas: Variáveis · Análise de variáveis · Modelo (+SHAP) · Ratings & Score · Validar & Exportar.
@@ -60,6 +71,8 @@ Algoritmos disponíveis (registry extensível em `ALGORITHMS`):
 | **CatBoost** | clf + reg | extra `[catboost]` |
 
 > Também aceita um modelo já treinado via `set_model(...)`. Os motores de boosting opcionais são importados sob demanda — sem o pacote, o erro orienta a instalação do extra correto.
+
+**Tuning bayesiano (Optuna):** `seg.tune_optuna(algorithm="lightgbm", n_trials=40)` busca os hiperparâmetros que maximizam AUC (clf) / R² (reg) no OOT e re-treina com os melhores; na UI, slider de _trials_ + botão **Tunar com Optuna** na aba Modelo. Requer o extra `[optuna]`.
 
 ---
 

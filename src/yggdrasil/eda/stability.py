@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from ..config import ColumnConfig
-from ..monitoring.psi import classify_psi, psi, psi_categorical
+from ..monitoring.psi import classify_psi, psi_categorical
 from .binning import MISSING, FeatureBinner
 from .config import EDAConfig
 from .dtypes import as_numeric, has_target, infer_feature_kind
@@ -23,6 +23,40 @@ _EPS = 1e-6
 
 def _cat_with_missing(series: pd.Series) -> pd.Series:
     return series.astype(object).where(series.notna(), MISSING).astype(str)
+
+
+def _numeric_psi_with_missing(base, oot, bins: int, eps: float = _EPS) -> float:
+    """PSI numérico que conta os **faltantes como um bin próprio**.
+
+    Cortes por quantil fixados na base não-faltante; os percentuais de cada bin são
+    medidos sobre a população TOTAL (incluindo NaN), e os ausentes entram como um
+    bin extra. Assim uma feature numérica que passa a faltar ao longo do tempo é
+    detectada — coerente com o ramo categórico (``_cat_with_missing``) e com o
+    ``csi_by_bin`` (FeatureBinner cria o bin MISSING).
+
+    Para features SEM faltantes nas duas amostras o resultado é idêntico ao de
+    ``monitoring.psi`` (o bin de faltantes zera e não contribui)."""
+    e = as_numeric(base).to_numpy(dtype=float)
+    a = as_numeric(oot).to_numpy(dtype=float)
+    if len(e) == 0 or len(a) == 0:
+        return float("nan")
+    e_obs, a_obs = e[~np.isnan(e)], a[~np.isnan(a)]
+    edges = (np.unique(np.quantile(e_obs, np.linspace(0, 1, bins + 1)))
+             if len(e_obs) else np.array([]))
+    if len(edges) < 2:                                  # base sem cortes válidos
+        exp = np.array([len(e_obs) / len(e)])
+        act = np.array([len(a_obs) / len(a)])
+    else:
+        edges = edges.astype(float)
+        edges[0], edges[-1] = -np.inf, np.inf
+        exp = np.histogram(e_obs, bins=edges)[0] / len(e)
+        act = np.histogram(a_obs, bins=edges)[0] / len(a)
+    # bin extra de faltantes (fração sobre o total de cada amostra)
+    exp = np.append(exp, (len(e) - len(e_obs)) / len(e))
+    act = np.append(act, (len(a) - len(a_obs)) / len(a))
+    exp = np.where(exp <= 0, eps, exp)
+    act = np.where(act <= 0, eps, act)
+    return float(np.sum((act - exp) * np.log(act / exp)))
 
 
 def feature_psi(
@@ -39,7 +73,7 @@ def feature_psi(
     if infer_feature_kind(df[col]) == "categorical":
         cats = sorted(set(_cat_with_missing(df[col]).unique()))
         return psi_categorical(_cat_with_missing(base), _cat_with_missing(oot), categories=cats)
-    return psi(as_numeric(base).dropna(), as_numeric(oot).dropna(), bins=eda_cfg.n_bins)
+    return _numeric_psi_with_missing(base, oot, bins=eda_cfg.n_bins)
 
 
 def feature_psi_over_time(
@@ -61,10 +95,8 @@ def feature_psi_over_time(
             val = psi_categorical(b, a, categories=cats)
             rows.append({"periodo": p, "psi": round(val, 6), "n": len(idx), "flag": classify_psi(val)})
     else:
-        bnum = as_numeric(base).dropna()
         for p, idx in df.groupby(per).groups.items():
-            a = as_numeric(df.loc[idx, col]).dropna()
-            val = psi(bnum, a, bins=eda_cfg.n_bins)
+            val = _numeric_psi_with_missing(base, df.loc[idx, col], bins=eda_cfg.n_bins)
             rows.append({"periodo": p, "psi": round(val, 6), "n": len(idx), "flag": classify_psi(val)})
     return pd.DataFrame(rows).sort_values("periodo").reset_index(drop=True)
 

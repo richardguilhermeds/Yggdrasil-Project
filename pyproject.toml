@@ -12,7 +12,12 @@ requires-python = ">=3.9"
 dependencies = [
     "numpy>=1.23",
     "pandas>=1.5",
-    "scikit-learn>=1.2",
+    # Teto em <1.8: o optbinning (0.20.x) ainda chama check_array(force_all_finite=...),
+    # argumento que o scikit-learn removeu na 1.8. Sem o teto, uma instalação limpa puxa
+    # sklearn>=1.8 e o OptimalBinning.fit() passa a lançar TypeError silenciosamente
+    # (engolido em _fit_optbinning_splits -> "sem corte válido"), quebrando os
+    # segmentadores. Reavaliar quando o optbinning publicar suporte a sklearn>=1.8.
+    "scikit-learn>=1.2,<1.8",
     "scipy>=1.9",
     "mlflow>=2.9",
     "shap>=0.44",
@@ -38,6 +43,8 @@ xgboost = ["xgboost>=2.0"]
 catboost = ["catboost>=1.2"]
 # Atalho: todos os motores de boosting opcionais de uma vez.
 boosting = ["lightgbm>=4.0", "xgboost>=2.0", "catboost>=1.2"]
+# Tuning de hiperparâmetros por otimização bayesiana (ModelSegmenter.tune_optuna).
+optuna = ["optuna>=3.0"]
 # Ferramentas de desenvolvimento, testes e execução de notebooks.
 dev = [
     "pytest>=7.4",

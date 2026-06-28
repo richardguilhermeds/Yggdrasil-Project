@@ -225,7 +225,6 @@ def plot_feature_panel(df, col, cfg, eda_cfg=None, problem_type=None, resumo: Op
     """Painel consolidado por feature (histograma + bivariada + missing/PSI + percentis)."""
     import matplotlib.gridspec as gridspec
     eda_cfg = eda_cfg or EDAConfig()
-    numerica = infer_feature_kind(df[col]) != "categorical"
     fig = _figure((16, 8))
     gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.45, wspace=0.22,
                            top=1 - 0.9 / 8, bottom=0.07)
@@ -238,10 +237,7 @@ def plot_feature_panel(df, col, cfg, eda_cfg=None, problem_type=None, resumo: Op
     plot_histogram(df, col, cfg, eda_cfg, problem_type, ax=fig.add_subplot(gs[0, 0]))
     plot_bivariate(df, col, cfg, eda_cfg, problem_type, ax=fig.add_subplot(gs[0, 1]))
     plot_missing_over_time(df, col, cfg, eda_cfg, ax=fig.add_subplot(gs[1, 0]))
-    if numerica:
-        plot_feature_psi_over_time(df, col, cfg, eda_cfg, ax=fig.add_subplot(gs[1, 1]))
-    else:
-        plot_feature_psi_over_time(df, col, cfg, eda_cfg, ax=fig.add_subplot(gs[1, 1]))
+    plot_feature_psi_over_time(df, col, cfg, eda_cfg, ax=fig.add_subplot(gs[1, 1]))
     return fig
 
 

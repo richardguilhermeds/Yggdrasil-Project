@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .base import RatingStrategy
+from .base import RatingStrategy, quantile_edges
 
 
 class DecileRating(RatingStrategy):
@@ -23,11 +23,7 @@ class DecileRating(RatingStrategy):
 
     def _fit_binner(self, scores_dev: np.ndarray, target_dev: np.ndarray) -> None:
         q = np.linspace(0.0, 1.0, self.n + 1)
-        edges = np.unique(np.quantile(scores_dev, q))
-        edges = edges.astype(float)
-        edges[0] = -np.inf
-        edges[-1] = np.inf
-        self.edges_ = edges
+        self.edges_ = quantile_edges(scores_dev, q)
 
     def _raw_groups(self, scores: np.ndarray) -> np.ndarray:
         idx = np.searchsorted(self.edges_, scores, side="right") - 1

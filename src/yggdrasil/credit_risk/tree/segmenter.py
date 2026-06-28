@@ -1,18 +1,23 @@
 """
-SequentialPDSegmenter
-=====================
-Construtor sequencial e híbrido de segmentações para modelos de PD
-(Probability of Default) — alvo **binário** (0 = adimplente, 1 = default).
+TreeSegmenter
+=============
+Construtor sequencial e híbrido de **árvore de segmentação** para risco de
+crédito, **unificado por** ``task_type``:
 
-- Cresce a segmentação em camadas (`grow`), dividindo cada folha por uma nova
-  variável usando OPTIMAL BINNING (OptBinning, alvo binário) ou CORTES MANUAIS.
-- Preview do split antes de efetivar (`show_grow`): taxa de default (PD) +
-  representatividade.
-- Poda de folhas pouco representativas ou sem separação de PD (`prune`).
-- PSI de estabilidade entre amostras (DES como referência) usando os próprios
-  segmentos como bins (`psi`, `psi_detalhe`).
-- Métricas de discriminação da régua como modelo de PD: **KS, ROC/AUC, Gini,
-  Acurácia e F1** por amostra (`metrics`).
+- ``task_type="classification"`` — alvo **binário** (ex.: PD, 0 = adimplente,
+  1 = default). Binning ótimo binário (``OptimalBinning``), IV WoE (Siddiqi),
+  métricas de discriminação **KS, ROC/AUC, Gini, Acurácia, F1**.
+- ``task_type="regression"`` — alvo **contínuo** em [0, 1] (ex.: LGD). Binning
+  ótimo contínuo (``ContinuousOptimalBinning``), IV contínuo (desvio médio
+  ponderado), métricas **MAE, RMSE, R²**.
+
+Em ambos os modos: cresce em camadas (`grow`) por OPTIMAL BINNING ou CORTES
+MANUAIS, com preview (`show_grow`), poda por representatividade/separação
+(`prune`), PSI entre amostras (`psi`), régua aplicável em pandas (`predict`) e
+Spark (`to_pyspark`/`apply_spark`) e registro no MLflow (`log_to_mlflow`).
+
+Substitui as antigas classes ``SequentialPDSegmenter``/``SequentialLGDSegmenter``
+(uma só classe parametrizada pelo tipo de problema).
 
 Contexto: parâmetros de risco de crédito sob Resolução CMN 4.966/2021 e IFRS 9.
 """
@@ -24,9 +29,12 @@ import numpy as np
 import pandas as pd
 
 try:
-    from optbinning import OptimalBinning
+    from optbinning import ContinuousOptimalBinning, OptimalBinning
 except ImportError:  # pragma: no cover
     OptimalBinning = None
+    ContinuousOptimalBinning = None
+
+TASK_TYPES = ("classification", "regression")
 
 
 def _fit_optbinning_splits(b, x, y) -> list:
@@ -35,6 +43,10 @@ def _fit_optbinning_splits(b, x, y) -> list:
     Silencia os ``RuntimeWarning`` de "divide by zero" benignos do optbinning
     (em ``auto_monotonic``, quando algum prebin fica com 0 registros) — o ajuste
     ainda produz cortes válidos. Devolve ``[]`` se o ajuste falhar.
+
+    ``ValueError`` (problema inviável / sem corte) é o caminho esperado e fica
+    silencioso. Qualquer outra exceção (ex.: incompatibilidade de versão de
+    dependência) é **avisada** em vez de mascarada como "sem corte válido".
     """
     try:
         with warnings.catch_warnings():
@@ -42,7 +54,12 @@ def _fit_optbinning_splits(b, x, y) -> list:
             with np.errstate(divide="ignore", invalid="ignore"):
                 b.fit(x, y)
         return list(b.splits)
-    except Exception:
+    except ValueError:
+        return []
+    except Exception as e:
+        warnings.warn(
+            f"optbinning falhou inesperadamente em '{getattr(b, 'name', '?')}': "
+            f"{type(e).__name__}: {e}", RuntimeWarning)
         return []
 
 
@@ -76,21 +93,139 @@ def _intervalo_por_extenso(lo: float, hi: float) -> str:
     return f"entre {_fmt(lo)} e {_fmt(hi)}"
 
 
-def _classifica_iv(iv) -> str:
-    """Faixas de força do IV **binário** (WoE clássico, escala de Siddiqi):
-    < 0.02 inútil · 0.02–0.10 fraco · 0.10–0.30 médio · 0.30–0.50 forte ·
-    ≥ 0.50 suspeito (alto demais — verifique vazamento de informação)."""
+def _classifica_iv(iv, task_type: str = "classification") -> str:
+    """Faixas de força do IV, conforme o tipo de alvo.
+
+    classification → IV **binário** (WoE clássico, escala de Siddiqi):
+        < 0.02 inútil · 0.02–0.10 fraco · 0.10–0.30 médio · 0.30–0.50 forte ·
+        ≥ 0.50 suspeito.
+    regression → IV **contínuo** (optbinning): desvio absoluto médio ponderado do
+        alvo por faixa em relação à média da folha — escala bem menor, recalibrada:
+        < 0.01 inútil · 0.01–0.03 fraco · 0.03–0.10 médio · 0.10–0.35 forte ·
+        ≥ 0.35 suspeito."""
     if iv is None or (isinstance(iv, float) and np.isnan(iv)):
         return "—"
-    if iv < 0.02:
-        return "inútil"
-    if iv < 0.10:
-        return "fraco"
-    if iv < 0.30:
-        return "médio"
-    if iv < 0.50:
-        return "forte"
+    faixas = ((0.02, 0.10, 0.30, 0.50) if task_type == "classification"
+              else (0.01, 0.03, 0.10, 0.35))
+    rotulos = ("inútil", "fraco", "médio", "forte")
+    for lim, rot in zip(faixas, rotulos):
+        if iv < lim:
+            return rot
     return "suspeito"
+
+
+# ======================================================================
+# Critérios de split (alternativos ao binning ótimo do optbinning).
+# Cada critério avalia uma partição BINÁRIA (CART-style): dado o alvo nos dois
+# filhos, devolve um score (maior = melhor). Usados quando o usuário escolhe o
+# critério em grow/fit_auto (criterion != "optbin").
+# ======================================================================
+CRITERIA_CLASSIFICATION = ("gini", "entropy", "ks", "iv", "chi2")
+CRITERIA_REGRESSION = ("variance", "mae", "ftest")
+
+
+def _gini(y):
+    p = y.mean() if len(y) else 0.0
+    return 1.0 - p * p - (1 - p) * (1 - p)
+
+
+def _entropy(y):
+    p = y.mean() if len(y) else 0.0
+    if p <= 0 or p >= 1:
+        return 0.0
+    return -(p * np.log2(p) + (1 - p) * np.log2(1 - p))
+
+
+def _split_score(yl, yr, criterion, is_clf):
+    """Score (maior = melhor) de dividir o alvo do pai em filhos `yl`/`yr`."""
+    nl, nr = len(yl), len(yr)
+    n = nl + nr
+    if nl == 0 or nr == 0:
+        return -np.inf
+    yp = np.concatenate([yl, yr])
+    wl, wr = nl / n, nr / n
+    if is_clf:
+        if criterion == "gini":
+            return _gini(yp) - (wl * _gini(yl) + wr * _gini(yr))
+        if criterion == "entropy":
+            return _entropy(yp) - (wl * _entropy(yl) + wr * _entropy(yr))
+        if criterion == "ks":
+            tb, tg = yp.sum(), (yp == 0).sum()
+            if tb == 0 or tg == 0:
+                return -np.inf
+            return abs(yl.sum() / tb - (yl == 0).sum() / tg)      # separação good/bad
+        if criterion == "iv":
+            tb, tg = yp.sum(), (yp == 0).sum()
+            if tb == 0 or tg == 0:
+                return -np.inf
+            iv = 0.0
+            for g in (yl, yr):
+                db, dg = g.sum() / tb, (g == 0).sum() / tg
+                if db > 0 and dg > 0:
+                    iv += (dg - db) * np.log(dg / db)
+            return iv
+        if criterion == "chi2":
+            from scipy.stats import chi2_contingency
+            tab = np.array([[yl.sum(), (yl == 0).sum()], [yr.sum(), (yr == 0).sum()]])
+            if (tab.sum(0) == 0).any() or (tab.sum(1) == 0).any():
+                return -np.inf
+            return float(chi2_contingency(tab)[0])                 # estatística qui-quadrado
+    else:
+        if criterion == "variance":
+            return yp.var() - (wl * yl.var() + wr * yr.var())
+        if criterion == "mae":
+            def _mae(a):
+                return np.mean(np.abs(a - np.median(a))) if len(a) else 0.0
+            return _mae(yp) - (wl * _mae(yl) + wr * _mae(yr))
+        if criterion == "ftest":
+            from scipy.stats import f_oneway
+            if np.unique(yl).size < 2 and np.unique(yr).size < 2:
+                return -np.inf
+            try:
+                return float(f_oneway(yl, yr)[0])
+            except Exception:
+                return -np.inf
+    raise ValueError(f"Critério de split desconhecido: {criterion!r}")
+
+
+def _best_numeric_cut(x, y, criterion, is_clf, min_n):
+    """Melhor corte único em `x` (numérico) pelo critério. Devolve o corte ou None."""
+    ok = ~np.isnan(x) & ~np.isnan(y)
+    x, y = x[ok], y[ok]
+    if x.size < 2 * min_n or np.unique(x).size < 2:
+        return None
+    cand = np.unique(np.quantile(x, np.linspace(0.02, 0.98, 49)))
+    best_t, best_s = None, -np.inf
+    for t in cand:
+        left = x <= t
+        nl = int(left.sum()); nr = x.size - nl
+        if nl < min_n or nr < min_n:
+            continue
+        s = _split_score(y[left], y[~left], criterion, is_clf)
+        if s > best_s:
+            best_s, best_t = s, float(t)
+    return best_t if (best_t is not None and np.isfinite(best_s)) else None
+
+
+def _best_categorical_split(xs, y, criterion, is_clf, min_n):
+    """Melhor partição binária das categorias pelo critério (ordena por alvo médio
+    e testa cada ponto de corte). Devolve (cats_esq, cats_dir) ou None."""
+    cats = list(np.unique(xs))
+    if len(cats) < 2:
+        return None
+    medias = {c: y[xs == c].mean() for c in cats}
+    ordem = sorted(cats, key=lambda c: medias[c])
+    best, best_s = None, -np.inf
+    for k in range(1, len(ordem)):
+        left_cats = set(ordem[:k])
+        left = np.array([c in left_cats for c in xs])
+        nl = int(left.sum()); nr = xs.size - nl
+        if nl < min_n or nr < min_n:
+            continue
+        s = _split_score(y[left], y[~left], criterion, is_clf)
+        if s > best_s:
+            best_s, best = s, (ordem[:k], ordem[k:])
+    return best if (best is not None and np.isfinite(best_s)) else None
 
 
 def _match_conditions_pandas(df, conditions):
@@ -123,8 +258,8 @@ def _match_conditions_pandas(df, conditions):
     return m
 
 
-def _aplicar_regua_pandas(regua, df, col_seg="segmento_pd",
-                          col_nota="nota_pd", col_pd="pd_regua"):
+def _aplicar_regua_pandas(regua, df, col_seg="segmento",
+                          col_nota="nota", col_valor="valor_regua"):
     """Aplica uma régua (dict de folhas) a um DataFrame pandas."""
     seg = pd.Series(pd.NA, index=df.index, dtype="object")
     nota = pd.Series(pd.NA, index=df.index, dtype="Int64")
@@ -134,19 +269,22 @@ def _aplicar_regua_pandas(regua, df, col_seg="segmento_pd",
         seg[m] = leaf["id"]
         nota[m] = leaf["nota"]
         pdcol[m] = leaf["pd"]
-    return pd.DataFrame({col_seg: seg, col_nota: nota, col_pd: pdcol}, index=df.index)
+    return pd.DataFrame({col_seg: seg, col_nota: nota, col_valor: pdcol}, index=df.index)
 
 
 # ======================================================================
 # Classe principal
 # ======================================================================
-class SequentialPDSegmenter:
-    """Segmentação sequencial de PD com binning ótimo/manual, poda e PSI."""
+class TreeSegmenter:
+    """Árvore de segmentação unificada (classificação/regressão) com binning
+    ótimo/manual, poda e PSI. O comportamento por tipo de alvo é escolhido por
+    ``task_type`` ("classification" p/ PD · "regression" p/ LGD)."""
 
     def __init__(
         self,
         df: pd.DataFrame,
         target: str = "target",
+        task_type: str = "classification",
         sample_col: str | None = None,
         ref_sample: str = "DES",
         feature_labels: dict[str, str] | None = None,
@@ -154,8 +292,19 @@ class SequentialPDSegmenter:
         date_col: str | None = None,
         verbose: bool = True,
     ):
-        if OptimalBinning is None:
+        if task_type not in TASK_TYPES:
+            raise ValueError(
+                f"task_type inválido: {task_type!r}. Use um de {TASK_TYPES}.")
+        self.task_type = task_type
+        self._is_clf = task_type == "classification"
+        # classe de optbinning e nome do kwarg de diferença mínima por tipo de alvo
+        self._OptBin = OptimalBinning if self._is_clf else ContinuousOptimalBinning
+        self._diff_kwarg = "min_event_rate_diff" if self._is_clf else "min_mean_diff"
+        if self._OptBin is None:
             raise ImportError("optbinning não instalado. Rode: pip install optbinning")
+        if target not in df.columns:
+            raise ValueError(f"Coluna alvo '{target}' não está no DataFrame "
+                             f"(colunas: {list(df.columns)}).")
 
         self.df = df.copy()
         self.target = target
@@ -263,22 +412,21 @@ class SequentialPDSegmenter:
             return {"feature": feature, "kind": "num", "lo": b["lo"], "hi": b["hi"]}
         return {"feature": feature, "kind": "cat", "cats": list(b["cats"])}
 
-    def _target_binary(self, frame) -> np.ndarray:
-        """Alvo binário (0/1) de `frame`, sem faltantes — para o binning ótimo."""
-        y = frame[self.target].to_numpy(dtype="float64")
-        y = y[~np.isnan(y)]
-        return y.astype(int)
-
     def _resolve_bins(self, sub, feature, splits, dtype, max_n_bins, min_bin_size,
-                      max_bin_size=None, relax_max=False, min_event_rate_diff=0.0):
+                      max_bin_size=None, relax_max=False, min_mean_diff=0.0,
+                      criterion="optbin"):
         """Resolve os bins de um ramo. Devolve (bins, modo, kind).
         - num: bins = [{'kind':'num','lo','hi'}, ...]
         - cat: bins = [{'kind':'cat','cats':[...]}, ...]
-        No modo ótimo, o binning binário é ajustado só na amostra de referência
-        (DES). No modo manual: splits numérico = lista de cortes; splits
-        categórico = lista de grupos (cada grupo é uma lista de categorias).
-        min_event_rate_diff: diferença mínima de taxa de default exigida entre bins
-        consecutivas no binning ótimo (optbinning); 0 = sem restrição.
+        No modo ótimo (``criterion="optbin"``), o binning é ajustado só na amostra
+        de referência (DES) — binário (``OptimalBinning``) p/ classificação,
+        contínuo (``ContinuousOptimalBinning``) p/ regressão. Com outro
+        ``criterion`` (gini/entropy/ks/iv/chi2 · variance/mae/ftest) faz um split
+        BINÁRIO no melhor corte por esse critério. No modo manual: splits numérico
+        = lista de cortes; splits categórico = lista de grupos.
+        min_mean_diff: diferença mínima do alvo médio (taxa de default em
+        classificação) exigida entre bins consecutivas no binning ótimo; 0 = sem
+        restrição.
         """
         kind = self._detect_kind(sub, feature, dtype)
 
@@ -293,19 +441,26 @@ class SequentialPDSegmenter:
                 y = fit[self.target].to_numpy(dtype="float64")
                 ok = ~np.isnan(y)
                 x, y = x[ok], y[ok]                         # alvo NaN não entra no ajuste
-                yb = y.astype(int)                          # alvo binário 0/1
+                yfit = y.astype(int) if self._is_clf else y    # binário 0/1 só na classif.
                 x_obs = x[~np.isnan(x)]
-                if (len(yb) < 4 or x_obs.size == 0 or np.unique(x_obs).size < 2
-                        or np.unique(yb).size < 2):
+                # classificação exige as 2 classes presentes; regressão não
+                degenerado = (len(yfit) < 4 or x_obs.size == 0
+                              or np.unique(x_obs).size < 2
+                              or (self._is_clf and np.unique(yfit).size < 2))
+                if degenerado:
                     cortes = []                            # dados degenerados → sem corte
+                elif criterion != "optbin":
+                    min_n = max(1, int(min_bin_size * len(yfit)))
+                    t = _best_numeric_cut(x, yfit, criterion, self._is_clf, min_n)
+                    cortes = [t] if t is not None else []
                 else:
                     def _opt(mnb, mbs):
-                        b = OptimalBinning(
+                        b = self._OptBin(
                             name=feature, dtype="numerical", max_n_bins=mnb,
                             min_bin_size=min_bin_size, max_bin_size=mbs,
-                            min_event_rate_diff=min_event_rate_diff,
-                            monotonic_trend="auto_asc_desc")
-                        return _fit_optbinning_splits(b, x, yb)
+                            monotonic_trend="auto_asc_desc",
+                            **{self._diff_kwarg: min_mean_diff})
+                        return _fit_optbinning_splits(b, x, yfit)
                     cortes = _opt(max_n_bins, max_bin_size)
                     if not cortes and max_bin_size is not None and relax_max:
                         # o máximo pode deixar o problema INFEASIBLE p/ este nº de
@@ -316,7 +471,7 @@ class SequentialPDSegmenter:
                                 break
                         if not cortes:
                             cortes = _opt(max_n_bins, None)
-                modo = "ótimo"
+                modo = "ótimo" if criterion == "optbin" else criterion
             if not cortes:
                 return [], modo, kind
             edges = [-np.inf, *cortes, np.inf]
@@ -341,17 +496,24 @@ class SequentialPDSegmenter:
             fit = self._fit_frame(sub, min_bin_size)
             fit = fit[fit[feature].notna() & fit[self.target].notna()]  # NaN fora do ajuste
             xs = fit[feature].astype(str).to_numpy()
-            ys = fit[self.target].to_numpy(dtype="float64").astype(int)
-            if len(ys) < 4 or np.unique(xs).size < 2 or np.unique(ys).size < 2:
+            yf = fit[self.target].to_numpy(dtype="float64")
+            ys = yf.astype(int) if self._is_clf else yf       # binário só na classif.
+            degenerado = (len(ys) < 4 or np.unique(xs).size < 2
+                          or (self._is_clf and np.unique(ys).size < 2))
+            if degenerado:
                 grupos = []                          # dados degenerados → sem grupos
+            elif criterion != "optbin":
+                min_n = max(1, int(min_bin_size * len(ys)))
+                par = _best_categorical_split(xs, ys, criterion, self._is_clf, min_n)
+                grupos = [list(par[0]), list(par[1])] if par is not None else []
             else:
-                b = OptimalBinning(
+                b = self._OptBin(
                     name=feature, dtype="categorical", max_n_bins=max_n_bins,
                     min_bin_size=min_bin_size, max_bin_size=max_bin_size,
-                    min_event_rate_diff=min_event_rate_diff,
-                    monotonic_trend="auto_asc_desc")
+                    monotonic_trend="auto_asc_desc",
+                    **{self._diff_kwarg: min_mean_diff})
                 grupos = [list(arr) for arr in _fit_optbinning_splits(b, xs, ys)]
-            modo = "ótimo"
+            modo = "ótimo" if criterion == "optbin" else criterion
         _NA_TOK = {"nan", "NaN", "<NA>", "None"}
         bins = []
         for g in grupos:
@@ -376,14 +538,14 @@ class SequentialPDSegmenter:
                 "faixa": self._bin_label(feature, b),
                 "n": len(s),
                 "repr_%": round(100 * len(s) / n_ref, 1),
-                "pd_medio": round(s.mean(), 4),
-                "pd_std": round(s.std(), 4),
+                "valor_medio": round(s.mean(), 4),
+                "valor_std": round(s.std(), 4),
             })
         tbl = pd.DataFrame(linhas)
         if tbl.empty:                       # todos os bins vazios
             tbl.attrs["mono_ok"] = True
             return tbl
-        means = tbl["pd_medio"]
+        means = tbl["valor_medio"]
         tbl.attrs["mono_ok"] = bool(
             means.is_monotonic_increasing or means.is_monotonic_decreasing
         )
@@ -395,7 +557,7 @@ class SequentialPDSegmenter:
     # ------------------------------------------------------------------
     def show_grow(self, feature, splits=None, dtype=None, max_n_bins=4,
                   min_bin_size=0.05, only_segments=None, max_bin_size=None,
-                  min_event_rate_diff=0.0):
+                  min_mean_diff=0.0, criterion="optbin"):
         targets = {
             sid: s for sid, s in self.segments.items()
             if s["is_leaf"] and (only_segments is None or sid in only_segments)
@@ -406,7 +568,7 @@ class SequentialPDSegmenter:
             sub = self.df[seg["mask"]]
             bins, modo, kind = self._resolve_bins(
                 sub, feature, splits, dtype, max_n_bins, min_bin_size, max_bin_size,
-                min_event_rate_diff=min_event_rate_diff)
+                min_mean_diff=min_mean_diff, criterion=criterion)
             if not bins:
                 print(f"[{sid}] sem corte válido em '{feature}' ({modo})")
                 continue
@@ -424,7 +586,7 @@ class SequentialPDSegmenter:
     # ------------------------------------------------------------------
     def grow(self, feature, splits=None, dtype=None, max_n_bins=4,
              min_bin_size=0.05, only_segments=None, max_bin_size=None, relax_max=False,
-             min_event_rate_diff=0.0):
+             min_mean_diff=0.0, criterion="optbin"):
         targets = {
             sid: s for sid, s in self.segments.items()
             if s["is_leaf"] and (only_segments is None or sid in only_segments)
@@ -440,7 +602,7 @@ class SequentialPDSegmenter:
                     continue
             bins, modo, kind = self._resolve_bins(
                 sub, feature, splits, dtype, max_n_bins, min_bin_size, max_bin_size,
-                relax_max=relax_max, min_event_rate_diff=min_event_rate_diff)
+                relax_max=relax_max, min_mean_diff=min_mean_diff, criterion=criterion)
             modo_usado = modo
             if not bins:
                 print(f"[{sid}] sem corte válido em '{feature}' ({modo}) — folha mantida")
@@ -477,16 +639,18 @@ class SequentialPDSegmenter:
     # ------------------------------------------------------------------
     # PRUNE: poda por FUSÃO de folhas-IRMÃS (mesmo pai). Em cada rodada funde um
     #   par de irmãs adjacentes que viole um dos critérios:
-    #     - diferença de PD média entre as duas irmãs < `min_pd_gap` (ex.: 0.02
+    #     - diferença de PD média entre as duas irmãs < `min_valor_gap` (ex.: 0.02
     #       = 2 p.p.) → separam pouco, devem ser unidas;
     #     - alguma das duas tem representatividade < `min_repr` % (imaterial) →
     #       é unida à irmã adjacente mais próxima em PD.
     #   Prioriza o par de menor diferença de PD. Só funde irmãs (o nó de
     #   faltantes não entra). Itera até nenhum par violar os critérios.
     # ------------------------------------------------------------------
-    def prune(self, min_repr: float = 2.0, min_pd_gap: float = 0.02,
+    def prune(self, min_repr: float = 2.0, min_valor_gap: float | None = None,
               protect: set | None = None, verbose: bool = True,
               max_rounds: int = 1000):
+        if min_valor_gap is None:
+            min_valor_gap = 0.02 if self._is_clf else 0.03
         protect = set(protect or [])
         n_total = len(self.df)
         n_merges = 0
@@ -521,7 +685,7 @@ class SequentialPDSegmenter:
                         continue
                     gap = (abs(pds[b] - pds[a])
                            if not (pd.isna(pds[a]) or pd.isna(pds[b])) else np.inf)
-                    viola_gap = gap < min_pd_gap
+                    viola_gap = gap < min_valor_gap
                     viola_repr = (reprs[a] < min_repr) or (reprs[b] < min_repr)
                     if not (viola_gap or viola_repr):
                         continue
@@ -541,7 +705,7 @@ class SequentialPDSegmenter:
 
         n_folhas = sum(s["is_leaf"] for s in self.segments.values())
         if verbose:
-            print(f"[prune] {n_merges} fusão(ões) (repr<{min_repr}% ou ΔPD<{min_pd_gap}). "
+            print(f"[prune] {n_merges} fusão(ões) (repr<{min_repr}% ou ΔPD<{min_valor_gap}). "
                   f"Folhas finais: {n_folhas}")
         return self
 
@@ -750,13 +914,13 @@ class SequentialPDSegmenter:
     #   adjacentes que NÃO se distinguem em PD. Em cada rodada, escolhe o par
     #   de irmãs vizinhas mais parecido e o funde se:
     #     - o teste de hipótese não rejeita a igualdade de PD (p > alpha), OU
-    #     - a diferença de PD média entre elas é < min_pd_gap.
+    #     - a diferença de PD média entre elas é < min_valor_gap.
     #   Só funde irmãs (a única fusão válida na árvore). Por padrão o nó de
     #   faltantes NÃO entra; com `include_missing=True` ele também é juntado ao
     #   bin populado irmão estatisticamente mais próximo. `protect` = ids de
     #   folhas a preservar (ex.: travadas na UI). Itera até nenhum par qualificar.
     # ------------------------------------------------------------------
-    def auto_merge(self, alpha: float = 0.05, min_pd_gap: float = 0.0,
+    def auto_merge(self, alpha: float = 0.05, min_valor_gap: float = 0.0,
                    test: str = "mannwhitney", min_n: int = 8,
                    protect: set | None = None, include_missing: bool = False,
                    max_rounds: int = 200, verbose: bool = True):
@@ -796,7 +960,7 @@ class SequentialPDSegmenter:
                         gap = (abs(va.mean() - vb.mean())
                                if len(va) and len(vb) else np.inf)
                         p = self._pair_pvalue(a, b, test=test, min_n=min_n)
-                        if not ((not np.isnan(p) and p > alpha) or gap < min_pd_gap):
+                        if not ((not np.isnan(p) and p > alpha) or gap < min_valor_gap):
                             continue
                         prio = p if not np.isnan(p) else (2.0 - min(gap, 1.0))
                         if melhor is None or prio > melhor[0]:
@@ -816,7 +980,7 @@ class SequentialPDSegmenter:
                             gap = (abs(va.mean() - vb.mean())
                                    if len(va) and len(vb) else np.inf)
                             p = self._pair_pvalue(na_sid, tgt, test=test, min_n=min_n)
-                            if not ((not np.isnan(p) and p > alpha) or gap < min_pd_gap):
+                            if not ((not np.isnan(p) and p > alpha) or gap < min_valor_gap):
                                 continue
                             prio = p if not np.isnan(p) else (2.0 - min(gap, 1.0))
                             if melhor is None or prio > melhor[0]:
@@ -835,7 +999,7 @@ class SequentialPDSegmenter:
         n_folhas = sum(s["is_leaf"] for s in self.segments.values())
         if verbose:
             print(f"[auto_merge] {n_merges} fusão(ões) automática(s) "
-                  f"(alpha={alpha}, min_pd_gap={min_pd_gap}, "
+                  f"(alpha={alpha}, min_valor_gap={min_valor_gap}, "
                   f"include_missing={include_missing}). Folhas finais: {n_folhas}")
         return self
 
@@ -862,13 +1026,13 @@ class SequentialPDSegmenter:
 
     # ------------------------------------------------------------------
     # Ordenação ESQUERDA→DIREITA das folhas (posição na árvore construída).
-    #   A nota_pd passa a ser essa posição: 1, 2, 3, … da esquerda p/ a direita.
+    #   A nota passa a ser essa posição: 1, 2, 3, … da esquerda p/ a direita.
     #   Em cada nó os filhos são ordenados pela MENOR PD (DES) de folha do ramo
     #   (asc. = ramo de menor risco à esquerda), espelhando o layout de plot_tree.
     #   Para um split único, posição = ordem de PD (idêntico ao comportamento
     #   anterior); em árvores profundas, as notas leem 1, 2, 3 de fato.
     # ------------------------------------------------------------------
-    def _node_pd(self, sid: str) -> float:
+    def _node_value(self, sid: str) -> float:
         """PD média do nó na amostra de referência (DES), com fallback p/ todas."""
         sub = self.df[self.segments[sid]["mask"]]
         if self.sample_col is not None:
@@ -883,7 +1047,7 @@ class SequentialPDSegmenter:
         for sid, s in self.segments.items():
             filhos.setdefault(s["parent"], []).append(sid)
         INF = float("inf")
-        leaf_pd = {sid: self._node_pd(sid)
+        leaf_pd = {sid: self._node_value(sid)
                    for sid, s in self.segments.items() if s["is_leaf"]}
         _submin: dict = {}
 
@@ -915,7 +1079,7 @@ class SequentialPDSegmenter:
 
     # ------------------------------------------------------------------
     # LEAVES: segmentos-folha finais, com nota de PD e descrição
-    #   nota_pd: 1..N pela POSIÇÃO esquerda→direita na árvore
+    #   nota: 1..N pela POSIÇÃO esquerda→direita na árvore
     #   with_psi:  adiciona a contribuição de PSI de cada folha por amostra
     #              (psi_<amostra>), tendo a referência (DES) como base
     #   with_test: adiciona p_vs_prox = p-valor do teste de PD entre a folha e a
@@ -930,7 +1094,7 @@ class SequentialPDSegmenter:
             if not seg["is_leaf"]:
                 continue
             sub = self.df[seg["mask"]]
-            # pd_medio na referência (DES) = base da régua; assim nota_pd é
+            # valor_medio na referência (DES) = base da régua; assim nota é
             # monotônica na PD que entra em predict/apply_spark (com fallback)
             if self.sample_col is not None:
                 ref_t = sub.loc[sub[self.sample_col] == self.ref_sample, self.target]
@@ -943,15 +1107,15 @@ class SequentialPDSegmenter:
                 "profundidade": seg["depth"],
                 "n": len(sub),
                 "repr_%": round(100 * len(sub) / n_total, 1) if n_total else 0.0,
-                "pd_medio": round(pd_m, 4) if not pd.isna(pd_m) else np.nan,
-                "pd_std": round(sub[self.target].std(), 4),
+                "valor_medio": round(pd_m, 4) if not pd.isna(pd_m) else np.nan,
+                "valor_std": round(sub[self.target].std(), 4),
             }
             if self.sample_col is not None:
                 for amostra in self.df[self.sample_col].dropna().unique():
                     s_am = sub.loc[sub[self.sample_col] == amostra, self.target]
-                    row[f"pd_{amostra}"] = round(s_am.mean(), 4) if len(s_am) else np.nan
+                    row[f"valor_{amostra}"] = round(s_am.mean(), 4) if len(s_am) else np.nan
             linhas.append(row)
-        # nota_pd = POSIÇÃO esquerda→direita na árvore (ver _leaf_order); assim os
+        # nota = POSIÇÃO esquerda→direita na árvore (ver _leaf_order); assim os
         # números sempre leem 1, 2, 3 da esquerda p/ a direita no plot_tree.
         ordem = {sid: i for i, sid in enumerate(self._leaf_order(ascending=ascending))}
         out = (
@@ -959,7 +1123,7 @@ class SequentialPDSegmenter:
             .sort_values("segmento", key=lambda s: s.map(ordem), kind="stable")
             .reset_index(drop=True)
         )
-        out.insert(1, "nota_pd", range(1, len(out) + 1))
+        out.insert(1, "nota", range(1, len(out) + 1))
 
         if with_psi and self.sample_col is not None:
             out = self._append_psi_cols(out)
@@ -1059,7 +1223,7 @@ class SequentialPDSegmenter:
     # mapeia segmento -> (nota, descrição) para uso no assign
     def _grade_map(self, ascending: bool = True):
         lv = self.leaves(ascending=ascending)
-        nota = dict(zip(lv["segmento"], lv["nota_pd"]))
+        nota = dict(zip(lv["segmento"], lv["nota"]))
         desc = dict(zip(lv["segmento"], lv["descricao"]))
         return nota, desc
 
@@ -1068,7 +1232,7 @@ class SequentialPDSegmenter:
     #   Cada nó mostra n, representatividade e PD média; folhas trazem [nota N].
     #   Filhos são ordenados por PD (ascendente por padrão).
     # ------------------------------------------------------------------
-    def tree(self, ascending: bool = True, prune_preview: bool = False) -> str:
+    def tree(self, ascending: bool = True) -> str:
         # mapa pai -> filhos
         filhos: dict = {}
         for sid, seg in self.segments.items():
@@ -1123,12 +1287,17 @@ class SequentialPDSegmenter:
         return out
 
     # ------------------------------------------------------------------
-    # _pd_color_range: faixa (vmin, vmax) da escala de cor da PD, a partir das
+    # _value_color_range: faixa (vmin, vmax) da escala de cor da PD, a partir das
     #   PDs observadas nos nós. Diferente da LGD (fixa 0–1), a PD costuma ser
     #   pequena (ex.: 0–0.3), então a escala é dinâmica para as cores
     #   discriminarem — ancorada em 0 (sem default = verde).
     # ------------------------------------------------------------------
-    def _pd_color_range(self):
+    def _value_color_range(self):
+        """Faixa de cor do alvo na árvore. Regressão (LGD em [0,1]) usa escala
+        fixa 0–1; classificação (PD, taxas pequenas) usa escala dinâmica até a
+        maior taxa observada para dar contraste."""
+        if not self._is_clf:
+            return 0.0, 1.0
         vals = []
         for sid, s in self.segments.items():
             sub = self.df[s["mask"]]
@@ -1178,12 +1347,12 @@ class SequentialPDSegmenter:
                 pdv = sub[self.target].mean() if n else float("nan")
             return n, (100 * n / n_total if n_total else 0.0), pdv
 
-        def sample_pd(sid, a):
+        def sample_value(sid, a):
             m = self.segments[sid]["mask"] & (self.df[self.sample_col] == a)
             sub = self.df[m]
             return sub[self.target].mean() if len(sub) else float("nan")
 
-        # menor nota_pd entre as folhas de cada ramo — usada para ordenar os
+        # menor nota entre as folhas de cada ramo — usada para ordenar os
         # ramos da esquerda (menor nota) para a direita (maior nota)
         _min_nota: dict = {}
 
@@ -1196,7 +1365,7 @@ class SequentialPDSegmenter:
                                          default=10 ** 9)
             return _min_nota[sid]
 
-        # --- layout: folhas em x sequencial na ORDEM DE nota_pd (esq.→dir.);
+        # --- layout: folhas em x sequencial na ORDEM DE nota (esq.→dir.);
         #     nós internos centralizados sobre o intervalo dos filhos ---
         X_GAP, Y_GAP = 2.4, 2.15        # espaçamento entre folhas / entre níveis
         bw, bh = 0.97, 0.74             # meia-largura / meia-altura do box (dados)
@@ -1217,7 +1386,6 @@ class SequentialPDSegmenter:
             return x
 
         place("root", 0)
-        n_leaves = max(counter[0], 1)
         md = max_depth[0]
         xs = [p[0] for p in pos.values()]
         ys = [p[1] for p in pos.values()]
@@ -1227,7 +1395,7 @@ class SequentialPDSegmenter:
                        max(3.5, (md + 1) * Y_GAP * 0.95))
         fig, ax = self._new_ax(figsize, dpi, ax)
 
-        vmin, vmax = self._pd_color_range()      # escala de cor da PD (dinâmica)
+        vmin, vmax = self._value_color_range()      # escala de cor da PD (dinâmica)
         norm = Normalize(vmin, vmax)
         cmap_obj = plt.get_cmap(cmap)
 
@@ -1275,7 +1443,7 @@ class SequentialPDSegmenter:
             metr = f"repr. {rep:.1f}%  |  {pd_txt}"
             if show_samples and self.sample_col is not None:
                 amostras = list(self.df[self.sample_col].dropna().unique())
-                metr += "\n" + " | ".join(f"{a} {sample_pd(sid, a) * 100:.2f}%"
+                metr += "\n" + " | ".join(f"{a} {sample_value(sid, a) * 100:.2f}%"
                                           for a in amostras)
             t_metr = ax.text(x, y - 0.42 * bh, metr, ha="center", va="center",
                              fontsize=base_fs - 0.8, color=txt_color, zorder=3,
@@ -1462,7 +1630,12 @@ class SequentialPDSegmenter:
     #   o corte KS-ótimo por amostra (ou `cutoff`, se informado).
     # ------------------------------------------------------------------
     def metrics(self, cutoff: float | None = None) -> pd.DataFrame:
-        from yggdrasil.metrics.classification import classification_metrics
+        """Métricas da régua como modelo, por amostra.
+
+        classification → taxa de default + KS/AUC/Gini/Acurácia/F1.
+        regression → MAE/RMSE/R² (``cutoff`` é ignorado)."""
+        if self._is_clf:
+            from yggdrasil.metrics.classification import classification_metrics
 
         leaf_ids = [sid for sid, s in self.segments.items() if s["is_leaf"]]
         if self.sample_col is not None:
@@ -1493,17 +1666,29 @@ class SequentialPDSegmenter:
             valid = ~(np.isnan(y) | np.isnan(yhat))      # ignora alvo/score NaN
             y, yhat = y[valid], yhat[valid]
             base = {"amostra": nome, "n": int(mask.sum())}
-            if len(y) == 0:
-                base.update({"taxa_default": np.nan, "KS": np.nan, "AUC": np.nan,
-                             "Gini": np.nan, "Acuracia": np.nan, "F1": np.nan})
-                linhas.append(base)
-                continue
-            cm = classification_metrics(y, yhat, cutoff=cutoff)
-            base.update({
-                "taxa_default": round(float(np.mean(y)), 4),
-                "KS": cm["ks"], "AUC": cm["auc"], "Gini": cm["gini"],
-                "Acuracia": cm["accuracy"], "F1": cm["f1"],
-            })
+            if self._is_clf:
+                if len(y) == 0:
+                    base.update({"taxa_default": np.nan, "KS": np.nan, "AUC": np.nan,
+                                 "Gini": np.nan, "Acuracia": np.nan, "F1": np.nan})
+                else:
+                    cm = classification_metrics(y, yhat, cutoff=cutoff)
+                    base.update({
+                        "taxa_default": round(float(np.mean(y)), 4),
+                        "KS": cm["ks"], "AUC": cm["auc"], "Gini": cm["gini"],
+                        "Acuracia": cm["accuracy"], "F1": cm["f1"],
+                    })
+            else:
+                if len(y) == 0:
+                    base.update({"MAE": np.nan, "RMSE": np.nan, "R2": np.nan})
+                else:
+                    err = y - yhat
+                    ss_res = float(np.sum(err ** 2))
+                    ss_tot = float(np.sum((y - y.mean()) ** 2))
+                    base.update({
+                        "MAE": round(float(np.mean(np.abs(err))), 4),
+                        "RMSE": round(float(np.sqrt(np.mean(err ** 2))), 4),
+                        "R2": round(1 - ss_res / ss_tot, 4) if ss_tot > 0 else np.nan,
+                    })
             linhas.append(base)
         return pd.DataFrame(linhas)
 
@@ -1550,10 +1735,10 @@ class SequentialPDSegmenter:
                 lo = hi = pt = np.nan
 
             row = {
-                "nota_pd": r["nota_pd"],
+                "nota": r["nota"],
                 "descricao": r["descricao"],
                 "n": int(n),
-                f"pd_{sample or 'todos'}": round(pt, 4) if not np.isnan(pt) else np.nan,
+                f"valor_{sample or 'todos'}": round(pt, 4) if not np.isnan(pt) else np.nan,
                 "ic_low": round(float(lo), 4) if not np.isnan(lo) else np.nan,
                 "ic_high": round(float(hi), 4) if not np.isnan(hi) else np.nan,
                 "amplitude": round(float(hi - lo), 4) if not np.isnan(hi) else np.nan,
@@ -1563,7 +1748,7 @@ class SequentialPDSegmenter:
                 cvals = self.df.loc[m_c, self.target].to_numpy(dtype="float64")
                 cvals = cvals[~np.isnan(cvals)]
                 pd_c = float(cvals.mean()) if len(cvals) else np.nan
-                row[f"pd_{check_sample}"] = round(pd_c, 4) if not np.isnan(pd_c) else np.nan
+                row[f"valor_{check_sample}"] = round(pd_c, 4) if not np.isnan(pd_c) else np.nan
                 if np.isnan(pd_c) or np.isnan(lo):
                     row["aderente"] = None
                     row["status_oot"] = "—"
@@ -1581,7 +1766,7 @@ class SequentialPDSegmenter:
     # ==================================================================
     # VALIDAÇÃO: backtesting por safra, monotonicidade e calibração
     # ==================================================================
-    def _predicted_pd_series(self) -> pd.Series:
+    def _predicted_series(self) -> pd.Series:
         """PD prevista por linha = PD média do segmento na referência (régua)."""
         pred = pd.Series(np.nan, index=self.df.index, dtype="float64")
         for sid, seg in self.segments.items():
@@ -1603,10 +1788,12 @@ class SequentialPDSegmenter:
     #   por `tol`).
     # ------------------------------------------------------------------
     def backtest(self, time_col: str, sample: str | None = None,
-                 tol: float = 0.03) -> pd.DataFrame:
+                 tol: float | None = None) -> pd.DataFrame:
+        if tol is None:                       # tolerância de gap default por tipo de alvo
+            tol = 0.03 if self._is_clf else 0.10
         if time_col not in self.df.columns:
             raise ValueError(f"Coluna de tempo '{time_col}' não está no DataFrame.")
-        pred = self._predicted_pd_series()
+        pred = self._predicted_series()
         mask = pd.Series(True, index=self.df.index)
         if sample is not None and self.sample_col is not None:
             mask = self.df[self.sample_col] == sample
@@ -1617,11 +1804,11 @@ class SequentialPDSegmenter:
         })
         g = base.groupby("periodo", dropna=False)
         out = g.agg(n=("real", "size"),
-                    pd_prevista=("prev", "mean"),
-                    pd_realizada=("real", "mean")).reset_index()
-        out["gap"] = out["pd_realizada"] - out["pd_prevista"]
+                    valor_previsto=("prev", "mean"),
+                    valor_realizado=("real", "mean")).reset_index()
+        out["gap"] = out["valor_realizado"] - out["valor_previsto"]
         out["status"] = out["gap"].abs().map(lambda d: "ok" if d <= tol else "alerta")
-        for c in ("pd_prevista", "pd_realizada", "gap"):
+        for c in ("valor_previsto", "valor_realizado", "gap"):
             out[c] = out[c].round(4)
         out = out.sort_values("periodo").reset_index(drop=True)
         out.attrs.update(time_col=time_col, sample=sample, tol=tol)
@@ -1654,7 +1841,7 @@ class SequentialPDSegmenter:
             for i in range(len(vals) - 1):
                 v0, v1 = vals[i], vals[i + 1]
                 if not (np.isnan(v0) or np.isnan(v1)) and v1 < v0:
-                    inv.append((int(lv.iloc[i]["nota_pd"]), int(lv.iloc[i + 1]["nota_pd"])))
+                    inv.append((int(lv.iloc[i]["nota"]), int(lv.iloc[i + 1]["nota"])))
             rows.append({"amostra": a if a is not None else "todos",
                          "monotonico": len(inv) == 0,
                          "n_inversoes": len(inv), "inversoes": inv})
@@ -1681,10 +1868,10 @@ class SequentialPDSegmenter:
             real_vals = self.df.loc[m, self.target]
             real = float(real_vals.mean()) if len(real_vals) else np.nan
             rows.append({
-                "nota_pd": int(r["nota_pd"]), "descricao": r["descricao"],
+                "nota": int(r["nota"]), "descricao": r["descricao"],
                 "n": int(len(real_vals)),
-                "pd_prevista": round(prev, 4) if not np.isnan(prev) else np.nan,
-                "pd_realizada": round(real, 4) if not np.isnan(real) else np.nan,
+                "valor_previsto": round(prev, 4) if not np.isnan(prev) else np.nan,
+                "valor_realizado": round(real, 4) if not np.isnan(real) else np.nan,
                 "gap": (round(real - prev, 4)
                         if not (np.isnan(real) or np.isnan(prev)) else np.nan),
             })
@@ -1696,9 +1883,11 @@ class SequentialPDSegmenter:
     # PLOT_CALIBRATION: dispersão PD prevista (x) vs realizada (y) por folha,
     #   com a diagonal y=x (calibração perfeita) e faixa de tolerância.
     # ------------------------------------------------------------------
-    def plot_calibration(self, check_sample: str | None = None, tol: float = 0.02,
+    def plot_calibration(self, check_sample: str | None = None, tol: float | None = None,
                          figsize=(6.0, 6.0), save_path: str | None = None,
                          dpi: int = 150, ax=None):
+        if tol is None:
+            tol = 0.02 if self._is_clf else 0.05
         try:
             import matplotlib.pyplot as plt  # noqa: F401
         except ImportError as e:  # pragma: no cover
@@ -1706,8 +1895,8 @@ class SequentialPDSegmenter:
         ct = self.calibration_table(check_sample)
         chk = ct.attrs.get("check_sample")
         fig, ax = self._new_ax(figsize, dpi, ax)
-        x = ct["pd_prevista"].to_numpy(dtype="float64")
-        y = ct["pd_realizada"].to_numpy(dtype="float64")
+        x = ct["valor_previsto"].to_numpy(dtype="float64")
+        y = ct["valor_realizado"].to_numpy(dtype="float64")
         lim_hi = float(np.nanmax([np.nanmax(x) if len(x) else 0,
                                   np.nanmax(y) if len(y) else 0, 0.05])) * 1.15
         diag = np.linspace(0, lim_hi, 50)
@@ -1715,14 +1904,14 @@ class SequentialPDSegmenter:
                         label=f"tolerância ±{tol}")
         ax.plot(diag, diag, color="#0f3d57", lw=1.3, label="calibração perfeita")
         for _, r in ct.iterrows():
-            if np.isnan(r["pd_prevista"]) or np.isnan(r["pd_realizada"]):
+            if np.isnan(r["valor_previsto"]) or np.isnan(r["valor_realizado"]):
                 continue
             ok = abs(r["gap"]) <= tol
-            ax.scatter(r["pd_prevista"], r["pd_realizada"], s=70,
+            ax.scatter(r["valor_previsto"], r["valor_realizado"], s=70,
                        color=("#1aa64b" if ok else "#d6453e"),
                        edgecolor="#33424f", zorder=3)
-            ax.annotate(str(r["nota_pd"]),
-                        (r["pd_prevista"], r["pd_realizada"]),
+            ax.annotate(str(r["nota"]),
+                        (r["valor_previsto"], r["valor_realizado"]),
                         textcoords="offset points", xytext=(6, 4), fontsize=9)
         ax.set_xlim(0, lim_hi)
         ax.set_ylim(0, lim_hi)
@@ -1761,12 +1950,144 @@ class SequentialPDSegmenter:
             linhas.append("| " + " | ".join(cell(r[c]) for c in cols) + " |")
         return "\n".join(linhas)
 
-    def validation_report(self, path: str = "relatorio_validacao_pd.md",
+    # ------------------------------------------------------------------
+    # Plots de DISTRIBUIÇÃO do alvo (só fazem sentido em regressão, ex.: LGD)
+    # ------------------------------------------------------------------
+    def plot_leaf_boxplots(self, sample: str | None = None, ascending: bool = True,
+                           cmap: str = "RdYlGn_r", figsize=None,
+                           save_path: str | None = None, dpi: int = 150, ax=None):
+        """Boxplot do alvo por folha (regressão). Mostra a dispersão dentro de
+        cada folha, não só a média."""
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.colors import Normalize
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("plot_leaf_boxplots requer matplotlib.") from e
+        lv = self.leaves(ascending=ascending)
+        ids, notas, descr, vals = [], [], [], []
+        for _, r in lv.iterrows():
+            sid = r["segmento"]
+            m = self.segments[sid]["mask"]
+            if sample is not None and self.sample_col is not None:
+                m = m & (self.df[self.sample_col] == sample)
+            v = self.df.loc[m, self.target].to_numpy(dtype="float64")
+            v = v[~np.isnan(v)]
+            if len(v) == 0:
+                continue
+            ids.append(sid); notas.append(int(r["nota"]))
+            descr.append(r["descricao"]); vals.append(v)
+        if not vals:
+            raise ValueError("Sem dados para o boxplot.")
+        if figsize is None:
+            figsize = (max(6.0, len(vals) * 1.1), 4.6)
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        norm = Normalize(0.0, 1.0)
+        cmap_obj = plt.get_cmap(cmap)
+        bp = ax.boxplot(vals, positions=range(1, len(vals) + 1), widths=0.6,
+                        patch_artist=True, showfliers=False,
+                        medianprops=dict(color="#15324a", lw=1.4))
+        for patch, v in zip(bp["boxes"], vals):
+            patch.set_facecolor(cmap_obj(norm(float(np.mean(v)))))
+            patch.set_edgecolor("#33424f")
+            patch.set_alpha(0.92)
+        ax.set_xticks(range(1, len(vals) + 1))
+        ax.set_xticklabels([f"folha {n}" for n in notas], rotation=0, fontsize=9)
+        ax.set_ylabel("alvo")
+        sfx = f" · {sample}" if sample else ""
+        ax.set_title(f"Dispersão do alvo por folha{sfx}", fontsize=12,
+                     fontweight="bold", color="#15324a")
+        ax.set_ylim(0, 1)
+        ax.grid(axis="y", alpha=0.2)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def plot_target_hist(self, sample: str | None = None, bins: int = 30,
+                         color: str = "#2a9d8f", figsize=(7.0, 4.2),
+                         save_path: str | None = None, dpi: int = 150, ax=None):
+        """Histograma do alvo na carteira (regressão) — revela bimodalidade
+        (massa em 0 e/ou 1) e concentração."""
+        try:
+            import matplotlib.pyplot as plt  # noqa: F401
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("plot_target_hist requer matplotlib.") from e
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        if sample is None and self.sample_col is not None:
+            sample = self.ref_sample
+        if sample is not None and self.sample_col is not None:
+            y = self.df.loc[self.df[self.sample_col] == sample, self.target].to_numpy(dtype="float64")
+            sfx = f" — {sample}"
+        else:
+            y = self.df[self.target].to_numpy(dtype="float64")
+            sfx = ""
+        y = y[~np.isnan(y)]
+        ax.hist(y, bins=bins, range=(0, 1), color=color, alpha=0.9,
+                edgecolor="#15324a")
+        if len(y):
+            ax.axvline(float(np.mean(y)), color="#d6453e", lw=1.6, ls="--",
+                       label=f"média {np.mean(y):.3f}")
+            ax.legend(fontsize=8)
+        ax.set_xlabel("alvo")
+        ax.set_ylabel("frequência")
+        ax.set_title(f"Distribuição do alvo{sfx}", fontsize=12,
+                     fontweight="bold", color="#15324a")
+        ax.set_xlim(0, 1)
+        ax.grid(axis="y", alpha=0.2)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def plot_leaf_value_hist(self, sid: str | None = None, sample: str | None = None,
+                             bins: int = 24, figsize=(5.2, 2.9),
+                             save_path: str | None = None, dpi: int = 150, ax=None):
+        """Histograma do alvo numa folha (regressão)."""
+        try:
+            import matplotlib.pyplot as plt  # noqa: F401
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("plot_leaf_value_hist requer matplotlib.") from e
+        mask = (pd.Series(True, index=self.df.index)
+                if sid is None or sid not in self.segments
+                else self.segments[sid]["mask"].copy())
+        if sample is None and self.sample_col is not None:
+            sample = self.ref_sample
+        sfx = ""
+        if sample is not None and self.sample_col is not None:
+            mask = mask & (self.df[self.sample_col] == sample)
+            sfx = f" · {sample}"
+        y = self.df.loc[mask, self.target].to_numpy(dtype="float64")
+        y = y[~np.isnan(y)]
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        if y.size == 0:
+            ax.text(0.5, 0.5, "sem dados nesta folha/amostra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889")
+            ax.axis("off"); fig.tight_layout()
+            return fig
+        ax.hist(y, bins=bins, range=(0, 1), color="steelblue", alpha=0.85,
+                edgecolor="#2f5d82")
+        m = float(np.mean(y))
+        ax.axvline(m, color="crimson", lw=1.8, ls="--", label=f"média {m:.3f}")
+        ax.legend(fontsize=8, framealpha=0.9)
+        ax.set_xlabel("alvo"); ax.set_ylabel("freq.")
+        ax.set_title(f"Alvo médio da folha{sfx} (n={y.size})", fontsize=10.5,
+                     fontweight="bold", color="#15324a")
+        ax.set_xlim(0, 1); ax.grid(axis="y", alpha=0.15)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def validation_report(self, path: str = "relatorio_validacao.md",
                           time_col: str | None = None,
-                          title: str = "Relatório de Validação — Segmentação de PD",
-                          tol_backtest: float = 0.03, tol_calib: float = 0.02,
+                          title: str = "Relatório de Validação — Segmentação",
+                          tol_backtest: float | None = None, tol_calib: float | None = None,
                           stamp: str | None = None) -> str:
         import os
+        if tol_backtest is None:
+            tol_backtest = 0.03 if self._is_clf else 0.10
+        if tol_calib is None:
+            tol_calib = 0.02 if self._is_clf else 0.05
 
         base = os.path.dirname(os.path.abspath(path))
         stem = os.path.splitext(os.path.basename(path))[0]
@@ -1842,8 +2163,8 @@ class SequentialPDSegmenter:
         if self.sample_col is not None:
             ct = self.calibration_table()
             L += [f"## Calibração (prevista DES × realizada {ct.attrs.get('check_sample')})",
-                  "", self._df_to_md(ct[["nota_pd", "n", "pd_prevista",
-                                         "pd_realizada", "gap"]]), ""]
+                  "", self._df_to_md(ct[["nota", "n", "valor_previsto",
+                                         "valor_realizado", "gap"]]), ""]
             if tem_calib:
                 L += [f"![calibracao]({img_calib})", ""]
 
@@ -1914,7 +2235,7 @@ class SequentialPDSegmenter:
             from sklearn.metrics import roc_auc_score, roc_curve
         except ImportError as e:  # pragma: no cover
             raise ImportError("plot_roc requer matplotlib e scikit-learn.") from e
-        pred = self._predicted_pd_series()
+        pred = self._predicted_series()
         grupos = self._samples_with_both_classes()
         if samples is not None:
             grupos = [(a, m) for a, m in grupos if a in samples]
@@ -1959,7 +2280,7 @@ class SequentialPDSegmenter:
             import matplotlib.pyplot as plt  # noqa: F401
         except ImportError as e:  # pragma: no cover
             raise ImportError("plot_ks requer matplotlib.") from e
-        pred = self._predicted_pd_series()
+        pred = self._predicted_series()
         if sample is None and self.sample_col is not None:
             sample = self.ref_sample
         mask = pd.Series(True, index=self.df.index)
@@ -2031,7 +2352,7 @@ class SequentialPDSegmenter:
             if len(v) == 0:
                 continue
             p, lo, hi = self._wilson_ci(int(v.sum()), len(v))
-            notas.append(int(r["nota_pd"])); rates.append(p); los.append(lo); his.append(hi)
+            notas.append(int(r["nota"])); rates.append(p); los.append(lo); his.append(hi)
         if not rates:
             raise ValueError("Sem dados para a taxa de default por folha.")
         if figsize is None:
@@ -2073,7 +2394,7 @@ class SequentialPDSegmenter:
             import matplotlib.pyplot as plt  # noqa: F401
         except ImportError as e:  # pragma: no cover
             raise ImportError("plot_score_distribution requer matplotlib.") from e
-        pred = self._predicted_pd_series()
+        pred = self._predicted_series()
         if sample is None and self.sample_col is not None:
             sample = self.ref_sample
         mask = pd.Series(True, index=self.df.index)
@@ -2115,14 +2436,14 @@ class SequentialPDSegmenter:
     #   nos mesmos bins do split. Mostra a FORMA da relação antes de dividir e
     #   se é monotônica. Use antes do `grow` para escolher a variável/corte.
     # ------------------------------------------------------------------
-    def plot_feature_pd(self, feature: str, sid: str | None = None, splits=None,
+    def plot_feature_value(self, feature: str, sid: str | None = None, splits=None,
                         dtype=None, max_n_bins: int = 6, min_bin_size: float = 0.05,
-                        max_bin_size=None, min_event_rate_diff=0.0, figsize=None,
+                        max_bin_size=None, min_mean_diff=0.0, figsize=None,
                         save_path: str | None = None, dpi: int = 150, ax=None):
         try:
             import matplotlib.pyplot as plt  # noqa: F401
         except ImportError as e:  # pragma: no cover
-            raise ImportError("plot_feature_pd requer matplotlib.") from e
+            raise ImportError("plot_feature_value requer matplotlib.") from e
         if sid is None or sid not in self.segments:
             sid, sub = "root", self.df
         else:
@@ -2130,14 +2451,14 @@ class SequentialPDSegmenter:
         # `splits` (mesmos do preview/grow) garante que o gráfico bata com a tabela
         bins, modo, kind = self._resolve_bins(sub, feature, splits, dtype,
                                               max_n_bins, min_bin_size, max_bin_size,
-                                              min_event_rate_diff=min_event_rate_diff)
+                                              min_mean_diff=min_mean_diff)
         if not bins:
             raise ValueError(f"Sem faixas válidas para '{feature}' nesta folha.")
         tbl = self._bin_table(sub, feature, bins, len(self.df))
         if tbl.empty:
             raise ValueError(f"Sem dados de '{feature}' nesta folha.")
         labels = [s.split(": ", 1)[-1] for s in tbl["faixa"]]
-        pds = tbl["pd_medio"].to_numpy()
+        pds = tbl["valor_medio"].to_numpy()
         reprs = tbl["repr_%"].to_numpy()
         if figsize is None:
             figsize = (max(6.0, len(labels) * 1.25), 4.6)
@@ -2190,11 +2511,11 @@ class SequentialPDSegmenter:
     # PLOT_FEATURE_HIST: histograma de uma variável NUMÉRICA dentro de uma
     #   folha, com linhas verticais nos cortes propostos (ótimo ou manual).
     #   Mostra a forma da distribuição da variável antes de dividir. Para
-    #   variável categórica cai no plot_feature_pd (barras × PD).
+    #   variável categórica cai no plot_feature_value (barras × PD).
     # ------------------------------------------------------------------
     def plot_feature_hist(self, feature: str, sid: str | None = None, splits=None,
                           dtype=None, max_n_bins: int = 6, min_bin_size: float = 0.05,
-                          max_bin_size=None, min_event_rate_diff=0.0, bins_hist: int = 30,
+                          max_bin_size=None, min_mean_diff=0.0, bins_hist: int = 30,
                           figsize=None, save_path: str | None = None, dpi: int = 150, ax=None):
         try:
             import matplotlib.pyplot as plt  # noqa: F401
@@ -2207,10 +2528,10 @@ class SequentialPDSegmenter:
         kind = self._detect_kind(sub, feature, dtype)
         if kind != "num":
             # categórica não tem histograma — barras de representatividade × PD
-            return self.plot_feature_pd(feature, sid=sid, splits=splits, dtype=dtype,
+            return self.plot_feature_value(feature, sid=sid, splits=splits, dtype=dtype,
                                         max_n_bins=max_n_bins, min_bin_size=min_bin_size,
                                         max_bin_size=max_bin_size,
-                                        min_event_rate_diff=min_event_rate_diff,
+                                        min_mean_diff=min_mean_diff,
                                         figsize=figsize, save_path=save_path, dpi=dpi, ax=ax)
         x = sub[feature].to_numpy(dtype="float64")
         x = x[~np.isnan(x)]
@@ -2221,7 +2542,7 @@ class SequentialPDSegmenter:
         try:
             bins, modo, _ = self._resolve_bins(sub, feature, splits, dtype,
                                                max_n_bins, min_bin_size, max_bin_size,
-                                               min_event_rate_diff=min_event_rate_diff)
+                                               min_mean_diff=min_mean_diff)
             cortes = sorted({e for b in bins if b["kind"] == "num"
                              for e in (b["lo"], b["hi"]) if np.isfinite(e)})
         except Exception:
@@ -2629,7 +2950,7 @@ class SequentialPDSegmenter:
     #   da segmentação (o ranking de risco não se sustenta no tempo/fora da
     #   amostra de desenvolvimento).
     # ==================================================================
-    def _ordered_samples_with_pd(self) -> list:
+    def _ordered_samples_with_value(self) -> list:
         """Amostras que têm PD observada, com a referência (DES) à frente."""
         if self.sample_col is None:
             return []
@@ -2644,7 +2965,7 @@ class SequentialPDSegmenter:
         (ordenadas_por_PD_DES, nota_por_sid, descrição_curta_por_sid,
         pd_ref_por_sid). A ORDEM DE REFERÊNCIA é a PD média na DES (asc.)."""
         lv = self.leaves()
-        nota = dict(zip(lv["segmento"], lv["nota_pd"]))
+        nota = dict(zip(lv["segmento"], lv["nota"]))
         if leaves is None:
             leaves = [sid for sid, s in self.segments.items()
                       if s["parent"] == parent_sid and s["is_leaf"]]
@@ -2694,7 +3015,7 @@ class SequentialPDSegmenter:
         """Série da PD média por AMOSTRA para cada folha-irmã.
         Retorna (ordered, nota, desc, xs, series) com series[sid] = [médias]."""
         ordered, nota, desc, _pd = self._sibling_meta(parent_sid, leaves)
-        samples = self._ordered_samples_with_pd()
+        samples = self._ordered_samples_with_value()
         usar = samples if samples else [None]
         xs = samples if samples else ["todas"]
         series: dict = {}
@@ -2809,18 +3130,18 @@ class SequentialPDSegmenter:
                 "status": status, "ref_sample": self.ref_sample,
                 "safra_err": safra_err}
 
-    def sibling_pd_by_sample(self, parent_sid, leaves=None) -> pd.DataFrame:
+    def sibling_value_by_sample(self, parent_sid, leaves=None) -> pd.DataFrame:
         """Tabela tidy: PD média de cada folha-irmã por amostra."""
         ordered, nota, desc, xs, series = self._sibling_sample_series(parent_sid, leaves)
         rows = []
         for sid in ordered:
-            row = {"segmento": sid, "nota_pd": nota.get(sid), "descricao": desc[sid]}
+            row = {"segmento": sid, "nota": nota.get(sid), "descricao": desc[sid]}
             for x, v in zip(xs, series[sid]):
                 row[x] = round(v, 4) if not pd.isna(v) else np.nan
             rows.append(row)
         return pd.DataFrame(rows)
 
-    def sibling_pd_by_safra(self, parent_sid, time_col=None, sample=None,
+    def sibling_value_by_safra(self, parent_sid, time_col=None, sample=None,
                             leaves=None, min_n: int = 1) -> pd.DataFrame:
         """Tabela tidy: PD média de cada folha-irmã por safra (linhas = safra)."""
         ordered, nota, desc, xs, series = self._sibling_safra_series(
@@ -2840,7 +3161,7 @@ class SequentialPDSegmenter:
         return {sid: cmap(i / (k - 1) if k > 1 else 0.5)
                 for i, sid in enumerate(ordered)}
 
-    def plot_sibling_pd_by_sample(self, parent_sid, leaves=None,
+    def plot_sibling_value_by_sample(self, parent_sid, leaves=None,
                                   figsize=(7.6, 4.0), dpi=150,
                                   save_path=None, ax=None):
         """Linhas da PD média das folhas-irmãs por amostra (DES, OOT, …). Onde
@@ -2848,7 +3169,7 @@ class SequentialPDSegmenter:
         try:
             import matplotlib.pyplot as plt  # noqa: F401
         except ImportError as e:  # pragma: no cover
-            raise ImportError("plot_sibling_pd_by_sample requer matplotlib.") from e
+            raise ImportError("plot_sibling_value_by_sample requer matplotlib.") from e
         ordered, nota, desc, xs, series = self._sibling_sample_series(parent_sid, leaves)
         fig, ax = self._new_ax(figsize, dpi, ax)
         if not ordered or not xs:
@@ -2874,7 +3195,7 @@ class SequentialPDSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
-    def plot_sibling_pd_by_safra(self, parent_sid, time_col=None, sample=None,
+    def plot_sibling_value_by_safra(self, parent_sid, time_col=None, sample=None,
                                  leaves=None, min_n: int = 1,
                                  figsize=(9.6, 4.0), dpi=150,
                                  save_path=None, ax=None):
@@ -2884,7 +3205,7 @@ class SequentialPDSegmenter:
         try:
             import matplotlib.pyplot as plt  # noqa: F401
         except ImportError as e:  # pragma: no cover
-            raise ImportError("plot_sibling_pd_by_safra requer matplotlib.") from e
+            raise ImportError("plot_sibling_value_by_safra requer matplotlib.") from e
         ordered, nota, desc, xs, series = self._sibling_safra_series(
             parent_sid, time_col, sample, leaves, min_n=min_n)
         fig, ax = self._new_ax(figsize, dpi, ax)
@@ -2952,12 +3273,17 @@ class SequentialPDSegmenter:
         base = self.df[leaf_mask & ref_mask]            # porção DES da folha (referência)
         yb = base[self.target].to_numpy(dtype="float64")
         yb = yb[~np.isnan(yb)]
-        ybin = yb.astype(int)
-        tot_bad = int(ybin.sum())
-        tot_good = int(ybin.size - tot_bad)
-        # IV binário precisa das DUAS classes presentes na folha (DES)
-        ok_base = ybin.size >= 4 and tot_bad > 0 and tot_good > 0
-        pd_global = float(yb.mean()) if yb.size else np.nan
+        if self._is_clf:
+            ybin = yb.astype(int)
+            tot_bad = int(ybin.sum())
+            tot_good = int(ybin.size - tot_bad)
+            # IV binário precisa das DUAS classes presentes na folha (DES)
+            ok_base = ybin.size >= 4 and tot_bad > 0 and tot_good > 0
+        else:
+            tot_bad = tot_good = 0
+            # IV contínuo exige variação do alvo na folha (DES)
+            ok_base = yb.size >= 4 and np.unique(yb).size > 1
+        mean_global = float(yb.mean()) if yb.size else np.nan
         n_base = int(yb.size)
 
         # frames e contagens por amostra DENTRO da folha (para o PSI nos bins do IV)
@@ -2979,20 +3305,26 @@ class SequentialPDSegmenter:
                         leaf, feat, None, None, max_n_bins, min_bin_size)
                     nb = len(bins)
                     if bins:
-                        # IV binário (WoE): Σ (dist_bons − dist_maus)·ln(dist_bons/dist_maus)
+                        # IV por faixa: classificação = WoE binário (Siddiqi)
+                        # Σ(dist_bons−dist_maus)·ln(dist_bons/dist_maus); regressão =
+                        # IV contínuo Σ (n_i/N)·|média_bin − média_global|.
                         iv = 0.0
                         yb_feat = base[self.target].to_numpy(dtype="float64")
                         for b in bins:
                             m = self._mask_in(base, feat, b).to_numpy()
                             yi = yb_feat[m]
-                            yi = yi[~np.isnan(yi)].astype(int)
+                            yi = yi[~np.isnan(yi)]
                             if yi.size == 0:
                                 continue
-                            bad_i = int(yi.sum()); good_i = int(yi.size - bad_i)
-                            dg = good_i / tot_good
-                            db = bad_i / tot_bad
-                            if dg > 0 and db > 0:
-                                iv += (dg - db) * np.log(dg / db)
+                            if self._is_clf:
+                                yi = yi.astype(int)
+                                bad_i = int(yi.sum()); good_i = int(yi.size - bad_i)
+                                dg = good_i / tot_good
+                                db = bad_i / tot_bad
+                                if dg > 0 and db > 0:
+                                    iv += (dg - db) * np.log(dg / db)
+                            else:
+                                iv += (yi.size / n_base) * abs(float(yi.mean()) - mean_global)
                         # PSI sobre os MESMOS bins (DES × amostra, na folha)
                         if psi_on and n_ref_leaf > 0:
                             for a in nonref:
@@ -3012,7 +3344,7 @@ class SequentialPDSegmenter:
             row = {
                 "variavel": feat, "tipo": kind, "n_bins": nb,
                 "iv": round(float(iv), 4) if not (iv is None or np.isnan(iv)) else np.nan,
-                "forca": _classifica_iv(iv),
+                "forca": _classifica_iv(iv, self.task_type),
             }
             if psi_on:
                 for a in nonref:
@@ -3025,9 +3357,154 @@ class SequentialPDSegmenter:
         out = (pd.DataFrame(rows)
                .sort_values("iv", ascending=False, na_position="last")
                .reset_index(drop=True))
-        out.attrs["pd_medio"] = round(pd_global, 4) if not np.isnan(pd_global) else np.nan
-        out.attrs["cutoff"] = out.attrs["pd_medio"]      # compat (agora é a PD da folha)
+        out.attrs["valor_medio"] = round(mean_global, 4) if not np.isnan(mean_global) else np.nan
+        out.attrs["cutoff"] = out.attrs["valor_medio"]      # compat (média do alvo na folha)
         return out
+
+    # ------------------------------------------------------------------
+    # FEATURE_IMPORTANCE: importância das variáveis que ENTRARAM na árvore.
+    #   Para cada nó interno, contribuição = (representatividade do nó) × (IV da
+    #   variável do split, medido nesse nó). Soma por variável e normaliza.
+    # ------------------------------------------------------------------
+    def feature_importance(self, normalize: bool = True) -> pd.DataFrame:
+        """Importância de cada variável usada nos splits da árvore.
+
+        A importância de uma variável é a soma, sobre os nós internos divididos
+        por ela, de ``representatividade_do_nó × IV_da_variável_no_nó`` (ganho de
+        IV ponderado pela população). Só lista variáveis que entraram na árvore;
+        ``normalize=True`` devolve em % do total."""
+        n_total = len(self.df)
+        filhos: dict = {}
+        for sid, s in self.segments.items():
+            filhos.setdefault(s["parent"], []).append(sid)
+        contrib: dict = {}
+        usos: dict = {}
+        for sid, s in self.segments.items():
+            if s["is_leaf"]:
+                continue
+            kids = filhos.get(sid, [])
+            if not kids:
+                continue
+            conds = self.segments[kids[0]]["conditions"]
+            if not conds:
+                continue
+            feat = conds[-1]["feature"]               # variável do split deste nó
+            try:
+                ivt = self.variable_iv(sid, features=[feat], with_psi=False)
+                iv = float(ivt["iv"].iloc[0]) if len(ivt) else np.nan
+            except Exception:
+                iv = np.nan
+            iv = 0.0 if (iv is None or np.isnan(iv)) else iv
+            w = (int(s["mask"].sum()) / n_total) if n_total else 0.0
+            contrib[feat] = contrib.get(feat, 0.0) + w * iv
+            usos[feat] = usos.get(feat, 0) + 1
+        rows = [{"variavel": f, "n_splits": usos[f],
+                 "importancia": round(v, 6)} for f, v in contrib.items()]
+        out = pd.DataFrame(rows)
+        if out.empty:
+            return out
+        total = out["importancia"].sum()
+        if normalize and total > 0:
+            out["importancia_%"] = (100 * out["importancia"] / total).round(2)
+        out["variavel"] = out["variavel"].map(lambda v: self.feature_labels.get(v, v))
+        return out.sort_values("importancia", ascending=False).reset_index(drop=True)
+
+    # ------------------------------------------------------------------
+    # SUGGEST_SPLITS: ranqueia as melhores variáveis para dividir uma folha,
+    #   com nº de bins, PSI por amostra (OOT/ESTABILIDADE), se passa no teste de
+    #   hipótese entre os bins, e o IV. Reusa variable_iv (IV + PSI nos bins).
+    # ------------------------------------------------------------------
+    def suggest_splits(self, sid: str | None = None, top: int = 3,
+                       max_n_bins: int = 5, min_bin_size: float = 0.05,
+                       alpha: float = 0.05) -> pd.DataFrame:
+        """TOP-``top`` variáveis sugeridas para dividir a folha ``sid`` (raiz por
+        padrão). Colunas: variável, nº de bins, IV, força, PSI por amostra,
+        ``passa_teste`` (separação de risco entre os bins é significativa,
+        p < ``alpha``) e ``p_valor`` do teste (qui-quadrado p/ classificação,
+        Kruskal-Wallis p/ regressão)."""
+        from scipy.stats import chi2_contingency, kruskal
+
+        sid = sid if (sid in self.segments) else "root"
+        iv = self.variable_iv(sid, max_n_bins=max_n_bins, min_bin_size=min_bin_size,
+                              with_psi=True)
+        iv = iv[iv["iv"].notna()].head(top).copy()
+        leaf = self.df[self._leaf_mask(sid)]
+        if self.sample_col is not None:
+            leaf = leaf[leaf[self.sample_col] == self.ref_sample]
+
+        pvals, passa = [], []
+        # mapeia o rótulo amigável de volta ao nome real da coluna
+        inv = {self.feature_labels.get(c, c): c
+               for c in self.df.columns}
+        for _, r in iv.iterrows():
+            feat = inv.get(r["variavel"], r["variavel"])
+            p = np.nan
+            try:
+                bins, _modo, kind = self._resolve_bins(
+                    leaf, feat, None, None, max_n_bins, min_bin_size)
+                grupos = []
+                for b in bins:
+                    y = leaf.loc[self._mask_in(leaf, feat, b), self.target].to_numpy(dtype="float64")
+                    y = y[~np.isnan(y)]
+                    if y.size:
+                        grupos.append(y)
+                if len(grupos) >= 2:
+                    if self._is_clf:
+                        tab = np.array([[int((g == 1).sum()), int((g == 0).sum())] for g in grupos])
+                        if (tab.sum(0) > 0).all() and (tab.sum(1) > 0).all():
+                            _, p, _, _ = chi2_contingency(tab)
+                    else:
+                        if all(np.unique(g).size > 1 for g in grupos) or len(grupos) > 1:
+                            _, p = kruskal(*grupos)
+            except Exception:
+                p = np.nan
+            pvals.append(round(float(p), 6) if p == p else np.nan)
+            passa.append(bool(p == p and p < alpha))
+        iv["p_valor"] = pvals
+        iv["passa_teste"] = passa
+        cols = ["variavel", "n_bins", "iv", "forca"]
+        cols += [c for c in iv.columns if c.startswith("psi_")]
+        cols += ["passa_teste", "p_valor"]
+        return iv[[c for c in cols if c in iv.columns]].reset_index(drop=True)
+
+    # ------------------------------------------------------------------
+    # DIFF_TREES: compara DUAS árvores (versões) — migração de notas entre as
+    #   segmentações, concordância e métricas lado a lado.
+    # ------------------------------------------------------------------
+    def diff_trees(self, other: "TreeSegmenter", df: pd.DataFrame | None = None) -> dict:
+        """Compara esta árvore (A) com `other` (B) sobre o mesmo DataFrame.
+
+        Devolve dict com: ``migracao`` (crosstab nota_A × nota_B — para onde as
+        linhas migram), ``concordancia`` (fração com a MESMA nota), ``resumo``
+        (nº de folhas + métricas-chave por amostra, A vs B vs Δ) e as tabelas de
+        métricas completas ``metrics_a``/``metrics_b``."""
+        if other.task_type != self.task_type:
+            raise ValueError(
+                f"Árvores de task_type diferentes: {self.task_type} vs {other.task_type}.")
+        df = self.df if df is None else df
+        na = self.predict(df)["nota"].astype("Int64")
+        nb = other.predict(df)["nota"].astype("Int64")
+        valid = na.notna() & nb.notna()
+        migracao = pd.crosstab(na[valid], nb[valid], dropna=False)
+        migracao.index.name, migracao.columns.name = "nota_A", "nota_B"
+        concord = float((na[valid] == nb[valid]).mean()) if valid.any() else float("nan")
+
+        ma, mb = self.metrics(), other.metrics()
+        key = "AUC" if self._is_clf else "R2"
+        rows = [{"métrica": "nº de folhas",
+                 "árvore A": int(sum(s["is_leaf"] for s in self.segments.values())),
+                 "árvore B": int(sum(s["is_leaf"] for s in other.segments.values()))}]
+        rows[0]["Δ (B−A)"] = rows[0]["árvore B"] - rows[0]["árvore A"]
+        for am in ma["amostra"]:
+            va = ma.loc[ma["amostra"] == am, key]
+            vb = mb.loc[mb["amostra"] == am, key]
+            if len(va) and len(vb):
+                a, b = float(va.iloc[0]), float(vb.iloc[0])
+                rows.append({"métrica": f"{key} · {am}", "árvore A": round(a, 4),
+                             "árvore B": round(b, 4), "Δ (B−A)": round(b - a, 4)})
+        resumo = pd.DataFrame(rows)
+        return {"migracao": migracao, "concordancia": concord, "resumo": resumo,
+                "metrics_a": ma, "metrics_b": mb}
 
     # ------------------------------------------------------------------
     # ASSIGN: rotula cada linha com seu segmento-folha
@@ -3036,7 +3513,7 @@ class SequentialPDSegmenter:
     # ------------------------------------------------------------------
     def assign(
         self,
-        col_name: str = "segmento_pd",
+        col_name: str = "segmento",
         add_grade: bool = True,
         add_desc: bool = True,
         ascending: bool = True,
@@ -3071,7 +3548,7 @@ class SequentialPDSegmenter:
     #   isso `load`/`from_dict` exigem um `df`. Permite versionar a segmentação
     #   e reaplicá-la (mesmos dados ou novos) em qualquer máquina.
     # ==================================================================
-    SCHEMA = "yggdrasil.credit_risk.pd.tree/1"
+    SCHEMA = "yggdrasil.credit_risk.tree/1"
 
     @staticmethod
     def _conditions_from_json(conditions):
@@ -3111,6 +3588,7 @@ class SequentialPDSegmenter:
             "schema": self.SCHEMA,
             "meta": {
                 "target": self.target,
+                "task_type": self.task_type,
                 "sample_col": self.sample_col,
                 "ref_sample": self.ref_sample,
                 "min_leaf_rows": self.min_leaf_rows,
@@ -3151,6 +3629,7 @@ class SequentialPDSegmenter:
         """Reconstrói um segmentador a partir de `to_dict()` + um DataFrame."""
         meta = data.get("meta", {})
         seg = cls(df, target=meta.get("target", "target"),
+                  task_type=meta.get("task_type", "classification"),
                   sample_col=meta.get("sample_col"),
                   ref_sample=meta.get("ref_sample", "DES"),
                   feature_labels=meta.get("feature_labels"),
@@ -3218,16 +3697,16 @@ class SequentialPDSegmenter:
         leaves.sort(key=lambda x: x["nota"])
         return {"target": self.target, "ref_sample": self.ref_sample, "leaves": leaves}
 
-    def predict(self, X: pd.DataFrame, col_seg="segmento_pd",
-                col_nota="nota_pd", col_pd="pd_regua") -> pd.DataFrame:
+    def predict(self, X: pd.DataFrame, col_seg="segmento",
+                col_nota="nota", col_valor="valor_regua") -> pd.DataFrame:
         """Aplica a régua a um DataFrame pandas novo: segmento, nota e PD."""
-        return _aplicar_regua_pandas(self._regua_dict(), X, col_seg, col_nota, col_pd)
+        return _aplicar_regua_pandas(self._regua_dict(), X, col_seg, col_nota, col_valor)
 
     # ------------------------------------------------------------------
     # TO_PYSPARK: gera o código da régua como F.when().otherwise() para
     #   aplicar a segmentação (segmento + nota + PD) em escala no Spark.
     # ------------------------------------------------------------------
-    def to_pyspark(self, func_name: str = "aplicar_regua_pd") -> str:
+    def to_pyspark(self, func_name: str = "aplicar_regua") -> str:
         regua = self._regua_dict()
 
         def cond_expr(conds):
@@ -3262,8 +3741,8 @@ class SequentialPDSegmenter:
             return "\n".join(out)
 
         L = ["from pyspark.sql import functions as F", "",
-             f"def {func_name}(df, col_seg='segmento_pd', col_nota='nota_pd', col_pd='pd_regua'):",
-             '    """Régua de PD gerada por SequentialPDSegmenter (segmento, nota e PD por folha)."""']
+             f"def {func_name}(df, col_seg='segmento', col_nota='nota', col_valor='valor_regua'):",
+             '    """Régua de PD gerada por TreeSegmenter (segmento, nota e PD por folha)."""']
         for i, leaf in enumerate(regua["leaves"], 1):
             L.append(f'    c{i} = {cond_expr(leaf["conditions"])}')
         L.append("    seg = (")
@@ -3277,7 +3756,65 @@ class SequentialPDSegmenter:
         L.append("    )")
         L.append("    return (df.withColumn(col_seg, seg)")
         L.append("              .withColumn(col_nota, nota)")
-        L.append("              .withColumn(col_pd, pd_val))")
+        L.append("              .withColumn(col_valor, pd_val))")
+        return "\n".join(L)
+
+    # ------------------------------------------------------------------
+    # TO_SQL: régua como CASE WHEN (copiar e colar no SQL). Gera 3 colunas:
+    #   segmento (id da folha), nota (1..N) e o valor previsto do alvo.
+    # ------------------------------------------------------------------
+    def to_sql(self, table: str = "minha_tabela", col_seg: str = "segmento",
+               col_nota: str = "nota", col_valor: str = "valor_regua") -> str:
+        """Gera SQL ANSI com ``CASE WHEN`` que reproduz a régua. Pronto p/ copiar.
+
+        ``table`` é o nome da tabela/CTE de origem. Cada folha vira um ramo do
+        CASE (na ordem da nota); a condição final usa as MESMAS regras de
+        pandas/Spark (faixas (lo, hi], ``IN`` para categóricas, ``IS NULL`` para
+        faltantes, ``include_na`` quando o nó de faltantes foi fundido)."""
+        regua = self._regua_dict()
+
+        def _q(v):                       # literal de categoria com escape de aspas
+            return "'" + str(v).replace("'", "''") + "'"
+
+        def cond_sql(conds):
+            parts = []
+            for c in conds:
+                feat = c["feature"]
+                if c["kind"] == "na":
+                    parts.append(f"{feat} IS NULL")
+                    continue
+                if c["kind"] == "num":
+                    sub = []
+                    if c.get("lo") is not None:
+                        sub.append(f"{feat} > {c['lo']}")
+                    if c.get("hi") is not None:
+                        sub.append(f"{feat} <= {c['hi']}")
+                    expr = " AND ".join(sub) if sub else "1=1"
+                else:
+                    cats = ", ".join(_q(x) for x in c["cats"])
+                    expr = f"CAST({feat} AS VARCHAR) IN ({cats})"
+                if len(conds) > 1 or c["kind"] != "na":
+                    expr = f"({expr})"
+                if c.get("include_na"):
+                    expr = f"({expr} OR {feat} IS NULL)"
+                parts.append(expr)
+            return " AND ".join(parts) if parts else "1=1"
+
+        def case(valfn, alias):
+            linhas = [f"  CASE"]
+            for leaf in regua["leaves"]:
+                linhas.append(f"    WHEN {cond_sql(leaf['conditions'])} THEN {valfn(leaf)}")
+            linhas.append(f"    ELSE NULL")
+            linhas.append(f"  END AS {alias}")
+            return "\n".join(linhas)
+
+        L = [f"-- Régua de segmentação ({self.task_type}) gerada por TreeSegmenter",
+             "SELECT",
+             "  *,",
+             case(lambda lf: _q(lf["id"]), col_seg) + ",",
+             case(lambda lf: str(lf["nota"]), col_nota) + ",",
+             case(lambda lf: str(lf["pd"]), col_valor),
+             f"FROM {table};"]
         return "\n".join(L)
 
     # ------------------------------------------------------------------
@@ -3298,8 +3835,8 @@ class SequentialPDSegmenter:
     #   é executada. Exige pyspark e que as colunas usadas na árvore existam no
     #   `sdf` com o MESMO nome (senão levanta erro listando as que faltam).
     # ------------------------------------------------------------------
-    def apply_spark(self, sdf, col_seg: str = "segmento_pd",
-                    col_nota: str = "nota_pd", col_pd: str = "pd_regua"):
+    def apply_spark(self, sdf, col_seg: str = "segmento",
+                    col_nota: str = "nota", col_valor: str = "valor_regua"):
         try:
             from pyspark.sql import functions as F
         except ImportError as e:  # pragma: no cover
@@ -3350,7 +3887,7 @@ class SequentialPDSegmenter:
 
         return (sdf.withColumn(col_seg, seg_col.otherwise(F.lit(None)))
                    .withColumn(col_nota, nota_col.otherwise(F.lit(None)))
-                   .withColumn(col_pd, pd_col.otherwise(F.lit(None))))
+                   .withColumn(col_valor, pd_col.otherwise(F.lit(None))))
 
     # ------------------------------------------------------------------
     # SUGGEST_SPLIT: recomenda a melhor variável para dividir uma folha,
@@ -3459,11 +3996,52 @@ class SequentialPDSegmenter:
             return None, kind
         return out, kind
 
+    def _best_criterion_feature(self, sid, features, criterion, min_bin_size):
+        """Feature com o melhor split BINÁRIO pelo `criterion` na folha `sid`
+        (avaliado na referência/DES). Devolve (feature, score). Usado por fit_auto
+        quando o usuário escolhe um critério (≠ optbin)."""
+        leaf = self.df[self._leaf_mask(sid)]
+        if self.sample_col is not None:
+            leaf = leaf[leaf[self.sample_col] == self.ref_sample]
+        if features is None:
+            features = [c for c in self.df.columns if c not in self._nonfeature_cols()]
+        y_all = leaf[self.target].to_numpy(dtype="float64")
+        min_n = max(1, int(min_bin_size * len(leaf)))
+        best_f, best_s = None, 0.0
+        for feat in features:
+            try:
+                kind = self._detect_kind(leaf, feat, None)
+                if kind == "num":
+                    x = leaf[feat].to_numpy(dtype="float64")
+                    ok = ~np.isnan(x) & ~np.isnan(y_all)
+                    xx, yy = x[ok], y_all[ok]
+                    yy = yy.astype(int) if self._is_clf else yy
+                    t = _best_numeric_cut(xx, yy, criterion, self._is_clf, min_n)
+                    if t is None:
+                        continue
+                    left = xx <= t
+                else:
+                    xs = leaf[feat].astype(str).to_numpy()
+                    ok = leaf[feat].notna().to_numpy() & ~np.isnan(y_all)
+                    xs, yy = xs[ok], y_all[ok]
+                    yy = yy.astype(int) if self._is_clf else yy
+                    par = _best_categorical_split(xs, yy, criterion, self._is_clf, min_n)
+                    if par is None:
+                        continue
+                    lc = set(par[0])
+                    left = np.array([c in lc for c in xs])
+                s = _split_score(yy[left], yy[~left], criterion, self._is_clf)
+                if np.isfinite(s) and s > best_s:
+                    best_s, best_f = float(s), feat
+            except Exception:
+                continue
+        return best_f, best_s
+
     def fit_auto(self, features: list | None = None, max_depth: int = 3,
                  min_iv: float = 0.02, max_n_bins: int = 2, min_bin_size: float = 0.05,
                  from_scratch: bool = True, subtree: str | None = None,
                  min_leaf_repr: float | None = None, max_bin_repr: float | None = None,
-                 verbose: bool = True):
+                 criterion: str = "optbin", verbose: bool = True):
         """Cresce a árvore de forma gulosa (maior IV por nível).
 
         ``min_leaf_repr`` e ``max_bin_repr`` são **representatividades GLOBAIS**
@@ -3505,6 +4083,18 @@ class SequentialPDSegmenter:
                     continue
                 sub = self.df[self.segments[sid]["mask"]]
                 n_leaf = len(sub)
+                # ---- critério escolhido (≠ optbin): split BINÁRIO guloso pelo
+                # melhor (feature, corte) por esse critério ----
+                if criterion != "optbin":
+                    if len(self._fit_frame(sub, min_bin_size)) < self.min_leaf_rows:
+                        continue
+                    feat, score = self._best_criterion_feature(
+                        sid, features, criterion, min_bin_size)
+                    if feat is not None and score > 0:
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            self.grow(feat, only_segments=[sid], min_bin_size=min_bin_size,
+                                      criterion=criterion)
+                    continue
                 # concentrações GLOBAIS → fração local (da folha) p/ o optbinning
                 loc_min = min_bin_size
                 if min_leaf_repr is not None and n_leaf:
@@ -3578,7 +4168,7 @@ class SequentialPDSegmenter:
     # ------------------------------------------------------------------
     def log_to_mlflow(self, experiment: str | None = None,
                       run_name: str | None = None, registered_model_name: str | None = None,
-                      artifact_path: str = "modelo_pd", extra_params: dict | None = None,
+                      artifact_path: str = "modelo", extra_params: dict | None = None,
                       registry_uri: str | None = None, verbose: bool = True) -> str:
         try:
             import mlflow
@@ -3605,17 +4195,23 @@ class SequentialPDSegmenter:
         if extra_params:
             params.update(extra_params)
 
-        metrics = {"n_folhas": float(n_folhas), "profundidade": float(prof)}
+        metrics = {"n_folhas": float(n_folhas), "profundidade": float(prof),
+                   "n_variaveis": float(len(feats))}
         for leaf in regua["leaves"]:
-            metrics[f"pd_nota_{leaf['nota']}"] = leaf["pd"]
+            metrics[f"valor_nota_{leaf['nota']}"] = leaf["pd"]
+        # métricas do modelo por amostra, conforme o tipo de problema
+        # (classificação: KS/AUC/Gini/Acurácia/F1 · regressão: MAE/RMSE/R²)
+        metric_keys = (("taxa_default", "KS", "AUC", "Gini", "Acuracia", "F1")
+                       if self._is_clf else ("MAE", "RMSE", "R2"))
         try:
             for _, r in self.metrics().iterrows():
                 a = r["amostra"]
-                for k in ("KS", "AUC", "Gini", "Acuracia", "F1"):
-                    if not pd.isna(r[k]):
+                for k in metric_keys:
+                    if k in r and not pd.isna(r[k]):
                         metrics[f"{k.lower()}_{a}"] = float(r[k])
         except Exception:
             pass
+        # PSI da segmentação por amostra (cobre OOT, ESTABILIDADE, ...)
         if self.sample_col is not None:
             try:
                 for _, r in self.psi().iterrows():
@@ -3623,7 +4219,7 @@ class SequentialPDSegmenter:
             except Exception:
                 pass
 
-        class _ReguaPDModel(mlflow.pyfunc.PythonModel):
+        class _ReguaModel(mlflow.pyfunc.PythonModel):
             def __init__(self, regua):
                 self.regua = regua
 
@@ -3655,7 +4251,7 @@ class SequentialPDSegmenter:
                     seg[m] = leaf["id"]
                     nota[m] = leaf["nota"]
                     pdcol[m] = leaf["pd"]
-                return _pd.DataFrame({"segmento_pd": seg, "nota_pd": nota, "pd_regua": pdcol},
+                return _pd.DataFrame({"segmento": seg, "nota": nota, "valor_regua": pdcol},
                                      index=df.index)
 
         # Unity Catalog exige set_registry_uri('databricks-uc') e assinatura do modelo
@@ -3664,7 +4260,7 @@ class SequentialPDSegmenter:
         if experiment:
             mlflow.set_experiment(experiment)
 
-        model = _ReguaPDModel(regua)
+        model = _ReguaModel(regua)
         cols = feats if feats else [c for c in self.df.columns
                                     if c not in (self.target, self.sample_col)]
         input_example = self.df[cols].head(5).reset_index(drop=True).copy()
@@ -3690,11 +4286,13 @@ class SequentialPDSegmenter:
             with tempfile.TemporaryDirectory() as d:
                 self.leaves(with_psi=(self.sample_col is not None)).to_csv(
                     os.path.join(d, "folhas.csv"), index=False)
-                with open(os.path.join(d, "arvore.txt"), "w") as f:
+                with open(os.path.join(d, "arvore.txt"), "w", encoding="utf-8") as f:
                     f.write(self.tree())
-                with open(os.path.join(d, "regua_pyspark.py"), "w") as f:
+                with open(os.path.join(d, "regua_pyspark.py"), "w", encoding="utf-8") as f:
                     f.write(self.to_pyspark())
-                with open(os.path.join(d, "regua.json"), "w") as f:
+                with open(os.path.join(d, "regua.sql"), "w", encoding="utf-8") as f:
+                    f.write(self.to_sql())
+                with open(os.path.join(d, "regua.json"), "w", encoding="utf-8") as f:
                     json.dump(regua, f, ensure_ascii=False, indent=2)
                 # árvore completa (estrutura) para recarregar via .load(...)
                 with open(os.path.join(d, "arvore.json"), "w", encoding="utf-8") as f:

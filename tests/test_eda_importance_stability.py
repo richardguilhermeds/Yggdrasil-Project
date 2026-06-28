@@ -32,14 +32,29 @@ def test_feature_psi_stable_vs_unstable(df_eda):
     assert instavel > 0.25
 
 
-def test_feature_psi_matches_monitoring(df_eda):
-    """PSI da feature deve bater com monitoring.psi nos mesmos dados (numérica)."""
+def test_feature_psi_sem_missing_igual_ao_monitoring(df_eda):
+    """Propriedade: sem faltantes, o PSI numérico da feature coincide com
+    monitoring.psi (o bin de faltantes não contribui)."""
     cfg, ec = ColumnConfig(), EDAConfig()
-    dev = df_eda[df_eda["amostra"] == "DES"]["feat_bom"].dropna()
-    oot = df_eda[df_eda["amostra"] == "OOT"]["feat_bom"].dropna()
+    dev = df_eda[df_eda["amostra"] == "DES"]["feat_bom"]   # feat_bom não tem NaN
+    oot = df_eda[df_eda["amostra"] == "OOT"]["feat_bom"]
     esperado = psi(dev, oot, bins=ec.n_bins)
     obtido = stability.feature_psi(df_eda, "feat_bom", cfg, ec)
     assert np.isclose(esperado, obtido, atol=1e-9)
+
+
+def test_feature_psi_detecta_migracao_de_missing(df_eda):
+    """Regressão (A1.4): o PSI numérico NÃO pode ignorar faltantes via dropna —
+    uma feature que passa a faltar no OOT deve acusar instabilidade."""
+    cfg, ec = ColumnConfig(), EDAConfig()
+    d = df_eda.copy()
+    d["feat_bom"] = d["feat_bom"].astype(float)            # DES permanece sem NaN
+    oot_idx = d.index[d["amostra"] == "OOT"]
+    rng = np.random.default_rng(0)
+    falta = rng.choice(oot_idx, size=int(0.5 * len(oot_idx)), replace=False)
+    d.loc[falta, "feat_bom"] = np.nan                      # 50% de missing só no OOT
+    val = stability.feature_psi(d, "feat_bom", cfg, ec)
+    assert val > 0.25                                      # migração de missing = instável
 
 
 def test_stability_summary_shape(df_eda):

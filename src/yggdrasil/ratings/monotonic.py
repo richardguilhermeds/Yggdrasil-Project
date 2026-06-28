@@ -34,8 +34,9 @@ def _p_value_inversao(v_prev: np.ndarray, v_curr: np.ndarray, problem_type: str)
         b1, b0 = int((v_curr == 1).sum()), int((v_curr == 0).sum())
         table = np.array([[a1, a0], [b1, b0]])
         # Sem variação em uma das margens não há teste possível => não funde.
+        # (p <= alpha sinaliza "não fundir" no chamador, que funde só quando p > alpha.)
         if table.sum(axis=1).min() == 0 or table.sum(axis=0).min() == 0:
-            return 1.0
+            return 0.0
         try:
             _, p, _, _ = chi2_contingency(table, correction=True)
         except ValueError:

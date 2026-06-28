@@ -34,9 +34,4 @@ def get_logger(name: str = "yggdrasil", level: int = logging.INFO) -> logging.Lo
     return logger
 
 
-def minha_funcao(nome: str) -> str:
-    """Função de exemplo preservada do stub original do repositório."""
-    return f"Olá, {nome}!"
-
-
-__all__ = ["idx_para_letra", "get_logger", "minha_funcao"]
+__all__ = ["idx_para_letra", "get_logger"]

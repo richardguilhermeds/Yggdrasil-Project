@@ -596,6 +596,22 @@ class ModelSegmenterUI:
         self.btn_fit = W.Button(description="Treinar modelo", button_style="primary",
                                 icon="cogs")
         self.btn_shap = W.Button(description="Calcular SHAP", icon="bar-chart")
+        # --- tuning bayesiano (Optuna) ---
+        self.sl_trials = W.IntSlider(description="trials", min=5, max=100, value=30,
+                                     layout=W.Layout(width="60%"))
+        self.btn_tune = W.Button(description="Tunar com Optuna", button_style="warning",
+                                 icon="magic")
+        self.btn_tune.tooltip = ("Otimização bayesiana (Optuna): busca hiperparâmetros "
+                                 "do algoritmo selecionado maximizando AUC (classificação) / "
+                                 "R² (regressão) no OOT, e treina com os melhores. Requer "
+                                 "pip install yggdrasil[optuna].")
+        self.out_tune = W.HTML()
+        # barra de progresso do tuning (escondida até começar)
+        self.pb_tune = W.IntProgress(value=0, min=0, max=100, description="0/0",
+                                     bar_style="info", orientation="horizontal",
+                                     layout=W.Layout(width="70%", visibility="hidden"),
+                                     style={"description_width": "initial"})
+        self.btn_tune.on_click(self._on_tune)
         self.cb_woe = W.Checkbox(value=False, indent=False,
                                  description="Transformar variáveis (WoE por bins)")
         self.cb_woe.tooltip = (
@@ -625,6 +641,11 @@ class ModelSegmenterUI:
             self.out_algo_help,
             self.out_woe_help,
             W.HBox([self.btn_fit, self.btn_shap]),
+            W.HTML("<div class='mseg-legend'>Tuning bayesiano (Optuna): busca os melhores "
+                   "hiperparâmetros do algoritmo selecionado e treina com eles.</div>"),
+            W.HBox([self.sl_trials, self.btn_tune]),
+            self.pb_tune,
+            self.out_tune,
         ])
         train_card.add_class("mseg-card")
         self.formula_card = W.VBox([
@@ -1215,6 +1236,52 @@ class ModelSegmenterUI:
             self._refresh_bar()
         except Exception as e:
             self._log(f"[fit] erro: {e}")
+
+    def _on_tune(self, b):
+        algo = self.dd_algo.value
+        transform = "woe" if self.cb_woe.value else "raw"
+        n_trials = int(self.sl_trials.value)
+        # prepara a barra de progresso (atualizada a cada trial via callback)
+        self.pb_tune.max = n_trials
+        self.pb_tune.value = 0
+        self.pb_tune.bar_style = "info"
+        self.pb_tune.description = f"0/{n_trials}"
+        self.pb_tune.layout.visibility = "visible"
+        self.btn_tune.disabled = True
+        self.out_tune.value = "<i>Rodando otimização bayesiana (Optuna)…</i>"
+
+        def _progress(done, total, best):
+            self.pb_tune.value = done
+            self.pb_tune.description = f"{done}/{total}"
+            self.out_tune.value = (f"<div class='mseg-legend'>Optuna · trial {done}/{total} · "
+                                   f"melhor até agora = <b>{best:.4f}</b></div>")
+
+        try:
+            res = self.seg.tune_optuna(algorithm=algo, n_trials=n_trials,
+                                       transform=transform, fit_best=True,
+                                       progress_callback=_progress)
+        except Exception as e:
+            self.pb_tune.bar_style = "danger"
+            self.btn_tune.disabled = False
+            self.out_tune.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no tuning: "
+                                   f"{type(e).__name__}: {e}</div>")
+            self._log(f"[tune] erro: {e}")
+            return
+        self.pb_tune.value = self.pb_tune.max
+        self.pb_tune.bar_style = "success"
+        self.pb_tune.description = f"{res['n_trials']}/{res['n_trials']} ✓"
+        self.btn_tune.disabled = False
+        bp = "<br>".join(f"<code>{k}</code> = {v}" for k, v in res["best_params"].items())
+        self.out_tune.value = (
+            f"<div class='mseg-legend'><b>Optuna</b> · {res['n_trials']} trials · melhor "
+            f"<b>{res['metric'].upper()} = {res['best_value']:.4f}</b> (no OOT/validação)"
+            f"<br>{bp}</div>")
+        self._log(f"[tune] {algo}: melhor {res['metric']}={res['best_value']:.4f} "
+                  f"em {res['n_trials']} trials; modelo re-treinado com os melhores.")
+        self._render_metrics()
+        self._render_model_plots()
+        self._render_formula()
+        self._refresh_bar()
 
     def _render_metrics(self):
         m = self.seg.metrics().round(4)

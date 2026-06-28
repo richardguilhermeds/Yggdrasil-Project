@@ -74,7 +74,63 @@ ALGORITHMS: dict[str, dict] = {
 BOOSTING_ALGORITHMS = ("gradient_boosting", "hist_gradient_boosting",
                        "lightgbm", "xgboost", "catboost")
 
+#: Algoritmos com espaço de busca para tuning bayesiano (Optuna).
+TUNABLE_ALGORITHMS = ("logistica", "random_forest", "extra_trees", "gradient_boosting",
+                      "hist_gradient_boosting", "lightgbm", "xgboost", "catboost")
+
 _EPS = 1e-6
+
+
+def _optuna_space(trial, algorithm: str) -> dict:
+    """Espaço de busca de hiperparâmetros por algoritmo para o Optuna."""
+    if algorithm == "logistica":
+        return {"C": trial.suggest_float("C", 1e-3, 1e2, log=True)}
+    if algorithm in ("random_forest", "extra_trees"):
+        return {
+            "n_estimators": trial.suggest_int("n_estimators", 100, 600, step=50),
+            "max_depth": trial.suggest_int("max_depth", 3, 16),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 80),
+            "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2", None]),
+        }
+    if algorithm == "gradient_boosting":
+        return {
+            "n_estimators": trial.suggest_int("n_estimators", 100, 600, step=50),
+            "max_depth": trial.suggest_int("max_depth", 2, 6),
+            "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+        }
+    if algorithm == "hist_gradient_boosting":
+        return {
+            "max_iter": trial.suggest_int("max_iter", 100, 600, step=50),
+            "max_depth": trial.suggest_int("max_depth", 2, 12),
+            "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
+            "l2_regularization": trial.suggest_float("l2_regularization", 1e-8, 10.0, log=True),
+        }
+    if algorithm == "lightgbm":
+        return {
+            "n_estimators": trial.suggest_int("n_estimators", 100, 800, step=50),
+            "num_leaves": trial.suggest_int("num_leaves", 15, 255),
+            "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+        }
+    if algorithm == "xgboost":
+        return {
+            "n_estimators": trial.suggest_int("n_estimators", 100, 800, step=50),
+            "max_depth": trial.suggest_int("max_depth", 2, 12),
+            "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+        }
+    if algorithm == "catboost":
+        return {
+            "iterations": trial.suggest_int("iterations", 100, 800, step=50),
+            "depth": trial.suggest_int("depth", 2, 10),
+            "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
+        }
+    raise ValueError(
+        f"O algoritmo {algorithm!r} não tem espaço de tuning. "
+        f"Tunáveis: {TUNABLE_ALGORITHMS}.")
 
 
 # ======================================================================
@@ -1557,6 +1613,79 @@ class ModelSegmenter:
         self._shap_cache = {}
         return self
 
+    def tune_optuna(self, algorithm=None, n_trials=30, transform="raw", features=None,
+                    timeout=None, random_state=42, fit_best=True, verbose=False,
+                    progress_callback=None):
+        """Otimização bayesiana de hiperparâmetros com **Optuna** (extra opcional
+        ``[optuna]``). Treina na referência (DES) e avalia no OOT (se houver alvo;
+        senão, num split 75/25 do DES), maximizando **AUC** (classificação) ou
+        **R²** (regressão). Guarda o resultado em ``self.tuning_`` (e o estudo em
+        ``self.study_``); com ``fit_best=True`` reajusta o modelo com os melhores
+        hiperparâmetros. Algoritmos tunáveis: :data:`TUNABLE_ALGORITHMS`.
+
+        ``progress_callback`` (opcional): chamado após CADA trial com
+        ``(n_concluidos, n_total, melhor_valor)`` — útil p/ barra de progresso na
+        UI. Exceções no callback são ignoradas (não derrubam o tuning)."""
+        optuna = _require("optuna", "optuna")
+        from sklearn.metrics import r2_score, roc_auc_score
+        from sklearn.model_selection import train_test_split
+
+        if algorithm is None:
+            algorithm = "logistica" if self.task_type == "classification" else "hist_gradient_boosting"
+        if algorithm not in TUNABLE_ALGORITHMS:
+            raise ValueError(f"Algoritmo {algorithm!r} não é tunável. "
+                             f"Use um de {TUNABLE_ALGORITHMS}.")
+        is_clf = self.task_type == "classification"
+        feats = list(features) if features is not None else self.selected_features()
+        if not feats:
+            feats = list(self.candidates)
+
+        tr = self._frame(self.ref_sample)
+        tr = tr[tr[self.target].notna()]
+        va = None
+        oot = self._oot_sample()
+        if oot and oot != self.ref_sample:
+            vf = self._frame(oot)
+            vf = vf[vf[self.target].notna()]
+            if len(vf) >= 50:
+                va = vf
+        if va is None:                     # sem OOT com alvo → split do DES
+            strat = tr[self.target].astype(int) if is_clf else None
+            tr, va = train_test_split(tr, test_size=0.25, random_state=random_state,
+                                      stratify=strat)
+        ytr = tr[self.target].astype(int) if is_clf else tr[self.target]
+        yva = va[self.target].astype(int) if is_clf else va[self.target]
+        Xtr, Xva = tr[feats], va[feats]
+
+        def objective(trial):
+            hp = _optuna_space(trial, algorithm)
+            pipe = self._build_pipeline(feats, algorithm, hp, transform=transform)
+            pipe.fit(Xtr, ytr)
+            s = self._predict_score_array(pipe, Xva)
+            return roc_auc_score(yva, s) if is_clf else r2_score(yva, s)
+
+        if not verbose:
+            optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study = optuna.create_study(direction="maximize",
+                                    sampler=optuna.samplers.TPESampler(seed=random_state))
+        callbacks = []
+        if progress_callback is not None:
+            def _progress_cb(study, trial):     # chamado após cada trial
+                try:
+                    progress_callback(len(study.trials), n_trials, float(study.best_value))
+                except Exception:
+                    pass                          # progresso é cosmético; nunca derruba o tuning
+            callbacks.append(_progress_cb)
+        study.optimize(objective, n_trials=n_trials, timeout=timeout, callbacks=callbacks)
+        self.study_ = study
+        self.tuning_ = {"algorithm": algorithm, "metric": "auc" if is_clf else "r2",
+                        "n_trials": len(study.trials), "best_value": round(float(study.best_value), 6),
+                        "best_params": dict(study.best_params)}
+        if fit_best:
+            self.fit(algorithm=algorithm, hyperparams=study.best_params,
+                     features=feats, transform=transform)
+        return self.tuning_
+
     def set_model(self, model, features=None):
         """Recebe um modelo já ajustado (sklearn/pipeline). ``features`` indica as
         colunas de entrada (default: as selecionadas). Calcula ``score_``."""
@@ -1687,7 +1816,9 @@ class ModelSegmenter:
         oot = self._oot_sample()
         if self.ref_sample not in m.index or oot not in m.index or oot == self.ref_sample:
             return {}
-        cols = [c for c in m.columns if c != "n"]
+        # 'ks_cutoff' é o limiar de score onde o KS é máximo (escala do score),
+        # não uma métrica de desempenho — seu "shift" não é comparável aos demais.
+        cols = [c for c in m.columns if c not in ("n", "ks_cutoff")]
         return {c: round(float(m.loc[oot, c] - m.loc[self.ref_sample, c]), 6)
                 for c in cols if np.isfinite(m.loc[oot, c]) and np.isfinite(m.loc[self.ref_sample, c])}
 
