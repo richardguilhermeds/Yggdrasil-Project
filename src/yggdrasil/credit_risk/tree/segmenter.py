@@ -3870,7 +3870,7 @@ class TreeSegmenter:
     #   segmento (id da folha), nota (1..N) e o valor previsto do alvo.
     # ------------------------------------------------------------------
     def to_sql(self, table: str = "minha_tabela", col_seg: str = "segmento",
-               col_nota: str = "nota", col_valor: str = "valor_regua") -> str:
+               col_nota: str = "folha", col_valor: str = "valor_previsto") -> str:
         """Gera SQL ANSI com ``CASE WHEN`` que reproduz a régua. Pronto p/ copiar.
 
         ``table`` é o nome da tabela/CTE de origem. Cada folha vira um ramo do

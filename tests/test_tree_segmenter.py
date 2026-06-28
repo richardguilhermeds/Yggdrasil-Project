@@ -355,7 +355,7 @@ def test_to_sql_case_when(seg):
     seg.fit_auto(max_depth=2, verbose=False)
     sql = seg.to_sql(table="carteira")
     assert "CASE" in sql and "carteira" in sql
-    assert "segmento" in sql and "nota" in sql and "valor_regua" in sql
+    assert "AS segmento" in sql and "AS folha" in sql and "AS valor_previsto" in sql
     # uma cláusula WHEN por folha
     assert sql.count("WHEN") >= 2 * len(seg.leaves())
 
