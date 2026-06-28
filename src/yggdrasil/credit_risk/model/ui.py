@@ -585,24 +585,26 @@ class ModelSegmenterUI:
         # espaço entre "categorizar na mão" e a faixa de métricas
         self.out_an_cards.layout = W.Layout(margin="20px 0 6px 0")
         # distribuição AO LADO da tabela por faixa + inversão entre amostras (chart menor)
-        col_dist = W.VBox([
-            W.HTML(f"<div class='mseg-h'>Distribuição &amp; {_dist_h} por faixa</div>"),
-            self.out_an_distbad], layout=W.Layout(width="49%"))
-        col_tab = W.VBox([
-            W.HTML("<div class='mseg-h'>Tabela por faixa</div>"), self.out_an_table,
-            W.HTML("<div class='mseg-h' style='margin-top:12px'>Inversão entre amostras</div>"),
-            self.out_an_inv_sample], layout=W.Layout(width="49%"))
+        # grade 3x2 da "Análise de variáveis"
+        _col = lambda titulo, out: W.VBox(
+            [W.HTML(f"<div class='mseg-h'>{titulo}</div>"), out],
+            layout=W.Layout(width="49%"))
+        _row = lambda a, b: W.HBox(
+            [a, b], layout=W.Layout(justify_content="space-between", align_items="flex-start"))
+        # linha 1: tabela por faixa · distribuição vs risco médio (PD/LGD)
+        row1 = _row(_col("Tabela por faixa", self.out_an_table),
+                    _col(f"Distribuição &amp; {_dist_h} por faixa", self.out_an_distbad))
+        # linha 2: risco das faixas por amostra · por safra
+        row2 = _row(_col("Risco das faixas por amostra", self.out_an_inv_sample),
+                    _col("Risco das faixas por safra", self.out_an_inv_safra))
+        # linha 3: variável ao longo do tempo (percentis) · PSI por safra
+        row3 = _row(_col("Variável ao longo do tempo · percentis por safra", self.out_an_time),
+                    _col("PSI da variável por safra vs DES", self.out_an_psi))
         tab_an = W.VBox([
             W.HBox([self.dd_var2, self.dd_sample2, self.tx_time2, self.btn_analyze]),
             bin_card,
             self.out_an_cards,
-            W.HBox([col_dist, col_tab],
-                   layout=W.Layout(justify_content="space-between", align_items="flex-start")),
-            W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Comportamento no tempo</div>"),
-                            self.out_an_time], layout=W.Layout(width="50%")),
-                    W.VBox([W.HTML("<div class='mseg-h'>Inversão por safra</div>"),
-                            self.out_an_inv_safra], layout=W.Layout(width="50%"))]),
-            W.VBox([W.HTML("<div class='mseg-h'>PSI por safra vs DES</div>"), self.out_an_psi]),
+            row1, row2, row3,
         ], layout=W.Layout(padding="2px"))
 
         # ---------- Aba 3: Modelo ----------
@@ -736,6 +738,12 @@ class ModelSegmenterUI:
         tab_rating = W.VBox([
             W.HBox([self.dd_method, self.sl_nratings, self.cb_fusion,
                     self.btn_suggest_n, self.btn_build_ratings]),
+            W.HTML("<div class='mseg-legend'><b>Fusão monotônica (inversão):</b> quando marcada, "
+                   "funde faixas de rating vizinhas cuja ordem de risco se inverte (rating de score "
+                   "maior com risco observado menor que o do rating anterior). A fusão só acontece "
+                   "se a inversão <b>não</b> for estatisticamente significativa (Mann-Whitney na "
+                   "regressão, qui-quadrado na classificação; α=0,05). Assim a régua fica "
+                   "monotônica sem descartar separações de risco que são reais.</div>"),
             self.tx_manual,
             self.out_rating_auto,
             W.VBox([W.HTML("<div class='mseg-h'>Régua de ratings (risco por amostra)</div>"),
@@ -778,14 +786,14 @@ class ModelSegmenterUI:
         self.btn_mlflow = W.Button(description="Registrar no MLflow", icon="database")
         # escorar base: rating + valor previsto do alvo por rating (a "régua")
         self.tx_value_col = W.Text(value="valor_previsto", description="Coluna do valor:",
-                                   style={"description_width": "initial"})
+                                   style={"description_width": "150px"})
         self.tx_in_table = W.Text(value="", description="Tabela (Databricks):",
                                   placeholder="catalog.schema.tabela",
-                                  style={"description_width": "initial"},
+                                  style={"description_width": "150px"},
                                   layout=W.Layout(width="46%"))
         self.tx_out_table = W.Text(value="", description="Gravar em (opcional):",
                                    placeholder="catalog.schema.saida",
-                                   style={"description_width": "initial"},
+                                   style={"description_width": "150px"},
                                    layout=W.Layout(width="46%"))
         self.cb_recreate = W.Checkbox(value=True, indent=False,
                                       description="recriar categorias/faixas das variáveis")
@@ -805,7 +813,7 @@ class ModelSegmenterUI:
         self.tx_in_table.layout = W.Layout(width="48%")
         self.tx_out_table.layout = W.Layout(width="48%")
         card_valid = W.VBox([
-            W.HTML("<div class='mseg-h'>① Validação · backtest e estabilidade dos ratings</div>"),
+            W.HTML("<div class='mseg-h'>Validação · backtest e estabilidade dos ratings</div>"),
             W.HBox([self.tx_time3, self.btn_backtest]),
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Backtest por safra</div>"),
                             self.out_backtest], layout=W.Layout(width="60%")),
@@ -814,7 +822,7 @@ class ModelSegmenterUI:
                    layout=W.Layout(justify_content="space-between")),
         ]); card_valid.add_class("mseg-card")
         card_score = W.VBox([
-            W.HTML("<div class='mseg-h'>② Escoragem da base · score + rating + valor previsto "
+            W.HTML("<div class='mseg-h'>Escoragem da base · score + rating + valor previsto "
                    "(régua)</div>"),
             W.HTML("<div class='mseg-legend'>Devolve <code>score</code>, <code>rating</code> e o "
                    "valor previsto do alvo daquele rating (ex.: LGD/PD previsto). A base só precisa "
@@ -831,13 +839,13 @@ class ModelSegmenterUI:
             W.HBox([self.btn_export]), self.out_export,
         ]); card_score.add_class("mseg-card")
         card_persist = W.VBox([
-            W.HTML("<div class='mseg-h'>③ Persistência · JSON + modelo joblib · relatório PDF</div>"),
+            W.HTML("<div class='mseg-h'>Persistência · JSON + modelo joblib · relatório PDF</div>"),
             W.HBox([self.tx_save, self.btn_save, self.btn_load]),
             W.HBox([self.tx_pdf, self.btn_pdf]),
             self.out_pdf,
         ], layout=W.Layout(width="49%")); card_persist.add_class("mseg-card")
         card_mlflow = W.VBox([
-            W.HTML("<div class='mseg-h'>④ Registrar no MLflow / Unity Catalog</div>"),
+            W.HTML("<div class='mseg-h'>Registrar no MLflow / Unity Catalog</div>"),
             W.HBox([self.tx_experiment, self.tx_model, self.btn_mlflow]),
         ], layout=W.Layout(width="49%")); card_mlflow.add_class("mseg-card")
         tab_export = W.VBox([

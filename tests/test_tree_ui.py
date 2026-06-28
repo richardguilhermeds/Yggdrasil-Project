@@ -202,9 +202,9 @@ def test_ui_importancia_colorida_com_dicionario(task):
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_autofit(None)
         ui._on_importance(None)
-    html = ui.out_importance.value
-    assert "rgb(" in html                            # cor por importância (gradiente)
-    assert "O que é a importância" in html           # dicionário
+    assert "rgb(" in ui.out_importance.value                  # cor por importância (gradiente) na tabela
+    assert "<img" in ui.out_importance_chart.value            # gráfico de importância relativa ao lado
+    assert "O que é a importância" in ui.out_importance_legend.value   # dicionário (abaixo)
 
 
 def test_ui_diag_explica_calibracao(task):
@@ -255,12 +255,8 @@ def test_ui_plots_especificos_por_task(task):
     ui = _build(task)
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_autofit(None)
-        # botões 1 e 2: clf = ROC/KS (out_discrim) · reg = boxplot/hist
+        # botões 1 e 2: clf = ROC/KS · reg = boxplot + histograma do alvo —
+        # em ambos os modos renderizam em out_discrim
         ui.btn_roc.click()
         ui.btn_ks.click()
-    if task == "classification":
-        assert ui.out_discrim.value and "Erro" not in ui.out_discrim.value
-    else:
-        # boxplot vai p/ out_discrim; histograma p/ out_quality
-        assert ui.out_discrim.value and "Erro" not in ui.out_discrim.value
-        assert ui.out_quality.value and "Erro" not in ui.out_quality.value
+    assert ui.out_discrim.value and "Erro" not in ui.out_discrim.value

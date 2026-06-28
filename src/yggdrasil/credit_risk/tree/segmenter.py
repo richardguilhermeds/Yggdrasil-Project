@@ -36,6 +36,25 @@ except ImportError:  # pragma: no cover
 
 TASK_TYPES = ("classification", "regression")
 
+# Abreviações de mês em PT-BR (independem do locale do SO; Windows não traz pt_BR).
+_MESES_PT = ("jan", "fev", "mar", "abr", "mai", "jun",
+             "jul", "ago", "set", "out", "nov", "dez")
+
+
+def _fmt_safras(safras) -> list:
+    """Rótulos de safra 'AAAA-MM' → 'mmm/AA' (ex.: '2022-01' → 'jan/22').
+
+    Valores fora do padrão são devolvidos como string, sem alteração."""
+    out = []
+    for s in safras:
+        s = str(s)
+        try:
+            ano, mes = s.split("-")[:2]
+            out.append(f"{_MESES_PT[int(mes) - 1]}/{ano[-2:]}")
+        except (ValueError, IndexError):
+            out.append(s)
+    return out
+
 
 def _fit_optbinning_splits(b, x, y) -> list:
     """Roda ``b.fit(x, y)`` e devolve ``list(b.splits)``.
@@ -2869,7 +2888,8 @@ class TreeSegmenter:
         ys = [sh[c].fillna(0).to_numpy() for c in cats]
         ax.stackplot(x, ys, labels=cats, colors=colors, alpha=0.92)
         ax.set_ylim(0, 100); ax.margins(x=0)
-        ax.set_xticks(x); ax.set_xticklabels(sh["safra"], rotation=45, ha="right", fontsize=8)
+        ax.set_xticks(x)
+        ax.set_xticklabels(_fmt_safras(sh["safra"]), rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("% da safra")
         # legenda à DIREITA (vertical) — não colide com as datas do eixo x
         ax.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5),
@@ -2904,7 +2924,9 @@ class TreeSegmenter:
         ax.plot(x, bs["p95"], color="#6f93ad", lw=1.3, ls="--", label="p5 / p95")
         ax.plot(x, bs["media"], color="#15324a", lw=2.4, marker="o", markersize=4,
                 label="média")
-        ax.set_xticks(x); ax.set_xticklabels(bs["safra"], rotation=45, ha="right", fontsize=8)
+        ax.margins(x=0)                                   # sem respiro lateral (eixo x)
+        ax.set_xticks(x)
+        ax.set_xticklabels(_fmt_safras(bs["safra"]), rotation=45, ha="right", fontsize=8)
         ax.legend(fontsize=8, ncol=3, framealpha=0.9, loc="upper left")
         rot = self.feature_labels.get(feature, feature)
         ax.set_title(f"'{rot}' ao longo do tempo — percentis por safra",
@@ -2916,7 +2938,7 @@ class TreeSegmenter:
         return fig
 
     def plot_variable_psi_by_safra(self, feature, time_col=None, sid=None,
-                                   figsize=(9.6, 3.4), save_path=None, dpi=150, ax=None):
+                                   figsize=(9.6, 4.4), save_path=None, dpi=150, ax=None):
         """PSI da variável por safra vs DES (barras coloridas por faixa de PSI)."""
         ps = self.variable_psi_by_safra(feature, time_col, sid=sid)
         fig, ax = self._new_ax(figsize, dpi, ax)
@@ -3438,6 +3460,49 @@ class TreeSegmenter:
             out["importancia_%"] = (100 * out["importancia"] / total).round(2)
         out["variavel"] = out["variavel"].map(lambda v: self.feature_labels.get(v, v))
         return out.sort_values("importancia", ascending=False).reset_index(drop=True)
+
+    def plot_importance_bar(self, figsize=None, save_path=None, dpi: int = 150, ax=None):
+        """Barras horizontais da **importância relativa (%)** de cada variável da
+        árvore — a importância de :meth:`feature_importance` normalizada para 100%
+        do total, ordenada da mais para a menos importante (topo → base).
+
+        Pensado para ficar ao lado da tabela de importância: mostra de relance
+        quanto cada variável pesa **em relação a todas as outras**."""
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.colors import Normalize
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("plot_importance_bar requer matplotlib.") from e
+        fi = self.feature_importance(normalize=True)
+        if fi.empty:
+            raise ValueError("A árvore ainda não tem splits — sem importância para o gráfico.")
+        col = "importancia_%" if "importancia_%" in fi.columns else "importancia"
+        names = fi["variavel"].tolist()
+        vals = fi[col].to_numpy(dtype="float64")
+        if figsize is None:
+            figsize = (6.4, max(2.6, len(names) * 0.46))     # cresce com o nº de variáveis
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        vmax = float(vals.max()) if vals.size else 1.0
+        norm = Normalize(0.0, vmax if vmax > 1e-9 else 1.0)
+        cmap_obj = plt.get_cmap("Greens")                     # mesma paleta verde da tabela
+        y = list(range(len(names)))
+        ax.barh(y, vals, color=[cmap_obj(0.30 + 0.6 * norm(v)) for v in vals],
+                edgecolor="#33424f", alpha=0.92, height=0.72)
+        ax.set_yticks(y); ax.set_yticklabels(names, fontsize=9)
+        ax.invert_yaxis()                                     # mais importante no topo
+        is_pct = col == "importancia_%"
+        for yi, v in zip(y, vals):
+            ax.text(v, yi, (f" {v:.1f}%" if is_pct else f" {v:.4f}"),
+                    va="center", ha="left", fontsize=8.5, fontweight="bold", color="#15324a")
+        ax.set_xlabel("Importância relativa (%)" if is_pct else "Importância", fontsize=10)
+        ax.set_xlim(0, (vmax * 1.16) if vmax > 1e-9 else 1.0)
+        ax.set_title("Importância relativa das variáveis na árvore", fontsize=12,
+                     fontweight="bold", color="#15324a")
+        ax.grid(axis="x", alpha=0.2)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
 
     # ------------------------------------------------------------------
     # SUGGEST_SPLITS: ranqueia as melhores variáveis para dividir uma folha,

@@ -247,6 +247,26 @@ def _new_ax(figsize, dpi, ax):
     return fig, fig.subplots()
 
 
+# Abreviações de mês em PT-BR (independem do locale do SO; Windows não traz pt_BR).
+_MESES_PT = ("jan", "fev", "mar", "abr", "mai", "jun",
+             "jul", "ago", "set", "out", "nov", "dez")
+
+
+def _fmt_safras(safras) -> list:
+    """Rótulos de safra 'AAAA-MM' → 'mmm/AA' (ex.: '2022-01' → 'jan/22').
+
+    Valores fora do padrão são devolvidos como string, sem alteração."""
+    out = []
+    for s in safras:
+        s = str(s)
+        try:
+            ano, mes = s.split("-")[:2]
+            out.append(f"{_MESES_PT[int(mes) - 1]}/{ano[-2:]}")
+        except (ValueError, IndexError):
+            out.append(s)
+    return out
+
+
 def _require(module: str, algorithm: str):
     """Importa um pacote opcional (LightGBM/XGBoost/CatBoost) com mensagem de
     instalação amigável quando ausente."""
@@ -1114,7 +1134,9 @@ class ModelSegmenter:
         ax.plot(x, bs["p5"], color="#6f93ad", lw=1.3, ls="--")
         ax.plot(x, bs["p95"], color="#6f93ad", lw=1.3, ls="--", label="p5 / p95")
         ax.plot(x, bs["media"], color="#15324a", lw=2.4, marker="o", ms=4, label="média")
-        ax.set_xticks(x); ax.set_xticklabels(bs["safra"], rotation=45, ha="right", fontsize=8)
+        ax.margins(x=0)                                   # sem respiro lateral (eixo x)
+        ax.set_xticks(x)
+        ax.set_xticklabels(_fmt_safras(bs["safra"]), rotation=45, ha="right", fontsize=8)
         ax.legend(fontsize=8, ncol=3, framealpha=0.9, loc="upper left")
         ax.set_title(f"'{self.label(feature)}' ao longo do tempo — percentis por safra",
                      fontsize=11, fontweight="bold", color="#15324a")
@@ -1147,7 +1169,8 @@ class ModelSegmenter:
         ys = [sh[c].fillna(0).to_numpy() for c in cats]
         ax.stackplot(x, ys, labels=cats, colors=colors, alpha=0.92)
         ax.set_ylim(0, 100); ax.margins(x=0)
-        ax.set_xticks(x); ax.set_xticklabels(sh["safra"], rotation=45, ha="right", fontsize=8)
+        ax.set_xticks(x)
+        ax.set_xticklabels(_fmt_safras(sh["safra"]), rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("% da safra")
         ax.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5),
                   framealpha=0.9, title="categoria")
@@ -1158,7 +1181,7 @@ class ModelSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
-    def plot_variable_psi_by_safra(self, feature, time_col=None, figsize=(9.6, 3.4),
+    def plot_variable_psi_by_safra(self, feature, time_col=None, figsize=(9.6, 4.4),
                                    dpi=150, save_path=None, ax=None):
         """PSI da variável por safra vs DES (barras coloridas)."""
         ps = self.variable_psi_by_safra(feature, time_col)
@@ -1176,7 +1199,7 @@ class ModelSegmenter:
         # guia de alerta do PSI (sempre visível, mesmo com PSI pequeno)
         ax.axhline(0.10, color="#caa000", lw=1.2, ls="--", label="alerta (0,10)")
         ax.axhline(0.25, color="#d6453e", lw=1.2, ls="--", label="crítico (0,25)")
-        ax.set_xticks(x); ax.set_xticklabels(ps["safra"], rotation=45, ha="right", fontsize=8)
+        ax.set_xticks(x); ax.set_xticklabels(_fmt_safras(ps["safra"]), rotation=45, ha="right", fontsize=8)
         ax.set_xlim(-0.7, len(ps) - 0.3)
         ax.set_ylim(0, max(float(np.nanmax(ps["psi"])) * 1.16 + 0.02, 0.28))
         ax.set_ylabel("PSI")
@@ -1239,7 +1262,7 @@ class ModelSegmenter:
             ax.plot(x, s["ser_safra"][i], marker="o", lw=1.7, ms=4.5,
                     color=cmap(rank / (k - 1) if k > 1 else 0.5),
                     markeredgecolor="#33424f", markeredgewidth=0.5, label=s["labels"][i])
-        ax.set_xticks(x); ax.set_xticklabels(xs, rotation=45, ha="right", fontsize=8)
+        ax.set_xticks(x); ax.set_xticklabels(_fmt_safras(xs), rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("risco médio"); ax.set_xlabel("safra")
         ax.set_title(f"'{self.label(feature)}' — risco das faixas por safra"
                      "  ·  faixas vermelhas = inversão",
@@ -1325,7 +1348,7 @@ class ModelSegmenter:
         for i, (label, ys) in enumerate(series):
             ax.plot(x, ys, marker="o", lw=1.7, ms=4.5, color=colors[i],
                     markeredgecolor="#33424f", markeredgewidth=0.5, label=label)
-        ax.set_xticks(x); ax.set_xticklabels(xs, rotation=45, ha="right", fontsize=8)
+        ax.set_xticks(x); ax.set_xticklabels(_fmt_safras(xs), rotation=45, ha="right", fontsize=8)
         ax.set_ylabel(ylabel); ax.set_xlabel("safra")
         titulo = "risco das faixas" if kind == "num" else f"{ylabel} por categoria"
         ax.set_title(f"'{self.label(feature)}' — {titulo} por safra",
@@ -2399,7 +2422,7 @@ class ModelSegmenter:
             ax.plot(x, ys, marker="o", lw=1.7, ms=4.5,
                     color=cmap(rank / (k - 1) if k > 1 else 0.5),
                     markeredgecolor="#33424f", markeredgewidth=0.5, label=lab)
-        ax.set_xticks(x); ax.set_xticklabels(xs, rotation=45, ha="right", fontsize=8)
+        ax.set_xticks(x); ax.set_xticklabels(_fmt_safras(xs), rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("risco médio"); ax.set_xlabel("safra")
         ax.set_title("Risco dos ratings por safra  ·  faixas vermelhas = inversão",
                      fontsize=11, fontweight="bold", color="#15324a")

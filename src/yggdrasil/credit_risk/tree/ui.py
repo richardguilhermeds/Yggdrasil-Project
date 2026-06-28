@@ -424,6 +424,8 @@ class TreeSegmenterUI:
         self.btn_importance = mk("Calcular importância", "info",
                                  "Importância das variáveis que entraram na árvore", "bar-chart")
         self.out_importance = W.HTML()
+        self.out_importance_chart = W.HTML()   # gráfico de importância relativa (ao lado da tabela)
+        self.out_importance_legend = W.HTML()  # legenda explicativa (abaixo de tabela + gráfico)
         self.btn_sql = mk("Gerar SQL (CASE WHEN)", "primary",
                           "Gera a régua como SQL copiável", "database")
         self.tx_sql_table = W.Text(description="tabela", value="minha_tabela",
@@ -473,6 +475,7 @@ class TreeSegmenterUI:
                            "Calcula o placar de saúde: discriminação (KS/AUC/Gini), estabilidade "
                            "(PSI/CSI), calibração (previsto×observado) e estrutura "
                            "(monotonicidade · distinção entre folhas-irmãs)", "stethoscope")
+        self.btn_diag_hide = mk("Ocultar", "", "Limpa a avaliação já renderizada", "eye-slash")
         # --- comparação de folhas-irmãs (inversão entre amostras/safras) ---
         sib_style = {"description_width": "118px"}
         self.dd_sib_group = W.Dropdown(description="Grupo de irmãs", layout=full,
@@ -497,17 +500,11 @@ class TreeSegmenterUI:
         self.btn_report = mk("Gerar relatório de validação (MD)", "success",
                              "Gera um documento Markdown com árvore, folhas, PSI, CSI, discriminação, "
                              "calibração e backtest (+ imagens)", "file-text-o")
-        # --- discriminação (KS · ROC) e qualidade dos segmentos ---
+        # --- discriminação (KS · ROC) / dispersão do alvo na regressão ---
         self.btn_roc = mk("Curva ROC (AUC/Gini)", "info",
                           "Curva ROC da régua por amostra, com a AUC e o Gini", "line-chart")
         self.btn_ks = mk("Curva KS", "info",
                          "Curva KS — distribuições acumuladas de bons e maus pelo score", "area-chart")
-        self.btn_badrate = mk("Taxa de default por folha", "info",
-                              "Taxa de default (PD) por folha, com IC de Wilson — separação de risco",
-                              "bar-chart")
-        self.btn_scoredist = mk("Distribuição do score por classe", "info",
-                                "Distribuição do score (PD prevista) separada por classe (bons × maus)",
-                                "area-chart")
 
         # --- undo/redo, auto-merge e persistência da árvore (JSON) ---
         self.btn_undo = mk("◀ Desfazer", "", "Desfaz a última alteração na árvore", "undo")
@@ -543,9 +540,11 @@ class TreeSegmenterUI:
                           "Salva um relatório PDF do modelo no caminho informado", "file-pdf-o")
         self.out_pdf = W.HTML()
         # --- aplicar a régua numa tabela Spark ("reconstruir as folhas") ---
-        self.tx_spark_in = W.Text(description="tabela", layout=full, style=dstyle,
+        # inputs com mais respiro vertical (tabela/saída mais espaçadas)
+        spark_lay = W.Layout(width="98%", margin="9px 0")
+        self.tx_spark_in = W.Text(description="tabela", layout=spark_lay, style=dstyle,
                                   placeholder="tabela Spark de entrada (catalogo.schema.tabela)")
-        self.tx_spark_out = W.Text(description="saída", layout=full, style=dstyle,
+        self.tx_spark_out = W.Text(description="saída", layout=spark_lay, style=dstyle,
                                    placeholder="opcional: grava o resultado nesta tabela")
         self.btn_spark_apply = mk("Reconstruir folhas (Spark)", "primary",
                                   "Aplica a régua à tabela Spark (segmento, nota e PD por linha), "
@@ -594,6 +593,7 @@ class TreeSegmenterUI:
         self.btn_clear_log.on_click(self._on_clear_log)
         self.btn_boot.on_click(self._on_boot)
         self.btn_diag.on_click(self._on_diag)
+        self.btn_diag_hide.on_click(self._on_diag_hide)
         self.btn_sib.on_click(self._on_sib_analyze)
         # amostras p/ a análise por safra das folhas-irmãs (fixas — não mudam
         # com a árvore): "todas" + a referência (DES) + as demais com PD.
@@ -607,17 +607,13 @@ class TreeSegmenterUI:
         if self._is_clf:
             self.btn_roc.on_click(self._on_roc)
             self.btn_ks.on_click(self._on_ks)
-            self.btn_badrate.on_click(self._on_badrate)
-            self.btn_scoredist.on_click(self._on_scoredist)
         else:
-            # regressão: reusa os 2 primeiros botões p/ boxplot e histograma do
-            # alvo; esconde os 2 específicos de classificação (taxa default/dist.)
+            # regressão: reusa os 2 botões da discriminação p/ boxplot e
+            # histograma do alvo (ROC/KS não se aplica a alvo contínuo)
             self.btn_roc.description = "📦 Boxplot por folha"
             self.btn_ks.description = "📊 Histograma do alvo"
             self.btn_roc.on_click(self._on_box)
             self.btn_ks.on_click(self._on_hist)
-            self.btn_badrate.layout.display = "none"
-            self.btn_scoredist.layout.display = "none"
         self.btn_undo.on_click(self._on_undo)
         self.btn_redo.on_click(self._on_redo)
         self.btn_automerge.on_click(self._on_automerge)
@@ -649,8 +645,7 @@ class TreeSegmenterUI:
         self.out_plot = W.HTML()
         self.out_boot = W.HTML()
         self.out_validate = W.HTML()
-        self.out_discrim = W.HTML()                       # ROC / KS
-        self.out_quality = W.HTML()
+        self.out_discrim = W.HTML()    # ROC/KS (clf) · boxplot/histograma do alvo (reg)
         self.out_sib = W.HTML()     # comparação de folhas-irmãs (inversão)
         self.out_diag = W.HTML()    # placar de saúde do modelo (Diagnóstico)
         self.out_log = W.Output(layout=W.Layout(max_height="320px", overflow="auto"))
@@ -888,13 +883,22 @@ class TreeSegmenterUI:
         card_sib.add_class("treeui-card")
         self._card_sib = card_sib
 
-        discrim_legend = W.HTML(
-            "<div class='treeui-legend'>Poder de <b>ordenação de risco</b> da régua (score = PD "
-            "prevista por folha). <b>KS</b> = máxima separação entre as acumuladas de bons e "
-            "maus; <b>AUC</b>/<b>Gini</b> = área sob a ROC. Avalie quando a árvore estiver "
-            "fechada.</div>")
+        if self._is_clf:
+            _dh = "Discriminação · curva ROC &amp; curva KS"
+            discrim_legend = W.HTML(
+                "<div class='treeui-legend'>Poder de <b>ordenação de risco</b> da régua (score = PD "
+                "prevista por folha). <b>KS</b> = máxima separação entre as acumuladas de bons e "
+                "maus; <b>AUC</b>/<b>Gini</b> = área sob a ROC. Avalie quando a árvore estiver "
+                "fechada.</div>")
+        else:
+            _dh = "Dispersão do alvo por folha · boxplot &amp; histograma"
+            discrim_legend = W.HTML(
+                "<div class='treeui-legend'>Dispersão do <b>alvo (LGD)</b> por folha — curva ROC/KS "
+                "não se aplica a alvo contínuo. <b>Boxplot por folha</b> mostra mediana, quartis e "
+                "outliers; <b>histograma do alvo</b> mostra a frequência dos valores. Avalie quando "
+                "a árvore estiver fechada.</div>")
         card_discrim = W.VBox([
-            W.HTML("<div class='treeui-h'>Discriminação · curva ROC &amp; curva KS</div>"),
+            W.HTML(f"<div class='treeui-h'>{_dh}</div>"),
             discrim_legend,
             W.HBox([self.btn_roc, self.btn_ks]),
             self.out_discrim,
@@ -918,12 +922,20 @@ class TreeSegmenterUI:
             metrics_legend, self.out_metrics])
         card_metrics.add_class("treeui-card")
 
-        boot_legend = W.HTML(
-            "<div class='treeui-legend'>IC da PD (taxa de default) por folha via bootstrap na "
-            "referência (DES). Se houver OOT, mostra a PD de OOT e verifica a "
-            "<b>aderência</b>: <span style='color:#137a3e'>dentro</span> do IC = estável; "
-            "<span style='color:#b3261e'>acima/abaixo</span> = PD deslocou além da incerteza "
-            "amostral. Calcule quando a árvore estiver fechada.</div>")
+        if self._is_clf:
+            boot_legend = W.HTML(
+                "<div class='treeui-legend'>IC da PD (taxa de default) por folha via bootstrap na "
+                "referência (DES). Se houver OOT, mostra a PD de OOT e verifica a "
+                "<b>aderência</b>: <span style='color:#137a3e'>dentro</span> do IC = estável; "
+                "<span style='color:#b3261e'>acima/abaixo</span> = PD deslocou além da incerteza "
+                "amostral. Calcule quando a árvore estiver fechada.</div>")
+        else:
+            boot_legend = W.HTML(
+                "<div class='treeui-legend'>IC do alvo (LGD) por folha via bootstrap na "
+                "referência (DES). Se houver OOT, mostra o LGD de OOT e verifica a "
+                "<b>aderência</b>: <span style='color:#137a3e'>dentro</span> do IC = estável; "
+                "<span style='color:#b3261e'>acima/abaixo</span> = LGD deslocou além da incerteza "
+                "amostral. Calcule quando a árvore estiver fechada.</div>")
         card_boot = W.VBox([
             W.HTML("<div class='treeui-h'>Intervalos de confiança (bootstrap) &amp; aderência OOT</div>"),
             boot_legend,
@@ -932,37 +944,28 @@ class TreeSegmenterUI:
             self.out_boot])
         card_boot.add_class("treeui-card")
 
-        quality_legend = W.HTML(
-            "<div class='treeui-legend'>Qualidade dos segmentos: <b>taxa de default por folha</b> "
-            "(com IC de Wilson — separação de risco e incerteza) e <b>distribuição do score</b> "
-            "por classe (quanto mais separadas as massas de bons e maus, melhor o KS/AUC). "
-            "<i>A PD por faixa da variável aparece embaixo da tabela ao clicar em 👁 Preview.</i></div>")
-        card_quality = W.VBox([
-            W.HTML("<div class='treeui-h'>Qualidade dos segmentos</div>"),
-            quality_legend,
-            W.HBox([self.btn_badrate, self.btn_scoredist]),
-            self.out_quality,
-        ])
-        card_quality.add_class("treeui-card")
-        self._card_quality = card_quality
-
         # ---- PLACAR DE SAÚDE DO MODELO (visão estatística de relance) -------
         sep_diag = W.HTML("<div class='treeui-band'>Placar de saúde do modelo · "
                           "discriminação · estabilidade · calibração · estrutura</div>")
+        self.btn_diag.layout.width = "auto"
+        self.btn_diag_hide.layout.width = "auto"
+        _diag_metrics = "AUC/Gini/KS" if self._is_clf else "MAE/RMSE/R²"
         card_score = W.VBox([
             W.HTML("<div class='treeui-legend'>Veredito de relance em 4 dimensões "
-                   "(verde/amarelo/vermelho) reunindo os testes das outras abas — AUC/Gini/KS, "
+                   "(verde/amarelo/vermelho) reunindo os testes das outras abas — " + _diag_metrics + ", "
                    "PSI/CSI, calibração prevista×observada e monotonicidade · distinção entre "
                    "folhas-irmãs — com a evidência logo abaixo. Clique para (re)calcular.</div>"),
-            W.HBox([self.btn_diag]),
+            W.HBox([self.btn_diag, self.btn_diag_hide], layout=W.Layout(gap="6px")),
             self.out_diag,
         ], layout=W.Layout(width="100%"))
         card_score.add_class("treeui-card")
+        _diag_detail = ("discriminação (ROC/KS)" if self._is_clf
+                        else "dispersão do alvo (boxplot/histograma)")
         sep_diag2 = W.HTML("<div class='treeui-band treeui-band-muted'>Evidência detalhada · "
-                           "folhas · discriminação (ROC/KS) · métricas · IC bootstrap · qualidade</div>")
+                           f"folhas · {_diag_detail} · métricas · IC bootstrap</div>")
         tab_diag = W.VBox([sep_diag, card_score, sep_diag2,
                            card_metrics, card_table, card_sib, card_discrim,
-                           card_boot, card_quality])
+                           card_boot])
 
         # ================================================================
         # ABA ④ VALIDAR & EXPORTAR — duas faixas: validação · exportar/registrar
@@ -1000,6 +1003,7 @@ class TreeSegmenterUI:
             W.HTML("<div class='treeui-legend'>Loga régua, métricas e o modelo pyfunc e registra a "
                    "versão no Model Registry.</div>"),
             self.tx_model, self.cb_uc, self.tx_experiment, self.tx_runname,
+            W.Box([], layout=W.Layout(flex="1 1 auto")),   # espaçador: empurra o botão p/ a base
             W.HBox([self.btn_mlflow]),
         ], layout=W.Layout(width="49%"))
         card_mlflow.add_class("treeui-card")
@@ -1008,6 +1012,7 @@ class TreeSegmenterUI:
             W.HTML("<div class='treeui-legend'>Aplica a régua a uma tabela Spark (segmento, nota e "
                    "valor por linha), gravando opcionalmente o resultado.</div>"),
             self.tx_spark_in, self.tx_spark_out,
+            W.Box([], layout=W.Layout(flex="1 1 auto")),   # alinha "Reconstruir folhas" com "Salvar no MLflow"
             W.HBox([self.btn_spark_apply]),
         ], layout=W.Layout(width="49%"))
         card_spark.add_class("treeui-card")
@@ -1112,11 +1117,17 @@ class TreeSegmenterUI:
             W.HTML("<div class='treeui-legend'>Funde folhas-irmãs com risco estatisticamente "
                    "<b>indistinguível</b> (p &gt; α no teste entre adjacentes).</div>"),
             self.sl_alpha, self.cb_automerge_na, self.btn_automerge]); card_merge.add_class("treeui-card")
+        imp_row = W.HBox(
+            [W.VBox([self.out_importance], layout=W.Layout(width="49%")),
+             W.VBox([self.out_importance_chart], layout=W.Layout(width="49%"))],
+            layout=W.Layout(width="100%", justify_content="space-between",
+                            align_items="flex-start"))
         card_imp = W.VBox([
             W.HTML("<div class='treeui-h'>Importância das variáveis (na árvore)</div>"),
             W.HTML("<div class='treeui-legend'>Ganho de IV ponderado pela representatividade do nó, "
                    "somado por variável que <b>entrou</b> na árvore.</div>"),
-            self.btn_importance, self.out_importance]); card_imp.add_class("treeui-card")
+            self.btn_importance, imp_row, self.out_importance_legend])
+        card_imp.add_class("treeui-card")
         card_sql = W.VBox([
             W.HTML("<div class='treeui-h'>Exportar como SQL (CASE WHEN)</div>"),
             W.HTML("<div class='treeui-legend'>Régua pronta para copiar e colar. Ajuste o nome da "
@@ -2085,10 +2096,12 @@ class TreeSegmenterUI:
             except Exception as e:
                 self.out_importance.value = (f"<div style='color:#b3261e;font-size:12px'>Erro: "
                                              f"{type(e).__name__}: {e}</div>")
+                self.out_importance_chart.value = ""; self.out_importance_legend.value = ""
                 return
             if fi.empty:
                 self.out_importance.value = ("<i>A árvore ainda não tem splits — construa a "
                                              "segmentação primeiro.</i>")
+                self.out_importance_chart.value = ""; self.out_importance_legend.value = ""
                 return
             col = "importancia_%" if "importancia_%" in fi.columns else "importancia"
             vmax = float(fi[col].max()) or 1.0
@@ -2109,6 +2122,12 @@ class TreeSegmenterUI:
                                        "props": [("text-align", "center")]}], overwrite=False)
                    .format(fmt)
                    .map(_imp_bg, subset=[col]))
+            # gráfico de importância relativa (barras horizontais) — ao lado da tabela
+            try:
+                chart = self._fig_html(self.seg.plot_importance_bar())
+            except Exception as e:
+                chart = (f"<div style='color:#b3261e;font-size:12px'>Erro no gráfico: "
+                         f"{type(e).__name__}: {e}</div>")
             dic = (
                 "<div class='treeui-legend' style='margin-top:8px'>"
                 "<b>O que é a importância?</b> Em cada nó interno, a variável do split contribui "
@@ -2120,7 +2139,9 @@ class TreeSegmenterUI:
                 "<span style='background:rgb(232,245,233);padding:0 5px'>cor clara = baixa</span> "
                 "&rarr; <span style='background:rgb(82,210,68);padding:0 5px;font-weight:700'>"
                 "cor forte = alta</span>.</div>")
-            self.out_importance.value = self._styler_html(sty) + dic
+            self.out_importance.value = self._styler_html(sty)
+            self.out_importance_chart.value = chart
+            self.out_importance_legend.value = dic
             print("Importância das variáveis na árvore calculada.")
 
     def _on_sql(self, _):
@@ -2947,6 +2968,9 @@ class TreeSegmenterUI:
             print("Placar de saúde do modelo calculado.")
         self.out_diag.value = html
 
+    def _on_diag_hide(self, _):
+        self.out_diag.value = ""    # oculta/limpa a avaliação já renderizada
+
     def _diag_scorecard_html(self):
         """Placar de 4 vereditos (Discriminação · Estabilidade · Calibração ·
         Estrutura) + evidência estatística — reúne os testes das outras abas.
@@ -3223,21 +3247,8 @@ class TreeSegmenterUI:
             self.out_discrim.value = (f"<div style='color:#b3261e;font-size:12px'>Erro na "
                                       f"curva KS: {type(e).__name__}: {e}</div>")
 
-    def _on_badrate(self, _):
-        try:
-            self.out_quality.value = self._fig_html(self.seg.plot_leaf_badrate())
-        except Exception as e:
-            self.out_quality.value = (f"<div style='color:#b3261e;font-size:12px'>Erro na taxa "
-                                      f"de default: {type(e).__name__}: {e}</div>")
-
-    def _on_scoredist(self, _):
-        try:
-            self.out_quality.value = self._fig_html(self.seg.plot_score_distribution())
-        except Exception as e:
-            self.out_quality.value = (f"<div style='color:#b3261e;font-size:12px'>Erro na "
-                                      f"distribuição do score: {type(e).__name__}: {e}</div>")
-
-    # plots de REGRESSÃO (alvo contínuo): dispersão e distribuição do alvo
+    # plots de REGRESSÃO (alvo contínuo): dispersão e distribuição do alvo —
+    # ambos renderizam em out_discrim (toggle no card de discriminação)
     def _on_box(self, _):
         try:
             self.out_discrim.value = self._fig_html(self.seg.plot_leaf_boxplots())
@@ -3247,9 +3258,9 @@ class TreeSegmenterUI:
 
     def _on_hist(self, _):
         try:
-            self.out_quality.value = self._fig_html(self.seg.plot_target_hist(color="steelblue"))
+            self.out_discrim.value = self._fig_html(self.seg.plot_target_hist(color="steelblue"))
         except Exception as e:
-            self.out_quality.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
+            self.out_discrim.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
                                       f"histograma: {type(e).__name__}: {e}</div>")
 
     # ==================================================================
