@@ -430,6 +430,12 @@ class ModelSegmenterUI:
     def _pill(text, cls="muted"):
         return f"<span class='pill pill-{cls}'>{text}</span>"
 
+    def _opts(self, names):
+        """(alias, nome_cru) para dropdowns/listas — exibe o feature_label e mantém
+        o valor cru (o .value continua sendo o nome real da coluna, então toda a
+        lógica de incluir/excluir/analisar segue inalterada)."""
+        return [(self.seg.label(n), n) for n in names]
+
     # ------------------------------------------------------------------ build
     def _build(self):
         cands = self.seg.candidates
@@ -443,9 +449,9 @@ class ModelSegmenterUI:
         self.out_log = W.Output(layout=W.Layout(max_height="160px", overflow="auto"))
 
         # ---------- Aba 1: Variáveis ----------
-        self.dd_var = W.Dropdown(options=cands, description="Variável:",
+        self.dd_var = W.Dropdown(options=self._opts(cands), description="Variável:",
                                  style={"description_width": "initial"})
-        self.sel_included = W.SelectMultiple(options=cands, value=tuple(self.seg.included),
+        self.sel_included = W.SelectMultiple(options=self._opts(cands), value=tuple(self.seg.included),
                                              rows=max(4, len(cands)),  # mostra todas, sem rolagem
                                              description="No modelo:",
                                              style={"description_width": "initial"},
@@ -580,7 +586,7 @@ class ModelSegmenterUI:
         ], layout=W.Layout(padding="2px"))
 
         # ---------- Aba 2: Análise de variáveis ----------
-        self.dd_var2 = W.Dropdown(options=cands, description="Variável:",
+        self.dd_var2 = W.Dropdown(options=self._opts(cands), description="Variável:",
                                   style={"description_width": "initial"})
         self.dd_sample2 = W.Dropdown(options=["(referência)"] + samples, value="(referência)",
                                      description="Amostra:",
@@ -969,6 +975,8 @@ class ModelSegmenterUI:
     def _refresh_vars(self):
         try:
             rk = self.seg.variable_iv().drop(columns="n_inversoes", errors="ignore")
+            if "variavel" in rk.columns:                  # exibe o alias (feature_labels)
+                rk["variavel"] = rk["variavel"].map(self.seg.label)
             for c in rk.columns:
                 if c.startswith("psi_") or c in ("iv", "pior_psi"):
                     rk[c] = rk[c].map(lambda v: "" if pd.isna(v) else f"{v:.4f}")
@@ -1040,7 +1048,7 @@ class ModelSegmenterUI:
             return
         self.seg.include(feat)
         self._sync_sel(); self._refresh_vars(); self._refresh_bar()
-        self._log(f"[incluir] '{feat}' no modelo · {len(self.seg.included)} no total.")
+        self._log(f"[incluir] '{self.seg.label(feat)}' no modelo · {len(self.seg.included)} no total.")
 
     def _on_exclude_var(self, b):
         feat = self.dd_var.value
@@ -1048,14 +1056,14 @@ class ModelSegmenterUI:
             return
         self.seg.exclude(feat)
         self._sync_sel(); self._refresh_vars(); self._refresh_bar()
-        self._log(f"[excluir] '{feat}' fora do modelo · {len(self.seg.included)} no total.")
+        self._log(f"[excluir] '{self.seg.label(feat)}' fora do modelo · {len(self.seg.included)} no total.")
 
     def _on_sel_click(self, change):
         """Ao clicar numa variável na lista 'No modelo', aponta a prévia (gráfico de
         estabilidade no tempo) para ela — selecionando-a no dropdown 'Variável'."""
         new = set(change.get("new") or ()); old = set(change.get("old") or ())
         clicada = list(new - old) or list(old - new)
-        if clicada and clicada[-1] in self.dd_var.options:
+        if clicada and clicada[-1] in self.seg.candidates:   # valores crus (não as tuplas de options)
             self.dd_var.value = clicada[-1]      # dispara _refresh_var_preview
 
     def _on_clear_derived(self, b):
@@ -1071,7 +1079,7 @@ class ModelSegmenterUI:
         cat = None if self.dd_categoria.value == "—" else self.dd_categoria.value
         self.seg.set_category(self.dd_var.value, cat)
         self._refresh_vars()
-        self._log(f"[categoria] {self.dd_var.value} = {cat}")
+        self._log(f"[categoria] {self.seg.label(self.dd_var.value)} = {cat}")
 
     # ------------------------------------------------------------------ Aba 2 handlers
     def _on_analyze(self, b):
@@ -1148,9 +1156,9 @@ class ModelSegmenterUI:
         try:
             self.seg.set_manual_bins(feat, self.tx_cuts.value)
             if not self.seg.manual_bins(feat):
-                self._log(f"[bins] '{feat}': nada para aplicar (campo vazio).")
+                self._log(f"[bins] '{self.seg.label(feat)}': nada para aplicar (campo vazio).")
             else:
-                self._log(f"[bins] '{feat}': bins manuais aplicados.")
+                self._log(f"[bins] '{self.seg.label(feat)}': bins manuais aplicados.")
             self._render_bin_hint(feat)
             self._on_analyze(None)
             self._refresh_vars()
@@ -1163,19 +1171,20 @@ class ModelSegmenterUI:
         self.tx_cuts.value = ""
         self.tg_binmode.value = "Ótimo"
         self._render_bin_hint(feat)
-        self._log(f"[bins] '{feat}': voltou ao binning ótimo.")
+        self._log(f"[bins] '{self.seg.label(feat)}': voltou ao binning ótimo.")
         self._on_analyze(None)
         self._refresh_vars()
 
     def _refresh_candidates(self):
         """Atualiza as listas de variáveis (após criar uma variável derivada)."""
         cands = list(self.seg.candidates)
+        opts = self._opts(cands)
         for dd in (self.dd_var, self.dd_var2):
             cur = dd.value
-            dd.options = cands
+            dd.options = opts
             if cur in cands:
                 dd.value = cur
-        self.sel_included.options = cands
+        self.sel_included.options = opts
         self.sel_included.value = tuple(f for f in cands if f in self.seg.included)
 
     def _on_create_cat(self, b):
@@ -1188,7 +1197,7 @@ class ModelSegmenterUI:
             self._refresh_candidates()
             self._refresh_vars()
             self._refresh_bar()
-            self._log(f"[nova variável] '{new}' criada de '{feat}' ({ncat} categorias) — "
+            self._log(f"[nova variável] '{new}' criada de '{self.seg.label(feat)}' ({ncat} categorias) — "
                       f"já disponível na seleção e no modelo.")
         except Exception as e:
             self._log(f"[nova variável] erro: {e}")
