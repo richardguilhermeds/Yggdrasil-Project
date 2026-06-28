@@ -352,7 +352,7 @@ class ModelSegmenterUI:
 
     def _df_html(self, df, max_height=None, color_categoria=False, center=False,
                  color_forca=False, color_tendencia=False, color_estabilidade=False,
-                 color_validation=False):
+                 color_validation=False, pct_cols=None):
         sty = (df.style.hide(axis="index").set_table_styles(self._TABLE_STYLES)
                .set_properties(**{"font-size": "12px"}))
         if center:
@@ -417,6 +417,13 @@ class ModelSegmenterUI:
                     c = "#137a3e" if a <= 0.05 else "#9a6b00" if a <= 0.10 else "#b3261e"
                     return f"color:{c};font-weight:600"
                 sty = sty.map(_gap_css, subset=["gap"])
+        if pct_cols:
+            # exibe taxas em % (camada de exibição — o dado segue numérico, então
+            # a coloração por valor, ex.: gap, continua funcionando)
+            present = [c for c in pct_cols if c in df.columns]
+            if present:
+                sty = sty.format(lambda v: "" if pd.isna(v) else f"{v * 100:.1f}%",
+                                 subset=present)
         html = sty.to_html()
         if max_height:
             html = f"<div style='max-height:{max_height};overflow:auto'>{html}</div>"
@@ -1637,8 +1644,9 @@ class ModelSegmenterUI:
                                    n_ratings=int(self.sl_nratings.value),
                                    monotonic_fusion=self.cb_fusion.value, **kw)
             self._log(f"[ratings] {len(self.seg.rating_labels_)} faixas ({method}).")
-            self.out_rating_table.value = self._df_html(
-                self.seg.rating_table().round(4), center=True)
+            rt = self.seg.rating_table().round(4)
+            rate_cols = [c for c in rt.columns if c.startswith(("event_rate", "alvo"))]
+            self.out_rating_table.value = self._df_html(rt, center=True, pct_cols=rate_cols)
             self.out_rating_badrate.value = self._fig_html(self.seg.plot_rating_badrate())
             self.out_rating_dist.value = self._fig_html(self.seg.plot_rating_distribution())
             # mesma figsize + tight=False ⇒ os dois gráficos de inversão (amostras ×
@@ -1661,9 +1669,10 @@ class ModelSegmenterUI:
     def _on_backtest(self, b):
         tcol = self.tx_time3.value.strip() or None
         try:
-            self.out_backtest.value = self._df_html(self.seg.backtest(tcol).round(4),
-                                                    max_height="320px", center=True,
-                                                    color_validation=True)
+            self.out_backtest.value = self._df_html(
+                self.seg.backtest(tcol).round(4), max_height="320px", center=True,
+                color_validation=True,
+                pct_cols=["previsto_medio", "realizado_medio", "gap"])
         except Exception as e:
             self.out_backtest.value = f"<i>{e}</i>"
         try:

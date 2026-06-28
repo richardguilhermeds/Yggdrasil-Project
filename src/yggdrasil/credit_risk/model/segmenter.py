@@ -1980,6 +1980,7 @@ class ModelSegmenter:
         ax.plot(fpr, tpr, color="#15324a", lw=2.2, label=f"AUC={auc:.3f} · Gini={2*auc-1:.3f}")
         ax.plot([0, 1], [0, 1], color="#bbb", ls="--", lw=1)
         ax.set_xlabel("FPR"); ax.set_ylabel("TPR")
+        _pct_axis(ax, "both")
         ax.set_title(f"Curva ROC · {sample or self.ref_sample}", fontsize=11,
                      fontweight="bold", color="#15324a")
         ax.legend(fontsize=9, loc="lower right"); ax.grid(alpha=0.15)
@@ -2075,6 +2076,7 @@ class ModelSegmenter:
         ax.scatter(sc, res, s=10, alpha=0.35, color="#3b6ea5", edgecolors="none")
         ax.axhline(0, color="#d6453e", lw=1)
         ax.set_xlabel("previsto"); ax.set_ylabel("resíduo (obs − prev)")
+        _pct_axis(ax, "both")
         ax.set_title(f"Resíduos · {sample or self.ref_sample}", fontsize=11,
                      fontweight="bold", color="#15324a")
         ax.grid(alpha=0.15)
