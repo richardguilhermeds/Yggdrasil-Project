@@ -238,6 +238,12 @@ class ModelSegmenterUI:
     _CAT_COLORS = {"manter": ("#157a52", "#e7f5ee"), "revisar": ("#9a6f12", "#fbf3e0"),
                    "descartar": ("#b23a2a", "#fbe7e4")}
 
+    # cores da força do IV (forte→verde, médio→azul, fraco→amarelo, inútil→vermelho,
+    # suspeito→roxo = IV alto demais, possível vazamento)
+    _FORCA_COLORS = {"forte": ("#157a52", "#e7f5ee"), "médio": ("#1f5fa8", "#e7eef8"),
+                     "fraco": ("#9a6f12", "#fbf3e0"), "inútil": ("#b23a2a", "#fbe7e4"),
+                     "suspeito": ("#6b46c1", "#efe9fb")}
+
     # CSS por nível de qualidade de uma métrica (identificador visual da tabela)
     _LEVEL_CSS = {
         "bom":     "background-color:#e7f5ee;color:#157a52;font-weight:600",
@@ -324,7 +330,8 @@ class ModelSegmenterUI:
             return "bom" if m <= a else "atencao" if m <= b else "ruim"
         return None
 
-    def _df_html(self, df, max_height=None, color_categoria=False, center=False):
+    def _df_html(self, df, max_height=None, color_categoria=False, center=False,
+                 color_forca=False):
         sty = (df.style.hide(axis="index").set_table_styles(self._TABLE_STYLES)
                .set_properties(**{"font-size": "12px"}))
         if center:
@@ -340,6 +347,11 @@ class ModelSegmenterUI:
                 fg, bg = self._CAT_COLORS.get(v, ("", ""))
                 return (f"color:{fg};background-color:{bg};font-weight:600" if fg else "")
             sty = sty.map(_cat_css, subset=["categoria"])
+        if color_forca and "forca" in df.columns:
+            def _forca_css(v):
+                fg, bg = self._FORCA_COLORS.get(v, ("", ""))
+                return (f"color:{fg};background-color:{bg};font-weight:600" if fg else "")
+            sty = sty.map(_forca_css, subset=["forca"])
         html = sty.to_html()
         if max_height:
             html = f"<div style='max-height:{max_height};overflow:auto'>{html}</div>"
@@ -383,8 +395,9 @@ class ModelSegmenterUI:
         self.dd_categoria.tooltip = ("Rótulo de triagem da variável (só anotação — não treina "
                                      "nem remove sozinho; quem entra no modelo é a lista 'No modelo')")
         self.out_cat_hint = W.HTML(
+            "<details class='mseg-guide'>"
+            "<summary>O que é “categoria”?</summary>"
             "<div class='mseg-help'>"
-            "<div class='ttl'>O que é “categoria”?</div>"
             "É um <b>rótulo de triagem</b> que você dá a cada variável para registrar a sua "
             "decisão durante a análise. Ele aparece na coluna <code>categoria</code> do ranking e "
             "é só documentação: <b>não treina nem remove a variável sozinho</b> — quem define o que "
@@ -416,7 +429,7 @@ class ModelSegmenterUI:
             "(0,10–PSI máx.) &nbsp;<b>ou</b>&nbsp; não-monotônica/inversões</span></div>"
             "<div class='rr'><span class='mseg-cat mseg-cat-keep'>manter</span>"
             "<span class='rx'>o restante (IV médio/forte, estável e monotônica)</span></div>"
-            "</div></div>")
+            "</div></div></details>")
         self.sl_min_iv = W.BoundedFloatText(value=0.02, min=0.0, max=1.0, step=0.01,
                                             description="IV mín.:",
                                             style={"description_width": "initial"},
@@ -459,6 +472,10 @@ class ModelSegmenterUI:
                                            self._refresh_vars(), self._refresh_bar()))
         self.btn_refresh_vars.on_click(lambda b: self._refresh_vars())
         self.btn_clear_derived.on_click(self._on_clear_derived)
+        # botões largos (~19%) → só uma pequena folga entre eles na linha
+        for _b in (self.btn_apply_sel, self.btn_incl_all, self.btn_clear,
+                   self.btn_refresh_vars, self.btn_clear_derived):
+            _b.layout = W.Layout(width="19%")
         self.dd_var.observe(lambda c: self._refresh_var_preview(), names="value")
         # clicar numa variável na lista "No modelo" também atualiza a prévia/análise
         self.sel_included.observe(self._on_sel_click, names="value")
@@ -790,10 +807,15 @@ class ModelSegmenterUI:
                     rk[c] = rk[c].map(lambda v: "" if pd.isna(v) else f"{v:.4f}")
             rk["incluida"] = rk["incluida"].map(lambda b: "✓" if b else "")
             rk["categoria"] = rk["categoria"].fillna("—")
+            if "tendencia" in rk.columns:
+                setas = {"crescente": "↑ crescente", "decrescente": "↓ decrescente",
+                         "não-monotônica": "⇅ não-monotônica"}
+                rk["tendencia"] = rk["tendencia"].map(lambda t: setas.get(t, t))
             if "bins_manuais" in rk.columns:
                 rk["bins_manuais"] = rk["bins_manuais"].map(lambda b: "✎" if b else "")
                 rk = rk.rename(columns={"bins_manuais": "manual"})
-            self.out_vars.value = self._df_html(rk, max_height="320px", color_categoria=True)
+            self.out_vars.value = self._df_html(rk, max_height="320px",
+                                                color_categoria=True, color_forca=True)
         except Exception as e:
             self.out_vars.value = f"<i>falha ao calcular IV: {e}</i>"
         self._refresh_var_preview()
