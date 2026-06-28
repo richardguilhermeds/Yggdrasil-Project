@@ -1129,6 +1129,9 @@ class ModelSegmenter:
         linha do risco por faixa — **% de maus** (event_rate) na classificação ou
         **alvo médio** na regressão. Faltantes destacados."""
         vt = self.variable_table(feature, sample, max_n_bins, min_bin_size)
+        # com muitas faixas (>8) o gráfico fica apertado — aumenta a altura
+        if ax is None and len(vt) > 8:
+            figsize = (figsize[0], figsize[1] + 0.30 * (len(vt) - 8))
         fig, ax = _new_ax(figsize, dpi, ax)
         if vt.empty:
             ax.text(0.5, 0.5, "sem faixas", ha="center", va="center",
