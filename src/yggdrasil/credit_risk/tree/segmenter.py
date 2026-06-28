@@ -319,6 +319,9 @@ class TreeSegmenter:
         # rótulos de risco por tipo de alvo (PD na classificação · LGD na regressão)
         self._risk_word = "PD" if self._is_clf else "LGD"
         self._risk_mean = "PD média" if self._is_clf else "LGD médio"
+        # cache do binning ótimo por folha (o solver do optbinning é o gargalo) —
+        # ver _resolve_bins_cached; chaveado por id() da máscara da folha
+        self._bins_cache: dict = {}
         # classe de optbinning e nome do kwarg de diferença mínima por tipo de alvo
         self._OptBin = OptimalBinning if self._is_clf else ContinuousOptimalBinning
         self._diff_kwarg = "min_event_rate_diff" if self._is_clf else "min_mean_diff"
@@ -433,6 +436,43 @@ class TreeSegmenter:
         if b["kind"] == "num":
             return {"feature": feature, "kind": "num", "lo": b["lo"], "hi": b["hi"]}
         return {"feature": feature, "kind": "cat", "cats": list(b["cats"])}
+
+    @staticmethod
+    def _splits_key(sp):
+        """Chave hashável dos splits (cortes numéricos ou grupos categóricos)."""
+        if sp is None:
+            return None
+        if sp and isinstance(sp[0], (list, tuple)):
+            return tuple(tuple(g) for g in sp)
+        return tuple(sp)
+
+    def _resolve_bins_cached(self, sid, feature, splits, dtype, max_n_bins, min_bin_size,
+                             max_bin_size=None, relax_max=False, min_mean_diff=0.0,
+                             criterion="optbin"):
+        """Memoiza :meth:`_resolve_bins` para o SUBFRAME COMPLETO da folha ``sid``
+        (o solver CP-SAT do optbinning é o gargalo das trocas de variável/sugestões).
+
+        A chave inclui o ``id`` do objeto-máscara da folha — que é trocado sempre
+        que a folha é refeita (grow/merge/prune/collapse/auto_merge/load/fit_auto),
+        então o cache se invalida sozinho, POR FOLHA, sem precisar versionar a
+        árvore nem caçar todos os pontos de mutação. O ``mask`` é guardado no valor
+        para o seu ``id`` não ser reciclado pelo GC. Use só com o subframe completo
+        da folha (o fit do optbin já restringe à DES internamente)."""
+        nsid = sid if (sid in self.segments) else "root"
+        mask = self.segments[nsid]["mask"]
+        key = (id(mask), feature, self._splits_key(splits), dtype, max_n_bins,
+               min_bin_size, max_bin_size, relax_max, round(float(min_mean_diff), 9),
+               criterion)
+        hit = self._bins_cache.get(key)
+        if hit is not None:
+            return hit[0], hit[1], hit[2]
+        res = self._resolve_bins(self.df[mask], feature, splits, dtype, max_n_bins,
+                                 min_bin_size, max_bin_size, relax_max, min_mean_diff,
+                                 criterion)
+        if len(self._bins_cache) > 6000:        # backstop de memória
+            self._bins_cache.clear()
+        self._bins_cache[key] = (res[0], res[1], res[2], mask)
+        return res[0], res[1], res[2]
 
     def _resolve_bins(self, sub, feature, splits, dtype, max_n_bins, min_bin_size,
                       max_bin_size=None, relax_max=False, min_mean_diff=0.0,
@@ -2477,9 +2517,9 @@ class TreeSegmenter:
         else:
             sub = self.df[self.segments[sid]["mask"]]
         # `splits` (mesmos do preview/grow) garante que o gráfico bata com a tabela
-        bins, modo, kind = self._resolve_bins(sub, feature, splits, dtype,
-                                              max_n_bins, min_bin_size, max_bin_size,
-                                              min_mean_diff=min_mean_diff)
+        bins, modo, kind = self._resolve_bins_cached(sid, feature, splits, dtype,
+                                                     max_n_bins, min_bin_size, max_bin_size,
+                                                     min_mean_diff=min_mean_diff)
         if not bins:
             raise ValueError(f"Sem faixas válidas para '{feature}' nesta folha.")
         tbl = self._bin_table(sub, feature, bins, len(self.df))
@@ -2569,9 +2609,9 @@ class TreeSegmenter:
         # cortes (linhas verticais) a partir dos bins resolvidos
         cortes, modo = [], "—"
         try:
-            bins, modo, _ = self._resolve_bins(sub, feature, splits, dtype,
-                                               max_n_bins, min_bin_size, max_bin_size,
-                                               min_mean_diff=min_mean_diff)
+            bins, modo, _ = self._resolve_bins_cached(sid, feature, splits, dtype,
+                                                      max_n_bins, min_bin_size, max_bin_size,
+                                                      min_mean_diff=min_mean_diff)
             cortes = sorted({e for b in bins if b["kind"] == "num"
                              for e in (b["lo"], b["hi"]) if np.isfinite(e)})
         except Exception:
@@ -2763,8 +2803,8 @@ class TreeSegmenter:
         ref = leaf[leaf[self.sample_col] == self.ref_sample]
         if len(ref) == 0:
             raise ValueError("Sem dados da referência (DES) nesta folha.")
-        bins, _modo, _kind = self._resolve_bins(leaf, feature, None, None,
-                                                max_n_bins, min_bin_size)
+        bins, _modo, _kind = self._resolve_bins_cached(sid, feature, None, None,
+                                                       max_n_bins, min_bin_size)
         if not bins:
             return pd.DataFrame(columns=["safra", "n", "psi", "classificacao"])
         n_ref = len(ref)
@@ -3337,8 +3377,8 @@ class TreeSegmenter:
             psi_vals = {a: np.nan for a in nonref}
             if ok_base:
                 try:
-                    bins, _modo, kind = self._resolve_bins(
-                        leaf, feat, None, None, max_n_bins, min_bin_size)
+                    bins, _modo, kind = self._resolve_bins_cached(
+                        sid, feat, None, None, max_n_bins, min_bin_size)
                     nb = len(bins)
                     if bins:
                         # IV por faixa: classificação = WoE binário (Siddiqi)
@@ -3413,8 +3453,8 @@ class TreeSegmenter:
         cortes ao dividir a folha por aquela variável."""
         sid = sid if (sid in self.segments) else "root"
         sub = self.df[self._leaf_mask(sid)]
-        bins, _modo, kind = self._resolve_bins(
-            sub, feature, None, None, max_n_bins, min_bin_size, relax_max=True)
+        bins, _modo, kind = self._resolve_bins_cached(
+            sid, feature, None, None, max_n_bins, min_bin_size, relax_max=True)
         cuts, groups = [], []
         for b in bins:
             if b["kind"] == "num" and np.isfinite(b.get("hi", np.inf)):
