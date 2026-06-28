@@ -372,7 +372,7 @@ class ModelSegmenterUI:
                                              rows=max(4, len(cands)),  # mostra todas, sem rolagem
                                              description="No modelo:",
                                              style={"description_width": "initial"},
-                                             layout=W.Layout(width="50%"))
+                                             layout=W.Layout(width="99%"))
         self.dd_categoria = W.Dropdown(
             options=[("— sem categoria", "—"),
                      ("✓ manter — entra no modelo", "manter"),
@@ -467,11 +467,10 @@ class ModelSegmenterUI:
             W.HTML("<div class='mseg-h'>Seleção & categorização de variáveis</div>"),
             W.HBox([self.sl_min_iv, self.sl_max_psi, self.cb_require_mono,
                     self.btn_auto, self.btn_auto_cat]),
-            W.HBox([self.sel_included, W.VBox([self.btn_apply_sel, self.btn_incl_all,
-                                               self.btn_clear, self.btn_refresh_vars,
-                                               self.btn_clear_derived],
-                                              layout=W.Layout(width="26%"))],
-                   layout=W.Layout(align_items="flex-start", overflow="hidden")),
+            W.VBox([self.sel_included,
+                    W.HBox([self.btn_apply_sel, self.btn_incl_all, self.btn_clear,
+                            self.btn_refresh_vars, self.btn_clear_derived],
+                           layout=W.Layout(justify_content="space-between", width="99%"))]),
             W.HBox([self.dd_var, self.dd_categoria, self.btn_set_cat]),
             self.out_cat_hint,
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Ranking (IV / força / inversão / PSI)</div>"),
