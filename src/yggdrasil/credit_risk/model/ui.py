@@ -595,9 +595,6 @@ class ModelSegmenterUI:
         self.box_lr = W.HBox([self.tx_lr])
         self.btn_fit = W.Button(description="Treinar modelo", button_style="primary",
                                 icon="cogs")
-        self.btn_formula = W.Button(description="Ver fórmula", icon="superscript",
-                                    tooltip="Mostra a equação ajustada (intercepto + coeficientes) "
-                                            "da Regressão Logística/Linear")
         self.btn_shap = W.Button(description="Calcular SHAP", icon="bar-chart")
         self.cb_woe = W.Checkbox(value=False, indent=False,
                                  description="Transformar variáveis (WoE por bins)")
@@ -617,7 +614,6 @@ class ModelSegmenterUI:
         self.out_shap = W.HTML()
         self.out_shap_bar = W.HTML()
         self.btn_fit.on_click(self._on_fit)
-        self.btn_formula.on_click(self._on_formula)
         self.btn_shap.on_click(self._on_shap)
         self.dd_algo.observe(lambda c: self._sync_algo_visibility(), names="value")
         self.cb_max_depth.observe(lambda c: self._sync_algo_visibility(), names="value")
@@ -628,7 +624,7 @@ class ModelSegmenterUI:
             self.box_logit, self.box_ensemble, self.box_lr,
             self.out_algo_help,
             self.out_woe_help,
-            W.HBox([self.btn_fit, self.btn_formula, self.btn_shap]),
+            W.HBox([self.btn_fit, self.btn_shap]),
         ])
         train_card.add_class("mseg-card")
         self.formula_card = W.VBox([
@@ -1025,7 +1021,6 @@ class ModelSegmenterUI:
         self.sl_max_depth.layout.display = "" if self.cb_max_depth.value else "none"
         # a fórmula só faz sentido para modelos lineares/logísticos
         linear = algo in ("logistica", "linear")
-        self.btn_formula.layout.display = "" if linear else "none"
         self.formula_card.layout.display = "" if linear else "none"
         self.out_algo_help.value = self._algo_help_html(algo)
 
@@ -1178,12 +1173,6 @@ class ModelSegmenterUI:
             f"<div class='mseg-formula'>{z_html}</div>"
             f"{legend}"
             f"<div style='max-height:320px;overflow:auto'>{table}</div>")
-
-    def _on_formula(self, b):
-        if self.seg.model is None:
-            self._log("[fórmula] treine o modelo primeiro.")
-            return
-        self._render_formula()
 
     def _collect_hyperparams(self, algo):
         if algo == "logistica":
