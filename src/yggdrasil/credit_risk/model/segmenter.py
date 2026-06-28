@@ -464,6 +464,12 @@ class ModelSegmenter:
             raise ValueError(f"Alvo '{target}' não está no DataFrame.")
 
         self.df = df.copy()
+        # caches de performance (memoização): binning ótimo por variável (caro —
+        # solver CP-SAT do optbinning) e máscara de linhas por amostra. O cache de
+        # bins é invalidado em set/clear_manual_bins e clear_derived; a máscara é
+        # invariante (linhas e sample_col não mudam após a construção).
+        self._bins_cache: dict = {}
+        self._mask_cache: dict = {}
         self.target = target
         self.task_type = task_type
         self.sample_col = sample_col
@@ -541,12 +547,21 @@ class ModelSegmenter:
         return nr[0] if nr else self.ref_sample
 
     def _frame(self, sample=None) -> pd.DataFrame:
-        """Recorte do df por amostra (default DES quando há sample_col)."""
+        """Recorte do df por amostra (default DES quando há sample_col).
+
+        Memoiza a máscara booleana por amostra (a comparação numa coluna de objeto
+        é cara e se repete centenas de vezes); devolve sempre uma cópia fresca
+        ``df[mask]`` — segura contra mutação. Linhas e ``sample_col`` não mudam
+        após a construção, então a máscara nunca precisa ser invalidada."""
         if self.sample_col is None:
             return self.df
         if sample is None:
             sample = self.ref_sample
-        return self.df[self.df[self.sample_col] == sample]
+        mask = self._mask_cache.get(sample)
+        if mask is None:
+            mask = (self.df[self.sample_col] == sample).to_numpy()
+            self._mask_cache[sample] = mask
+        return self.df[mask]
 
     def label(self, feature) -> str:
         return self.feature_labels.get(feature, feature)
@@ -568,8 +583,32 @@ class ModelSegmenter:
             return f"({_fmt(b['lo'])}, {_fmt(b['hi'])}]"
         return "{" + ", ".join(map(str, b["cats"])) + "}"
 
+    @staticmethod
+    def _splits_key(sp):
+        """Chave hashável dos splits (cortes numéricos ou grupos categóricos)."""
+        if not sp:
+            return None
+        if isinstance(sp[0], (list, tuple)):
+            return tuple(tuple(g) for g in sp)
+        return tuple(sp)
+
     def _resolve_bins(self, feature, max_n_bins=5, min_bin_size=0.05, splits=None,
                       sample=None):
+        """Memoiza :meth:`_resolve_bins_uncached` (caro: roda o solver CP-SAT do
+        optbinning). A chave cobre tudo que altera o resultado; o cache é limpo
+        em set/clear_manual_bins e clear_derived."""
+        eff_splits = splits if splits is not None else self.var_meta.get(feature, {}).get("splits")
+        sample_key = sample if sample is not None else self.ref_sample
+        ck = (feature, max_n_bins, min_bin_size, sample_key, self._splits_key(eff_splits))
+        hit = self._bins_cache.get(ck)
+        if hit is not None:
+            return hit
+        res = self._resolve_bins_uncached(feature, max_n_bins, min_bin_size, eff_splits, sample)
+        self._bins_cache[ck] = res
+        return res
+
+    def _resolve_bins_uncached(self, feature, max_n_bins=5, min_bin_size=0.05, splits=None,
+                               sample=None):
         """Resolve os bins de uma variável na amostra de ajuste (DES por padrão).
         Usa ``OptimalBinning`` (classificação) ou ``ContinuousOptimalBinning``
         (regressão). Devolve (bins, kind).
@@ -1398,6 +1437,8 @@ class ModelSegmenter:
             self.included.discard(n)
             self.var_meta.pop(n, None)
             self.feature_labels.pop(n, None)
+        if removidas:
+            self._bins_cache.clear()   # variáveis derivadas saíram → invalida o cache
         return removidas
 
     def set_category(self, feature, categoria):
@@ -1451,11 +1492,13 @@ class ModelSegmenter:
             meta["splits"] = splits
         else:
             meta.pop("splits", None)
+        self._bins_cache.clear()      # bins mudaram → invalida o cache de binning
         return self
 
     def clear_manual_bins(self, feature):
         """Remove os bins manuais da variável (volta ao binning ótimo)."""
         self.var_meta.get(feature, {}).pop("splits", None)
+        self._bins_cache.clear()      # volta ao binning ótimo → invalida o cache
         return self
 
     def manual_bins(self, feature):
