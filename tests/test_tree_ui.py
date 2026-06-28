@@ -66,7 +66,9 @@ def test_ui_constroi_e_expoe_task_type(task):
 def test_ui_banner_titulo_por_task(task):
     import re
     ui = _build(task)
-    html = ui.panel.children[0].value                    # banner é o 1º filho do panel
+    # localiza o banner entre os filhos do painel (após a topbar do tema)
+    html = next(c.value for c in ui.panel.children
+                if hasattr(c, "value") and "treeui-banner" in (c.value or ""))
     titulo = re.search(r"class='t'>([^<]+)<", html).group(1)
     esperado = "Segmentação de PD" if task == "classification" else "Segmentação de LGD"
     assert titulo == esperado
@@ -211,6 +213,26 @@ def test_ui_diag_explica_calibracao(task):
         ui._on_autofit(None)
         ui._on_diag(None)
     assert "O que é calibração" in ui.out_diag.value
+
+
+def test_ui_tema_escuro(task):
+    ui = _build(task)
+    ui.cb_dark.value = True
+    assert "dark" in ui.panel._dom_classes
+    ui.cb_dark.value = False
+    assert "dark" not in ui.panel._dom_classes
+
+
+def test_ui_relatorio_pdf(task, tmp_path):
+    ui = _build(task)
+    p = str(tmp_path / "rel.pdf")
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        ui.tx_pdf_path.value = p
+        ui._on_pdf(None)
+    import os
+    assert os.path.exists(p) and os.path.getsize(p) > 1000
+    assert "Erro" not in ui.out_pdf.value
 
 
 def test_ui_diff_de_arvores(task, tmp_path):

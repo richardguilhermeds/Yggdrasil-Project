@@ -181,6 +181,21 @@ _CSS = """
 .mseg-pos-tx { color:#157a52; } .mseg-neg-tx { color:#b23a2a; }
 .mseg .jupyter-button { border-radius:8px; font-family:inherit; }
 .mseg .jupyter-widgets { min-width:0 !important; }
+/* ===== TEMA ESCURO (classe .dark no painel raiz) ===== */
+.mseg.dark { --ink:#e7ebf2; --muted:#9aa6ba; --line:#2c3a55; --ac-soft:#243049;
+  --ac-border:#3a4a6a; --ac-deep:#d6deec; --ac:#6076a0; background:#0e1521;
+  padding:8px; border-radius:12px; }
+.mseg.dark .mseg-banner, .mseg.dark .mseg-card, .mseg.dark .mseg-bar { background:#16202f !important;
+  border-color:#27344c !important; }
+.mseg.dark .mseg-banner .t { color:#e7ebf2; }
+.mseg.dark .mseg-help { background:#1a2740 !important; border-color:#2c3a55 !important; }
+.mseg.dark .mseg-tabs .p-TabBar-tab, .mseg.dark .mseg-tabs .lm-TabBar-tab {
+  background:#16202f !important; color:#9aa6ba !important; border-color:#27344c !important; }
+.mseg.dark .mseg-tabs .p-TabBar-tab.p-mod-current,
+.mseg.dark .mseg-tabs .lm-TabBar-tab.lm-mod-current { background:#243049 !important; color:#e7ebf2 !important; }
+.mseg.dark .widget-text input, .mseg.dark .widget-dropdown select, .mseg.dark textarea {
+  background:#0e1521 !important; color:#e7ebf2 !important; border-color:#2c3a55 !important; }
+.mseg.dark .widget-label, .mseg.dark .jupyter-widgets label { color:#c4cdde !important; }
 </style>
 """
 
@@ -687,9 +702,17 @@ class ModelSegmenterUI:
 
         # ---------- Aba 4: Ratings & Score ----------
         self.dd_method = W.Dropdown(options=[("Decis", "decis"), ("Quantil + fusão", "quantil"),
-                                             ("Árvore + fusão", "arvore"), ("OptBinning", "optbin")],
+                                             ("Árvore + fusão", "arvore"), ("OptBinning", "optbin"),
+                                             ("Manual · cortes de score", "manual_score"),
+                                             ("Manual · percentis", "manual_percentil")],
                                     value="quantil", description="Metodologia:",
                                     style={"description_width": "initial"})
+        # entrada dos métodos manuais (cortes de score OU percentis), só quando aplicável
+        self.tx_manual = W.Text(value="", placeholder="cortes de score (ex.: 0.2, 0.5, 0.8)",
+                                description="cortes/percentis:",
+                                style={"description_width": "initial"},
+                                layout=W.Layout(width="42%", display="none"))
+        self.dd_method.observe(lambda c: self._sync_rating_method(), names="value")
         self.sl_nratings = W.IntSlider(value=10, min=2, max=20, description="nº ratings")
         self.cb_fusion = W.Checkbox(value=True, description="fusão monotônica (inversão)")
         self.btn_suggest_n = W.Button(description="Sugerir nº", icon="magic",
@@ -713,6 +736,7 @@ class ModelSegmenterUI:
         tab_rating = W.VBox([
             W.HBox([self.dd_method, self.sl_nratings, self.cb_fusion,
                     self.btn_suggest_n, self.btn_build_ratings]),
+            self.tx_manual,
             self.out_rating_auto,
             W.VBox([W.HTML("<div class='mseg-h'>Régua de ratings (risco por amostra)</div>"),
                     self.out_rating_table]),
@@ -741,6 +765,12 @@ class ModelSegmenterUI:
                               style={"description_width": "initial"})
         self.btn_save = W.Button(description="Salvar", button_style="success", icon="save")
         self.btn_load = W.Button(description="Carregar", icon="upload")
+        self.tx_pdf = W.Text(value="relatorio_modelo.pdf", description="PDF:",
+                             style={"description_width": "initial"})
+        self.btn_pdf = W.Button(description="Gerar relatório PDF", button_style="primary",
+                                icon="file-pdf-o")
+        self.out_pdf = W.HTML()
+        self.btn_pdf.on_click(self._on_pdf)
         self.tx_experiment = W.Text(value="", description="Experimento:",
                                     style={"description_width": "initial"})
         self.tx_model = W.Text(value="", description="Modelo (UC):",
@@ -801,8 +831,10 @@ class ModelSegmenterUI:
             W.HBox([self.btn_export]), self.out_export,
         ]); card_score.add_class("mseg-card")
         card_persist = W.VBox([
-            W.HTML("<div class='mseg-h'>③ Persistência · JSON + modelo joblib</div>"),
+            W.HTML("<div class='mseg-h'>③ Persistência · JSON + modelo joblib · relatório PDF</div>"),
             W.HBox([self.tx_save, self.btn_save, self.btn_load]),
+            W.HBox([self.tx_pdf, self.btn_pdf]),
+            self.out_pdf,
         ], layout=W.Layout(width="49%")); card_persist.add_class("mseg-card")
         card_mlflow = W.VBox([
             W.HTML("<div class='mseg-h'>④ Registrar no MLflow / Unity Catalog</div>"),
@@ -822,8 +854,21 @@ class ModelSegmenterUI:
 
         console = W.VBox([W.HTML("<div class='mseg-h'>Console</div>"), self.out_log])
         console.add_class("mseg-card")
-        self.panel = W.VBox([W.HTML(_CSS), self.banner, self.bar, self.tabs, console])
+        self.cb_dark = W.ToggleButton(value=False, description="🌙 Tema escuro",
+                                      tooltip="Alterna o tema claro/escuro da interface",
+                                      layout=W.Layout(width="150px"))
+        self.cb_dark.observe(self._on_dark, names="value")
+        topbar = W.HBox([self.cb_dark], layout=W.Layout(justify_content="flex-end"))
+        self.panel = W.VBox([W.HTML(_CSS), topbar, self.banner, self.bar, self.tabs, console])
         self.panel.add_class("mseg")
+
+    def _on_dark(self, change):
+        if change["new"]:
+            self.panel.add_class("dark")
+            self.cb_dark.description = "☀ Tema claro"
+        else:
+            self.panel.remove_class("dark")
+            self.cb_dark.description = "🌙 Tema escuro"
 
     # ------------------------------------------------------------------ refresh
     def _refresh_bar(self):
@@ -1179,6 +1224,7 @@ class ModelSegmenterUI:
 
         # tabela de coeficientes com barra de magnitude (|coef|) e leitura do efeito
         cmax = float(coef["coef"].abs().max()) or 1.0
+        has_p = "p_valor" in coef.columns          # logística → teste de hipótese (Wald)
         rows = []
         for _, r in coef.iterrows():
             c = float(r["coef"]); cls = "pos" if c >= 0 else "neg"
@@ -1193,6 +1239,12 @@ class ModelSegmenterUI:
             else:
                 read = f"{'↑' if c >= 0 else '↓'} ŷ em {abs(c):.4f} por +1 un."
                 extra = f"<td class='read mseg-{cls}-tx'>{read}</td>"
+            if has_p:                              # p-valor + estrelas (verde = significativo)
+                pv = r["p_valor"]; sg = r.get("signif", "")
+                sig_ok = sg not in ("", "n.s.", ".")
+                cor = "#137a3e" if sig_ok else "#9aa3ad"
+                pv_txt = "—" if (pv is None or (isinstance(pv, float) and np.isnan(pv))) else f"{pv:.4f}"
+                extra += f"<td class='num' style='color:{cor}'>{pv_txt} {sg}</td>"
             rows.append(
                 f"<tr><td class='term'>{r['termo']}</td>"
                 f"<td class='num mseg-{cls}-tx'>{c:+.4f}</td>"
@@ -1201,10 +1253,14 @@ class ModelSegmenterUI:
         base_extra = (f"<td class='num'>{np.exp(b0):.4f}</td>"
                       "<td class='read'>odds base (todos os termos = 0)</td>"
                       if is_clf else "<td class='read'>valor base de ŷ</td>")
+        if has_p:
+            base_extra += "<td></td>"
         base_row = (f"<tr class='base'><td class='term'>intercepto (β₀)</td>"
                     f"<td class='num'>{b0:+.4f}</td><td></td>{base_extra}</tr>")
         head_extra = "<th>odds_ratio</th><th class='read'>leitura</th>" if is_clf \
             else "<th class='read'>leitura</th>"
+        if has_p:
+            head_extra += "<th>p-valor (Wald)</th>"
         table = (
             "<table class='mseg-coef'><thead><tr>"
             "<th class='term'>termo</th><th>coef</th><th>magnitude |coef|</th>"
@@ -1220,6 +1276,10 @@ class ModelSegmenterUI:
             + ("<b>odds_ratio</b> = e<sup>coef</sup>: a cada +1 no termo, a razão de "
                "chances é multiplicada por esse fator." if is_clf
                else "<b>coef</b>: variação de ŷ a cada +1 no termo.")
+            + ("<br><b>p-valor (Wald)</b>: significância do coeficiente (H₀: coef = 0) — "
+               "<code>***</code> p&lt;0,001 · <code>**</code> p&lt;0,01 · <code>*</code> "
+               "p&lt;0,05 · <code>.</code> p&lt;0,10 · <code>n.s.</code> não significativo. "
+               "Aproximação (a logística do sklearn é regularizada)." if has_p else "")
             + "</div>")
         self.out_formula.value = (
             f"<div class='mseg-eq'>{eq}</div>"
@@ -1428,16 +1488,40 @@ class ModelSegmenterUI:
             "★ = recomendado · <code>ok</code> = passa nos critérios.</div></div>"
             + self._df_html(t, center=True, max_height="280px"))
 
+    def _sync_rating_method(self):
+        """Mostra o campo de cortes/percentis só nos métodos manuais e ajusta o
+        placeholder; nº ratings e fusão não se aplicam aos manuais."""
+        m = self.dd_method.value
+        manual = m in ("manual_score", "manual_percentil")
+        self.tx_manual.layout.display = "" if manual else "none"
+        if m == "manual_score":
+            self.tx_manual.placeholder = "cortes de score (ex.: 0.2, 0.5, 0.8)"
+        elif m == "manual_percentil":
+            self.tx_manual.placeholder = "percentis 0–100 (ex.: 20, 40, 60, 80)"
+        self.sl_nratings.disabled = manual
+        self.cb_fusion.disabled = manual
+
     def _on_build_ratings(self, b):
         if self.seg.score_ is None:
             self._log("[ratings] treine o modelo primeiro.")
             return
+        method = self.dd_method.value
+        kw = {}
+        if method in ("manual_score", "manual_percentil"):
+            try:
+                nums = [float(x) for x in self.tx_manual.value.replace(";", ",").split(",")
+                        if x.strip() != ""]
+            except ValueError:
+                self._log("[ratings] valores inválidos em cortes/percentis."); return
+            if not nums:
+                self._log("[ratings] informe os cortes (manual_score) ou percentis "
+                          "(manual_percentil)."); return
+            kw = {"cuts": nums} if method == "manual_score" else {"percentiles": nums}
         try:
-            self.seg.build_ratings(method=self.dd_method.value,
+            self.seg.build_ratings(method=method,
                                    n_ratings=int(self.sl_nratings.value),
-                                   monotonic_fusion=self.cb_fusion.value)
-            self._log(f"[ratings] {len(self.seg.rating_labels_)} faixas "
-                      f"({self.dd_method.value}).")
+                                   monotonic_fusion=self.cb_fusion.value, **kw)
+            self._log(f"[ratings] {len(self.seg.rating_labels_)} faixas ({method}).")
             self.out_rating_table.value = self._df_html(
                 self.seg.rating_table().round(4), center=True)
             self.out_rating_badrate.value = self._fig_html(self.seg.plot_rating_badrate())
@@ -1537,6 +1621,23 @@ class ModelSegmenterUI:
             self._log(f"[save] salvo em {self.tx_save.value} (+ .model.joblib).")
         except Exception as e:
             self._log(f"[save] erro: {e}")
+
+    def _on_pdf(self, b):
+        if self.seg.score_ is None:
+            self.out_pdf.value = "<i>Treine o modelo antes de gerar o relatório.</i>"; return
+        path = (self.tx_pdf.value or "").strip()
+        if not path:
+            self.out_pdf.value = "<i>Informe o caminho do .pdf.</i>"; return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        try:
+            self.seg.report_pdf(path)
+        except Exception as e:
+            self.out_pdf.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao gerar PDF: "
+                                  f"{type(e).__name__}: {e}</div>")
+            self._log(f"[pdf] erro: {e}"); return
+        self.out_pdf.value = f"<div class='mseg-legend'>✅ Relatório salvo em <code>{path}</code>.</div>"
+        self._log(f"[pdf] relatório salvo em {path}")
 
     def _on_load(self, b):
         try:

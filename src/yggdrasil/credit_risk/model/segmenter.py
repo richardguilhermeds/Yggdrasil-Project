@@ -1727,10 +1727,39 @@ class ModelSegmenter:
             out.append(f"{wrap}({nm})" if wrap else nm)
         return out
 
+    def _logit_wald_pvalues(self, est, pre, names) -> dict:
+        """p-valores de Wald (aprox.) por termo da **logística**: z = coef/EP,
+        EP da diagonal de inv(Xᵀ W X), W = p(1−p). Aproximação (a logística do
+        sklearn é regularizada); serve como indicação de significância."""
+        from scipy.stats import norm
+        fit_df = self._frame(self.ref_sample)
+        fit_df = fit_df[fit_df[self.target].notna()]
+        Xd = pre.transform(fit_df[self.model_features]) if pre is not None \
+            else fit_df[self.model_features].to_numpy(dtype="float64")
+        Xd = Xd.toarray() if hasattr(Xd, "toarray") else np.asarray(Xd, dtype="float64")
+        p = np.clip(est.predict_proba(Xd)[:, 1], 1e-6, 1 - 1e-6)
+        w = p * (1 - p)
+        Xf = np.column_stack([np.ones(len(Xd)), Xd])          # intercepto + design
+        H = Xf.T @ (Xf * w[:, None])
+        cov = np.linalg.pinv(H)
+        se = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+        beta = np.concatenate([np.ravel(est.intercept_), np.ravel(est.coef_)])
+        z = np.divide(beta, se, out=np.zeros_like(beta), where=se > 0)
+        pv = 2.0 * (1.0 - norm.cdf(np.abs(z)))
+        return {nm: float(pv[i + 1]) for i, nm in enumerate(names)}
+
+    @staticmethod
+    def _signif_stars(p) -> str:
+        if p is None or (isinstance(p, float) and np.isnan(p)):
+            return ""
+        return ("***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05
+                else "." if p < 0.10 else "n.s.")
+
     def model_coefficients(self, use_labels=True) -> pd.DataFrame:
         """Coeficientes do modelo **linear/logístico** ajustado: ``termo``, ``coef``
-        e — na classificação — ``odds_ratio`` (``exp(coef)``). O intercepto fica em
-        ``.attrs['intercept']``. Erro para modelos não-lineares (use SHAP)."""
+        e — na classificação — ``odds_ratio`` (``exp(coef)``). Na **logística**
+        inclui também ``p_valor`` (Wald aprox.) e ``signif`` (estrelas). O intercepto
+        fica em ``.attrs['intercept']``. Erro para modelos não-lineares (use SHAP)."""
         if self.model is None:
             raise RuntimeError("Ajuste o modelo antes (fit / set_model).")
         if self.algorithm not in ("logistica", "linear"):
@@ -1750,6 +1779,13 @@ class ModelSegmenter:
         out = pd.DataFrame(rows, columns=["termo", "coef"])
         if self.task_type == "classification" and not out.empty:
             out["odds_ratio"] = np.exp(out["coef"]).round(4)
+        if self.algorithm == "logistica" and not out.empty:
+            try:                                   # p-valor de Wald (aprox.) por termo
+                pvals = self._logit_wald_pvalues(est, pre, names)
+                out["p_valor"] = out["termo"].map(lambda t: round(pvals.get(t, np.nan), 4))
+                out["signif"] = out["p_valor"].map(self._signif_stars)
+            except Exception:
+                pass
         out = out.reindex(out["coef"].abs().sort_values(ascending=False).index).reset_index(drop=True)
         out.attrs["intercept"] = round(intercept, 6)
         return out
@@ -2045,10 +2081,13 @@ class ModelSegmenter:
         return wf
 
     def build_ratings(self, method="quantil", n_ratings=10, monotonic_fusion=True,
-                      alpha=0.05, label_style=None):
+                      alpha=0.05, label_style=None, cuts=None, percentiles=None):
         """Segmenta o score em ratings ordenados. ``method`` ∈ {decis, quantil,
-        arvore, optbin}; ``n_ratings`` é o número-alvo de faixas (a fusão monotônica
-        pode reduzi-lo). Reaproveita :mod:`yggdrasil.ratings`."""
+        arvore, optbin, manual_score, manual_percentil}; ``n_ratings`` é o
+        número-alvo de faixas (a fusão monotônica pode reduzi-lo). Para os métodos
+        manuais: ``manual_score`` usa ``cuts`` (lista de cortes de score) e
+        ``manual_percentil`` usa ``percentiles`` (lista 0–100). Reaproveita
+        :mod:`yggdrasil.ratings`."""
         if self.score_ is None:
             raise RuntimeError("Gere o score antes (fit / set_model).")
         if method not in RATING_REGISTRY:
@@ -2066,10 +2105,18 @@ class ModelSegmenter:
             strat = RATING_REGISTRY[method](step=1.0 / max(n, 1), alpha=alpha)
         elif method == "arvore":
             strat = RATING_REGISTRY[method](max_leaf_nodes=n, alpha=alpha)
+        elif method == "manual_score":
+            if not cuts:
+                raise ValueError("manual_score requer 'cuts' (lista de cortes de score).")
+            strat = RATING_REGISTRY[method](cuts=cuts)
+        elif method == "manual_percentil":
+            if not percentiles:
+                raise ValueError("manual_percentil requer 'percentiles' (lista 0–100).")
+            strat = RATING_REGISTRY[method](percentiles=percentiles)
         else:  # optbin
             strat = RATING_REGISTRY[method](max_n_bins=n)
-        # respeita as flags quando a estratégia as expõe
-        if method != "decis":
+        # respeita as flags quando a estratégia as expõe (manuais não fundem)
+        if method not in ("decis", "manual_score", "manual_percentil"):
             strat.monotonic_fusion = bool(monotonic_fusion)
         if label_style:
             strat.label_style = label_style
@@ -2732,6 +2779,70 @@ class ModelSegmenter:
                 seg.rating_col_ = seg.rating_strategy.column
                 seg.rating_labels_ = list(seg.rating_strategy.labels_)
         return seg
+
+    # ------------------------------------------------------------------
+    # REPORT_PDF: relatório do modelo em PDF (capa + métricas + fórmula/SHAP +
+    #   ratings). Usa matplotlib (sem dependência extra).
+    # ------------------------------------------------------------------
+    def report_pdf(self, path: str) -> str:
+        """Gera um relatório PDF do modelo em ``path`` e o devolve. Páginas: capa
+        (algoritmo, variáveis), métricas por amostra, fórmula (logística/linear)
+        ou importância SHAP (não-lineares), e a régua de ratings (se houver)."""
+        from matplotlib.backends.backend_pdf import PdfPages
+        import matplotlib.pyplot as plt
+
+        feats = list(self.model_features or self.selected_features() or self.candidates)
+
+        def _trunc(v, n=46):
+            s = str(v)
+            return s if len(s) <= n else s[:n - 1] + "…"
+
+        def _table_fig(df, titulo, fs=8):
+            df = df.copy()
+            for c in df.columns:
+                if df[c].dtype.kind in "fc":
+                    df[c] = df[c].round(4)
+            cell = [[_trunc(v) for v in row] for row in df.astype(object).values]
+            fig = plt.figure(figsize=(11, max(2.0, 0.42 * (len(df) + 2))))
+            ax = fig.add_subplot(111); ax.axis("off")
+            ax.set_title(titulo, fontsize=13, fontweight="bold", color="#15324a", loc="left")
+            if cell:
+                t = ax.table(cellText=cell, colLabels=list(df.columns),
+                             loc="center", cellLoc="center")
+                t.auto_set_font_size(False); t.set_fontsize(fs); t.scale(1, 1.3)
+            fig.tight_layout()
+            return fig
+
+        with PdfPages(path) as pdf:
+            fig = plt.figure(figsize=(11, 8.5)); fig.patch.set_facecolor("white")
+            fig.text(0.06, 0.9, f"Relatório — ModelSegmenter ({self.task_type})", fontsize=20,
+                     fontweight="bold", color="#15324a")
+            info = (f"algoritmo: {self.algorithm}     ·     alvo: {self.target}\n"
+                    f"amostra de referência: {self.ref_sample}\n"
+                    f"variáveis no modelo ({len(feats)}):\n{', '.join(feats) or '—'}")
+            fig.text(0.06, 0.8, info, fontsize=12, color="#33424f", va="top")
+            pdf.savefig(fig); plt.close(fig)
+            try:
+                f = _table_fig(self.metrics(), "Métricas por amostra"); pdf.savefig(f); plt.close(f)
+            except Exception:
+                plt.close("all")
+            if self.algorithm in ("logistica", "linear"):
+                try:
+                    co = self.model_coefficients()
+                    f = _table_fig(co, "Fórmula — coeficientes"); pdf.savefig(f); plt.close(f)
+                except Exception:
+                    plt.close("all")
+            else:
+                try:
+                    f = self.plot_shap_bar(sample_size=800); pdf.savefig(f); plt.close(f)
+                except Exception:
+                    plt.close("all")
+            if self.rating_strategy is not None:
+                try:
+                    f = _table_fig(self.rating_table(), "Régua de ratings"); pdf.savefig(f); plt.close(f)
+                except Exception:
+                    plt.close("all")
+        return path
 
     # ------------------------------------------------------------------
     # MLflow

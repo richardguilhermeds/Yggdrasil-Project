@@ -131,6 +131,24 @@ _CSS = """
    horizontal que aparecia embaixo dos cards na aba Construir */
 .treeui .jupyter-widgets { min-width:0 !important; }
 .treeui-card { overflow-x:clip; }
+/* ===== TEMA ESCURO (classe .dark no painel raiz) ===== */
+.treeui.dark { --ink:#e7ebf2; --muted:#9aa6ba; --line:#2c3a55; --ac-soft:#243049;
+  --ac-border:#3a4a6a; --ac-deep:#d6deec; --ac:#6076a0; background:#0e1521;
+  padding:8px; border-radius:12px; }
+.treeui.dark .treeui-banner, .treeui.dark .treeui-card, .treeui.dark .treeui-bar,
+.treeui.dark .treeui-chips .chip { background:#16202f !important; border-color:#27344c !important; }
+.treeui.dark .treeui-banner .t, .treeui.dark .treeui-band { color:#e7ebf2; }
+.treeui.dark .treeui-band { background:#1c283a; }
+.treeui.dark .treeui-tabs .p-TabBar-tab,
+.treeui.dark .treeui-tabs .lm-TabBar-tab { background:#16202f !important; color:#9aa6ba !important;
+  border-color:#27344c !important; }
+.treeui.dark .treeui-tabs .p-TabBar-tab.p-mod-current,
+.treeui.dark .treeui-tabs .lm-TabBar-tab.lm-mod-current { background:#243049 !important;
+  color:#e7ebf2 !important; }
+.treeui.dark .widget-text input, .treeui.dark .widget-dropdown select,
+.treeui.dark textarea { background:#0e1521 !important; color:#e7ebf2 !important;
+  border-color:#2c3a55 !important; }
+.treeui.dark .widget-label, .treeui.dark .jupyter-widgets label { color:#c4cdde !important; }
 </style>
 """
 
@@ -517,6 +535,13 @@ class TreeSegmenterUI:
                            "Renderiza a árvore como imagem (PD média e % por folha) e salva "
                            "se um caminho for informado", "picture-o")
         self.btn_plot_hide = mk("Recolher imagem", "", "Oculta a imagem da árvore", "eye-slash")
+        # --- relatório PDF do modelo (capa + métricas + árvore + folhas + calibração) ---
+        self.tx_pdf_path = W.Text(description="arquivo", value="relatorio_arvore.pdf",
+                                  layout=full, style=dstyle,
+                                  placeholder="caminho .pdf onde salvar o relatório")
+        self.btn_pdf = mk("Gerar relatório PDF", "primary",
+                          "Salva um relatório PDF do modelo no caminho informado", "file-pdf-o")
+        self.out_pdf = W.HTML()
         # --- aplicar a régua numa tabela Spark ("reconstruir as folhas") ---
         self.tx_spark_in = W.Text(description="tabela", layout=full, style=dstyle,
                                   placeholder="tabela Spark de entrada (catalogo.schema.tabela)")
@@ -598,6 +623,7 @@ class TreeSegmenterUI:
         self.btn_automerge.on_click(self._on_automerge)
         self.btn_save_json.on_click(self._on_save_json)
         self.btn_load_json.on_click(self._on_load_json)
+        self.btn_pdf.on_click(self._on_pdf)
         self.btn_plot.on_click(self._on_plot)
         self.btn_plot_hide.on_click(self._on_plot_hide)
         self.btn_spark_apply.on_click(self._on_spark_apply)
@@ -1013,7 +1039,16 @@ class TreeSegmenterUI:
         hist_row = W.HBox([card_json, card_img],
                           layout=W.Layout(width="100%", align_items="stretch",
                                           justify_content="space-between"))
-        tab_hist = W.VBox([sep_hist, hist_row])
+        card_pdf = W.VBox([
+            W.HTML("<div class='treeui-h'>Relatório do modelo (PDF)</div>"),
+            W.HTML("<div class='treeui-legend'>Gera um PDF com capa (parâmetros), métricas por "
+                   "amostra, imagem da árvore, folhas e calibração — salvo no caminho informado.</div>"),
+            self.tx_pdf_path,
+            W.HBox([self.btn_pdf]),
+            self.out_pdf,
+        ])
+        card_pdf.add_class("treeui-card")
+        tab_hist = W.VBox([sep_hist, hist_row, card_pdf])
 
         # ================================================================
         # ABA ② ANÁLISE DE VARIÁVEL — perfil, distribuição e estabilidade
@@ -1115,8 +1150,21 @@ class TreeSegmenterUI:
         ])
         console.add_class("treeui-card")
 
-        self.panel = W.VBox([banner, bar_box, tabs, console])
+        self.cb_dark = W.ToggleButton(value=False, description="🌙 Tema escuro",
+                                      tooltip="Alterna o tema claro/escuro da interface",
+                                      layout=W.Layout(width="150px"))
+        self.cb_dark.observe(self._on_dark, names="value")
+        topbar = W.HBox([self.cb_dark], layout=W.Layout(justify_content="flex-end"))
+        self.panel = W.VBox([topbar, banner, bar_box, tabs, console])
         self.panel.add_class("treeui")
+
+    def _on_dark(self, change):
+        if change["new"]:
+            self.panel.add_class("dark")
+            self.cb_dark.description = "☀ Tema claro"
+        else:
+            self.panel.remove_class("dark")
+            self.cb_dark.description = "🌙 Tema escuro"
 
     # ==================================================================
     # Render
@@ -3362,6 +3410,25 @@ class TreeSegmenterUI:
         self.locked &= set(self.seg.segments)
         self._pending = None
         self._refresh()
+
+    def _on_pdf(self, _):
+        with self.out_log:
+            self.out_log.clear_output(wait=True)
+            path = (self.tx_pdf_path.value or "").strip()
+            if not path:
+                self.out_pdf.value = "<i>Informe o caminho do .pdf.</i>"; return
+            if not path.lower().endswith(".pdf"):
+                path += ".pdf"
+            try:
+                tcol = self.date_col if (self.date_col and self.date_col in self.df.columns) else None
+                self.seg.report_pdf(path, time_col=tcol)
+            except Exception as e:
+                self.out_pdf.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao gerar "
+                                      f"PDF: {type(e).__name__}: {e}</div>")
+                print(f"[pdf] erro: {e}"); return
+            self.out_pdf.value = (f"<div class='treeui-legend'>✅ Relatório salvo em "
+                                  f"<code>{path}</code>.</div>")
+            print(f"[pdf] relatório salvo em {path}")
 
     # ==================================================================
     # Persistência: salvar / carregar a árvore em JSON

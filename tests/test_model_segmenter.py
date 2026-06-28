@@ -927,6 +927,59 @@ def test_ui_tune_optuna(task):
     assert ui.pb_tune.bar_style == "success" and ui.btn_tune.disabled is False
 
 
+def test_ratings_manuais(task):
+    df = _synthetic(task, n=2000, seed=1)
+    seg = ModelSegmenter(df, target="target", task_type=task, sample_col="amostra",
+                         ref_sample="DES", verbose=False)
+    seg.auto_select(min_iv=0.0)
+    seg.fit(_default_algo(task))
+    sc = seg.score_
+    cuts = [float(np.quantile(sc, q)) for q in (0.3, 0.6, 0.85)]
+    seg.build_ratings(method="manual_score", cuts=cuts)
+    assert len(seg.rating_labels_) == 4                # 3 cortes → 4 faixas
+    seg.build_ratings(method="manual_percentil", percentiles=[20, 40, 60, 80])
+    assert len(seg.rating_labels_) == 5
+    with pytest.raises(ValueError, match="cuts"):
+        seg.build_ratings(method="manual_score")       # sem cortes → erro
+
+
+def test_logistica_pvalores_na_formula():
+    df = _synthetic("classification", n=2500, seed=2)
+    seg = ModelSegmenter(df, target="target", task_type="classification",
+                         sample_col="amostra", ref_sample="DES", verbose=False)
+    seg.auto_select(min_iv=0.0)
+    seg.fit("logistica")
+    co = seg.model_coefficients()
+    assert "p_valor" in co.columns and "signif" in co.columns
+    assert (co["p_valor"].fillna(0) >= 0).all()
+
+
+def test_report_pdf_model(task, tmp_path):
+    df = _synthetic(task, n=1500, seed=3)
+    seg = ModelSegmenter(df, target="target", task_type=task, sample_col="amostra",
+                         ref_sample="DES", verbose=False)
+    seg.auto_select(min_iv=0.0)
+    seg.fit(_default_algo(task))
+    seg.build_ratings(method="quantil", n_ratings=5)
+    p = str(tmp_path / "rel_model.pdf")
+    seg.report_pdf(p)
+    import os
+    assert os.path.exists(p) and os.path.getsize(p) > 1000
+
+
+def test_ui_tema_escuro(task):
+    pytest.importorskip("ipywidgets")
+    import contextlib
+    import io
+    from yggdrasil.credit_risk.model import ModelSegmenterUI
+    df = _synthetic(task, n=800)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui = ModelSegmenterUI(df, target="target", task_type=task,
+                              sample_col="amostra", ref_sample="DES")
+        ui.cb_dark.value = True
+    assert "dark" in ui.panel._dom_classes
+
+
 def test_tune_optuna_progress_callback(task):
     pytest.importorskip("optuna")
     df = _synthetic(task, n=1200, seed=4)

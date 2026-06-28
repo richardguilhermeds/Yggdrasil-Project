@@ -3859,6 +3859,76 @@ class TreeSegmenter:
         return feats
 
     # ------------------------------------------------------------------
+    # REPORT_PDF: relatório do modelo de árvore em PDF (capa + métricas +
+    #   imagem da árvore + folhas + calibração + backtest). Usa matplotlib.
+    # ------------------------------------------------------------------
+    def report_pdf(self, path: str, time_col: str | None = None) -> str:
+        """Gera um relatório PDF da árvore no caminho ``path`` e o devolve.
+
+        Páginas: capa (parâmetros), métricas por amostra, imagem da árvore,
+        tabela de folhas, calibração (se houver amostra) e backtest (se
+        ``time_col``). Não exige dependência extra (usa matplotlib)."""
+        from matplotlib.backends.backend_pdf import PdfPages
+        import matplotlib.pyplot as plt
+
+        rl = "PD" if self._is_clf else "LGD"
+        n_folhas = sum(s["is_leaf"] for s in self.segments.values())
+        prof = max(s["depth"] for s in self.segments.values())
+        feats = self.regua_features()
+
+        def _trunc(v, n=46):
+            s = str(v)
+            return s if len(s) <= n else s[:n - 1] + "…"
+
+        def _table_fig(df, titulo, fs=8):
+            df = df.copy()
+            for c in df.columns:                 # arredonda numéricos, trunca textos
+                if df[c].dtype.kind in "fc":
+                    df[c] = df[c].round(4)
+            cell = [[_trunc(v) for v in row] for row in df.astype(object).values]
+            fig = plt.figure(figsize=(11, max(2.0, 0.42 * (len(df) + 2))))
+            ax = fig.add_subplot(111); ax.axis("off")
+            ax.set_title(titulo, fontsize=13, fontweight="bold", color="#15324a", loc="left")
+            if cell:
+                t = ax.table(cellText=cell, colLabels=list(df.columns),
+                             loc="center", cellLoc="center")
+                t.auto_set_font_size(False); t.set_fontsize(fs); t.scale(1, 1.3)
+            fig.tight_layout()
+            return fig
+
+        with PdfPages(path) as pdf:
+            fig = plt.figure(figsize=(11, 8.5)); fig.patch.set_facecolor("white")
+            fig.text(0.06, 0.9, f"Relatório — Segmentação de {rl}", fontsize=22,
+                     fontweight="bold", color="#15324a")
+            info = (f"task_type: {self.task_type}     ·     alvo: {self.target}\n"
+                    f"amostra de referência: {self.ref_sample}\n"
+                    f"folhas: {n_folhas}     ·     profundidade máxima: {prof}\n\n"
+                    f"variáveis na árvore ({len(feats)}):\n{', '.join(feats) or '—'}")
+            fig.text(0.06, 0.8, info, fontsize=12, color="#33424f", va="top")
+            pdf.savefig(fig); plt.close(fig)
+            for builder in (
+                lambda: _table_fig(self.metrics(), "Métricas por amostra"),
+                lambda: self.plot_tree(figsize=(11, 7)),
+                lambda: _table_fig(self.leaves(with_psi=(self.sample_col is not None)), "Folhas"),
+            ):
+                try:
+                    f = builder(); pdf.savefig(f); plt.close(f)
+                except Exception:
+                    plt.close("all")
+            if self.sample_col is not None:
+                try:
+                    f = self.plot_calibration(); pdf.savefig(f); plt.close(f)
+                except Exception:
+                    plt.close("all")
+            if time_col:
+                try:
+                    f = _table_fig(self.backtest(time_col), "Backtest por safra")
+                    pdf.savefig(f); plt.close(f)
+                except Exception:
+                    plt.close("all")
+        return path
+
+    # ------------------------------------------------------------------
     # APPLY_SPARK: aplica a régua DIRETAMENTE num Spark DataFrame, devolvendo-o
     #   com as colunas de segmento, nota e PD ("reconstrói as folhas" na
     #   tabela). Diferente de `to_pyspark` (que só gera o código), aqui a régua

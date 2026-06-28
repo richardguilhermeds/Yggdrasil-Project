@@ -14,6 +14,7 @@ from typing import Dict, List, Sequence, Type
 
 from .base import RatingStrategy
 from .decile import DecileRating
+from .manual import ManualScoreRating, PercentileRating
 from .optbinning import OptBinningRating
 from .quantile import QuantileMonotonicRating
 from .tree import TreeRating
@@ -23,6 +24,8 @@ RATING_REGISTRY: Dict[str, Type[RatingStrategy]] = {
     "quantil": QuantileMonotonicRating,
     "arvore": TreeRating,
     "optbin": OptBinningRating,
+    "manual_score": ManualScoreRating,
+    "manual_percentil": PercentileRating,
 }
 
 DEFAULT_RATINGS: List[str] = ["decis", "quantil", "arvore", "optbin"]
@@ -47,6 +50,8 @@ __all__ = [
     "QuantileMonotonicRating",
     "TreeRating",
     "OptBinningRating",
+    "ManualScoreRating",
+    "PercentileRating",
     "RATING_REGISTRY",
     "DEFAULT_RATINGS",
     "build_ratings",
