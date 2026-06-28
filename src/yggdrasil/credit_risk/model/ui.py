@@ -70,6 +70,41 @@ _CSS = """
 .pill-yellow { background:#fbf3e0; color:#9a6f12; }
 .pill-red    { background:#fbe7e4; color:#b23a2a; }
 .mseg-legend { font-size:11px; color:var(--muted); margin:6px 0 2px; line-height:1.55; }
+/* caixa de tutorial (algoritmo/parâmetros) e legenda de categorias */
+.mseg-help { background:#f5f8fc; border:1px solid #dbe5f1; border-left:3px solid var(--ac);
+  border-radius:9px; padding:11px 14px; font-size:11.5px; color:#3a4658; line-height:1.62;
+  margin-top:8px; }
+.mseg-help .ttl { font-size:12px; font-weight:600; color:var(--ink); margin-bottom:5px; }
+.mseg-help ul { margin:5px 0 0; padding-left:6px; list-style:none; }
+.mseg-help li { margin:4px 0; }
+.mseg-help .pname { font-family:'IBM Plex Mono', ui-monospace, monospace; font-weight:600;
+  color:#0b63ce; background:#e7eef8; padding:1px 6px; border-radius:5px; }
+.mseg-help .none { color:var(--muted); font-style:italic; }
+.mseg-cat { display:inline-block; padding:2px 9px; border-radius:999px; font-size:11px;
+  font-weight:600; }
+.mseg-cat-keep { background:#e7f5ee; color:#157a52; }
+.mseg-cat-rev  { background:#fbf3e0; color:#9a6f12; }
+.mseg-cat-drop { background:#fbe7e4; color:#b23a2a; }
+.mseg-rule { margin-top:8px; padding:11px 13px; background:#fff; border:1px solid #e3e9f1;
+  border-radius:8px; font-size:11px; }
+.mseg-rule .rt { font-weight:600; color:var(--ink); margin-bottom:8px;
+  font-family:'IBM Plex Mono', ui-monospace, monospace; }
+.mseg-rule .rr { display:flex; align-items:baseline; gap:9px; margin:7px 0; line-height:1.65; }
+.mseg-rule .rr .mseg-cat { flex:0 0 72px; text-align:center; }
+.mseg-rule .rx { flex:1; color:#3a4658; }
+.mseg-rule i { color:#6b7480; }
+/* dicionário/guia de bolso das métricas (bloco recolhível) */
+.mseg-guide { margin-top:10px; font-size:11.5px; }
+.mseg-guide > summary { cursor:pointer; font-weight:600; color:var(--ac-deep);
+  padding:8px 12px; background:var(--ac-soft); border:1px solid var(--ac-border);
+  border-radius:8px; list-style:none; user-select:none; }
+.mseg-guide > summary::-webkit-details-marker { display:none; }
+.mseg-guide > summary::before { content:'▸ '; }
+.mseg-guide[open] > summary::before { content:'▾ '; }
+.mseg-guide > summary:hover { background:#e3e9f1; }
+.mseg-guide .lg { margin:9px 2px 7px; color:var(--muted); line-height:1.75; }
+.mseg-guide table td { text-align:left !important; vertical-align:top; }
+.mseg-guide .mseg-cat { font-size:10px; }
 .mseg-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(96px,1fr)); gap:6px; }
 .mseg-metric { background:#f7f8fa; border:1px solid #eef0f3; border-radius:9px; padding:7px 10px; }
 .mseg-metric .k { font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:#8a93a3; }
@@ -114,14 +149,36 @@ _CSS = """
 .mseg-tabs .p-TabBar-tab.p-mod-current:hover {
   background:var(--ac-deep) !important; color:#fff !important;
   border-color:var(--ac-deep) !important; }
-/* fórmula do modelo — bloco mono com rolagem horizontal suave */
-.mseg-formula { background:#0f1620; color:#e8edf4; border-radius:10px; padding:12px 14px;
+/* fórmula do modelo — preditor linear z como termos que quebram linha */
+.mseg-formula { background:#0f1620; color:#e8edf4; border-radius:10px; padding:13px 15px;
   font-family:'IBM Plex Mono', ui-monospace, Menlo, Consolas, monospace; font-size:12.5px;
-  line-height:1.6; overflow-x:auto; white-space:pre; }
-.mseg-formula .b0 { color:#7fd1b9; } .mseg-formula .op { color:#9aa7b8; }
+  line-height:1.9; }
+.mseg-zlead { color:#8aa0b6; font-weight:600; margin-right:4px; }
+.mseg-term { display:inline-block; border-radius:7px; padding:2px 9px; margin:3px 5px 3px 0;
+  white-space:nowrap; }
+.mseg-b0  { background:#23303d; color:#cfdae6; }
+.mseg-pos { background:rgba(46,160,107,.18); color:#86e3b4; }
+.mseg-neg { background:rgba(214,69,69,.18); color:#f2a3a3; }
+.mseg-op  { opacity:.65; margin-right:3px; } .mseg-mul { opacity:.5; margin:0 4px; }
+.mseg-cf  { font-weight:600; } .mseg-vn { font-weight:500; }
 .mseg-eq { font-size:13px; color:var(--ink); background:var(--ac-soft);
   border:1px solid var(--ac-border); border-radius:9px; padding:8px 12px; margin-bottom:8px;
   font-family:'IBM Plex Mono', ui-monospace, monospace; }
+/* tabela de coeficientes — sinal colorido + barra de magnitude + leitura */
+.mseg-coef { border-collapse:collapse; width:100%; font-size:12px; margin-top:4px; }
+.mseg-coef th { background:#eef1f5; color:#27324a; font-weight:600; text-align:right;
+  padding:6px 10px; border-bottom:2px solid #b9c2d0; white-space:nowrap; }
+.mseg-coef td { padding:5px 10px; border-bottom:1px solid #eef0f3; text-align:right;
+  white-space:nowrap; }
+.mseg-coef th.term, .mseg-coef td.term { text-align:left; font-weight:500; }
+.mseg-coef td.read, .mseg-coef th.read { text-align:left; }
+.mseg-coef td.num { font-variant-numeric:tabular-nums; font-weight:600; }
+.mseg-coef tbody tr:hover td { background:#f5f8fb; }
+.mseg-coef tr.base td { background:#fbfcfe; color:var(--muted); font-style:italic; }
+.mseg-barcell { width:150px; }
+.mseg-barwrap { background:#eef0f3; border-radius:5px; height:9px; width:100%; overflow:hidden; }
+.mseg-bar-pos { background:#2ea06b; height:100%; } .mseg-bar-neg { background:#d64545; height:100%; }
+.mseg-pos-tx { color:#157a52; } .mseg-neg-tx { color:#b23a2a; }
 .mseg .jupyter-button { border-radius:8px; font-family:inherit; }
 .mseg .jupyter-widgets { min-width:0 !important; }
 </style>
@@ -160,12 +217,17 @@ class ModelSegmenterUI:
         self._sync_bin_controls()
 
     # ------------------------------------------------------------------ render utils
-    def _fig_html(self, fig, border=False):
+    def _fig_html(self, fig, border=False, tight=True):
         import base64
         import io as _io
         import matplotlib.pyplot as plt
         buf = _io.BytesIO()
-        fig.savefig(buf, format="png", dpi=fig.get_dpi(), bbox_inches="tight")
+        # tight=False → o PNG sai exatamente em figsize×dpi (mesma figsize ⇒ mesmo
+        # tamanho de imagem), garantindo gráficos lado a lado com a MESMA altura.
+        save_kw = {"format": "png", "dpi": fig.get_dpi()}
+        if tight:
+            save_kw["bbox_inches"] = "tight"
+        fig.savefig(buf, **save_kw)
         plt.close(fig)
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         style = "max-width:100%;height:auto"
@@ -173,12 +235,111 @@ class ModelSegmenterUI:
             style += ";border:1px solid #e6e8eb;border-radius:6px"
         return f"<img src='data:image/png;base64,{b64}' style='{style}'/>"
 
-    def _df_html(self, df, max_height=None):
+    _CAT_COLORS = {"manter": ("#157a52", "#e7f5ee"), "revisar": ("#9a6f12", "#fbf3e0"),
+                   "descartar": ("#b23a2a", "#fbe7e4")}
+
+    # CSS por nível de qualidade de uma métrica (identificador visual da tabela)
+    _LEVEL_CSS = {
+        "bom":     "background-color:#e7f5ee;color:#157a52;font-weight:600",
+        "atencao": "background-color:#fbf3e0;color:#9a6f12;font-weight:600",
+        "ruim":    "background-color:#fbe7e4;color:#b23a2a;font-weight:600"}
+
+    # Dicionário + guia de bolso das métricas. ``dir``: 'up' = maior melhor,
+    # 'down' = menor melhor, 'zero' = perto de 0 melhor, 'info' = sem julgamento.
+    # ``bands`` = (limiar_bom, limiar_atencao); abaixo/acima ⇒ 'ruim'.
+    _METRIC_GUIDE = {
+        "auc": dict(nome="AUC", dir="up", bands=(0.75, 0.65),
+                    desc="Discriminação: prob. de ordenar um evento acima de um não-evento.",
+                    rec="≥ 0,70 (bom) · ≥ 0,80 ótimo", baixa="< 0,65 fraco · 0,5 = acaso"),
+        "gini": dict(nome="Gini", dir="up", bands=(0.50, 0.30),
+                     desc="= 2·AUC − 1. Mesma ideia da AUC, escala 0–1.",
+                     rec="≥ 0,40", baixa="< 0,30"),
+        "ks": dict(nome="KS", dir="up", bands=(0.40, 0.30),
+                   desc="Máxima separação entre as CDFs de evento e não-evento.",
+                   rec="≥ 0,30 (bom) · ≥ 0,40 forte", baixa="< 0,20"),
+        "ks_cutoff": dict(nome="KS cutoff", dir="info",
+                          desc="Score onde o KS é máximo (ponto de corte). Informativo.",
+                          rec="—", baixa="—"),
+        "accuracy": dict(nome="Acurácia", dir="up", bands=(0.80, 0.70),
+                         desc="% de acertos no corte 0,5. ⚠ enganosa em base desbalanceada.",
+                         rec="comparar à taxa da classe maioria", baixa="≤ taxa da maioria"),
+        "f1": dict(nome="F1", dir="up", bands=(0.60, 0.45),
+                   desc="Média harmônica de precisão e recall (equilíbrio dos dois).",
+                   rec="≥ 0,50 (depende do corte)", baixa="< 0,45"),
+        "precision": dict(nome="Precisão", dir="up", bands=(0.60, 0.45),
+                          desc="Dos previstos evento, quantos eram evento (controla falso-positivo).",
+                          rec="≥ 0,60 (contextual)", baixa="< 0,45"),
+        "recall": dict(nome="Recall", dir="up", bands=(0.60, 0.45),
+                       desc="Dos eventos reais, quantos foram pegos (controla falso-negativo).",
+                       rec="≥ 0,60 (contextual)", baixa="< 0,45"),
+        "brier": dict(nome="Brier", dir="down", bands=(0.12, 0.20),
+                      desc="Erro quadrático médio da probabilidade (calibração). Menor melhor.",
+                      rec="≤ 0,12", baixa="> 0,20"),
+        "logloss": dict(nome="LogLoss", dir="down", bands=(0.40, 0.55),
+                        desc="Penaliza prob. confiantes e erradas. Menor melhor.",
+                        rec="≤ 0,40", baixa="> 0,55"),
+        # regressão
+        "rmse": dict(nome="RMSE", dir="info",
+                     desc="Raiz do erro quadrático médio (unidade do alvo). Depende da escala.",
+                     rec="comparar ao desvio-padrão do alvo", baixa="≥ desvio do alvo"),
+        "mae": dict(nome="MAE", dir="info",
+                    desc="Erro absoluto médio (unidade do alvo). Depende da escala.",
+                    rec="comparar ao alvo médio", baixa="—"),
+        "mape": dict(nome="MAPE", dir="down", bands=(0.10, 0.25),
+                     desc="Erro percentual absoluto médio. ⚠ explode com alvo perto de 0.",
+                     rec="≤ 0,10 (10%)", baixa="> 0,25"),
+        "smape": dict(nome="sMAPE", dir="down", bands=(0.10, 0.25),
+                      desc="MAPE simétrico (0–1). Menor melhor.",
+                      rec="≤ 0,10", baixa="> 0,25"),
+        "medae": dict(nome="MedAE", dir="info",
+                      desc="Erro absoluto mediano (robusto a outliers). Menor melhor.",
+                      rec="—", baixa="—"),
+        "r2": dict(nome="R²", dir="up", bands=(0.70, 0.40),
+                   desc="Fração da variância do alvo explicada (1 perfeito, 0 = média).",
+                   rec="≥ 0,40", baixa="< 0,40 · < 0 pior que a média"),
+        "mean_bias": dict(nome="Viés médio", dir="zero", bands=(0.02, 0.05),
+                          desc="Média (previsto − real). ~0 = sem viés sistemático.",
+                          rec="≈ 0 (|viés| ≤ 0,02)", baixa="|viés| > 0,05"),
+    }
+
+    def _metric_level(self, metric, value):
+        """Classifica o valor de uma métrica em 'bom'/'atencao'/'ruim' pela regra de
+        bolso (ou None quando informativa/desconhecida/inválida)."""
+        g = self._METRIC_GUIDE.get(metric)
+        if not g or g.get("dir") in (None, "info") or not g.get("bands"):
+            return None
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return None
+        if v != v:                                   # NaN
+            return None
+        d, (a, b) = g["dir"], g["bands"]
+        if d == "up":
+            return "bom" if v >= a else "atencao" if v >= b else "ruim"
+        if d == "down":
+            return "bom" if v <= a else "atencao" if v <= b else "ruim"
+        if d == "zero":
+            m = abs(v)
+            return "bom" if m <= a else "atencao" if m <= b else "ruim"
+        return None
+
+    def _df_html(self, df, max_height=None, color_categoria=False, center=False):
         sty = (df.style.hide(axis="index").set_table_styles(self._TABLE_STYLES)
                .set_properties(**{"font-size": "12px"}))
-        txt = [c for c in df.columns if df[c].dtype == object]
-        if txt:
-            sty = sty.set_properties(subset=txt, **{"text-align": "left"})
+        if center:
+            sty = sty.set_properties(**{"text-align": "center"})
+            sty = sty.set_table_styles([{"selector": "th", "props": [("text-align", "center")]}],
+                                       overwrite=False)
+        else:
+            txt = [c for c in df.columns if df[c].dtype == object]
+            if txt:
+                sty = sty.set_properties(subset=txt, **{"text-align": "left"})
+        if color_categoria and "categoria" in df.columns:
+            def _cat_css(v):
+                fg, bg = self._CAT_COLORS.get(v, ("", ""))
+                return (f"color:{fg};background-color:{bg};font-weight:600" if fg else "")
+            sty = sty.map(_cat_css, subset=["categoria"])
         html = sty.to_html()
         if max_height:
             html = f"<div style='max-height:{max_height};overflow:auto'>{html}</div>"
@@ -212,16 +373,67 @@ class ModelSegmenterUI:
                                              description="No modelo:",
                                              style={"description_width": "initial"},
                                              layout=W.Layout(width="98%"))
-        self.dd_categoria = W.Dropdown(options=["—", "manter", "revisar", "descartar"],
-                                       value="—", description="Categoria:",
-                                       style={"description_width": "initial"})
-        self.sl_min_iv = W.FloatSlider(value=0.02, min=0.0, max=0.5, step=0.01,
-                                       description="IV mín.", readout_format=".2f")
-        self.sl_max_psi = W.FloatSlider(value=0.25, min=0.0, max=1.0, step=0.05,
-                                        description="PSI máx.", readout_format=".2f")
+        self.dd_categoria = W.Dropdown(
+            options=[("— sem categoria", "—"),
+                     ("✓ manter — entra no modelo", "manter"),
+                     ("● revisar — decisão pendente", "revisar"),
+                     ("✕ descartar — fora do modelo", "descartar")],
+            value="—", description="Categoria:",
+            style={"description_width": "initial"})
+        self.dd_categoria.tooltip = ("Rótulo de triagem da variável (só anotação — não treina "
+                                     "nem remove sozinho; quem entra no modelo é a lista 'No modelo')")
+        self.out_cat_hint = W.HTML(
+            "<div class='mseg-help'>"
+            "<div class='ttl'>O que é “categoria”?</div>"
+            "É um <b>rótulo de triagem</b> que você dá a cada variável para registrar a sua "
+            "decisão durante a análise. Ele aparece na coluna <code>categoria</code> do ranking e "
+            "é só documentação: <b>não treina nem remove a variável sozinho</b> — quem define o que "
+            "entra no modelo é a lista <b>“No modelo”</b> (botão <i>Aplicar seleção</i>)."
+            "<ul>"
+            "<li><span class='mseg-cat mseg-cat-keep'>✓ manter</span> &nbsp;variável boa, "
+            "deve entrar no modelo.</li>"
+            "<li><span class='mseg-cat mseg-cat-rev'>● revisar</span> &nbsp;promissora, mas "
+            "precisa de uma segunda olhada (IV baixo, inversão, PSI etc.) antes de decidir.</li>"
+            "<li><span class='mseg-cat mseg-cat-drop'>✕ descartar</span> &nbsp;não deve ser "
+            "usada (instável, sem poder, redundante…).</li>"
+            "<li><span class='mseg-cat' style='background:#eef1f5;color:#6b7480'>— sem categoria</span> "
+            "&nbsp;ainda não avaliada (limpa o rótulo).</li>"
+            "</ul>"
+            "<b>Manual:</b> escolha a variável, selecione a categoria e clique em "
+            "<i>Categorizar</i> (uma a uma).<br>"
+            "<b>Automático:</b> clique em <i>Auto-categorizar</i> para rotular "
+            "<b>todas</b> de uma vez pela regra abaixo (usa os controles "
+            "<i>IV mín.</i>, <i>PSI máx.</i> e <i>exigir monotonia</i>). Ela só rotula; a "
+            "justificativa aparece na coluna <code>motivo</code> do ranking."
+            "<div class='mseg-rule'>"
+            "<div class='rt'>Regra (Regressão Logística)</div>"
+            "<div class='rr'><span class='mseg-cat mseg-cat-drop'>descartar</span>"
+            "<span class='rx'>IV &lt; <i>IV mín.</i> &nbsp;<b>ou</b>&nbsp; "
+            "PSI &gt; <i>PSI máx.</i></span></div>"
+            "<div class='rr'><span class='mseg-cat mseg-cat-rev'>revisar</span>"
+            "<span class='rx'>IV alto demais (força “suspeito” → vazamento) &nbsp;<b>ou</b>&nbsp; "
+            "IV fraco (IV mín. ≤ IV &lt; 0,10) &nbsp;<b>ou</b>&nbsp; PSI em atenção "
+            "(0,10–PSI máx.) &nbsp;<b>ou</b>&nbsp; não-monotônica/inversões</span></div>"
+            "<div class='rr'><span class='mseg-cat mseg-cat-keep'>manter</span>"
+            "<span class='rx'>o restante (IV médio/forte, estável e monotônica)</span></div>"
+            "</div></div>")
+        self.sl_min_iv = W.BoundedFloatText(value=0.02, min=0.0, max=1.0, step=0.01,
+                                            description="IV mín.:",
+                                            style={"description_width": "initial"},
+                                            layout=W.Layout(width="150px"))
+        self.sl_max_psi = W.BoundedFloatText(value=0.25, min=0.0, max=1.0, step=0.05,
+                                             description="PSI máx.:",
+                                             style={"description_width": "initial"},
+                                             layout=W.Layout(width="155px"))
         self.cb_require_mono = W.Checkbox(value=False, description="exigir monotonia")
         self.btn_auto = W.Button(description="Auto-selecionar", button_style="primary",
-                                 icon="magic")
+                                 icon="magic",
+                                 tooltip="Inclui/exclui variáveis no modelo pelos critérios "
+                                         "(IV mín., PSI máx., monotonia) e marca manter/descartar.")
+        self.btn_auto_cat = W.Button(description="Auto-categorizar", icon="tags",
+                                     tooltip="Classifica TODAS as variáveis em manter / revisar / "
+                                             "descartar pela regra (IV · PSI · monotonia). "
+                                             "Só rotula — não altera a seleção do modelo.")
         self.btn_apply_sel = W.Button(description="Aplicar seleção", button_style="success",
                                       icon="check")
         self.btn_set_cat = W.Button(description="Categorizar", icon="tag")
@@ -229,9 +441,11 @@ class ModelSegmenterUI:
         self.btn_clear = W.Button(description="Limpar", icon="trash")
         self.btn_refresh_vars = W.Button(description="Recalcular", icon="refresh")
         self.out_vars = W.HTML()
+        self.out_var_preview_h = W.HTML("<div class='mseg-h'>Estabilidade da variável no tempo</div>")
         self.out_var_preview = W.HTML()
 
         self.btn_auto.on_click(self._on_auto_select)
+        self.btn_auto_cat.on_click(self._on_auto_categorize)
         self.btn_apply_sel.on_click(self._on_apply_sel)
         self.btn_set_cat.on_click(self._on_set_cat)
         self.btn_incl_all.on_click(lambda b: (self.seg.include_all(), self._sync_sel(),
@@ -243,14 +457,16 @@ class ModelSegmenterUI:
 
         tab_vars = W.VBox([
             W.HTML("<div class='mseg-h'>Seleção & categorização de variáveis</div>"),
-            W.HBox([self.sl_min_iv, self.sl_max_psi, self.cb_require_mono, self.btn_auto]),
+            W.HBox([self.sl_min_iv, self.sl_max_psi, self.cb_require_mono,
+                    self.btn_auto, self.btn_auto_cat]),
             W.HBox([self.sel_included, W.VBox([self.btn_apply_sel, self.btn_incl_all,
                                                self.btn_clear, self.btn_refresh_vars])],
                    layout=W.Layout(align_items="flex-start")),
             W.HBox([self.dd_var, self.dd_categoria, self.btn_set_cat]),
+            self.out_cat_hint,
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Ranking (IV / força / inversão / PSI)</div>"),
                             self.out_vars], layout=W.Layout(width="58%")),
-                    W.VBox([W.HTML("<div class='mseg-h'>Logodds da variável</div>"),
+                    W.VBox([self.out_var_preview_h,
                             self.out_var_preview], layout=W.Layout(width="42%"))]),
         ], layout=W.Layout(padding="2px"))
 
@@ -279,14 +495,24 @@ class ModelSegmenterUI:
                                                "(tabela, IV, logodds, PSI e inversão)")
         self.btn_clear_bins = W.Button(description="Bins ótimos", icon="magic",
                                        tooltip="Remove os bins manuais e volta ao binning ótimo")
+        self.tx_new_cat = W.Text(value="", placeholder="nome (opcional)",
+                                 description="Nova variável:",
+                                 style={"description_width": "initial"},
+                                 layout=W.Layout(width="320px"))
+        self.btn_create_cat = W.Button(description="Criar variável categórica",
+                                       icon="plus-square", button_style="info",
+                                       tooltip="Materializa a binagem/agrupamento atual (faixas "
+                                               "numéricas ou grupos de categorias) como uma NOVA "
+                                               "variável categórica, candidata ao modelo e recriada "
+                                               "ao escorar. Junte categorias na mão como na árvore.")
         self.out_bin_hint = W.HTML()
         self.btn_apply_bins.on_click(self._on_apply_bins)
         self.btn_clear_bins.on_click(self._on_clear_bins)
+        self.btn_create_cat.on_click(self._on_create_cat)
         self.tg_binmode.observe(lambda c: self._sync_binmode(), names="value")
         self.dd_var2.observe(lambda c: self._sync_bin_controls(), names="value")
         self.out_an_cards = W.HTML()
-        self.out_an_logodds = W.HTML()
-        self.out_an_dist = W.HTML()
+        self.out_an_distbad = W.HTML()    # distribuição + % de maus (gráfico único)
         self.out_an_table = W.HTML()
         self.out_an_inv_sample = W.HTML()
         self.out_an_inv_safra = W.HTML()
@@ -298,17 +524,17 @@ class ModelSegmenterUI:
             W.HTML("<div class='mseg-h'>Categorizar a variável na mão (bins manuais)</div>"),
             W.HBox([self.tg_binmode, self.tx_cuts, self.btn_apply_bins, self.btn_clear_bins]),
             self.out_bin_hint,
+            W.HBox([self.tx_new_cat, self.btn_create_cat]),
         ])
         bin_card.add_class("mseg-card")
+        bin_card.layout = W.Layout(margin="26px 0 0 0")   # respiro até a linha da variável
 
         tab_an = W.VBox([
             W.HBox([self.dd_var2, self.dd_sample2, self.tx_time2, self.btn_analyze]),
             bin_card,
             self.out_an_cards,
-            W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Logodds por faixa</div>"),
-                            self.out_an_logodds], layout=W.Layout(width="50%")),
-                    W.VBox([W.HTML("<div class='mseg-h'>Distribuição</div>"),
-                            self.out_an_dist], layout=W.Layout(width="50%"))]),
+            W.VBox([W.HTML("<div class='mseg-h'>Distribuição & % de maus por faixa</div>"),
+                    self.out_an_distbad]),
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Tabela por faixa</div>"),
                             self.out_an_table], layout=W.Layout(width="50%")),
                     W.VBox([W.HTML("<div class='mseg-h'>Inversão entre amostras</div>"),
@@ -347,6 +573,16 @@ class ModelSegmenterUI:
                                     tooltip="Mostra a equação ajustada (intercepto + coeficientes) "
                                             "da Regressão Logística/Linear")
         self.btn_shap = W.Button(description="Calcular SHAP", icon="bar-chart")
+        self.cb_woe = W.Checkbox(value=False, indent=False,
+                                 description="Transformar variáveis (WoE por bins)")
+        self.cb_woe.tooltip = (
+            "Em vez dos valores crus, alimenta o modelo com a transformação por bins "
+            "(estilo scorecard): contínuas viram faixas e categóricas viram grupos "
+            "— exatamente os bins definidos na aba 'Análise de variáveis' — e cada bin "
+            "é codificado pelo seu WoE (classificação) ou risco médio (regressão).")
+        self.out_woe_help = W.HTML()
+        self.cb_woe.observe(lambda c: self._sync_woe_hint(), names="value")
+        self.out_algo_help = W.HTML()   # tutorial do algoritmo/parâmetros selecionado
         self.out_metrics = W.HTML()
         self.out_formula = W.HTML()
         self.out_model_a = W.HTML()
@@ -362,8 +598,10 @@ class ModelSegmenterUI:
 
         train_card = W.VBox([
             W.HTML("<div class='mseg-h'>Treinar (ou usar modelo pré-ajustado via set_model)</div>"),
-            W.HBox([self.dd_algo]),
+            W.HBox([self.dd_algo, self.cb_woe]),
             self.box_logit, self.box_ensemble, self.box_lr,
+            self.out_algo_help,
+            self.out_woe_help,
             W.HBox([self.btn_fit, self.btn_formula, self.btn_shap]),
         ])
         train_card.add_class("mseg-card")
@@ -376,9 +614,9 @@ class ModelSegmenterUI:
             train_card,
             W.VBox([W.HTML("<div class='mseg-h'>Métricas por amostra</div>"), self.out_metrics]),
             self.formula_card,
-            W.HBox([W.VBox([self.out_model_a], layout=W.Layout(width="34%")),
-                    W.VBox([self.out_model_b], layout=W.Layout(width="33%")),
-                    W.VBox([self.out_model_c], layout=W.Layout(width="33%"))]),
+            W.HBox([W.VBox([self.out_model_a], layout=W.Layout(width="33.33%")),
+                    W.VBox([self.out_model_b], layout=W.Layout(width="33.33%")),
+                    W.VBox([self.out_model_c], layout=W.Layout(width="33.33%"))]),
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>SHAP — beeswarm</div>"), self.out_shap],
                            layout=W.Layout(width="55%")),
                     W.VBox([W.HTML("<div class='mseg-h'>SHAP — importância</div>"), self.out_shap_bar],
@@ -393,8 +631,16 @@ class ModelSegmenterUI:
                                     style={"description_width": "initial"})
         self.sl_nratings = W.IntSlider(value=10, min=2, max=20, description="nº ratings")
         self.cb_fusion = W.Checkbox(value=True, description="fusão monotônica (inversão)")
+        self.btn_suggest_n = W.Button(description="Sugerir nº", icon="magic",
+                                      tooltip="O algoritmo escolhe o nº de ratings: a régua mais "
+                                              "enxuta que mantém monotonia entre amostras, volume "
+                                              "mínimo por faixa e quase todo o poder de "
+                                              "discriminação. Preenche o slider; depois clique em "
+                                              "Gerar ratings.")
         self.btn_build_ratings = W.Button(description="Gerar ratings", button_style="primary",
                                           icon="sitemap")
+        self.btn_suggest_n.on_click(self._on_suggest_n)
+        self.out_rating_auto = W.HTML()
         self.out_rating_table = W.HTML()
         self.out_rating_badrate = W.HTML()
         self.out_rating_dist = W.HTML()
@@ -404,7 +650,9 @@ class ModelSegmenterUI:
         self.btn_build_ratings.on_click(self._on_build_ratings)
 
         tab_rating = W.VBox([
-            W.HBox([self.dd_method, self.sl_nratings, self.cb_fusion, self.btn_build_ratings]),
+            W.HBox([self.dd_method, self.sl_nratings, self.cb_fusion,
+                    self.btn_suggest_n, self.btn_build_ratings]),
+            self.out_rating_auto,
             W.VBox([W.HTML("<div class='mseg-h'>Régua de ratings (risco por amostra)</div>"),
                     self.out_rating_table]),
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Risco por rating</div>"),
@@ -440,6 +688,16 @@ class ModelSegmenterUI:
         # escorar base: rating + valor previsto do alvo por rating (a "régua")
         self.tx_value_col = W.Text(value="valor_previsto", description="Coluna do valor:",
                                    style={"description_width": "initial"})
+        self.tx_in_table = W.Text(value="", description="Tabela (Databricks):",
+                                  placeholder="catalog.schema.tabela",
+                                  style={"description_width": "initial"},
+                                  layout=W.Layout(width="46%"))
+        self.tx_out_table = W.Text(value="", description="Gravar em (opcional):",
+                                   placeholder="catalog.schema.saida",
+                                   style={"description_width": "initial"},
+                                   layout=W.Layout(width="46%"))
+        self.cb_recreate = W.Checkbox(value=True, indent=False,
+                                      description="recriar categorias/faixas das variáveis")
         self.btn_ruler = W.Button(description="Ver régua (rating → valor)", icon="list-ol")
         self.btn_score = W.Button(description="Escorar base", button_style="primary",
                                   icon="bolt")
@@ -462,11 +720,19 @@ class ModelSegmenterUI:
             W.HBox([self.btn_export]), self.out_export,
             W.HTML("<div class='mseg-h'>Escorar base — rating + valor previsto do alvo "
                    "por rating (régua)</div>"),
-            W.HTML("<div class='mseg-legend'>Escora a base carregada (ou <code>ui.score_df = "
-                   "df_novo</code> para uma base externa) e devolve <code>score</code>, "
-                   "<code>rating</code> e o valor previsto do alvo daquele rating (ex.: LGD "
-                   "previsto). Resultado em <code>ui.result</code>.</div>"),
-            W.HBox([self.tx_value_col, self.btn_ruler, self.btn_score]),
+            W.HTML("<div class='mseg-legend'>Devolve <code>score</code>, <code>rating</code> e o "
+                   "valor previsto do alvo daquele rating (ex.: LGD previsto). A base só precisa "
+                   "ter as <b>variáveis originais do modelo</b> — a binagem/WoE é refeita ao "
+                   "escorar e, quando uma variável foi categorizada, as <b>faixas/grupos são "
+                   "recriados</b> na saída.<br>• <b>Tabela Databricks</b>: informe "
+                   "<code>catalog.schema.tabela</code> (lê via Spark) e, opcionalmente, uma tabela "
+                   "de saída para gravar; o Spark DataFrame fica em <code>ui.result</code>.<br>"
+                   "• <b>Em memória</b>: deixe a tabela em branco para escorar a base carregada "
+                   "(ou <code>ui.score_df = df_novo</code>). Resultado (pandas) em "
+                   "<code>ui.result</code>.</div>"),
+            W.HBox([self.tx_in_table, self.tx_out_table]),
+            W.HBox([self.tx_value_col, self.cb_recreate]),
+            W.HBox([self.btn_ruler, self.btn_score]),
             self.out_ruler,
             self.out_score,
             W.HTML("<div class='mseg-h'>Salvar / carregar (JSON + modelo joblib)</div>"),
@@ -509,7 +775,7 @@ class ModelSegmenterUI:
 
     def _refresh_vars(self):
         try:
-            rk = self.seg.variable_iv()
+            rk = self.seg.variable_iv().drop(columns="n_inversoes", errors="ignore")
             for c in rk.columns:
                 if c.startswith("psi_") or c in ("iv", "pior_psi"):
                     rk[c] = rk[c].map(lambda v: "" if pd.isna(v) else f"{v:.4f}")
@@ -518,15 +784,29 @@ class ModelSegmenterUI:
             if "bins_manuais" in rk.columns:
                 rk["bins_manuais"] = rk["bins_manuais"].map(lambda b: "✎" if b else "")
                 rk = rk.rename(columns={"bins_manuais": "manual"})
-            self.out_vars.value = self._df_html(rk, max_height="320px")
+            self.out_vars.value = self._df_html(rk, max_height="320px", color_categoria=True)
         except Exception as e:
             self.out_vars.value = f"<i>falha ao calcular IV: {e}</i>"
         self._refresh_var_preview()
 
     def _refresh_var_preview(self):
+        """Prévia ao lado do ranking: a **estabilidade no tempo** da variável — risco
+        de cada faixa por safra (cruzamentos/safras sombreadas = inversão ao longo do
+        tempo), complementando as colunas de PSI/estabilidade/inversão do ranking.
+        Sem coluna de safra, cai para o logodds por faixa."""
+        feat = self.dd_var.value
         try:
-            fig = self.seg.plot_variable_logodds(self.dd_var.value)
-            self.out_var_preview.value = self._fig_html(fig)
+            if self.seg.date_col:
+                self.out_var_preview_h.value = (
+                    "<div class='mseg-h'>Estabilidade no tempo · risco das faixas por safra</div>")
+                fig = self.seg.plot_variable_inversion_by_safra(feat)
+            else:
+                self.out_var_preview_h.value = (
+                    "<div class='mseg-h'>Logodds da variável por faixa "
+                    "<span style='font-weight:400;text-transform:none'>(defina uma coluna de "
+                    "safra para ver a estabilidade no tempo)</span></div>")
+                fig = self.seg.plot_variable_logodds(feat)
+            self.out_var_preview.value = self._fig_html(fig, tight=False)
         except Exception as e:
             self.out_var_preview.value = f"<i>{e}</i>"
 
@@ -539,6 +819,19 @@ class ModelSegmenterUI:
             self._log(f"[auto] incluídas {len(self.seg.included)} variáveis.")
         except Exception as e:
             self._log(f"[auto] erro: {e}")
+
+    def _on_auto_categorize(self, b):
+        try:
+            rk = self.seg.auto_categorize(min_iv=self.sl_min_iv.value,
+                                          max_psi=self.sl_max_psi.value,
+                                          require_monotonic=self.cb_require_mono.value)
+            self._refresh_vars(); self._refresh_bar()
+            vc = rk["categoria"].value_counts().to_dict()
+            resumo = " · ".join(f"{k}: {vc.get(k, 0)}"
+                                for k in ("manter", "revisar", "descartar"))
+            self._log(f"[auto-categoria] {resumo} (veja a coluna 'motivo' no ranking)")
+        except Exception as e:
+            self._log(f"[auto-categoria] erro: {e}")
 
     def _on_apply_sel(self, b):
         self.seg.included = set(self.sel_included.value)
@@ -557,17 +850,15 @@ class ModelSegmenterUI:
         sample = None if self.dd_sample2.value == "(referência)" else self.dd_sample2.value
         tcol = self.tx_time2.value.strip() or None
         try:
-            self.out_an_logodds.value = self._fig_html(
-                self.seg.plot_variable_logodds(feat, sample=sample))
-            self.out_an_dist.value = self._fig_html(
-                self.seg.plot_variable_distribution(feat, sample=sample))
+            self.out_an_distbad.value = self._fig_html(
+                self.seg.plot_variable_distribution_badrate(feat, sample=sample), tight=False)
             vt = self.seg.variable_table(feat, sample=sample)
-            self.out_an_table.value = self._df_html(vt, max_height="280px")
+            self.out_an_table.value = self._df_html(vt, max_height="280px", center=True)
             self.out_an_inv_sample.value = self._fig_html(
                 self.seg.plot_variable_inversion_by_sample(feat))
             self.out_an_cards.value = self._var_cards(self.seg.variable_summary(feat, sample))
         except Exception as e:
-            self.out_an_logodds.value = f"<i>{e}</i>"
+            self.out_an_distbad.value = f"<i>{e}</i>"
         if tcol:
             for out, fn in ((self.out_an_time,
                              lambda: self.seg.plot_variable_timeseries(feat, tcol, sample)),
@@ -646,6 +937,32 @@ class ModelSegmenterUI:
         self._on_analyze(None)
         self._refresh_vars()
 
+    def _refresh_candidates(self):
+        """Atualiza as listas de variáveis (após criar uma variável derivada)."""
+        cands = list(self.seg.candidates)
+        for dd in (self.dd_var, self.dd_var2):
+            cur = dd.value
+            dd.options = cands
+            if cur in cands:
+                dd.value = cur
+        self.sel_included.options = cands
+        self.sel_included.value = tuple(f for f in cands if f in self.seg.included)
+
+    def _on_create_cat(self, b):
+        feat = self.dd_var2.value
+        name = self.tx_new_cat.value.strip() or None
+        try:
+            new = self.seg.create_categorical(feat, new_name=name)
+            ncat = int(self.seg.df[new].nunique(dropna=True))
+            self.tx_new_cat.value = ""
+            self._refresh_candidates()
+            self._refresh_vars()
+            self._refresh_bar()
+            self._log(f"[nova variável] '{new}' criada de '{feat}' ({ncat} categorias) — "
+                      f"já disponível na seleção e no modelo.")
+        except Exception as e:
+            self._log(f"[nova variável] erro: {e}")
+
     # ------------------------------------------------------------------ Aba 3 handlers
     def _sync_algo_visibility(self):
         """Mostra só os hiperparâmetros do algoritmo escolhido: C (logística),
@@ -660,6 +977,74 @@ class ModelSegmenterUI:
         linear = algo in ("logistica", "linear")
         self.btn_formula.layout.display = "" if linear else "none"
         self.formula_card.layout.display = "" if linear else "none"
+        self.out_algo_help.value = self._algo_help_html(algo)
+
+    @staticmethod
+    def _algo_help_html(algo):
+        """Tutorial curto do algoritmo escolhido e do que cada hiperparâmetro faz."""
+        P = {  # nome do parâmetro -> explicação (em HTML)
+            "C": "<span class='pname'>C (regul.)</span> — inverso da força de regularização "
+                 "(L2). <b>C alto</b> → pouca regularização: ajusta mais aos dados, coeficientes "
+                 "maiores, risco de <i>overfit</i>. <b>C baixo</b> → mais regularização: encolhe "
+                 "os coeficientes, modelo mais estável/generalizável. Faixa típica: 0,1 a 10.",
+            "n_estimators": "<span class='pname'>n_estimators</span> — número de árvores do "
+                 "ensemble. Mais árvores = previsão mais estável, porém mais lento; o ganho "
+                 "satura a partir de certo ponto.",
+            "max_depth": "<span class='pname'>max_depth</span> — profundidade máxima de cada "
+                 "árvore. Controla a complexidade: valores altos (ou sem limite) capturam "
+                 "interações finas mas tendem a <i>overfit</i>; valores baixos regularizam.",
+            "learning_rate": "<span class='pname'>learning_rate</span> — peso de cada árvore na "
+                 "soma do boosting. <b>Menor</b> = aprende devagar, precisa de mais árvores "
+                 "(<code>n_estimators</code>), mas costuma generalizar melhor. Troca-se "
+                 "<code>learning_rate</code> por <code>n_estimators</code>.",
+        }
+        meta = {
+            "logistica": ("Regressão Logística",
+                "Modelo linear e <b>interpretável</b>: estima a probabilidade via "
+                "<code>logit(p) = β₀ + Σ βᵢ·xᵢ</code>. Cada coeficiente vira um "
+                "<code>odds_ratio</code> (veja a aba/fórmula). Ótimo ponto de partida e padrão "
+                "em risco de crédito (scorecards).", ["C"]),
+            "linear": ("Regressão Linear (OLS)",
+                "Ajuste por mínimos quadrados para alvo contínuo: "
+                "<code>ŷ = β₀ + Σ βᵢ·xᵢ</code>. Interpretável e <b>sem hiperparâmetros</b> "
+                "a calibrar.", []),
+            "random_forest": ("Random Forest",
+                "Conjunto de árvores em <i>bagging</i> (cada uma vê uma amostra/colunas "
+                "diferentes); a média reduz variância. Robusto e pouco sensível a ajuste fino.",
+                ["n_estimators", "max_depth"]),
+            "extra_trees": ("Extra Trees",
+                "Como a Random Forest, mas com cortes <b>aleatórios</b> nas divisões — mais "
+                "rápido e com variância ainda menor (viés um pouco maior).",
+                ["n_estimators", "max_depth"]),
+            "gradient_boosting": ("Gradient Boosting",
+                "Árvores treinadas em <b>sequência</b>, cada uma corrigindo o erro da anterior. "
+                "Costuma ter ótima performance, mas exige cuidado com <i>overfit</i> "
+                "(balancear <code>learning_rate</code> × <code>n_estimators</code>).",
+                ["n_estimators", "max_depth", "learning_rate"]),
+            "hist_gradient_boosting": ("Hist Gradient Boosting",
+                "Gradient boosting com <i>binning</i> por histogramas — bem mais rápido em bases "
+                "grandes, mesma lógica de parâmetros.",
+                ["n_estimators", "max_depth", "learning_rate"]),
+            "lightgbm": ("LightGBM",
+                "Boosting de alta performance (crescimento <i>leaf-wise</i>), muito rápido em "
+                "bases grandes. Calibre principalmente "
+                "<code>learning_rate</code> × <code>n_estimators</code>.",
+                ["n_estimators", "max_depth", "learning_rate"]),
+            "xgboost": ("XGBoost",
+                "Boosting robusto e amplamente usado, com regularização embutida. Mesma troca "
+                "<code>learning_rate</code> × <code>n_estimators</code>; <code>max_depth</code> "
+                "controla a complexidade.",
+                ["n_estimators", "max_depth", "learning_rate"]),
+            "catboost": ("CatBoost",
+                "Boosting que lida bem com variáveis categóricas e reduz <i>overfit</i> com "
+                "<i>ordered boosting</i>. Mesmos parâmetros principais de calibração.",
+                ["n_estimators", "max_depth", "learning_rate"]),
+        }
+        title, desc, params = meta.get(algo, (algo, "", []))
+        items = "".join(f"<li>{P[p]}</li>" for p in params)
+        body = (f"<ul>{items}</ul>" if items
+                else "<div class='none'>Sem hiperparâmetros a ajustar.</div>")
+        return (f"<div class='mseg-help'><div class='ttl'>{title}</div>{desc}{body}</div>")
 
     def _render_formula(self):
         if self.seg.algorithm not in ("logistica", "linear"):
@@ -672,27 +1057,77 @@ class ModelSegmenterUI:
         except Exception as e:
             self.out_formula.value = f"<i>{e}</i>"
             return
-        if self.task_type == "classification":
-            eq = ("logit(p) = ln[ p / (1 − p) ] = z"
-                  "&nbsp;&nbsp;⇒&nbsp;&nbsp; p = 1 / (1 + e<sup>−z</sup>)")
+        is_clf = self.task_type == "classification"
+        coef = fm["coef"]
+        b0 = float(fm["intercept"])
+        if is_clf:
+            eq = ("p = 1 / (1 + e<sup>−z</sup>)&nbsp;&nbsp;onde&nbsp;&nbsp;"
+                  "z = logit(p) = ln[ p / (1 − p) ]")
         else:
             eq = "ŷ = z"
-        # z = intercepto + Σ coefᵢ·termoᵢ, colorindo o sinal
-        z = (f"<span class='b0'>z = {fm['intercept']:+.4f}</span>")
-        for _, r in fm["coef"].iterrows():
-            z += (f"  <span class='op'>{r['coef']:+.4f}</span>·"
-                  f"[{r['termo']}]")
-        coef = fm["coef"].copy()
-        coef.insert(0, "termo", coef.pop("termo"))
-        tbl = self._df_html(coef, max_height="260px")
+
+        # z = intercepto + Σ coefᵢ·termoᵢ — cada termo é uma "pílula" que quebra linha,
+        # com o sinal do coeficiente colorido (verde sobe z, vermelho desce z)
+        chips = [f"<span class='mseg-term mseg-b0'>{b0:+.4f}</span>"]
+        for _, r in coef.iterrows():
+            c = float(r["coef"]); cls = "pos" if c >= 0 else "neg"
+            chips.append(
+                f"<span class='mseg-term mseg-{cls}'>"
+                f"<span class='mseg-op'>{'+' if c >= 0 else '−'}</span>"
+                f"<span class='mseg-cf'>{abs(c):.4f}</span>"
+                f"<span class='mseg-mul'>×</span>"
+                f"<span class='mseg-vn'>{r['termo']}</span></span>")
+        z_html = "<span class='mseg-zlead'>z =</span>" + "".join(chips)
+
+        # tabela de coeficientes com barra de magnitude (|coef|) e leitura do efeito
+        cmax = float(coef["coef"].abs().max()) or 1.0
+        rows = []
+        for _, r in coef.iterrows():
+            c = float(r["coef"]); cls = "pos" if c >= 0 else "neg"
+            bar = (f"<div class='mseg-barwrap'><div class='mseg-bar-{cls}' "
+                   f"style='width:{100 * abs(c) / cmax:.1f}%'></div></div>")
+            if is_clf:
+                orr = float(r["odds_ratio"])
+                pct = abs(orr - 1.0) * 100
+                read = (f"{'↑' if c >= 0 else '↓'} chance: odds ×{orr:.2f} "
+                        f"({'+' if c >= 0 else '−'}{pct:.0f}%)")
+                extra = f"<td class='num'>{orr:.4f}</td><td class='read mseg-{cls}-tx'>{read}</td>"
+            else:
+                read = f"{'↑' if c >= 0 else '↓'} ŷ em {abs(c):.4f} por +1 un."
+                extra = f"<td class='read mseg-{cls}-tx'>{read}</td>"
+            rows.append(
+                f"<tr><td class='term'>{r['termo']}</td>"
+                f"<td class='num mseg-{cls}-tx'>{c:+.4f}</td>"
+                f"<td class='barcell'>{bar}</td>{extra}</tr>")
+        # linha do intercepto (baseline) — sem barra/leitura por unidade
+        base_extra = (f"<td class='num'>{np.exp(b0):.4f}</td>"
+                      "<td class='read'>odds base (todos os termos = 0)</td>"
+                      if is_clf else "<td class='read'>valor base de ŷ</td>")
+        base_row = (f"<tr class='base'><td class='term'>intercepto (β₀)</td>"
+                    f"<td class='num'>{b0:+.4f}</td><td></td>{base_extra}</tr>")
+        head_extra = "<th>odds_ratio</th><th class='read'>leitura</th>" if is_clf \
+            else "<th class='read'>leitura</th>"
+        table = (
+            "<table class='mseg-coef'><thead><tr>"
+            "<th class='term'>termo</th><th>coef</th><th>magnitude |coef|</th>"
+            f"{head_extra}</tr></thead><tbody>"
+            f"{base_row}{''.join(rows)}</tbody></table>")
+
+        woe_note = ("Termos <code>WoE(var)</code> = a variável transformada no WoE do seu "
+                    "bin (binagem da aba Análise). " if self.seg.feature_transform == "woe"
+                    else "")
+        legend = (
+            "<div class='mseg-legend'>" + woe_note + "Termos ordenados por |coef|. A barra compara "
+            "<b>|coef|</b> (relevante quando os termos estão na mesma escala, p.ex. WoE). "
+            + ("<b>odds_ratio</b> = e<sup>coef</sup>: a cada +1 no termo, a razão de "
+               "chances é multiplicada por esse fator." if is_clf
+               else "<b>coef</b>: variação de ŷ a cada +1 no termo.")
+            + "</div>")
         self.out_formula.value = (
             f"<div class='mseg-eq'>{eq}</div>"
-            f"<div class='mseg-formula'>{z}</div>"
-            "<div class='mseg-legend'>Termos ordenados por |coef|. "
-            + ("<b>odds_ratio</b> = e<sup>coef</sup>: efeito multiplicativo na razão de "
-               "chances por +1 unidade do termo." if self.task_type == "classification"
-               else "coeficiente = variação de ŷ por +1 unidade do termo.")
-            + "</div>" + tbl)
+            f"<div class='mseg-formula'>{z_html}</div>"
+            f"{legend}"
+            f"<div style='max-height:320px;overflow:auto'>{table}</div>")
 
     def _on_formula(self, b):
         if self.seg.model is None:
@@ -714,11 +1149,27 @@ class ModelSegmenterUI:
             hp["learning_rate"] = float(self.tx_lr.value)
         return hp
 
+    def _sync_woe_hint(self):
+        if self.cb_woe.value:
+            alvo = ("WoE" if self.task_type == "classification" else "risco médio do bin")
+            self.out_woe_help.value = (
+                "<div class='mseg-help'><div class='ttl'>Variáveis transformadas (WoE por bins)</div>"
+                "O modelo será treinado com a <b>transformação por bins</b> (estilo scorecard): "
+                "contínuas viram faixas e categóricas viram grupos — os mesmos bins da aba "
+                "<i>Análise de variáveis</i> (manuais quando existirem, senão o binning ótimo) — "
+                f"e cada bin é codificado pelo seu <b>{alvo}</b>. Os termos da fórmula aparecem "
+                "como <code>WoE(variável)</code>. Defina/ajuste os bins na aba Análise antes de treinar.</div>")
+        else:
+            self.out_woe_help.value = ""
+
     def _on_fit(self, b):
         algo = self.dd_algo.value
+        transform = "woe" if self.cb_woe.value else "raw"
         try:
-            self.seg.fit(algo, hyperparams=self._collect_hyperparams(algo))
-            self._log(f"[fit] {algo} treinado com {len(self.seg.model_features)} variáveis.")
+            self.seg.fit(algo, hyperparams=self._collect_hyperparams(algo), transform=transform)
+            modo = "WoE/bins" if transform == "woe" else "valores crus"
+            self._log(f"[fit] {algo} treinado com {len(self.seg.model_features)} "
+                      f"variáveis ({modo}).")
             self._render_metrics()
             self._render_model_plots()
             self._render_formula()
@@ -728,7 +1179,54 @@ class ModelSegmenterUI:
 
     def _render_metrics(self):
         m = self.seg.metrics().round(4)
-        self.out_metrics.value = self._df_html(m)
+        self.out_metrics.value = (self._metrics_table_html(m)
+                                  + self._metrics_guide_html(list(m.columns)))
+
+    def _metrics_table_html(self, m):
+        """Tabela de métricas centralizada e com identificador visual: cada célula
+        ganha cor (verde/amarelo/vermelho) conforme o guia de bolso da métrica."""
+        metric_cols = [c for c in m.columns if c in self._METRIC_GUIDE]
+        fmt = {c: "{:.4f}" for c in m.columns if c not in ("amostra", "n")}
+        sty = (m.style.hide(axis="index").set_table_styles(self._TABLE_STYLES)
+               .set_properties(**{"font-size": "12px", "text-align": "center"})
+               .set_table_styles([{"selector": "th", "props": [("text-align", "center")]}],
+                                 overwrite=False)
+               .format(fmt))
+
+        def _color(col):
+            return [self._LEVEL_CSS.get(self._metric_level(col.name, v), "") for v in col]
+
+        if metric_cols:
+            sty = sty.apply(_color, axis=0, subset=metric_cols)
+        return sty.to_html()
+
+    def _metrics_guide_html(self, cols):
+        """Dicionário das métricas + guia de bolso (o que mede, recomendado, quando
+        é baixa), num bloco recolhível, com a legenda de cores."""
+        rows = []
+        for c in cols:
+            g = self._METRIC_GUIDE.get(c)
+            if not g:
+                continue
+            rows.append(f"<tr><td class='term'><b>{g['nome']}</b> "
+                        f"<span class='mono' style='color:#8a93a3'>{c}</span></td>"
+                        f"<td class='read'>{g['desc']}</td>"
+                        f"<td class='read'>{g['rec']}</td>"
+                        f"<td class='read'>{g['baixa']}</td></tr>")
+        if not rows:
+            return ""
+        return (
+            "<details class='mseg-guide'>"
+            "<summary>📖 Dicionário de métricas & guia de bolso</summary>"
+            "<div class='lg'>Identificador visual: "
+            "<span class='mseg-cat mseg-cat-keep'>bom</span> "
+            "<span class='mseg-cat mseg-cat-rev'>atenção</span> "
+            "<span class='mseg-cat mseg-cat-drop'>ruim</span> — as faixas são regras "
+            "de bolso; em crédito, compare também DES × OOT e contra um baseline.</div>"
+            "<table class='mseg-coef'><thead><tr>"
+            "<th class='term'>métrica</th><th class='read'>o que mede</th>"
+            "<th class='read'>recomendado</th><th class='read'>considerada baixa</th>"
+            "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></details>")
 
     def _render_model_plots(self):
         if self.task_type == "classification":
@@ -739,9 +1237,11 @@ class ModelSegmenterUI:
             specs = [(self.out_model_a, self.seg.plot_calibration),
                      (self.out_model_b, self.seg.plot_residuals),
                      (self.out_model_c, self.seg.plot_score_distribution)]
+        # figsize comum + tight=False ⇒ os 3 gráficos saem do mesmo tamanho
+        common = (5.2, 4.3)
         for out, fn in specs:
             try:
-                out.value = self._fig_html(fn())
+                out.value = self._fig_html(fn(figsize=common), tight=False)
             except Exception as e:
                 out.value = f"<i>{e}</i>"
 
@@ -758,6 +1258,38 @@ class ModelSegmenterUI:
             self._log(f"[shap] erro: {e}")
 
     # ------------------------------------------------------------------ Aba 4 handlers
+    def _on_suggest_n(self, b):
+        if self.seg.score_ is None:
+            self._log("[ratings] treine o modelo primeiro.")
+            return
+        try:
+            sug = self.seg.suggest_n_ratings(method=self.dd_method.value,
+                                             monotonic_fusion=self.cb_fusion.value)
+            best = int(sug["best"])
+            self.sl_nratings.value = max(self.sl_nratings.min,
+                                         min(best, self.sl_nratings.max))
+            self.out_rating_auto.value = self._render_suggestion(sug)
+            self._log(f"[ratings] sugestão: {best} ratings (slider ajustado; "
+                      f"clique em Gerar ratings).")
+        except Exception as e:
+            self.out_rating_auto.value = f"<i>{e}</i>"
+            self._log(f"[ratings] erro na sugestão: {e}")
+
+    def _render_suggestion(self, sug):
+        t = sug["table"].copy()
+        rec = int(sug["best"])
+        t.insert(0, "rec", t["n_alvo"].map(lambda n: "★" if int(n) == rec else ""))
+        t["ok"] = t["ok"].map(lambda v: "✓" if v else "—")
+        if "gini" in t.columns:
+            t["gini"] = t["gini"].map(lambda v: "" if pd.isna(v) else f"{v:.4f}")
+        return (
+            "<div class='mseg-help'><div class='ttl'>Nº de ratings sugerido: "
+            f"{rec}</div>{sug['reason']}"
+            "<div class='mseg-legend'>Critério: monotonia de risco entre amostras "
+            "(0 inversões), volume mínimo por faixa e ganho de discriminação (Gini). "
+            "★ = recomendado · <code>ok</code> = passa nos critérios.</div></div>"
+            + self._df_html(t, center=True, max_height="280px"))
+
     def _on_build_ratings(self, b):
         if self.seg.score_ is None:
             self._log("[ratings] treine o modelo primeiro.")
@@ -768,14 +1300,20 @@ class ModelSegmenterUI:
                                    monotonic_fusion=self.cb_fusion.value)
             self._log(f"[ratings] {len(self.seg.rating_labels_)} faixas "
                       f"({self.dd_method.value}).")
-            self.out_rating_table.value = self._df_html(self.seg.rating_table().round(4))
+            self.out_rating_table.value = self._df_html(
+                self.seg.rating_table().round(4), center=True)
             self.out_rating_badrate.value = self._fig_html(self.seg.plot_rating_badrate())
             self.out_rating_dist.value = self._fig_html(self.seg.plot_rating_distribution())
-            self.out_rating_inv_s.value = self._fig_html(self.seg.plot_rating_inversion_by_sample())
-            self.out_rating_mono.value = self._df_html(self.seg.monotonicity_report())
+            # mesma figsize + tight=False ⇒ os dois gráficos de inversão (amostras ×
+            # safras) saem com a MESMA altura nas colunas 50/50
+            inv_size = (8.4, 4.0)
+            self.out_rating_inv_s.value = self._fig_html(
+                self.seg.plot_rating_inversion_by_sample(figsize=inv_size), tight=False)
+            self.out_rating_mono.value = self._df_html(
+                self.seg.monotonicity_report(), center=True)
             try:
                 self.out_rating_inv_t.value = self._fig_html(
-                    self.seg.plot_rating_inversion_by_safra())
+                    self.seg.plot_rating_inversion_by_safra(figsize=inv_size), tight=False)
             except Exception as e:
                 self.out_rating_inv_t.value = f"<i>{e}</i>"
             self._refresh_bar()
@@ -817,23 +1355,40 @@ class ModelSegmenterUI:
             self._log(f"[régua] erro: {e}")
 
     def _on_score(self, b):
+        col_value = self.tx_value_col.value.strip() or "valor_previsto"
+        recreate = self.cb_recreate.value
+        in_tbl = self.tx_in_table.value.strip()
+        out_tbl = self.tx_out_table.value.strip() or None
         try:
+            if in_tbl:                                   # tabela do Databricks (Spark)
+                sout = self.seg.score_table(in_tbl, col_value=col_value,
+                                            recreate_categories=recreate,
+                                            output_table=out_tbl)
+                self.result = sout                       # Spark DataFrame
+                prev = sout.limit(10).toPandas()
+                ncols = len(sout.columns)
+                gravou = (f" Gravado em <code>{out_tbl}</code>." if out_tbl
+                          else " Spark DataFrame em <code>ui.result</code>.")
+                self.out_score.value = (
+                    f"<div class='mseg-legend'>Tabela Databricks <code>{in_tbl}</code> "
+                    f"escorada ({ncols} colunas).{gravou} Prévia (10 linhas):</div>"
+                    + self._df_html(prev.round(6), max_height="320px"))
+                self._log(f"[escorar] tabela '{in_tbl}' escorada"
+                          + (f" e gravada em '{out_tbl}'." if out_tbl else " (ui.result)."))
+                return
+            # em memória (pandas): base carregada ou ui.score_df
             base = self.score_df if self.score_df is not None else self.seg.df
             origem = "ui.score_df" if self.score_df is not None else "base carregada"
-            col_value = self.tx_value_col.value.strip() or "valor_previsto"
-            scored = self.seg.predict(base, col_value=col_value)
-            out = base.copy()
-            for c in scored.columns:
-                out[c] = scored[c]
+            out = self.seg.score_table(base, col_value=col_value, recreate_categories=recreate)
             self.result = out
-            cols = ", ".join(f"<code>{c}</code>" for c in scored.columns)
+            novas = [c for c in out.columns if c not in base.columns]
+            cols = ", ".join(f"<code>{c}</code>" for c in novas)
             self.out_score.value = (
                 f"<div class='mseg-legend'>Base escorada ({origem}): "
                 f"{out.shape[0]} linhas × {out.shape[1]} colunas, em <code>ui.result</code>. "
                 f"Colunas adicionadas: {cols}.</div>"
-                + self._df_html(scored.head(10).round(6)))
-            self._log(f"[escorar] {origem} escorada em ui.result "
-                      f"({out.shape[0]} linhas).")
+                + self._df_html(out.head(10).round(6), max_height="320px"))
+            self._log(f"[escorar] {origem} escorada em ui.result ({out.shape[0]} linhas).")
         except Exception as e:
             self.out_score.value = f"<i>{e}</i>"
             self._log(f"[escorar] erro: {e}")

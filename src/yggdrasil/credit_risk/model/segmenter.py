@@ -43,6 +43,11 @@ try:  # optbinning é dependência core, mas degradamos com elegância.
 except ImportError:  # pragma: no cover
     ContinuousOptimalBinning = OptimalBinning = None
 
+try:  # sklearn é dependência core; degradamos se ausente (só p/ importar o módulo).
+    from sklearn.base import BaseEstimator, TransformerMixin
+except ImportError:  # pragma: no cover
+    BaseEstimator = TransformerMixin = object
+
 SCHEMA = "yggdrasil.credit_risk.model/1"
 
 #: Algoritmos suportados (registry extensível). Cada entrada indica em quais
@@ -289,6 +294,57 @@ def _make_ohe():
         return OneHotEncoder(handle_unknown="ignore", sparse=False)
 
 
+def _bin_mask_series(series: pd.Series, b: dict) -> pd.Series:
+    """Máscara das linhas que caem no bin ``b`` (faltante / faixa numérica /
+    grupo categórico). Espelha ``ModelSegmenter._mask_in`` para uso fora da classe
+    (no transformador serializável)."""
+    if b["kind"] == "na":
+        return series.isna()
+    if b["kind"] == "num":
+        return series.between(b["lo"], b["hi"], inclusive="right")
+    return series.astype(str).isin(b["cats"])
+
+
+class WoeBinEncoder(BaseEstimator, TransformerMixin):
+    """Transforma cada variável no **valor do seu bin** — WoE (classificação) ou
+    risco médio do bin (regressão) — usando bins/grupos já ajustados na amostra de
+    referência (faixas para contínuas, grupos para categóricas, como nas árvores
+    de PD/LGD). Serve para alimentar os modelos com variáveis transformadas, no
+    estilo *scorecard*.
+
+    ``encodings``: ``{feature: {"kind", "bins": [(bin_dict, valor), ...],
+    "fallback": float}}``. Valores fora de qualquer bin (categoria nova, faltante
+    sem bin próprio) recebem ``fallback`` (0 = WoE neutro)."""
+
+    def __init__(self, encodings=None, features=None, name_prefix="WoE"):
+        self.encodings = encodings
+        self.features = features
+        self.name_prefix = name_prefix
+
+    def fit(self, X, y=None):
+        return self
+
+    def get_feature_names_out(self, input_features=None):
+        feats = self.features or []
+        return np.asarray([f"{self.name_prefix}({f})" for f in feats], dtype=object)
+
+    def transform(self, X):
+        X = pd.DataFrame(X).reset_index(drop=True)
+        feats = self.features or []
+        out = np.empty((len(X), len(feats)), dtype="float64")
+        for j, f in enumerate(feats):
+            enc = self.encodings[f]
+            col = X[f]
+            vals = np.full(len(X), enc["fallback"], dtype="float64")
+            assigned = np.zeros(len(X), dtype=bool)
+            for b, v in enc["bins"]:
+                m = _bin_mask_series(col, b).to_numpy() & ~assigned
+                vals[m] = v
+                assigned |= m
+            out[:, j] = vals
+        return out
+
+
 # ======================================================================
 # Classe principal
 # ======================================================================
@@ -364,6 +420,7 @@ class ModelSegmenter:
         self.model = None
         self.algorithm: str | None = None
         self.hyperparams: dict = {}
+        self.feature_transform: str = "raw"   # "raw" | "woe" (binagem + WoE/risco do bin)
         self.model_features: list = []
         self.score_: pd.Series | None = None
         self.rating_strategy = None
@@ -625,11 +682,15 @@ class ModelSegmenter:
                 row["estabilidade"] = _classifica_psi(pior)
             row["incluida"] = feat in self.included
             row["categoria"] = self.var_meta.get(feat, {}).get("categoria")
+            row["motivo"] = self.var_meta.get(feat, {}).get("motivo", "")
             row["bins_manuais"] = bool(self.var_meta.get(feat, {}).get("splits"))
             rows.append(row)
-        return (pd.DataFrame(rows)
-                .sort_values("iv", ascending=False, na_position="last")
-                .reset_index(drop=True))
+        df = (pd.DataFrame(rows)
+              .sort_values("iv", ascending=False, na_position="last")
+              .reset_index(drop=True))
+        if "motivo" in df and not df["motivo"].astype(bool).any():
+            df = df.drop(columns="motivo")   # só aparece após auto-categorizar
+        return df
 
     def _variable_psi(self, feature, samples, max_n_bins=5, min_bin_size=0.05,
                       eps=1e-6) -> dict:
@@ -927,6 +988,57 @@ class ModelSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
+    def plot_variable_distribution_badrate(self, feature, sample=None, max_n_bins=6,
+                                           min_bin_size=0.05, figsize=(9.0, 3.8), dpi=150,
+                                           save_path=None, ax=None):
+        """Um único gráfico: barras de **distribuição** (% da amostra por faixa) +
+        linha do risco por faixa — **% de maus** (event_rate) na classificação ou
+        **alvo médio** na regressão. Faltantes destacados."""
+        vt = self.variable_table(feature, sample, max_n_bins, min_bin_size)
+        fig, ax = _new_ax(figsize, dpi, ax)
+        if vt.empty:
+            ax.text(0.5, 0.5, "sem faixas", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        rcol = vt.attrs["risco_label"]
+        labels = vt["faixa"].tolist()
+        reprs = vt["repr_%"].to_numpy()
+        xs = list(range(len(labels)))
+        cols = ["#c98a8a" if "faltante" in f else "steelblue" for f in labels]
+        ax.bar(xs, reprs, color=cols, edgecolor="#2f5d82", alpha=0.85, width=0.7,
+               label="% da amostra")
+        for x0, rp in zip(xs, reprs):
+            ax.text(x0, rp, f"{rp:.0f}%", ha="center", va="bottom", fontsize=7.5,
+                    color="#15324a")
+        ax.set_ylabel("% da amostra"); ax.set_ylim(0, float(np.nanmax(reprs)) * 1.2 + 1)
+
+        is_clf = self.task_type == "classification"
+        risco = vt[rcol].to_numpy(dtype="float64")
+        yline = risco * 100 if is_clf else risco
+        ylabel = "% de maus" if is_clf else "alvo médio"
+        ax2 = ax.twinx()
+        ax2.plot(xs, yline, color="crimson", lw=2.3, marker="o", ms=5.5,
+                 markeredgecolor="#fff", markeredgewidth=0.7, label=ylabel)
+        for x0, yv in zip(xs, yline):
+            if np.isfinite(yv):
+                ax2.text(x0, yv, (f"{yv:.1f}%" if is_clf else f"{yv:.3f}"),
+                         ha="center", va="bottom", fontsize=7.5, color="crimson")
+        ax2.set_ylabel(ylabel, color="crimson"); ax2.tick_params(axis="y", labelcolor="crimson")
+        finite = yline[np.isfinite(yline)]
+        if finite.size:
+            ax2.set_ylim(0, float(np.nanmax(finite)) * 1.25 + (1 if is_clf else 1e-9))
+        ax.set_xticks(xs); ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8)
+        ax.set_xlim(-0.7, len(labels) - 0.3)
+        mono = "monotônica" if vt.attrs.get("mono_ok") else "NÃO monotônica"
+        ax.set_title(f"'{self.label(feature)}' · distribuição & {ylabel}  ·  "
+                     f"IV={vt.attrs['iv']}  ·  {mono}",
+                     fontsize=10.5, fontweight="bold", color="#15324a")
+        ax.grid(axis="y", alpha=0.12)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
     def plot_variable_timeseries(self, feature, time_col=None, sample=None,
                                  figsize=(8.6, 3.4), dpi=150, save_path=None, ax=None):
         """Numérica: percentis por safra. Categórica: área empilhada de share."""
@@ -1005,12 +1117,14 @@ class ModelSegmenter:
         ax.bar(x, ps["psi"], color=cor, alpha=0.92, width=0.78)
         for x0, p in zip(x, ps["psi"]):
             ax.text(x0, p, f"{p:.2f}", ha="center", va="bottom", fontsize=7, color="#555")
-        ax.axhline(0.10, color="#caa000", lw=0.8, ls="--")
-        ax.axhline(0.25, color="#d6453e", lw=0.8, ls="--")
+        # guia de alerta do PSI (sempre visível, mesmo com PSI pequeno)
+        ax.axhline(0.10, color="#caa000", lw=1.2, ls="--", label="alerta (0,10)")
+        ax.axhline(0.25, color="#d6453e", lw=1.2, ls="--", label="crítico (0,25)")
         ax.set_xticks(x); ax.set_xticklabels(ps["safra"], rotation=45, ha="right", fontsize=8)
         ax.set_xlim(-0.7, len(ps) - 0.3)
-        ax.set_ylim(0, float(np.nanmax(ps["psi"])) * 1.16 + 0.05)
+        ax.set_ylim(0, max(float(np.nanmax(ps["psi"])) * 1.16 + 0.02, 0.28))
         ax.set_ylabel("PSI")
+        ax.legend(fontsize=7.5, loc="upper right", framealpha=0.9)
         ax.set_title(f"PSI de '{self.label(feature)}' por safra vs DES",
                      fontsize=11, fontweight="bold", color="#15324a")
         fig.tight_layout()
@@ -1104,7 +1218,9 @@ class ModelSegmenter:
 
     def set_category(self, feature, categoria):
         """Categoriza a variável (ex.: 'manter', 'revisar', 'descartar')."""
-        self.var_meta.setdefault(feature, {})["categoria"] = categoria
+        meta = self.var_meta.setdefault(feature, {})
+        meta["categoria"] = categoria
+        meta.pop("motivo", None)   # 'motivo' só vale para categorização automática
         return self
 
     # ---- bins manuais ("categorizar na mão", como nos projetos de árvore) ----
@@ -1192,13 +1308,105 @@ class ModelSegmenter:
                 self.exclude(feat); self.set_category(feat, "descartar")
         return rk
 
+    def auto_categorize(self, min_iv=0.02, max_psi=0.25, require_monotonic=True,
+                        psi_warn=0.10, max_n_bins=5, apply_selection=False) -> pd.DataFrame:
+        """Categoriza em lote **todas** as candidatas em ``manter``/``revisar``/
+        ``descartar`` por uma regra transparente, pensada para **Regressão
+        Logística** (scorecard de crédito).
+
+        Diferente de :meth:`auto_select`, **não altera a seleção** por padrão — a
+        categoria é só triagem/documentação. Use ``apply_selection=True`` para
+        também incluir as ``manter`` e excluir o resto.
+
+        Regra (avaliada nesta ordem, por variável)::
+
+            descartar  IV < min_iv (sem poder)  ou  pior_psi > max_psi (instável)
+            revisar    força 'suspeito' (IV alto demais → possível vazamento)
+                       ou IV fraco (min_iv ≤ IV < piso de 'médio': 0.10 clf / 0.03 reg)
+                       ou pior_psi em atenção (psi_warn ≤ PSI ≤ max_psi)
+                       ou (require_monotonic) tendência não-monotônica / com inversões
+            manter     o restante (IV médio/forte, estável e monotônica)
+
+        Devolve o ranking de :meth:`variable_iv` com ``categoria`` e ``motivo``
+        (justificativa curta) preenchidos; ``motivo`` também passa a aparecer no
+        ranking da UI.
+        """
+        rk = self.variable_iv(max_n_bins=max_n_bins)
+        weak_ceiling = 0.10 if self.task_type == "classification" else 0.03
+        cats, motivos = [], []
+        for _, r in rk.iterrows():
+            feat = r["variavel"]
+            iv = r["iv"]; psi = r.get("pior_psi", np.nan)
+            nao_mono = (r["tendencia"] == "não-monotônica") or (int(r.get("n_inversoes", 0)) > 0)
+            iv_txt = "—" if not np.isfinite(iv) else f"{iv:.3f}"
+            if not np.isfinite(iv) or iv < min_iv:
+                cat, motivo = "descartar", f"IV {iv_txt} < mín. {min_iv:g} (sem poder)"
+            elif np.isfinite(psi) and psi > max_psi:
+                cat, motivo = "descartar", f"PSI {psi:.3f} > máx. {max_psi:g} (instável)"
+            elif r["forca"] == "suspeito":
+                cat, motivo = "revisar", f"IV {iv_txt} alto demais (possível vazamento)"
+            elif iv < weak_ceiling:
+                cat, motivo = "revisar", f"IV {iv_txt} fraco"
+            elif np.isfinite(psi) and psi >= psi_warn:
+                cat, motivo = "revisar", f"PSI {psi:.3f} em atenção"
+            elif require_monotonic and nao_mono:
+                cat, motivo = "revisar", "não-monotônica / com inversões"
+            else:
+                cat, motivo = "manter", f"IV {iv_txt}, estável e monotônica"
+            self.set_category(feat, cat)
+            self.var_meta[feat]["motivo"] = motivo
+            if apply_selection:
+                (self.include if cat == "manter" else self.exclude)(feat)
+            cats.append(cat); motivos.append(motivo)
+        rk = rk.copy()
+        rk["categoria"] = cats
+        rk["motivo"] = motivos
+        return rk
+
     # ------------------------------------------------------------------
     # C) Modelo
     # ------------------------------------------------------------------
-    def _build_pipeline(self, features, algorithm, hyperparams):
+    def _bin_encoding(self, feature) -> dict:
+        """Bins (ajustados na referência) + valor de codificação por bin: **WoE**
+        (classificação) ou **risco médio do bin** (regressão). Reaproveita os bins
+        manuais/ótimos da análise univariada (:meth:`_resolve_bins`). Usado pela
+        transformação WoE que alimenta o modelo."""
+        ref = self._frame(self.ref_sample)
+        bins, kind = self._resolve_bins(feature, sample=self.ref_sample)
+        y_all = ref[self.target].to_numpy(dtype="float64")
+        enc_bins = []
+        if self.task_type == "classification":
+            n_evt_tot = float(np.nansum(y_all == 1))
+            n_non_tot = float(np.nansum(y_all == 0))
+            for b in bins:
+                m = self._mask_in(ref, feature, b).to_numpy()
+                yi = y_all[m]; yi = yi[~np.isnan(yi)]
+                d_evt = float((yi == 1).sum()) / max(n_evt_tot, _EPS)
+                d_non = float((yi == 0).sum()) / max(n_non_tot, _EPS)
+                enc_bins.append((b, float(np.log((d_non + _EPS) / (d_evt + _EPS)))))
+            fallback = 0.0   # WoE neutro p/ valores fora dos bins vistos na referência
+        else:
+            mean_global = self._risco(y_all)
+            for b in bins:
+                m = self._mask_in(ref, feature, b).to_numpy()
+                r = self._risco(y_all[m])
+                enc_bins.append((b, float(r) if np.isfinite(r) else mean_global))
+            fallback = float(mean_global) if np.isfinite(mean_global) else 0.0
+        return {"kind": kind, "bins": enc_bins, "fallback": fallback}
+
+    def _build_pipeline(self, features, algorithm, hyperparams, transform="raw"):
         from sklearn.compose import ColumnTransformer
         from sklearn.impute import SimpleImputer
         from sklearn.pipeline import Pipeline
+
+        est = _build_estimator(algorithm, self.task_type, hyperparams)
+        if transform == "woe":
+            # variáveis transformadas no estilo scorecard (binagem + WoE/risco do bin)
+            encodings = {f: self._bin_encoding(f) for f in features}
+            prefix = "WoE" if self.task_type == "classification" else "bin"
+            pre = WoeBinEncoder(encodings=encodings, features=list(features),
+                                name_prefix=prefix)
+            return Pipeline([("pre", pre), ("est", est)])
 
         num = [f for f in features if self._detect_kind(f) == "num"]
         cat = [f for f in features if self._detect_kind(f) == "cat"]
@@ -1211,13 +1419,17 @@ class ModelSegmenter:
                           ("ohe", _make_ohe())])
             transformers.append(("cat", cat_pipe, cat))
         pre = ColumnTransformer(transformers, remainder="drop")
-        est = _build_estimator(algorithm, self.task_type, hyperparams)
         return Pipeline([("pre", pre), ("est", est)])
 
-    def fit(self, algorithm=None, hyperparams=None, features=None):
+    def fit(self, algorithm=None, hyperparams=None, features=None, transform="raw"):
         """Treina um modelo na amostra de referência (DES) com as variáveis
         selecionadas (ou ``features``). ``algorithm`` default: logística
-        (classificação) / linear (regressão). Calcula ``score_`` para todas as linhas."""
+        (classificação) / linear (regressão). Calcula ``score_`` para todas as linhas.
+
+        ``transform``: ``"raw"`` usa os valores originais (numéricas + one-hot das
+        categóricas); ``"woe"`` transforma cada variável no WoE do seu bin
+        (classificação) ou no risco médio do bin (regressão), reaproveitando os
+        bins/grupos definidos na análise univariada — estilo *scorecard*."""
         if algorithm is None:
             algorithm = "logistica" if self.task_type == "classification" else "linear"
         feats = list(features) if features is not None else self.selected_features()
@@ -1226,6 +1438,7 @@ class ModelSegmenter:
         self.model_features = feats
         self.algorithm = algorithm
         self.hyperparams = dict(hyperparams or {})
+        self.feature_transform = transform
 
         fit_df = self._frame(self.ref_sample)
         fit_df = fit_df[fit_df[self.target].notna()]
@@ -1233,7 +1446,7 @@ class ModelSegmenter:
         y = fit_df[self.target]
         if self.task_type == "classification":
             y = y.astype(int)
-        self.model = self._build_pipeline(feats, algorithm, hyperparams)
+        self.model = self._build_pipeline(feats, algorithm, hyperparams, transform=transform)
         self.model.fit(X, y)
         self.score_ = self._compute_score(self.df)
         self._shap_cache = {}
@@ -1269,9 +1482,15 @@ class ModelSegmenter:
                 if nm.startswith(p):
                     nm = nm[len(p):]
                     break
+            # termos transformados vêm como 'WoE(feat)'/'bin(feat)': rotula o miolo
+            wrap = None
+            for w in ("WoE", "bin"):
+                if nm.startswith(f"{w}(") and nm.endswith(")"):
+                    wrap, nm = w, nm[len(w) + 1:-1]
+                    break
             if use_labels and nm in self.feature_labels:
                 nm = self.feature_labels[nm]
-            out.append(nm)
+            out.append(f"{wrap}({nm})" if wrap else nm)
         return out
 
     def model_coefficients(self, use_labels=True) -> pd.DataFrame:
@@ -1587,6 +1806,11 @@ class ModelSegmenter:
         if method not in RATING_REGISTRY:
             raise ValueError(f"Método de rating desconhecido: {method!r}. "
                              f"Opções: {sorted(RATING_REGISTRY)}")
+        if isinstance(n_ratings, str) and n_ratings.lower() == "auto":
+            sug = self.suggest_n_ratings(method=method, monotonic_fusion=monotonic_fusion,
+                                         alpha=alpha)
+            n_ratings = sug["best"]
+            self._last_auto_suggestion = sug
         n = int(n_ratings)
         if method == "decis":
             strat = RATING_REGISTRY[method](n=n)
@@ -1613,6 +1837,94 @@ class ModelSegmenter:
         self.rating_config = {"method": method, "n_ratings": n,
                               "monotonic_fusion": bool(monotonic_fusion), "alpha": alpha}
         return self
+
+    def _rating_gini(self) -> float:
+        """Discriminação retida pela régua atual na referência (DES): Gini usando o
+        risco médio de cada rating como score. ``NaN`` fora da classificação."""
+        if self.task_type != "classification" or self.rating_ is None:
+            return float("nan")
+        rating = self.rating_
+        ref_mask = (pd.Series(True, index=self.df.index) if self.sample_col is None
+                    else self.df[self.sample_col] == self.ref_sample)
+        risco_by = {lab: self._risco(self.df.loc[(rating == lab) & ref_mask, self.target])
+                    for lab in self.rating_labels_}
+        sub = self.df[ref_mask]
+        y = sub[self.target].to_numpy(dtype="float64")
+        sc = rating[ref_mask].map(risco_by).to_numpy(dtype="float64")
+        ok = ~np.isnan(y) & ~np.isnan(sc)
+        if ok.sum() < 2 or np.unique(y[ok]).size < 2:
+            return float("nan")
+        return float(classification_metrics(y[ok], sc[ok]).get("gini", np.nan))
+
+    def suggest_n_ratings(self, method="quantil", n_min=3, n_max=15,
+                          monotonic_fusion=True, alpha=0.05, min_repr=0.02) -> dict:
+        """Deixa o algoritmo escolher o nº de ratings. Testa de ``n_max`` a ``n_min``
+        e recomenda a régua **mais granular** que mantém a ordem de risco monotônica
+        entre amostras (sem inversões) e com volume mínimo por faixa (``min_repr``,
+        fração da DES). Se nenhuma zera as inversões, escolhe a de menor inversão e
+        maior granularidade.
+
+        Método **não-destrutivo**: restaura a régua atual ao final. Devolve
+        ``{'best': int, 'table': DataFrame, 'reason': str}``."""
+        if self.score_ is None:
+            raise RuntimeError("Gere o score antes (fit / set_model).")
+        snap = (self.rating_, self.rating_strategy, self.rating_col_,
+                list(self.rating_labels_), dict(self.rating_config))
+        n_top = max(int(n_min), min(int(n_max), max(2, int(self.score_.nunique()))))
+        rows, evals = [], {}
+        try:
+            for n in range(n_top, int(n_min) - 1, -1):
+                try:
+                    self.build_ratings(method=method, n_ratings=n,
+                                       monotonic_fusion=monotonic_fusion, alpha=alpha)
+                except Exception:
+                    continue
+                eff = len(self.rating_labels_)
+                inv = self.rating_inversion()
+                rt = self.rating_table()
+                repr_min = (float(rt["repr_%"].min()) / 100) if len(rt) else 0.0
+                mono_ok = inv["sample_inv"] == 0
+                vol_ok = repr_min >= min_repr
+                gini = self._rating_gini()
+                rows.append({"n_alvo": n, "n_efetivo": eff,
+                             "inv_amostra": int(inv["sample_inv"]),
+                             "safras_inv_%": round(100 * inv["safra_rate"], 0),
+                             "repr_min_%": round(100 * repr_min, 1),
+                             "gini": round(gini, 4) if np.isfinite(gini) else np.nan,
+                             "ok": bool(mono_ok and vol_ok)})
+                evals[n] = (mono_ok, vol_ok, eff, inv["safra_rate"], gini)
+        finally:
+            (self.rating_, self.rating_strategy, self.rating_col_,
+             self.rating_labels_, self.rating_config) = snap
+
+        if not evals:
+            raise RuntimeError("Não foi possível avaliar nenhuma régua de ratings.")
+        table = pd.DataFrame(rows).sort_values("n_alvo").reset_index(drop=True)
+        passa = [n for n, e in evals.items() if e[0] and e[1]]
+        if passa:
+            ginis = {n: evals[n][4] for n in passa}
+            gmax = max((g for g in ginis.values() if np.isfinite(g)), default=float("nan"))
+            if np.isfinite(gmax) and gmax > 0:
+                # parcimônia: a MENOR régua que retém ≥ 99% do Gini máximo possível
+                # (ponto de cotovelo — mais faixas quase não agregam discriminação)
+                keep = [n for n in passa if np.isfinite(ginis[n]) and ginis[n] >= 0.99 * gmax]
+                best = min(keep or passa, key=lambda n: (evals[n][2], evals[n][3]))
+                reason = (f"{best} ratings — menor régua que mantém monotonia entre amostras, "
+                          f"≥ {min_repr * 100:.0f}% da base por faixa e ≥ 99% do Gini máximo "
+                          f"({gmax:.3f}); mais faixas quase não agregam discriminação.")
+            else:  # sem métrica de discriminação (regressão): mais granular válida
+                best = max(passa, key=lambda n: (evals[n][2], -evals[n][3]))
+                reason = (f"{best} ratings — régua mais granular que mantém a monotonia entre "
+                          f"amostras (0 inversões) e ≥ {min_repr * 100:.0f}% da base por faixa.")
+        else:
+            # nenhuma zerou inversões: prioriza menos inversão entre amostras, depois
+            # volume adequado, menos inversão de safra e maior granularidade
+            best = min(evals, key=lambda n: (0 if evals[n][0] else 1, not evals[n][1],
+                                             evals[n][3], -evals[n][2]))
+            reason = (f"{best} ratings — nenhuma régua zerou as inversões; escolhida a de "
+                      f"menor inversão, volume adequado e maior granularidade.")
+        return {"best": int(best), "table": table, "reason": reason,
+                "n_recomendado": int(best)}
 
     def _rating_series(self) -> pd.Series:
         if self.rating_ is None:
@@ -1730,12 +2042,14 @@ class ModelSegmenter:
         samples = self._samples()
         fig, ax = _new_ax(figsize, dpi, ax)
         x = np.arange(len(labels)); w = 0.8 / max(len(samples), 1)
+        palette = ["steelblue", "crimson"]
         for k, a in enumerate(samples):
             am = (pd.Series(True, index=self.df.index) if self.sample_col is None
                   else self.df[self.sample_col] == a)
             n_a = max(int(am.sum()), 1)
             pct = [100 * int(((rating == l) & am).sum()) / n_a for l in labels]
-            ax.bar(x + k * w, pct, width=w, label=a, alpha=0.9)
+            ax.bar(x + k * w, pct, width=w, label=a, alpha=0.9,
+                   color=palette[k % len(palette)])
         ax.set_xticks(x + 0.4 - w / 2); ax.set_xticklabels(labels, fontsize=9)
         ax.set_ylabel("% da amostra"); ax.legend(fontsize=8)
         ax.set_title("Distribuição dos ratings por amostra", fontsize=11,
@@ -1909,6 +2223,7 @@ class ModelSegmenter:
         previsto por rating."""
         if self.model is None:
             raise RuntimeError("Ajuste/defina o modelo antes (fit / set_model).")
+        X = self._apply_derived(X)        # recria variáveis derivadas a partir da origem
         sc = pd.Series(self._predict_score_array(self.model, X[self.model_features]),
                        index=X.index, name=col_score, dtype="float64")
         out = pd.DataFrame({col_score: sc}, index=X.index)
@@ -1923,6 +2238,183 @@ class ModelSegmenter:
                 mapping = dict(zip(ruler[col_rating], ruler[col_value]))
                 out[col_value] = out[col_rating].map(mapping)
         return out
+
+    def _labels_from_bins(self, col, bins, feature, others="(outros)") -> pd.Series:
+        """Rótulo do bin (faixa/grupo) de cada valor de ``col`` segundo ``bins``.
+        Valores fora de todos os bins (categoria nova) e não-nulos viram ``others``."""
+        col = pd.Series(col)
+        labels = pd.Series([pd.NA] * len(col), index=col.index, dtype="object")
+        assigned = np.zeros(len(col), dtype=bool)
+        for b in bins:
+            m = _bin_mask_series(col, b).to_numpy() & ~assigned
+            labels.iloc[m] = self._bin_label(feature, b)
+            assigned |= m
+        miss = (~assigned) & col.notna().to_numpy()
+        if miss.any():
+            labels.iloc[miss] = others
+        return labels
+
+    def recreate_categories(self, X, suffix="_faixa", features=None) -> pd.DataFrame:
+        """Recria, para cada variável, a **faixa/grupo** (categoria) a que cada linha
+        pertence — com os mesmos bins do modelo (manuais ou ótimos, ajustados na
+        referência). Numéricas viram faixas ``(lo, hi]``; categóricas viram grupos
+        ``{A, B}``; faltantes ``(faltante)``. Devolve só as colunas recriadas
+        (``<feature><suffix>``). É como a binagem/WoE "vê" cada linha ao escorar.
+        Pula variáveis já derivadas (criadas via :meth:`create_categorical`)."""
+        feats = (list(features) if features is not None
+                 else (list(self.model_features) or self.selected_features()
+                       or list(self.candidates)))
+        X = pd.DataFrame(X)
+        out = {}
+        for f in feats:
+            if f not in X.columns or self.var_meta.get(f, {}).get("derived_from"):
+                continue
+            try:
+                bins, _kind = self._resolve_bins(f, sample=self.ref_sample)
+            except Exception:
+                continue
+            if not bins:
+                continue
+            out[f"{f}{suffix}"] = self._labels_from_bins(X[f], bins, f)
+        return pd.DataFrame(out, index=X.index)
+
+    def create_categorical(self, feature, new_name=None) -> str:
+        """Materializa a binagem atual de ``feature`` (faixas numéricas ou grupos
+        categóricos — **manuais** quando definidos, senão o **ótimo**) como uma NOVA
+        variável categórica no DataFrame, candidata ao modelo. É o equivalente a
+        "agrupar bins" da árvore de decisão, persistido numa coluna: junte categorias
+        na mão (ex.: ``A,B; C,D``) e gere a variável agrupada.
+
+        A derivação fica registrada (origem + bins), então a variável é **recriada
+        automaticamente** ao escorar uma base que tenha só as variáveis originais.
+        Devolve o nome da nova variável."""
+        if feature not in self.df.columns:
+            raise ValueError(f"'{feature}' não está no DataFrame.")
+        bins, kind = self._resolve_bins(feature, sample=self.ref_sample)
+        if not bins:
+            raise ValueError(f"Sem bins para '{feature}'. Defina cortes/grupos (ou rode o "
+                             "binning ótimo) antes de criar a variável.")
+        name = new_name or f"{feature}_cat"
+        base, k = name, 2
+        while name in self.df.columns:
+            name = f"{base}_{k}"; k += 1
+        self.df[name] = self._labels_from_bins(self.df[feature], bins, feature).to_numpy()
+        if name not in self.candidates:
+            self.candidates.append(name)
+        self.var_meta[name] = {"categoria": None, "derived_from": feature,
+                               "derived_kind": kind, "derived_bins": bins}
+        self.feature_labels.setdefault(name, f"{self.label(feature)} (cat.)")
+        return name
+
+    def _apply_derived(self, X):
+        """Recria, em ``X``, as variáveis derivadas (criadas via
+        :meth:`create_categorical`) que o modelo usa e que ainda não estão presentes,
+        a partir da variável de origem — para escorar bases com só as colunas crus."""
+        need = [n for n in self.model_features
+                if self.var_meta.get(n, {}).get("derived_from") and n not in X.columns]
+        if not need:
+            return X
+        X = X.copy()
+        for n in need:
+            meta = self.var_meta[n]; src = meta["derived_from"]
+            if src not in X.columns:
+                raise ValueError(f"Para recriar a variável derivada '{n}', a tabela "
+                                 f"precisa conter a variável de origem '{src}'.")
+            X[n] = self._labels_from_bins(X[src], meta.get("derived_bins") or [],
+                                          src).to_numpy()
+        return X
+
+    def _rebuild_derived(self):
+        """Recria no ``self.df`` as variáveis derivadas registradas em ``var_meta``
+        (usado após load, quando o df vem só com as colunas originais)."""
+        for name, meta in self.var_meta.items():
+            src = meta.get("derived_from")
+            if not src or name in self.df.columns or src not in self.df.columns:
+                continue
+            self.df[name] = self._labels_from_bins(
+                self.df[src], meta.get("derived_bins") or [], src).to_numpy()
+
+    def _score_pandas(self, pdf, col_score="score", col_rating="rating", col_value=None,
+                      ruler_sample=None, recreate_categories=None, cat_suffix="_faixa"):
+        """Escora um pandas DataFrame: colunas originais + score + rating (+ valor
+        previsto) e, quando o modelo usou variáveis categorizadas, as faixas
+        recriadas. A tabela só precisa ter as variáveis originais do modelo."""
+        pdf = self._apply_derived(pd.DataFrame(pdf))    # recria derivadas (se houver)
+        missing = [f for f in self.model_features if f not in pdf.columns]
+        if missing:
+            raise ValueError(
+                f"Faltam variáveis do modelo na tabela: {missing}. "
+                f"Ela precisa conter: {list(self.model_features)}.")
+        scored = self.predict(pdf, col_score=col_score, col_rating=col_rating,
+                              col_value=col_value, ruler_sample=ruler_sample)
+        out = pdf.copy()
+        for c in scored.columns:
+            out[c] = scored[c].to_numpy()
+        if recreate_categories is None:
+            recreate_categories = (self.feature_transform == "woe")
+        if recreate_categories:
+            cats = self.recreate_categories(pdf, suffix=cat_suffix)
+            for c in cats.columns:
+                out[c] = cats[c].to_numpy()
+        return out
+
+    def apply_spark(self, sdf, col_score="score", col_rating="rating", col_value=None,
+                    ruler_sample=None, recreate_categories=None, cat_suffix="_faixa"):
+        """Escora um **Spark DataFrame** (ex.: tabela do Databricks/Unity Catalog) e
+        devolve um Spark DataFrame com ``score`` + ``rating`` (+ valor previsto) e,
+        quando o modelo usou variáveis categorizadas (WoE/bins), as faixas recriadas.
+        A tabela só precisa ter as variáveis originais do modelo (``model_features``);
+        a binagem/WoE é refeita internamente.
+
+        Aplica o modelo sklearn coletando a tabela no driver (``toPandas``); para
+        tabelas muito grandes, filtre/particione antes de escorar."""
+        if self.model is None:
+            raise RuntimeError("Ajuste/defina o modelo antes (fit / set_model).")
+        try:
+            from pyspark.sql import SparkSession
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("apply_spark requer pyspark — no Databricks já vem no "
+                              "cluster; fora dele: pip install pyspark") from e
+        missing = [f for f in self.model_features if f not in sdf.columns]
+        if missing:
+            raise ValueError(
+                f"Colunas ausentes no Spark DataFrame: {missing}. A tabela precisa ter "
+                f"as variáveis do modelo: {list(self.model_features)}.")
+        pdf = sdf.toPandas()
+        out = self._score_pandas(pdf, col_score, col_rating, col_value, ruler_sample,
+                                 recreate_categories, cat_suffix)
+        spark = SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
+        return spark.createDataFrame(out)
+
+    def score_table(self, data, col_score="score", col_rating="rating", col_value=None,
+                    ruler_sample=None, recreate_categories=None, cat_suffix="_faixa",
+                    output_table=None, mode="overwrite", spark=None):
+        """Escora uma tabela e devolve as **notas (score)** e os **ratings**.
+
+        ``data`` pode ser o **nome** de uma tabela do Databricks (``catalog.schema.
+        tabela``), um **Spark DataFrame** ou um **pandas DataFrame**. A tabela só
+        precisa conter as variáveis originais do modelo; se uma variável foi
+        categorizada (faixas/grupos via WoE), a categoria é recriada na saída.
+
+        - nome de tabela ou Spark DataFrame → devolve um **Spark DataFrame** (e grava
+          em ``output_table`` quando informado);
+        - pandas DataFrame → devolve **pandas**."""
+        if self.model is None:
+            raise RuntimeError("Ajuste/defina o modelo antes (fit / set_model).")
+        if isinstance(data, str):
+            from pyspark.sql import SparkSession
+            spark = spark or SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
+            data = spark.table(data)
+        if hasattr(data, "toPandas"):                       # Spark DataFrame
+            out = self.apply_spark(data, col_score=col_score, col_rating=col_rating,
+                                   col_value=col_value, ruler_sample=ruler_sample,
+                                   recreate_categories=recreate_categories,
+                                   cat_suffix=cat_suffix)
+            if output_table:
+                out.write.mode(mode).saveAsTable(output_table)
+            return out
+        return self._score_pandas(pd.DataFrame(data), col_score, col_rating, col_value,
+                                  ruler_sample, recreate_categories, cat_suffix)
 
     def to_dict(self) -> dict:
         """Configuração serializável (sem o modelo binário — ver :meth:`save`)."""
@@ -1967,6 +2459,7 @@ class ModelSegmenter:
         seg.hyperparams = data.get("hyperparams", {})
         seg.model_features = data.get("model_features", [])
         seg.rating_config = data.get("rating_config", {})
+        seg._rebuild_derived()      # recria colunas categóricas derivadas no df
         return seg
 
     def load(self, path: str, df: pd.DataFrame = None):

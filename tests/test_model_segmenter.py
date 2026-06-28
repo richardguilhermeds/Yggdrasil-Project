@@ -225,6 +225,27 @@ def test_auto_select(seg):
     assert cats <= {"manter", "descartar"}
 
 
+def test_auto_categorize(seg):
+    rk = seg.auto_categorize()
+    assert {"categoria", "motivo"}.issubset(rk.columns)
+    assert set(rk["categoria"]) <= {"manter", "revisar", "descartar"}
+    assert (rk["motivo"].astype(bool)).all()                 # toda linha tem justificativa
+    # categoria é só triagem: não altera a seleção por padrão
+    assert seg.included == set(seg.candidates)
+    # 'motivo' passa a aparecer no ranking exibido
+    assert "motivo" in seg.variable_iv().columns
+    # set_category manual limpa o motivo automático
+    f0 = seg.candidates[0]
+    seg.set_category(f0, "manter")
+    assert "motivo" not in seg.var_meta[f0]
+
+
+def test_auto_categorize_apply_selection(seg):
+    seg.auto_categorize(min_iv=0.0, apply_selection=True)
+    mantidas = {f for f in seg.candidates if seg.var_meta[f]["categoria"] == "manter"}
+    assert seg.included == mantidas
+
+
 # ----------------------------------------------------------------------
 # Modelo
 # ----------------------------------------------------------------------
@@ -234,6 +255,39 @@ def test_fit_linear_e_score(seg):
     assert seg.score_.notna().all()
     if seg.task_type == "classification":
         assert seg.score_.between(0, 1).all()
+
+
+def test_fit_woe_transform(seg):
+    """Treino com variáveis transformadas (WoE/risco por bins), reaproveitando os
+    bins da análise univariada; score válido e fórmula com termos WoE(...)/bin(...)."""
+    algo = _default_algo(seg.task_type)
+    seg.fit(algo, transform="woe")
+    assert seg.feature_transform == "woe"
+    assert seg.score_ is not None and seg.score_.notna().all()
+    if seg.task_type == "classification":
+        assert seg.score_.between(0, 1).all()
+    # termos da fórmula vêm embrulhados conforme o task_type
+    wrap = "WoE(" if seg.task_type == "classification" else "bin("
+    coefs = seg.model_coefficients()
+    assert all(t.startswith(wrap) and t.endswith(")") for t in coefs["termo"])
+    # re-binagem de dados novos no predict (score sem NaN)
+    novo = seg.df[seg.model_features].head(20).copy()
+    pr = seg.predict(novo)
+    assert "score" in pr.columns and pr["score"].notna().all()
+
+
+def test_woe_transform_reusa_bins_manuais(seg):
+    if seg.task_type != "classification":
+        pytest.skip("WoE manual-bin check focado em classificação")
+    feat = "feat_00"
+    seg.set_manual_bins(feat, "0.0")              # 2 faixas: (-inf,0] e (0,inf]
+    seg.included = {feat}
+    enc = seg._bin_encoding(feat)
+    # os bins usados na transformação são os manuais (2 faixas numéricas)
+    faixas = [b for b in enc["bins"] if b[0]["kind"] == "num"]
+    assert len(faixas) == 2
+    seg.fit("logistica", transform="woe")
+    assert seg._compute_score(seg.df).notna().all()
 
 
 def test_fit_random_forest_e_metrics(seg):
@@ -361,6 +415,26 @@ def test_rating_table_e_inversao(seg):
     assert len(inv["ordered"]) == len(seg.rating_labels_)
 
 
+def test_suggest_n_ratings(seg):
+    seg.fit(_default_algo(seg.task_type))
+    seg.build_ratings(method="decis", n_ratings=7)
+    antes = list(seg.rating_labels_)
+    sug = seg.suggest_n_ratings(method="quantil", n_min=3, n_max=12)
+    assert {"best", "table", "reason"}.issubset(sug)
+    assert 3 <= sug["best"] <= 12
+    assert {"n_alvo", "n_efetivo", "inv_amostra", "repr_min_%", "ok"}.issubset(sug["table"].columns)
+    # é não-destrutivo: a régua atual permanece intacta
+    assert list(seg.rating_labels_) == antes
+
+
+def test_build_ratings_auto(seg):
+    seg.fit(_default_algo(seg.task_type))
+    seg.build_ratings(method="quantil", n_ratings="auto")
+    assert seg.rating_ is not None and len(seg.rating_labels_) >= 2
+    # a sugestão usada fica registrada
+    assert seg._last_auto_suggestion["best"] >= 2
+
+
 def test_build_ratings_exige_score(seg):
     with pytest.raises(RuntimeError):
         seg.build_ratings()
@@ -456,6 +530,81 @@ def test_assign(seg):
     assert len(out) == len(seg.df)
 
 
+def test_score_table_pandas_so_variaveis_originais(seg):
+    seg.fit(_default_algo(seg.task_type))
+    seg.build_ratings(method="quantil", n_ratings=6)
+    novos = _synthetic(seg.task_type, n=200, seed=11, com_cat=True)
+    # a tabela só precisa ter as variáveis do modelo
+    entrada = novos[seg.model_features].copy()
+    out = seg.score_table(entrada, col_value="valor_previsto")
+    assert {"score", "rating", "valor_previsto"}.issubset(out.columns)
+    assert out["score"].notna().all()
+    # faltando uma variável do modelo → erro claro
+    if len(seg.model_features) > 1:
+        with pytest.raises(ValueError):
+            seg.score_table(entrada[seg.model_features[:-1]])
+
+
+def test_create_categorical_agrupa_e_modela(seg):
+    if seg.task_type != "classification":
+        pytest.skip("foco em classificação")
+    # agrupa categorias na mão (como na árvore) e materializa numa nova variável
+    seg.set_manual_bins("feat_cat", "A,B; C,D")
+    nome = seg.create_categorical("feat_cat")
+    assert nome in seg.candidates and nome in seg.df.columns
+    assert seg.df[nome].dropna().nunique() == 2
+    assert seg.var_meta[nome]["derived_from"] == "feat_cat"
+    # variável numérica vira faixas
+    seg.set_manual_bins("feat_00", "0.0")
+    nome_num = seg.create_categorical("feat_00")
+    assert seg.df[nome_num].dropna().nunique() == 2
+    # treina usando as derivadas e escora tabela só com as variáveis ORIGINAIS
+    seg.included = {nome, nome_num}
+    seg.fit("logistica")
+    seg.build_ratings(method="quantil", n_ratings=6)
+    novos = _synthetic("classification", n=200, seed=21, com_cat=True)[["feat_cat", "feat_00"]]
+    out = seg.score_table(novos)                 # recria as derivadas a partir da origem
+    assert {"score", "rating"}.issubset(out.columns)
+    assert out["score"].notna().all()
+    assert nome in out.columns and nome_num in out.columns
+
+
+def test_create_categorical_save_load(seg):
+    if seg.task_type != "classification":
+        pytest.skip("foco em classificação")
+    import tempfile
+    import os
+    seg.set_manual_bins("feat_cat", "A,B; C,D")
+    nome = seg.create_categorical("feat_cat")
+    seg.included = {nome, "feat_03"}
+    seg.fit("logistica")
+    p = os.path.join(tempfile.mkdtemp(), "m.json")
+    seg.save(p)
+    base = seg.df.drop(columns=[nome])           # df "cru", sem a derivada
+    seg2 = ModelSegmenter(base, target="target", task_type="classification",
+                          sample_col="amostra", ref_sample="DES",
+                          date_col="dt_ref", verbose=False).load(p)
+    assert nome in seg2.df.columns               # derivada recriada no load
+    assert np.allclose(seg.score_.values, seg2.score_.values, equal_nan=True)
+
+
+def test_recreate_categories_usa_bins_do_modelo(seg):
+    if seg.task_type != "classification":
+        pytest.skip("recreate em classificação")
+    seg.included = {"feat_00", "feat_cat"}
+    seg.set_manual_bins("feat_00", "0.0")                  # 2 faixas numéricas
+    seg.fit("logistica", transform="woe")
+    seg.build_ratings(method="quantil", n_ratings=6)
+    novos = _synthetic("classification", n=150, seed=12, com_cat=True)[seg.model_features]
+    out = seg.score_table(novos)                            # woe ⇒ recria faixas por padrão
+    assert "feat_00_faixa" in out.columns
+    # a faixa numérica recriada respeita o corte 0.0 definido no treino
+    faixas = set(out["feat_00_faixa"].dropna().unique())
+    assert any("0" in f for f in faixas)
+    # cada linha caiu em exatamente uma faixa (sem nulos onde há valor)
+    assert out.loc[novos["feat_00"].notna(), "feat_00_faixa"].notna().all()
+
+
 def test_save_load_roundtrip(seg, tmp_path):
     seg.fit("random_forest", hyperparams={"n_estimators": 40})
     seg.build_ratings(method="quantil", n_ratings=8)
@@ -517,9 +666,23 @@ def test_plots_variavel(seg):
     import matplotlib.pyplot as plt
     for f in (seg.plot_variable_logodds("feat_00"),
               seg.plot_variable_distribution("feat_00"),
+              seg.plot_variable_distribution_badrate("feat_00"),
               seg.plot_variable_inversion_by_sample("feat_00"),
               seg.plot_variable_timeseries("feat_00")):
         assert f is not None; plt.close(f)
+
+
+def test_psi_plot_mostra_linhas_de_alerta(seg):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig = seg.plot_variable_psi_by_safra("feat_00", "dt_ref")
+    ax = fig.axes[0]
+    # guia do PSI sempre visível: linhas em 0,10 e 0,25 e eixo que as alcança
+    ys = {round(line.get_ydata()[0], 2) for line in ax.get_lines()}
+    assert {0.10, 0.25}.issubset(ys)
+    assert ax.get_ylim()[1] >= 0.25
+    plt.close(fig)
 
 
 def test_plots_rating(seg):
