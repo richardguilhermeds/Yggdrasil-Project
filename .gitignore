@@ -37,3 +37,7 @@ env/
 # artefatos de execução de notebooks/UI
 arvore_pd.png
 **/arvore_pd.png
+
+relatorio_arvore.pdf
+relatorio_modelo.pdf
+relatorio_*.pdf

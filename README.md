@@ -45,7 +45,7 @@ Seleção **por book** (grupo de features por palavra-chave/prefixo, ex.: `seras
 - **`task_type="classification"`** (PD) — alvo **binário**: binning binário, IV WoE (escala Siddiqi), KS/AUC/Gini/Acurácia/F1, gráficos ROC/KS/taxa-default/distribuição.
 - **`task_type="regression"`** (LGD) — alvo **contínuo**: binning contínuo, IV contínuo, métricas MAE/RMSE/R², boxplot/histograma do alvo.
 
-Aba **Avançado** + métodos: **critério de split selecionável** no Auto-fit (`criterion=` em `fit_auto`/`grow`: `optbin` · clf: `gini`/`entropy`/`ks`/`iv`/`chi2` · reg: `variance`/`mae`/`ftest`); **`suggest_splits()`** (TOP-N variáveis com nº de bins, PSI por amostra, teste de hipótese e IV); **`feature_importance()`** das variáveis que entraram na árvore; **auto-merge** de folhas indistinguíveis (`auto_merge`); **`to_sql()`** (régua como `CASE WHEN` copiável); **`diff_trees()`** (migração de notas + métricas entre duas versões).
+Aba **Avançado** + métodos: **critério de split selecionável** no Auto-fit e no split por folha (`criterion=` em `fit_auto`/`grow`: `optbin` · clf: `gini`/`entropy`/`ks`/`iv`/`chi2` · reg: `variance`/`mae`/`ftest`); **`suggest_splits()`** (TOP-N variáveis com nº de bins, PSI por amostra, teste de hipótese e IV) e **sugestão de cortes + máx. bins** por variável na folha; **`feature_importance()`** das variáveis que entraram na árvore; **auto-merge** de folhas indistinguíveis (`auto_merge`); **`to_sql()`** (régua como `CASE WHEN` copiável); **`diff_trees()`** (migração de notas + métricas entre duas versões); **`report_pdf()`** (relatório do modelo em PDF) e **tema escuro** na UI.
 
 ```python
 from yggdrasil.credit_risk.tree import TreeSegmenter
@@ -72,7 +72,9 @@ Algoritmos disponíveis (registry extensível em `ALGORITHMS`):
 
 > Também aceita um modelo já treinado via `set_model(...)`. Os motores de boosting opcionais são importados sob demanda — sem o pacote, o erro orienta a instalação do extra correto.
 
-**Tuning bayesiano (Optuna):** `seg.tune_optuna(algorithm="lightgbm", n_trials=40)` busca os hiperparâmetros que maximizam AUC (clf) / R² (reg) no OOT e re-treina com os melhores; na UI, slider de _trials_ + botão **Tunar com Optuna** na aba Modelo. Requer o extra `[optuna]`.
+**Tuning bayesiano (Optuna):** `seg.tune_optuna(algorithm="lightgbm", n_trials=40)` busca os hiperparâmetros que maximizam AUC (clf) / R² (reg) no OOT e re-treina com os melhores; na UI, slider de _trials_ + botão **Tunar com Optuna** (com barra de progresso) na aba Modelo. Requer o extra `[optuna]`.
+
+Mais na UI/segmentador: **ratings** decis/quantil/árvore/optbin **+ manuais** (`manual_score` por cortes de score · `manual_percentil` por lista de percentis); na **regressão logística**, a tabela da fórmula traz o **p-valor (Wald)** e estrelas de significância por coeficiente; **relatório PDF** do modelo (`report_pdf`) e **tema escuro** (toggle).
 
 ---
 
@@ -81,7 +83,7 @@ Algoritmos disponíveis (registry extensível em `ALGORITHMS`):
 | Pasta | Conteúdo |
 |---|---|
 | `src/yggdrasil/` | Código-fonte principal (as cinco esteiras acima). |
-| `tests/` | Testes automatizados (`pytest`) — 206 testes, incluindo os UI e Spark (estes *gated*). |
+| `tests/` | Testes automatizados (`pytest`) — suíte parametrizada (classificação/regressão), incluindo UI, Spark, boosting e Optuna (estes *gated* pela dependência). |
 | `notebooks/tutoriais/` | Tutoriais passo a passo (índice abaixo). Lógica de produção **não** vive aqui. |
 | `docs/` | Metodologia (o *porquê* dos métodos) e documentação dos segmentadores. |
 | `conf/` | Configuração por ambiente (dev/homolog/prod). Nunca versionar segredos. |
@@ -98,6 +100,7 @@ pip install -e ".[dev]"          # núcleo + ferramentas de teste/notebook
 pip install -e ".[ui]"           # opcional: UIs interativas (ipywidgets)
 pip install -e ".[spark]"        # opcional: geração/aplicação de régua em PySpark (fora do Databricks)
 pip install -e ".[boosting]"     # opcional: LightGBM + XGBoost + CatBoost para o ModelSegmenter
+pip install -e ".[optuna]"       # opcional: tuning bayesiano (ModelSegmenter.tune_optuna)
 pip install -e ".[pycaret]"      # opcional: treino automatizado via PyCaret
 ```
 
@@ -141,11 +144,33 @@ Todos centralizados em **[`notebooks/tutoriais/`](notebooks/tutoriais/)** (passo
 | 01 | [LGD / regressão (alvo [0,1] bimodal)](notebooks/tutoriais/01_tutorial_lgd.ipynb) |
 | 02 | [EDA de features](notebooks/tutoriais/02_tutorial_eda_features.ipynb) |
 | 03 | [Seleção de features (PySpark)](notebooks/tutoriais/03_tutorial_feature_selection.ipynb) |
-| 04 | [Segmentador LGD (UI)](notebooks/tutoriais/04_tutorial_lgd_segmenter.ipynb) |
-| 05 | [Segmentador PD (UI)](notebooks/tutoriais/05_tutorial_pd_segmenter.ipynb) |
+| 04 | [Árvore de segmentação **unificada** — PD & LGD por `task_type`](notebooks/tutoriais/04_tutorial_tree_segmenter.ipynb) |
 | 06 | [Construtor de modelos (UI)](notebooks/tutoriais/06_tutorial_model_segmenter.ipynb) |
 | 07 | [Esteira ML + MLflow](notebooks/tutoriais/07_tutorial_esteira_ml_mlflow.ipynb) |
-| 08 | [Relatórios de validação LGD](notebooks/tutoriais/08_tutorial_validacao_lgd.ipynb) |
 
 > 📖 **Metodologia** (o *porquê* dos métodos — KS, PSI/CSI, WoE/IV, ratings com fusão monotônica, SHAP, veredito de EDA): [`docs/metodologia.md`](docs/metodologia.md).
-> 📑 **Segmentadores:** [LGD](docs/credit-risk/lgd-segmenter.md) · [PD](docs/credit-risk/pd-segmenter.md).
+> 🌳 **Árvore de segmentação unificada (PD & LGD):** [`docs/credit-risk/tree-segmenter.md`](docs/credit-risk/tree-segmenter.md).
+
+---
+
+## 🖼️ Galeria
+
+| Árvore de PD (classificação) | Importância SHAP (model) |
+|---|---|
+| ![Árvore de segmentação de PD](docs/img/tree_pd.png) | ![Importância SHAP](docs/img/shap_importance.png) |
+
+| Dispersão do alvo por folha (LGD / regressão) |
+|---|
+| ![Boxplot do alvo por folha](docs/img/tree_lgd_boxplot.png) |
+
+> As UIs interativas (`TreeSegmenterUI` / `ModelSegmenterUI`) têm **tema claro e escuro** (toggle 🌙), abas de construção/diagnóstico/validação, **sugestão de splits**, **critério de split** (Gini/Entropy/KS/IV/Chi²/Variância/MAE/F-test), **export SQL**, **diff de versões** e **relatório PDF** — rode os tutoriais para ver ao vivo.
+
+---
+
+## 👤 Sobre o desenvolvedor
+
+**Richard Guilherme** — Cientista de Dados com foco em **risco de crédito** (PD/LGD/EAD), modelagem regulatória (CMN 4.966/2021, IFRS 9) e MLOps em Databricks.
+
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Richard%20Guilherme-0A66C2?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/richardguilhermeds/)
+
+> 🔗 Conecte-se no LinkedIn para acompanhar projetos e conteúdos de ciência de dados e risco de crédito.
