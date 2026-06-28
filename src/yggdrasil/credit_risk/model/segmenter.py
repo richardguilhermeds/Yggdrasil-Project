@@ -266,6 +266,17 @@ def _new_ax(figsize, dpi, ax):
     return fig, fig.subplots()
 
 
+def _pct_axis(ax, axis="y", xmax=1.0):
+    """Formata o(s) eixo(s) como percentual — só exibição, não altera os dados.
+    Use ``xmax=1.0`` quando os valores estão em fração [0,1] (risco/score) e
+    ``xmax=100`` quando já estão em 0-100 (ex.: % da amostra)."""
+    from matplotlib.ticker import PercentFormatter
+    if axis in ("y", "both"):
+        ax.yaxis.set_major_formatter(PercentFormatter(xmax=xmax, decimals=None))
+    if axis in ("x", "both"):
+        ax.xaxis.set_major_formatter(PercentFormatter(xmax=xmax, decimals=None))
+
+
 # Abreviações de mês em PT-BR (independem do locale do SO; Windows não traz pt_BR).
 _MESES_PT = ("jan", "fev", "mar", "abr", "mai", "jun",
              "jul", "ago", "set", "out", "nov", "dez")
@@ -1994,6 +2005,7 @@ class ModelSegmenter:
         ax.vlines(grid[j], cdf_pos[j], cdf_neg[j], color="#15324a", lw=2,
                   label=f"KS={diff[j]:.3f}")
         ax.set_xlabel("score"); ax.set_ylabel("CDF acumulada")
+        _pct_axis(ax, "x")
         ax.set_title(f"Curva KS · {sample or self.ref_sample}", fontsize=11,
                      fontweight="bold", color="#15324a")
         ax.legend(fontsize=9, loc="center right"); ax.grid(alpha=0.15)
@@ -2015,6 +2027,7 @@ class ModelSegmenter:
         else:
             ax.hist(sc, bins=bins, color="steelblue", alpha=0.85, edgecolor="#2f5d82")
         ax.set_xlabel("score"); ax.set_ylabel("densidade")
+        _pct_axis(ax, "x")
         ax.set_title(f"Distribuição do score · {sample or self.ref_sample}",
                      fontsize=11, fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)
@@ -2045,6 +2058,7 @@ class ModelSegmenter:
         lim = [min(ax.get_xlim()[0], ax.get_ylim()[0]), max(ax.get_xlim()[1], ax.get_ylim()[1])]
         ax.plot(lim, lim, color="#bbb", ls="--", lw=1)
         ax.set_xlabel("previsto"); ax.set_ylabel("observado")
+        _pct_axis(ax, "both")
         ax.set_title(f"Calibração · {sample or self.ref_sample}", fontsize=11,
                      fontweight="bold", color="#15324a")
         ax.grid(alpha=0.15)
@@ -2406,10 +2420,11 @@ class ModelSegmenter:
         ax.bar(xs, risco, color=cols, edgecolor="#33424f", alpha=0.9, width=0.72)
         for x0, r in zip(xs, risco):
             if np.isfinite(r):
-                ax.text(x0, r, f"{r:.3f}", ha="center", va="bottom", fontsize=7.5,
+                ax.text(x0, r, f"{r*100:.1f}%", ha="center", va="bottom", fontsize=7.5,
                         color="#15324a")
         ax.set_xticks(xs); ax.set_xticklabels(labels, fontsize=9)
         ax.set_ylabel("event_rate" if self.task_type == "classification" else "alvo médio")
+        _pct_axis(ax, "y")
         ax.set_title(f"Risco por rating · {sample or self.ref_sample}", fontsize=11,
                      fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)
@@ -2435,6 +2450,7 @@ class ModelSegmenter:
                    color=palette[k % len(palette)])
         ax.set_xticks(x + 0.4 - w / 2); ax.set_xticklabels(labels, fontsize=9)
         ax.set_ylabel("% da amostra"); ax.legend(fontsize=8)
+        _pct_axis(ax, "y", xmax=100)
         ax.set_title("Distribuição dos ratings por amostra", fontsize=11,
                      fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)
@@ -2457,6 +2473,7 @@ class ModelSegmenter:
                     markeredgecolor="#33424f", markeredgewidth=0.6, label=lab)
         ax.set_xticks(x); ax.set_xticklabels(samples, fontsize=9)
         ax.set_ylabel("risco médio"); ax.set_xlabel("amostra")
+        _pct_axis(ax, "y")
         ax.set_title("Risco dos ratings por amostra (cruzamento = inversão)",
                      fontsize=11, fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)
@@ -2489,6 +2506,7 @@ class ModelSegmenter:
                     markeredgecolor="#33424f", markeredgewidth=0.5, label=lab)
         ax.set_xticks(x); ax.set_xticklabels(_fmt_safras(xs), rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("risco médio"); ax.set_xlabel("safra")
+        _pct_axis(ax, "y")
         ax.set_title("Risco dos ratings por safra  ·  faixas vermelhas = inversão",
                      fontsize=11, fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)
