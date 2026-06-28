@@ -1996,7 +1996,15 @@ class ModelSegmenter:
         plt.figure()
         shap.summary_plot(sv, Xs, show=False, max_display=max_display)
         fig = plt.gcf()
-        fig.suptitle("SHAP — contribuição por feature", fontsize=11,
+        try:                                   # eixos/legenda em português
+            fig.axes[0].set_xlabel("valor SHAP (impacto na saída do modelo)")
+            if len(fig.axes) > 1:              # colorbar ("heatmap") à direita
+                cb = fig.axes[-1]
+                cb.set_ylabel("valor da variável")
+                cb.set_yticklabels(["baixo", "alto"])
+        except Exception:
+            pass
+        fig.suptitle("SHAP — contribuição por variável", fontsize=11,
                      fontweight="bold", color="#15324a")
         fig.tight_layout()
         return fig
@@ -2009,6 +2017,10 @@ class ModelSegmenter:
         plt.figure()
         shap.summary_plot(sv, Xs, plot_type="bar", show=False, max_display=max_display)
         fig = plt.gcf()
+        try:
+            fig.axes[0].set_xlabel("média(|valor SHAP|) — impacto médio na saída do modelo")
+        except Exception:
+            pass
         fig.suptitle("SHAP — importância global (|valor| médio)", fontsize=11,
                      fontweight="bold", color="#15324a")
         fig.tight_layout()

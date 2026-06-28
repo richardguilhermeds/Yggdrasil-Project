@@ -331,12 +331,13 @@ class ModelSegmenterUI:
         return None
 
     def _df_html(self, df, max_height=None, color_categoria=False, center=False,
-                 color_forca=False):
+                 color_forca=False, color_tendencia=False):
         sty = (df.style.hide(axis="index").set_table_styles(self._TABLE_STYLES)
                .set_properties(**{"font-size": "12px"}))
         if center:
             sty = sty.set_properties(**{"text-align": "center"})
-            sty = sty.set_table_styles([{"selector": "th", "props": [("text-align", "center")]}],
+            sty = sty.set_table_styles([{"selector": "th, td",
+                                         "props": [("text-align", "center")]}],
                                        overwrite=False)
         else:
             txt = [c for c in df.columns if df[c].dtype == object]
@@ -352,6 +353,15 @@ class ModelSegmenterUI:
                 fg, bg = self._FORCA_COLORS.get(v, ("", ""))
                 return (f"color:{fg};background-color:{bg};font-weight:600" if fg else "")
             sty = sty.map(_forca_css, subset=["forca"])
+        if color_tendencia and "tendencia" in df.columns:
+            def _tend_css(v):                       # crescente=verde · decrescente=vermelho · senão cinza
+                s = str(v)
+                if "decrescente" in s:              # antes de 'crescente' (substring!)
+                    return "color:#b3261e;background-color:#fdecea;font-weight:600"
+                if "crescente" in s:
+                    return "color:#137a3e;background-color:#e9f6ee;font-weight:600"
+                return "color:#6b7480;background-color:#f1f3f5;font-weight:600"
+            sty = sty.map(_tend_css, subset=["tendencia"])
         html = sty.to_html()
         if max_height:
             html = f"<div style='max-height:{max_height};overflow:auto'>{html}</div>"
@@ -555,16 +565,24 @@ class ModelSegmenterUI:
         bin_card.add_class("mseg-card")
         bin_card.layout = W.Layout(margin="26px 0 0 0")   # respiro até a linha da variável
 
+        # rótulo do eixo de risco por tipo de problema (clf = % de maus · reg = alvo médio)
+        _dist_h = "% de maus" if self.task_type == "classification" else "alvo médio"
+        # espaço entre "categorizar na mão" e a faixa de métricas
+        self.out_an_cards.layout = W.Layout(margin="20px 0 6px 0")
+        # distribuição AO LADO da tabela por faixa + inversão entre amostras (chart menor)
+        col_dist = W.VBox([
+            W.HTML(f"<div class='mseg-h'>Distribuição &amp; {_dist_h} por faixa</div>"),
+            self.out_an_distbad], layout=W.Layout(width="49%"))
+        col_tab = W.VBox([
+            W.HTML("<div class='mseg-h'>Tabela por faixa</div>"), self.out_an_table,
+            W.HTML("<div class='mseg-h' style='margin-top:12px'>Inversão entre amostras</div>"),
+            self.out_an_inv_sample], layout=W.Layout(width="49%"))
         tab_an = W.VBox([
             W.HBox([self.dd_var2, self.dd_sample2, self.tx_time2, self.btn_analyze]),
             bin_card,
             self.out_an_cards,
-            W.VBox([W.HTML("<div class='mseg-h'>Distribuição & % de maus por faixa</div>"),
-                    self.out_an_distbad]),
-            W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Tabela por faixa</div>"),
-                            self.out_an_table], layout=W.Layout(width="50%")),
-                    W.VBox([W.HTML("<div class='mseg-h'>Inversão entre amostras</div>"),
-                            self.out_an_inv_sample], layout=W.Layout(width="50%"))]),
+            W.HBox([col_dist, col_tab],
+                   layout=W.Layout(justify_content="space-between", align_items="flex-start")),
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Comportamento no tempo</div>"),
                             self.out_an_time], layout=W.Layout(width="50%")),
                     W.VBox([W.HTML("<div class='mseg-h'>Inversão por safra</div>"),
@@ -754,34 +772,46 @@ class ModelSegmenterUI:
         self.btn_load.on_click(self._on_load)
         self.btn_mlflow.on_click(self._on_mlflow)
 
-        tab_export = W.VBox([
+        self.tx_in_table.layout = W.Layout(width="48%")
+        self.tx_out_table.layout = W.Layout(width="48%")
+        card_valid = W.VBox([
+            W.HTML("<div class='mseg-h'>① Validação · backtest e estabilidade dos ratings</div>"),
             W.HBox([self.tx_time3, self.btn_backtest]),
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Backtest por safra</div>"),
                             self.out_backtest], layout=W.Layout(width="60%")),
                     W.VBox([W.HTML("<div class='mseg-h'>PSI dos ratings</div>"),
-                            self.out_psi], layout=W.Layout(width="40%"))]),
-            W.HBox([self.btn_export]), self.out_export,
-            W.HTML("<div class='mseg-h'>Escorar base — rating + valor previsto do alvo "
-                   "por rating (régua)</div>"),
+                            self.out_psi], layout=W.Layout(width="38%"))],
+                   layout=W.Layout(justify_content="space-between")),
+        ]); card_valid.add_class("mseg-card")
+        card_score = W.VBox([
+            W.HTML("<div class='mseg-h'>② Escoragem da base · score + rating + valor previsto "
+                   "(régua)</div>"),
             W.HTML("<div class='mseg-legend'>Devolve <code>score</code>, <code>rating</code> e o "
-                   "valor previsto do alvo daquele rating (ex.: LGD previsto). A base só precisa "
-                   "ter as <b>variáveis originais do modelo</b> — a binagem/WoE é refeita ao "
-                   "escorar e, quando uma variável foi categorizada, as <b>faixas/grupos são "
-                   "recriados</b> na saída.<br>• <b>Tabela Databricks</b>: informe "
-                   "<code>catalog.schema.tabela</code> (lê via Spark) e, opcionalmente, uma tabela "
-                   "de saída para gravar; o Spark DataFrame fica em <code>ui.result</code>.<br>"
-                   "• <b>Em memória</b>: deixe a tabela em branco para escorar a base carregada "
-                   "(ou <code>ui.score_df = df_novo</code>). Resultado (pandas) em "
-                   "<code>ui.result</code>.</div>"),
-            W.HBox([self.tx_in_table, self.tx_out_table]),
+                   "valor previsto do alvo daquele rating (ex.: LGD/PD previsto). A base só precisa "
+                   "das <b>variáveis originais do modelo</b> — binagem/WoE e faixas são recriadas ao "
+                   "escorar. <b>Tabela Databricks</b>: <code>catalog.schema.tabela</code> (via Spark; "
+                   "saída opcional) → <code>ui.result</code>. <b>Em memória</b>: deixe em branco (ou "
+                   "<code>ui.score_df = df_novo</code>) → <code>ui.result</code>.</div>"),
+            W.HBox([self.tx_in_table, self.tx_out_table],
+                   layout=W.Layout(justify_content="space-between")),
             W.HBox([self.tx_value_col, self.cb_recreate]),
             W.HBox([self.btn_ruler, self.btn_score]),
-            self.out_ruler,
-            self.out_score,
-            W.HTML("<div class='mseg-h'>Salvar / carregar (JSON + modelo joblib)</div>"),
+            self.out_ruler, self.out_score,
+            W.HTML("<div class='mseg-h' style='margin-top:8px'>Exportar DataFrame rotulado</div>"),
+            W.HBox([self.btn_export]), self.out_export,
+        ]); card_score.add_class("mseg-card")
+        card_persist = W.VBox([
+            W.HTML("<div class='mseg-h'>③ Persistência · JSON + modelo joblib</div>"),
             W.HBox([self.tx_save, self.btn_save, self.btn_load]),
-            W.HTML("<div class='mseg-h'>Registrar no MLflow</div>"),
+        ], layout=W.Layout(width="49%")); card_persist.add_class("mseg-card")
+        card_mlflow = W.VBox([
+            W.HTML("<div class='mseg-h'>④ Registrar no MLflow / Unity Catalog</div>"),
             W.HBox([self.tx_experiment, self.tx_model, self.btn_mlflow]),
+        ], layout=W.Layout(width="49%")); card_mlflow.add_class("mseg-card")
+        tab_export = W.VBox([
+            card_valid, card_score,
+            W.HBox([card_persist, card_mlflow],
+                   layout=W.Layout(justify_content="space-between", align_items="stretch")),
         ], layout=W.Layout(padding="2px"))
 
         self.tabs = W.Tab(children=[tab_vars, tab_an, tab_model, tab_rating, tab_export])
@@ -832,7 +862,8 @@ class ModelSegmenterUI:
                 rk["bins_manuais"] = rk["bins_manuais"].map(lambda b: "✎" if b else "")
                 rk = rk.rename(columns={"bins_manuais": "manual"})
             self.out_vars.value = self._df_html(rk, max_height="320px",
-                                                color_categoria=True, color_forca=True)
+                                                color_categoria=True, color_forca=True,
+                                                color_tendencia=True)
         except Exception as e:
             self.out_vars.value = f"<i>falha ao calcular IV: {e}</i>"
         self._refresh_var_preview()
@@ -918,11 +949,12 @@ class ModelSegmenterUI:
         tcol = self.tx_time2.value.strip() or None
         try:
             self.out_an_distbad.value = self._fig_html(
-                self.seg.plot_variable_distribution_badrate(feat, sample=sample), tight=False)
+                self.seg.plot_variable_distribution_badrate(feat, sample=sample,
+                                                            figsize=(6.4, 3.4)), tight=False)
             vt = self.seg.variable_table(feat, sample=sample)
-            self.out_an_table.value = self._df_html(vt, max_height="280px", center=True)
+            self.out_an_table.value = self._df_html(vt, max_height="240px", center=True)
             self.out_an_inv_sample.value = self._fig_html(
-                self.seg.plot_variable_inversion_by_sample(feat))
+                self.seg.plot_variable_inversion_by_sample(feat, figsize=(6.0, 3.1)))
             self.out_an_cards.value = self._var_cards(self.seg.variable_summary(feat, sample))
         except Exception as e:
             self.out_an_distbad.value = f"<i>{e}</i>"

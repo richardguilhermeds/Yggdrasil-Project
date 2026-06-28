@@ -222,6 +222,7 @@ class TreeSegmenterUI:
         # date_col: coluna de data/safra — FORA da modelagem, só p/ gráficos no tempo.
         self.task_type = task_type
         self._is_clf = task_type == "classification"
+        self._risk_label = "PD" if self._is_clf else "LGD"   # rótulo do alvo na UI
         self._tree_samples_cfg = tree_samples
         self.date_col = date_col
         self._kwargs = dict(target=target, task_type=task_type, sample_col=sample_col,
@@ -295,6 +296,20 @@ class TreeSegmenterUI:
                                        layout=W.Layout(width="100%"))
         self.sl_bins = W.IntSlider(description="máx. bins", min=2, max=8, value=4,
                                    layout=W.Layout(width="98%"), style=dstyle)
+        # critério do split desta folha (modo Ótimo): optbin (multi-bin) ou CART/CHAID
+        if self._is_clf:
+            _scrit = [("Binning ótimo (IV)", "optbin"), ("Gini", "gini"),
+                      ("Entropy / IG", "entropy"), ("KS", "ks"), ("IV gain", "iv"),
+                      ("Qui-quadrado (CHAID)", "chi2")]
+        else:
+            _scrit = [("Binning ótimo (IV)", "optbin"), ("Redução de variância", "variance"),
+                      ("Redução de MAE", "mae"), ("F-test / ANOVA", "ftest")]
+        self.dd_split_criterion = W.Dropdown(description="critério", options=_scrit,
+                                             value="optbin", layout=W.Layout(width="98%"),
+                                             style=dstyle)
+        self.dd_split_criterion.tooltip = ("Critério para escolher os cortes ao dividir ESTA "
+                                           "folha no modo Ótimo (optbin = multi-bin por IV; "
+                                           "demais = split binário CART/CHAID).")
         # Ótimo: limites OPCIONAIS de tamanho de bin (fração da folha) — optbinning
         self.cb_minbin = W.Checkbox(value=False, indent=False,
                                     description="limitar tamanho mínimo da bin",
@@ -336,6 +351,9 @@ class TreeSegmenterUI:
                             layout=W.Layout(width="98%", margin="2px 0"))
         self.btn_preview = mk("Preview", "info", "Mostra PD e representatividade (não altera)", "eye")
         self.btn_split = mk("Criar segmento", "success", "Efetiva o split na folha", "scissors")
+        self.btn_sugcuts = mk("Sugerir cortes & máx. bins", "warning",
+                              "Roda o binning ótimo da variável NESTA folha e preenche o 'máx. "
+                              "bins' e os 'Cortes' com a sugestão", "magic")
         self.btn_lock = mk("Fechar folha", "warning", "Trava a folha (não será dividida)", "lock")
         self.btn_unlock = mk("Reabrir folha", "", "Destrava a folha", "unlock")
         self.btn_prune = mk("Podar", "danger",
@@ -527,6 +545,7 @@ class TreeSegmenterUI:
         self.btn_tree_preview_hide = mk("Ocultar", "", "Oculta a imagem da árvore", "eye-slash")
 
         self.btn_preview.on_click(self._on_preview)
+        self.btn_sugcuts.on_click(self._on_suggest_cuts)
         self.btn_split.on_click(self._on_split)
         self.btn_lock.on_click(self._on_lock)
         self.btn_unlock.on_click(self._on_unlock)
@@ -632,25 +651,39 @@ class TreeSegmenterUI:
         # persistente abaixo das abas, para que mensagens de qualquer aba
         # apareçam (um widget só pode estar em um lugar da árvore de widgets).
         # ================================================================
+        if self._is_clf:
+            _bg_logo, _bg_titulo = "PD", "Segmentação de PD"
+            _bg_sub = "optimal binning binário · KS/AUC ao vivo"
+        else:
+            _bg_logo, _bg_titulo = "LGD", "Segmentação de LGD"
+            _bg_sub = "optimal binning contínuo · MAE/RMSE/R² ao vivo"
         banner = W.HTML(_CSS +
-            "<div class='treeui-banner'><div class='logo'>PD</div>"
-            "<div><div class='t'>Segmentação de PD</div>"
-            "<div class='s'>Construtor de árvore · optimal binning binário · KS/AUC ao vivo · "
+            f"<div class='treeui-banner'><div class='logo'>{_bg_logo}</div>"
+            f"<div><div class='t'>{_bg_titulo}</div>"
+            f"<div class='s'>Construtor de árvore · {_bg_sub} · "
             "PSI ao vivo (DES) · teste de hipótese entre folhas adjacentes</div></div></div>")
         bar_box = W.VBox([self.bar]); bar_box.add_class("treeui-bar")
 
-        # ---- legendas reutilizadas --------------------------------------
+        # ---- legendas reutilizadas (task-aware) -------------------------
+        _rl = "PD" if self._is_clf else "LGD"
         tree_legend = W.HTML(
-            "<div class='treeui-legend'>cor do quadrado = PD "
-            "(<span style='color:#1aa64b'>baixa</span> &rarr; "
-            "<span style='color:#caa000'>média</span> &rarr; "
-            "<span style='color:#d6453e'>alta</span>) · 🔒 folha fechada</div>")
+            f"<div class='treeui-legend'>cor do quadrado = {_rl} "
+            "(<span style='color:#1aa64b'>baixo</span> &rarr; "
+            "<span style='color:#caa000'>médio</span> &rarr; "
+            "<span style='color:#d6453e'>alto</span>) · 🔒 folha fechada</div>")
+        if self._is_clf:
+            _iv_intro = "<b>IV</b> (optbinning · WoE binário) = poder de"
+            _iv_faixas = ("Faixas (Siddiqi): <span style='color:#137a3e'>forte (0,3–0,5)</span> · "
+                          "<span style='color:#9a6b00'>médio (0,1–0,3)</span> · fraco/inútil (&lt;0,1) · "
+                          "<span style='color:#6b3fa0'>suspeito (&ge;0,5)</span> (alto demais, verifique vazamento).")
+        else:
+            _iv_intro = "<b>IV</b> (optbinning · contínuo) = poder de"
+            _iv_faixas = ("Faixas: <span style='color:#137a3e'>forte (0,1–0,35)</span> · "
+                          "<span style='color:#9a6b00'>médio (0,03–0,1)</span> · fraco/inútil (&lt;0,03) · "
+                          "<span style='color:#6b3fa0'>suspeito (&ge;0,35)</span>.")
         iv_legend = W.HTML(
-            "<div class='treeui-legend'><b>IV</b> (optbinning · WoE binário) = poder de "
-            "separação da variável na <b>folha selecionada</b> (★ = maior). Faixas (Siddiqi): "
-            "<span style='color:#137a3e'>forte (0,3–0,5)</span> · "
-            "<span style='color:#9a6b00'>médio (0,1–0,3)</span> · fraco/inútil (&lt;0,1) · "
-            "<span style='color:#6b3fa0'>suspeito (&ge;0,5)</span> (alto demais, verifique vazamento). "
+            f"<div class='treeui-legend'>{_iv_intro} "
+            f"separação da variável na <b>folha selecionada</b> (★ = maior). {_iv_faixas} "
             "<b>bins</b> = nº de faixas ideais do binning ótimo na folha.</div>"
             "<div class='treeui-legend' style='margin-top:6px;padding-top:6px;"
             "border-top:1px solid #eef1f4'><b>PSI</b> = estabilidade da variável (DES × demais "
@@ -691,10 +724,12 @@ class TreeSegmenterUI:
         card_leaf = W.VBox([self.leaf_header]); card_leaf.add_class("treeui-card")
         det_c1 = W.VBox([card_leaf], layout=W.Layout(width="30%"))
 
+        self.btn_sugcuts.layout.width = "99%"
         card_split = W.VBox([
             W.HTML("<div class='treeui-h'>Dividir a folha selecionada</div>"),
-            self.dd_leaf, self.dd_feature, self.tg_mode,
-            self.sl_bins, self.cb_minbin, self.sl_minbin, self.cb_maxbin, self.sl_maxbin,
+            self.dd_leaf, self.dd_feature, self.btn_sugcuts, self.tg_mode,
+            self.sl_bins, self.dd_split_criterion,
+            self.cb_minbin, self.sl_minbin, self.cb_maxbin, self.sl_maxbin,
             self.cb_mindiff, self.sl_mindiff,
             self.tx_cuts, self.cat_box,
             W.HBox([self.btn_preview, self.btn_split]),
@@ -740,10 +775,17 @@ class TreeSegmenterUI:
                    "(DES), com os cortes propostos marcados.</div>"),
             self.out_preview_chart,
         ], layout=W.Layout(width="49%")); card_preview.add_class("treeui-card")
+        if self._is_clf:
+            _hist_h = "PD da folha (taxa de default · DES)"
+            _hist_leg = ("Taxa de default da folha selecionada (DES), com IC de Wilson e a "
+                         "PD da carteira como referência.")
+        else:
+            _hist_h = "LGD da folha (alvo médio · DES)"
+            _hist_leg = ("Distribuição do alvo (LGD) na folha selecionada (DES), com a média "
+                         "da folha e a da carteira como referência.")
         card_hist = W.VBox([
-            W.HTML("<div class='treeui-h'>PD da folha (taxa de default · DES)</div>"),
-            W.HTML("<div class='treeui-legend'>Taxa de default da folha selecionada (DES), com IC "
-                   "de Wilson e a PD da carteira como referência.</div>"),
+            W.HTML(f"<div class='treeui-h'>{_hist_h}</div>"),
+            W.HTML(f"<div class='treeui-legend'>{_hist_leg}</div>"),
             self.out_leaf_hist,
         ], layout=W.Layout(width="49%")); card_hist.add_class("treeui-card")
         det_bottom = W.HBox([card_preview, card_hist],
@@ -797,12 +839,12 @@ class TreeSegmenterUI:
         card_table.add_class("treeui-card")
 
         sib_legend = W.HTML(
-            "<div class='treeui-legend'>Compara a <b>PD média</b> das folhas de um mesmo "
+            f"<div class='treeui-legend'>Compara o <b>{_rl} médio</b> das folhas de um mesmo "
             "pai (<b>folhas-irmãs</b>) e checa se a <b>ordem de risco</b> se mantém. "
-            "A ordem de <b>referência</b> é a PD na <b>DES</b>; uma <b>inversão</b> ocorre "
-            "quando, numa amostra ou safra, uma folha de menor risco passa a ter PD "
+            f"A ordem de <b>referência</b> é o {_rl} na <b>DES</b>; uma <b>inversão</b> ocorre "
+            f"quando, numa amostra ou safra, uma folha de menor risco passa a ter {_rl} "
             "<i>maior</i> que uma irmã de maior risco (as linhas se cruzam). "
-            "O gráfico da esquerda mostra a PD por <b>amostra</b> (DES, OOT, …) e o da "
+            f"O gráfico da esquerda mostra o {_rl} por <b>amostra</b> (DES, OOT, …) e o da "
             "direita por <b>safra</b> ao longo do tempo (faixas vermelhas = safras com "
             "inversão). O <b>indicador</b> resume: "
             "<span style='background:#e7f5ee;padding:1px 5px;border-radius:3px'>verde sem inversão</span> "
@@ -833,13 +875,20 @@ class TreeSegmenterUI:
         ])
         card_discrim.add_class("treeui-card")
 
-        metrics_legend = W.HTML(
-            "<div class='treeui-legend'>a régua prediz a PD pela taxa de default do segmento na "
-            "referência (DES); avaliada como modelo em cada amostra · "
-            "<b>KS</b>/<b>AUC</b>/<b>Gini</b> altos = a segmentação ordena bem o risco · "
-            "<b>Acurácia</b>/<b>F1</b> no corte KS-ótimo</div>")
+        if self._is_clf:
+            _ml = ("a régua prediz a PD pela taxa de default do segmento na referência (DES); "
+                   "avaliada como modelo em cada amostra · <b>KS</b>/<b>AUC</b>/<b>Gini</b> "
+                   "altos = a segmentação ordena bem o risco · <b>Acurácia</b>/<b>F1</b> no "
+                   "corte KS-ótimo")
+            _mh = "Discriminação (régua como modelo de PD)"
+        else:
+            _ml = ("a régua prediz o LGD pela média do alvo no segmento (referência DES); "
+                   "avaliada como modelo em cada amostra · <b>MAE</b>/<b>RMSE</b> menores e "
+                   "<b>R²</b> maior = a régua reproduz melhor o alvo")
+            _mh = "Desempenho (régua como modelo de LGD)"
+        metrics_legend = W.HTML(f"<div class='treeui-legend'>{_ml}</div>")
         card_metrics = W.VBox([
-            W.HTML("<div class='treeui-h'>Discriminação (régua como modelo de PD)</div>"),
+            W.HTML(f"<div class='treeui-h'>{_mh}</div>"),
             metrics_legend, self.out_metrics])
         card_metrics.add_class("treeui-card")
 
@@ -895,9 +944,9 @@ class TreeSegmenterUI:
         sep_val = W.HTML("<div class='treeui-band'>① Validação regulatória · "
                          "monotonicidade · calibração · backtest</div>")
         valid_legend = W.HTML(
-            "<div class='treeui-legend'>Roda as três checagens: <b>monotonicidade</b> da PD nas "
+            f"<div class='treeui-legend'>Roda as três checagens: <b>monotonicidade</b> do {_rl} nas "
             "notas (DES e demais amostras), <b>calibração</b> prevista (DES) × realizada (OOT) por "
-            "folha, e <b>backtest</b> da PD prevista × realizada por safra (informe a coluna de "
+            f"folha, e <b>backtest</b> do {_rl} previsto × realizado por safra (informe a coluna de "
             "tempo). O <b>relatório</b> reúne tudo num Markdown com as imagens.</div>")
         card_validacao = W.VBox([
             W.HTML("<div class='treeui-h'>Rodar validação</div>"),
@@ -926,18 +975,18 @@ class TreeSegmenterUI:
                    "versão no Model Registry.</div>"),
             self.tx_model, self.cb_uc, self.tx_experiment, self.tx_runname,
             W.HBox([self.btn_mlflow]),
-        ], layout=W.Layout(width="50%"))
+        ], layout=W.Layout(width="49%"))
         card_mlflow.add_class("treeui-card")
         card_spark = W.VBox([
             W.HTML("<div class='treeui-h'>Reconstruir folhas em tabela Spark</div>"),
             W.HTML("<div class='treeui-legend'>Aplica a régua a uma tabela Spark (segmento, nota e "
-                   "PD por linha), gravando opcionalmente o resultado.</div>"),
+                   "valor por linha), gravando opcionalmente o resultado.</div>"),
             self.tx_spark_in, self.tx_spark_out,
             W.HBox([self.btn_spark_apply]),
-        ], layout=W.Layout(width="48%"))
+        ], layout=W.Layout(width="49%"))
         card_spark.add_class("treeui-card")
         export_row = W.HBox([card_mlflow, card_spark],
-                            layout=W.Layout(width="100%", align_items="flex-start",
+                            layout=W.Layout(width="100%", align_items="stretch",
                                             justify_content="space-between"))
         tab_valid = W.VBox([sep_val, card_validacao, sep_exp, card_export_df, export_row])
 
@@ -955,7 +1004,7 @@ class TreeSegmenterUI:
         ], layout=W.Layout(width="49%"))
         card_json.add_class("treeui-card")
         card_img = W.VBox([
-            W.HTML("<div class='treeui-h'>Imagem da árvore (PD média &amp; % por folha)</div>"),
+            W.HTML(f"<div class='treeui-h'>Imagem da árvore ({_rl} médio &amp; % por folha)</div>"),
             self.tx_img_path,
             W.HBox([self.btn_plot, self.btn_plot_hide]),
             self.out_plot,
@@ -1005,15 +1054,15 @@ class TreeSegmenterUI:
         card_var_time.add_class("treeui-card")
         card_var_table = W.VBox([
             W.HTML("<div class='treeui-h'>Detalhe por safra</div>"),
-            self.out_var_table], layout=W.Layout(width="48%"))
+            self.out_var_table], layout=W.Layout(width="49%"))
         card_var_table.add_class("treeui-card")
         card_var_psi = W.VBox([
             W.HTML("<div class='treeui-h'>PSI por safra · vs. data de referência (DES)</div>"),
-            self.out_var_psi], layout=W.Layout(width="50%"))
+            self.out_var_psi], layout=W.Layout(width="49%"))
         card_var_psi.add_class("treeui-card")
         var_row_b = W.HBox([card_var_table, card_var_psi],
                            layout=W.Layout(justify_content="space-between",
-                                           align_items="flex-start", width="100%"))
+                                           align_items="stretch", width="100%"))
         tab_var = W.VBox([var_controls, var_row_a, card_var_time, var_row_b])
 
         # ---- ABA AVANÇADO: sugerir splits · auto-merge · importância · SQL · diff ----
@@ -1178,7 +1227,7 @@ class TreeSegmenterUI:
         return (
             "<div class='treeui-chips'><span class='lab'>folha ativa</span>"
             f"<span class='chip'><b>#{nota}</b> · {label}{lock}</span>"
-            f"<span class='chip'>PD {pd_txt}</span>"
+            f"<span class='chip'>{self._risk_label} {pd_txt}</span>"
             f"<span class='chip'>vol {vol}</span>"
             f"<span class='chip'>repr. {rep:.1f}%</span></div>")
 
@@ -1279,8 +1328,8 @@ class TreeSegmenterUI:
                 parts = [f"{self.ref_sample} {self._node_value(sid, self.ref_sample) * 100:.2f}%"]
                 for a in self._tree_nonref:          # só amostras COM alvo (sem ESTABILIDADE)
                     parts.append(f"{a} {self._node_value(sid, a) * 100:.2f}%")
-                return "PD " + " ".join(parts)
-            return f"PD {self._node_value(sid) * 100:.2f}%"
+                return self._risk_label + " " + " ".join(parts)
+            return f"{self._risk_label} {self._node_value(sid) * 100:.2f}%"
 
         psi_hex = {"green": "#1aa64b", "yellow": "#caa000", "red": "#d6453e"}
         # "barrinha" vertical que separa o bloco PD do bloco PSI na linha da folha
@@ -1727,7 +1776,7 @@ class TreeSegmenterUI:
                 rep = 100 * s["mask"].sum() / n_total
                 lock = "🔒 " if sid in self.locked else ""
                 nota = nota_map.get(sid, "?")
-                label = f"[{nota:>2}] {lock}{own}  (PD {value_of(sid) * 100:.2f}% · {rep:.0f}%)"
+                label = f"[{nota:>2}] {lock}{own}  ({self._risk_label} {value_of(sid) * 100:.2f}% · {rep:.0f}%)"
                 opts.append((label, sid))
             for c in sorted(filhos.get(sid, []), key=min_nota):   # esquerda→direita
                 rec(c)
@@ -1798,6 +1847,7 @@ class TreeSegmenterUI:
         manual = self.tg_mode.value == "Manual"
         cat = self._feature_kind() == "cat"
         self.sl_bins.layout.display = "none" if manual else ""           # máx. bins: só Ótimo
+        self.dd_split_criterion.layout.display = "none" if manual else ""  # critério: só Ótimo
         self.tx_cuts.layout.display = "" if (manual and not cat) else "none"   # cortes: Manual numérico
         self.cat_box.layout.display = "" if (manual and cat) else "none"      # grupos: Manual categórico
         self._sync_optbin_visibility()                                   # limites de bin: só Ótimo
@@ -1956,18 +2006,6 @@ class TreeSegmenterUI:
             print("Já deixei a variável selecionada no modo Ótimo — "
                   "rode o 👁 Preview e depois Criar segmento.")
 
-    def _df_html(self, df):
-        """Renderiza um DataFrame com o visual padrão das tabelas da UI."""
-        try:
-            sty = (df.style.hide(axis="index")
-                   .set_table_styles(self._TABLE_STYLES)
-                   .set_properties(**{"font-size": "12px", "text-align": "center"})
-                   .set_table_styles([{"selector": "th, td",
-                                       "props": [("text-align", "center")]}], overwrite=False))
-            return self._styler_html(sty)
-        except Exception:
-            return df.to_html(index=False, border=0)
-
     def _on_suggest3(self, _):
         sid = self._selected_leaf()
         with self.out_log:
@@ -1988,7 +2026,7 @@ class TreeSegmenterUI:
             disp = sug.copy()
             disp["passa_teste"] = disp["passa_teste"].map({True: "✅", False: "—"})
             disp = disp.rename(columns={"n_bins": "nº bins", "passa_teste": "passa teste"})
-            self.out_suggest.value = self._df_html(disp)
+            self.out_suggest.value = self._df_html(disp, center=True)
             print(f"TOP {len(sug)} splits sugeridos para a folha selecionada.")
 
     def _on_importance(self, _):
@@ -2004,7 +2042,37 @@ class TreeSegmenterUI:
                 self.out_importance.value = ("<i>A árvore ainda não tem splits — construa a "
                                              "segmentação primeiro.</i>")
                 return
-            self.out_importance.value = self._df_html(fi)
+            col = "importancia_%" if "importancia_%" in fi.columns else "importancia"
+            vmax = float(fi[col].max()) or 1.0
+
+            def _imp_bg(v):                          # cor proporcional à importância
+                frac = 0.0 if vmax <= 0 else max(0.0, float(v)) / vmax
+                r = int(232 - 150 * frac); g = int(245 - 35 * frac); b = int(233 - 165 * frac)
+                peso = "700" if frac >= 0.66 else "600" if frac >= 0.33 else "400"
+                return f"background-color:rgb({r},{g},{b});font-weight:{peso}"
+
+            fmt = {"importancia": "{:.4f}"}
+            if "importancia_%" in fi.columns:
+                fmt["importancia_%"] = "{:.1f}%"
+            sty = (fi.style.hide(axis="index")
+                   .set_table_styles(self._TABLE_STYLES)
+                   .set_properties(**{"font-size": "12px"})
+                   .set_table_styles([{"selector": "th, td",
+                                       "props": [("text-align", "center")]}], overwrite=False)
+                   .format(fmt)
+                   .map(_imp_bg, subset=[col]))
+            dic = (
+                "<div class='treeui-legend' style='margin-top:8px'>"
+                "<b>O que é a importância?</b> Em cada nó interno, a variável do split contribui "
+                "com <b>(IV da variável no nó) × (representatividade do nó)</b> — ganho de "
+                "separação ponderado pela população afetada. A importância de uma variável é a "
+                "<b>soma</b> dessas contribuições nos nós em que ela dividiu; "
+                "<b>importancia_%</b> normaliza para 100% (quanto cada variável pesa na árvore). "
+                "<b>n_splits</b> = em quantos nós ela foi usada. "
+                "<span style='background:rgb(232,245,233);padding:0 5px'>cor clara = baixa</span> "
+                "&rarr; <span style='background:rgb(82,210,68);padding:0 5px;font-weight:700'>"
+                "cor forte = alta</span>.</div>")
+            self.out_importance.value = self._styler_html(sty) + dic
             print("Importância das variáveis na árvore calculada.")
 
     def _on_sql(self, _):
@@ -2037,7 +2105,7 @@ class TreeSegmenterUI:
             mig.columns = [f"B·{c}" for c in mig.columns]
             html = (f"<div class='treeui-legend'>Concordância de notas (A=B): "
                     f"<b>{d['concordancia']:.1%}</b></div>"
-                    + self._df_html(d["resumo"])
+                    + self._df_html(d["resumo"], center=True)
                     + "<div class='treeui-h' style='margin-top:8px'>Migração de notas "
                       "(linhas = árvore A · colunas = árvore B)</div>"
                     + mig.to_html(border=0))
@@ -2280,14 +2348,16 @@ class TreeSegmenterUI:
         self.out_iv.value = hint + self._styler_html(sty)
 
     def _refresh_leaf_hist(self):
-        """Taxa de default da folha selecionada (DES), abaixo da tabela IV/PSI."""
+        """Alvo da folha selecionada (DES): taxa de default + IC de Wilson
+        (classificação) ou histograma do alvo (regressão)."""
         sid = self.dd_leaf.value
         if sid is None or sid not in self.seg.segments:
             self.out_leaf_hist.value = "<div style='font-size:11px;color:#889'>—</div>"
             return
         try:
-            self.out_leaf_hist.value = self._fig_html(self.seg.plot_leaf_target_hist(
-                sid, figsize=self._PREVIEW_FIGSIZE))
+            plot = (self.seg.plot_leaf_target_hist if self._is_clf
+                    else self.seg.plot_leaf_value_hist)
+            self.out_leaf_hist.value = self._fig_html(plot(sid, figsize=self._PREVIEW_FIGSIZE))
         except Exception as e:
             self.out_leaf_hist.value = (f"<div style='font-size:11px;color:#b3261e'>"
                                         f"(gráfico não gerado: {type(e).__name__})</div>")
@@ -2583,7 +2653,8 @@ class TreeSegmenterUI:
         try:
             if self.tg_mode.value == "Ótimo":
                 splits = None
-                extra = dict(max_n_bins=self.sl_bins.value, **self._optbin_extra())
+                extra = dict(max_n_bins=self.sl_bins.value,
+                             criterion=self.dd_split_criterion.value, **self._optbin_extra())
             else:
                 splits, extra = self._parse_cuts(feature, sid), {}
                 if not splits:
@@ -2595,6 +2666,35 @@ class TreeSegmenterUI:
         except Exception as e:
             self._pending = None
             return False, f"Erro ao preparar a divisão: {type(e).__name__}: {e}"
+
+    def _on_suggest_cuts(self, _):
+        """Sugere o binning ótimo da variável selecionada NESTA folha: ajusta o
+        'máx. bins' e preenche os 'Cortes' (Manual) com a sugestão."""
+        sid = self._selected_leaf()
+        feat = self.dd_feature.value
+        with self.out_log:
+            self.out_log.clear_output(wait=True)
+            if sid is None or sid not in self.seg.segments:
+                print("Selecione uma folha."); return
+            try:
+                r = self.seg.best_binning(sid, feat, max_n_bins=int(self.sl_bins.max))
+            except Exception as e:
+                print(f"Não consegui sugerir cortes: {type(e).__name__}: {e}"); return
+            lbl = self.seg.feature_labels.get(feat, feat)
+            if r["n_bins"] < 2:
+                print(f"Sem corte ótimo para '{lbl}' nesta folha "
+                      "(variável pouco informativa aqui)."); return
+            self.sl_bins.value = max(self.sl_bins.min, min(self.sl_bins.max, r["n_bins"]))
+            if r["kind"] == "num":
+                cuts = ", ".join(f"{c:.4g}" for c in r["cuts"])
+                self.tx_cuts.value = cuts
+                print(f"Sugestão p/ '{lbl}': {r['n_bins']} bins · cortes: {cuts}. "
+                      "Em 'Ótimo' o máx. bins já foi ajustado; em 'Manual' os cortes foram "
+                      "preenchidos. Clique em 👁 Preview.")
+            else:
+                grupos = " | ".join("{" + ", ".join(g) + "}" for g in r["groups"])
+                print(f"Sugestão p/ '{lbl}' (categórica): {r['n_bins']} grupos: {grupos}. "
+                      "No modo Ótimo o máx. bins já foi ajustado; clique em 👁 Preview.")
 
     def _on_preview(self, _):
         self.out_preview_seg.value = ""
@@ -2876,9 +2976,13 @@ class TreeSegmenterUI:
                 return "yellow", f"{n_indist}/{n_pares} irmãs indistintas"
             return "green", "monotônico · distintas"
 
-        dims = [("Discriminação", "o modelo separa bom × mau?", *v_disc()),
+        _rl = self._risk_label                       # "PD" (clf) ou "LGD" (reg)
+        _obs = "taxa de default observada" if self._is_clf else f"{_rl} observado"
+        _disc_q = ("o modelo separa bom × mau?" if self._is_clf
+                   else "o modelo explica a variação do alvo?")
+        dims = [("Discriminação", _disc_q, *v_disc()),
                 ("Estabilidade", "população estável (DES→amostras)?", *v_estab()),
-                ("Calibração", "PD prevista bate com a observada?", *v_calib()),
+                ("Calibração", f"o {_rl} previsto por folha bate com o realizado?", *v_calib()),
                 ("Estrutura", "folhas monotônicas e distintas?", *v_estrut())]
 
         def light(dim, q, c, val):
@@ -2890,6 +2994,24 @@ class TreeSegmenterUI:
         scorecard = ("<div class='treeui-metrics' style='grid-template-columns:"
                      "repeat(4,minmax(0,1fr))'>"
                      + "".join(light(*d) for d in dims) + "</div>")
+        # explicação da CALIBRAÇÃO (o que o diagnóstico mede)
+        _ref = self.ref_sample if self.sample_col is not None else "todos"
+        _chk = (calib.attrs.get("check_sample") if calib is not None
+                and hasattr(calib, "attrs") else None) or "OOT"
+        calib_ajuda = (
+            "<div class='treeui-legend' style='margin-top:8px'>"
+            "<b>O que é calibração aqui?</b> Cada folha vira um segmento com um "
+            f"<b>{_rl} previsto</b> = média do alvo na <b>{_ref}</b> (a régua). A calibração "
+            f"checa se esse valor <b>se confirma fora da amostra</b>: para cada folha, compara "
+            f"o {_rl} previsto (na {_ref}) com o <b>{_obs}</b> na amostra de aferição "
+            f"(<b>{_chk}</b>). O <b>gap</b> = previsto − realizado por folha; o placar usa o "
+            "<b>máx |gap|</b> entre as folhas: "
+            "<span style='color:#137a3e'>&le;0,02 OK</span> · "
+            "<span style='color:#9a6b00'>0,02–0,05 atenção</span> · "
+            "<span style='color:#b3261e'>&gt;0,05 crítico</span>. "
+            "Gap alto = a folha promete um risco que não se realiza (régua "
+            "des-calibrada) — veja o gráfico de calibração e o backtest na aba "
+            "<b>Validar &amp; Exportar</b>.</div>")
 
         ev = ""
         if psi_df is not None and len(psi_df):
@@ -2915,9 +3037,9 @@ class TreeSegmenterUI:
         if calib is not None and len(calib):
             cols = [c for c in ["folha", "n", "valor_previsto", "valor_realizado", "gap"]
                     if c in calib.columns]
-            ev += ("<div class='treeui-h' style='margin-top:14px'>Calibração · PD prevista (DES) × "
-                   "realizada</div>" + self._df_html(calib[cols], max_height="240px",
-                                                     center=True))
+            ev += (f"<div class='treeui-h' style='margin-top:14px'>Calibração · {_rl} previsto (DES) × "
+                   "realizado por folha</div>" + self._df_html(calib[cols], max_height="240px",
+                                                               center=True))
         # estrutura: monotonicidade + nº de inversões e QUAIS folhas invertem
         def _inv_str(inv):
             if not inv:
@@ -2927,13 +3049,13 @@ class TreeSegmenterUI:
         mono_disp["folhas que invertem"] = mono["inversoes"].apply(_inv_str)
         mono_disp = mono_disp.rename(columns={"monotonico": "monotônico",
                                               "n_inversoes": "nº inversões"})
-        ev += ("<div class='treeui-h' style='margin-top:14px'>Estrutura · monotonicidade da "
-               "PD por amostra</div>"
-               "<div class='treeui-legend'>Cada inversão é um par de folhas adjacentes (pela "
-               "ordem da régua) cuja PD está fora de ordem — <b>folha a ▸ folha b</b> indica "
-               "que a folha <b>a</b> tem PD maior que a <b>b</b>, que deveria ser ≥.</div>"
+        ev += (f"<div class='treeui-h' style='margin-top:14px'>Estrutura · monotonicidade do "
+               f"{_rl} por amostra</div>"
+               f"<div class='treeui-legend'>Cada inversão é um par de folhas adjacentes (pela "
+               f"ordem da régua) cujo {_rl} está fora de ordem — <b>folha a ▸ folha b</b> indica "
+               f"que a folha <b>a</b> tem {_rl} maior que a <b>b</b>, que deveria ser ≥.</div>"
                + self._df_html(mono_disp, center=True))
-        return scorecard + ev
+        return scorecard + calib_ajuda + ev
 
     # ==================================================================
     # Validação (monotonicidade · calibração · backtest) e relatório
@@ -3294,8 +3416,8 @@ class TreeSegmenterUI:
     def _on_plot(self, _):
         path = self.tx_img_path.value.strip() or None
         try:
-            fig = self.seg.plot_tree(save_path=path,    # repr. % + PD (DES)
-                                     highlight=self.dd_leaf.value)   # destaca a folha selecionada
+            # sem destaque da folha selecionada: todas as folhas com o mesmo estilo
+            fig = self.seg.plot_tree(save_path=path)    # repr. % + alvo (DES)
             self.out_plot.value = self._fig_html(fig, border=True)
         except Exception as e:
             self.out_plot.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao "

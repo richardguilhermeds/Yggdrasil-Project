@@ -1315,9 +1315,12 @@ class TreeSegmenter:
     #   se `save_path` for dado, salva a imagem (PNG/SVG/PDF…).
     # ------------------------------------------------------------------
     def plot_tree(self, ascending: bool = True, figsize=None, cmap: str = "RdYlGn_r",
-                  show_samples: bool = False, title: str | None = "Segmentação de PD",
+                  show_samples: bool = False, title: str | None = "auto",
                   save_path: str | None = None, dpi: int = 150, ax=None,
                   highlight: str | None = None):
+        # "auto" → título conforme o tipo de alvo (PD p/ classificação · LGD p/ regressão)
+        if title == "auto":
+            title = f"Segmentação de {'PD' if self._is_clf else 'LGD'}"
         try:
             import textwrap
 
@@ -1978,8 +1981,8 @@ class TreeSegmenter:
             descr.append(r["descricao"]); vals.append(v)
         if not vals:
             raise ValueError("Sem dados para o boxplot.")
-        if figsize is None:
-            figsize = (max(6.0, len(vals) * 1.1), 4.6)
+        if figsize is None:                       # mais largo e mais baixo
+            figsize = (max(10.0, len(vals) * 1.6), 3.4)
         fig, ax = self._new_ax(figsize, dpi, ax)
         norm = Normalize(0.0, 1.0)
         cmap_obj = plt.get_cmap(cmap)
@@ -3360,6 +3363,33 @@ class TreeSegmenter:
         out.attrs["valor_medio"] = round(mean_global, 4) if not np.isnan(mean_global) else np.nan
         out.attrs["cutoff"] = out.attrs["valor_medio"]      # compat (média do alvo na folha)
         return out
+
+    # ------------------------------------------------------------------
+    # BEST_BINNING: binning ótimo de UMA variável numa folha — nº de bins e os
+    #   cortes (num) / grupos (cat) que o optbinning escolhe. Alimenta o botão
+    #   "sugerir cortes" dos controles de split (folha × variável específica).
+    # ------------------------------------------------------------------
+    def best_binning(self, sid: str | None = None, feature: str | None = None,
+                     max_n_bins: int = 8, min_bin_size: float = 0.05) -> dict:
+        """Sugere o binning ótimo de ``feature`` na folha ``sid`` (raiz por padrão).
+
+        Devolve ``{kind, n_bins, cuts, groups}``: ``n_bins`` = nº de faixas/grupos
+        ideais (sem o bin de faltantes), ``cuts`` = cortes numéricos sugeridos
+        (para preencher 'Cortes' no modo Manual) e ``groups`` = grupos de
+        categorias (categórico). Útil para indicar o melhor 'máx. bins' e os
+        cortes ao dividir a folha por aquela variável."""
+        sid = sid if (sid in self.segments) else "root"
+        sub = self.df[self._leaf_mask(sid)]
+        bins, _modo, kind = self._resolve_bins(
+            sub, feature, None, None, max_n_bins, min_bin_size, relax_max=True)
+        cuts, groups = [], []
+        for b in bins:
+            if b["kind"] == "num" and np.isfinite(b.get("hi", np.inf)):
+                cuts.append(round(float(b["hi"]), 6))
+            elif b["kind"] == "cat":
+                groups.append([str(c) for c in b["cats"]])
+        n_bins = sum(1 for b in bins if b["kind"] != "na")
+        return {"kind": kind, "n_bins": int(n_bins), "cuts": sorted(cuts), "groups": groups}
 
     # ------------------------------------------------------------------
     # FEATURE_IMPORTANCE: importância das variáveis que ENTRARAM na árvore.

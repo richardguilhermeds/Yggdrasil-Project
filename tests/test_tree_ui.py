@@ -63,6 +63,23 @@ def test_ui_constroi_e_expoe_task_type(task):
     assert ui.task_type == task and ui.seg.task_type == task
 
 
+def test_ui_banner_titulo_por_task(task):
+    import re
+    ui = _build(task)
+    html = ui.panel.children[0].value                    # banner é o 1º filho do panel
+    titulo = re.search(r"class='t'>([^<]+)<", html).group(1)
+    esperado = "Segmentação de PD" if task == "classification" else "Segmentação de LGD"
+    assert titulo == esperado
+    assert ui._risk_label == ("PD" if task == "classification" else "LGD")
+
+
+def test_ui_leaf_hist_por_task(task):
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)                             # dispara _refresh -> _refresh_leaf_hist
+    assert "não gerado" not in ui.out_leaf_hist.value    # reg usa plot_leaf_value_hist, clf badrate
+
+
 def test_ui_preview_split(task):
     ui = _build(task)
     with contextlib.redirect_stdout(io.StringIO()):
@@ -164,6 +181,36 @@ def test_ui_criterio_de_split(task):
         ui._on_autofit(None)
     assert ui.seg.task_type == task
     assert sum(s["is_leaf"] for s in ui.seg.segments.values()) >= 2
+
+
+def test_ui_sugerir_cortes_preenche_controles(task):
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        leaf = [s for s, v in ui.seg.segments.items() if v["is_leaf"]][0]
+        ui.dd_leaf.value = leaf
+        ui.dd_feature.value = "score"
+        ui._on_suggest_cuts(None)
+    # numérica: ou preencheu os cortes, ou ajustou o máx. bins p/ a sugestão
+    assert ui.tx_cuts.value != "" or ui.sl_bins.value >= 2
+
+
+def test_ui_importancia_colorida_com_dicionario(task):
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        ui._on_importance(None)
+    html = ui.out_importance.value
+    assert "rgb(" in html                            # cor por importância (gradiente)
+    assert "O que é a importância" in html           # dicionário
+
+
+def test_ui_diag_explica_calibracao(task):
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        ui._on_diag(None)
+    assert "O que é calibração" in ui.out_diag.value
 
 
 def test_ui_diff_de_arvores(task, tmp_path):

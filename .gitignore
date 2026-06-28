@@ -33,3 +33,7 @@ htmlcov/
 .venv*/
 venv/
 env/
+
+# artefatos de execução de notebooks/UI
+arvore_pd.png
+**/arvore_pd.png
