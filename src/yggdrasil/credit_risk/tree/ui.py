@@ -359,9 +359,9 @@ class TreeSegmenterUI:
         self.sl_repr = W.FloatSlider(description="min repr%", min=0, max=10, step=0.5,
                                      value=3.0, layout=full, style=dstyle)
         self.sl_repr.tooltip = "Representatividade mínima por folha (%); abaixo disso, funde com a irmã"
-        self.sl_gap = W.FloatSlider(description="ΔPD mínimo", min=0, max=0.10, step=0.002,
+        self.sl_gap = W.FloatSlider(description=f"Δ{self._risk_label} mínimo", min=0, max=0.10, step=0.002,
                                     value=0.02, readout_format=".3f", layout=full, style=dstyle)
-        self.sl_gap.tooltip = "Diferença mínima de PD entre irmãs; abaixo disso, as duas são unidas (0.02 = 2 p.p.)"
+        self.sl_gap.tooltip = f"Diferença mínima de {self._risk_label} entre irmãs; abaixo disso, as duas são unidas (0.02 = 2 p.p.)"
         self.dd_test = W.Dropdown(description="Teste",
                                   options=[("Mann-Whitney", "mannwhitney"), ("Welch t", "welch")],
                                   value="mannwhitney", layout=W.Layout(width="100%"),
@@ -370,7 +370,7 @@ class TreeSegmenterUI:
         def mk(desc, style, tip, icon):
             return W.Button(description=desc, button_style=style, tooltip=tip, icon=icon,
                             layout=W.Layout(width="98%", margin="2px 0"))
-        self.btn_preview = mk("Preview", "info", "Mostra PD e representatividade (não altera)", "eye")
+        self.btn_preview = mk("Preview", "info", f"Mostra {self._risk_label} e representatividade (não altera)", "eye")
         self.btn_split = mk("Criar segmento", "success", "Efetiva o split na folha", "scissors")
         self.btn_sugcuts = mk("Sugerir cortes & máx. bins", "warning",
                               "Roda o binning ótimo da variável NESTA folha e preenche o 'máx. "
@@ -379,7 +379,7 @@ class TreeSegmenterUI:
         self.btn_unlock = mk("Reabrir folha", "", "Destrava a folha", "unlock")
         self.btn_prune = mk("Podar", "danger",
                             "Funde folhas-irmãs com representatividade < min repr% ou diferença "
-                            "de PD < ΔPD mínimo", "cut")
+                            f"de {self._risk_label} < Δ{self._risk_label} mínimo", "cut")
         self.btn_reset = mk("Reset", "", "Recomeça do zero", "refresh")
         self.btn_export = mk("Exportar", "primary", "Gera ui.result com o rótulo", "download")
         # copiar a tabela de folhas p/ o Excel (TSV pronto p/ colar)
@@ -394,9 +394,9 @@ class TreeSegmenterUI:
         self.btn_collapse = mk("Recolher p/ o pai", "danger",
                                "Desfaz o split: recolhe a folha de volta ao segmento pai", "compress")
         self.btn_merge_l = mk("Fundir ◀", "warning",
-                              "Funde a folha com a vizinha de menor corte (num) / menor PD (cat)", "arrow-left")
+                              f"Funde a folha com a vizinha de menor corte (num) / menor {self._risk_label} (cat)", "arrow-left")
         self.btn_merge_r = mk("Fundir ▶", "warning",
-                              "Funde a folha com a vizinha de maior corte (num) / maior PD (cat)", "arrow-right")
+                              f"Funde a folha com a vizinha de maior corte (num) / maior {self._risk_label} (cat)", "arrow-right")
         self.btn_merge_na = mk("Juntar missings", "warning",
                                "Junta o nó de faltantes/missings (NaN) deste split dentro da folha "
                                "populada selecionada — a regra vira 'bin OU missing'", "link")
@@ -472,7 +472,7 @@ class TreeSegmenterUI:
         self.sl_boot = W.IntSlider(description="reamostras", min=200, max=5000, step=100,
                                    value=1000, layout=full, style=dstyle)
         self.btn_boot = mk("Calcular IC bootstrap", "primary",
-                           "Calcula o IC da PD por folha e a aderência em OOT", "random")
+                           f"Calcula o IC {'da PD' if self._is_clf else 'do LGD'} por folha e a aderência em OOT", "random")
         # --- placar de saúde do modelo (aba Diagnóstico) ---
         self.btn_diag = mk("Avaliar modelo (placar)", "primary",
                            "Calcula o placar de saúde: discriminação (KS/AUC/Gini), estabilidade "
@@ -489,7 +489,7 @@ class TreeSegmenterUI:
                                   layout=full, style=sib_style,
                                   placeholder="coluna de safra (ex.: dt_ref)")
         self.btn_sib = mk("Analisar folhas-irmãs (inversão)", "primary",
-                          "Compara a PD média das folhas de mesmo pai por amostra e por "
+                          f"Compara {'a PD média' if self._is_clf else 'o LGD médio'} das folhas de mesmo pai por amostra e por "
                           "safra e sinaliza inversões da ordem de risco", "exchange")
         # --- validação regulatória (monotonicidade, calibração, backtest) e relatório ---
         self.tx_time_col = W.Text(description="coluna tempo", value="dt_ref",
@@ -532,7 +532,7 @@ class TreeSegmenterUI:
                                   layout=full, style=dstyle,
                                   placeholder="caminho .png/.svg (opcional)")
         self.btn_plot = mk("Ver / salvar árvore (imagem)", "info",
-                           "Renderiza a árvore como imagem (PD média e % por folha) e salva "
+                           f"Renderiza a árvore como imagem ({self._risk_mean} e % por folha) e salva "
                            "se um caminho for informado", "picture-o")
         self.btn_plot_hide = mk("Recolher imagem", "", "Oculta a imagem da árvore", "eye-slash")
         # --- relatório PDF do modelo (capa + métricas + árvore + folhas + calibração) ---
@@ -550,7 +550,7 @@ class TreeSegmenterUI:
         self.tx_spark_out = W.Text(description="saída", layout=spark_lay, style=dstyle,
                                    placeholder="opcional: grava o resultado nesta tabela")
         self.btn_spark_apply = mk("Reconstruir folhas (Spark)", "primary",
-                                  "Aplica a régua à tabela Spark (segmento, nota e PD por linha), "
+                                  f"Aplica a régua à tabela Spark (segmento, nota e {self._risk_label} por linha), "
                                   "desde que as colunas tenham o mesmo nome", "table")
         # --- controles da aba "Análise de variáveis" ---
         # opções com o NOME DE EXIBIÇÃO (feature_labels) — valor = nome da coluna
@@ -615,6 +615,8 @@ class TreeSegmenterUI:
             # histograma do alvo (ROC/KS não se aplica a alvo contínuo)
             self.btn_roc.description = "📦 Boxplot por folha"
             self.btn_ks.description = "📊 Histograma do alvo"
+            self.btn_roc.tooltip = "Boxplot do alvo (LGD) por folha — dispersão dentro de cada folha"
+            self.btn_ks.tooltip = "Histograma do alvo (LGD) na carteira"
             self.btn_roc.on_click(self._on_box)
             self.btn_ks.on_click(self._on_hist)
         self.btn_undo.on_click(self._on_undo)
@@ -849,8 +851,8 @@ class TreeSegmenterUI:
             "<span style='background:#fdf3da;padding:1px 5px;border-radius:3px'>0.10–0.25 atenção</span> "
             "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>&ge;0.25 instável</span>"
             "<br><b>p (irmãs)</b> = p-valor de um <b>teste de hipótese</b> que compara a "
-            "<b>distribuição do alvo (default)</b> da folha com a da <b>irmã adjacente</b> (mesmo "
-            "pai, na amostra de referência DES). H₀: as duas irmãs têm a mesma PD. "
+            f"<b>distribuição do alvo ({'default' if self._is_clf else 'LGD'})</b> da folha com a da <b>irmã adjacente</b> (mesmo "
+            f"pai, na amostra de referência DES). H₀: as duas irmãs têm {'a mesma PD' if self._is_clf else 'o mesmo LGD'}. "
             "O teste é o <b>Mann-Whitney U</b> (não-paramétrico, padrão) ou o <b>t de Welch</b> "
             "(médias, variâncias desiguais) — escolha no seletor <b>Teste</b>. "
             "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>p alto (&gt;0,05, em vermelho)</span> "
@@ -1553,7 +1555,7 @@ class TreeSegmenterUI:
             rep = 100 * n / len(self.df) if len(self.df) else 0.0
             cells = (chip("Volumetria", f"{n:,}".replace(",", "."))
                      + chip("Repr.", f"{rep:.1f}%")
-                     + chip("PD", f"{self._node_value(sid) * 100:.2f}%"))
+                     + chip(self._risk_label, f"{self._node_value(sid) * 100:.2f}%"))
             return head + f"<div class='treeui-metrics'>{cells}</div>"
 
         sm = self._sample_masks
@@ -1570,18 +1572,18 @@ class TreeSegmenterUI:
 
         # 2) PD média (DES e demais) + incremento de cada amostra vs DES
         pd_ref = self._node_value(sid, self.ref_sample)
-        sec2 = chip(f"PD {self.ref_sample}",
+        sec2 = chip(f"{self._risk_label} {self.ref_sample}",
                     "—" if pd.isna(pd_ref) else f"{pd_ref * 100:.2f}%", sub="referência")
         for a in self._pd_nonref:
             v = self._node_value(sid, a)
             if pd.isna(v) or pd.isna(pd_ref):
-                sec2 += chip(f"PD {ab(a)}", "—" if pd.isna(v) else f"{v * 100:.2f}%")
+                sec2 += chip(f"{self._risk_label} {ab(a)}", "—" if pd.isna(v) else f"{v * 100:.2f}%")
                 continue
             d = (v - pd_ref) * 100      # incremento em pontos percentuais
             sig = "+" if d >= 0 else "−"
             dcol = "#b3261e" if d > 0 else "#137a3e"   # PD subindo = pior (vermelho)
             sub = f"<span style='color:{dcol}'>Δ vs DES {sig}{abs(d):.2f} p.p.</span>"
-            sec2 += chip(f"PD {ab(a)}", f"{v * 100:.2f}%", sub=sub)
+            sec2 += chip(f"{self._risk_label} {ab(a)}", f"{v * 100:.2f}%", sub=sub)
 
         # 3) Aderência DES → amostra (teste de hipótese: nome + p-valor)
         test_rows = ""
@@ -1740,6 +1742,10 @@ class TreeSegmenterUI:
         lv, cols, headers = self._leaf_table_spec()
         sty = self._style_leaves(lv[cols]).relabel_index(
             [headers[c] for c in cols], axis="columns")
+        # tabela larga (muitas amostras): garante a largura natural para NÃO cortar
+        # a última coluna (ex.: PSI ESTAB) — rola na horizontal dentro do container.
+        sty = sty.set_table_styles(
+            [{"selector": "", "props": [("min-width", "max-content")]}], overwrite=False)
         self.out_table.value = self._styler_html(sty, max_height="320px")
 
     def _leaves_tsv(self):
@@ -2927,9 +2933,9 @@ class TreeSegmenterUI:
                 f"border-radius:3px'>{bar}{ootmark}</div></div>")
         leg = (f"<div style='font-size:10.5px;color:#778;margin-top:5px'>"
                f"barra cinza = IC {int(bc.attrs.get('ci',0.95)*100)}% (DES) · "
-               f"traço azul = PD {ref} · ")
+               f"traço azul = {self._risk_label} {ref} · ")
         if chk:
-            leg += (f"círculo = PD {chk} (<span style='color:#1aa64b'>verde dentro</span> / "
+            leg += (f"círculo = {self._risk_label} {chk} (<span style='color:#1aa64b'>verde dentro</span> / "
                     f"<span style='color:#d6453e'>vermelho fora</span>)")
         leg += "</div>"
         rows.append(leg + "</div>")
@@ -2961,7 +2967,7 @@ class TreeSegmenterUI:
             n_tot = int(bc["aderente"].notna().sum())
             chk = bc.attrs.get("check_sample")
             resumo = (f"<div style='font-size:12px;color:#15324a;margin:6px 0'>Aderência "
-                      f"<b>{chk}</b>: {n_ok}/{n_tot} folhas com PD dentro do IC bootstrap "
+                      f"<b>{chk}</b>: {n_ok}/{n_tot} folhas com {self._risk_label} dentro do IC bootstrap "
                       f"(n_boot={bc.attrs.get('n_boot')}).</div>")
         self.out_boot.value = self._boot_forest_html(bc) + resumo + self._styler_html(sty)
 
@@ -3325,7 +3331,7 @@ class TreeSegmenterUI:
             f"{s['n_pairs']} par(es) de irmãs comparados</span></div>"
             f"<div style='font-size:12px;line-height:1.7'>{am_line}<br>{sf_line}</div>"
             f"<div style='font-size:11px;color:#6b7480;margin-top:6px'>"
-            f"Ordem de referência (PD na {s['ref_sample']}): {ordem}</div>"
+            f"Ordem de referência ({self._risk_label} na {s['ref_sample']}): {ordem}</div>"
             "</div>")
 
     def _on_sib_analyze(self, _):
@@ -3434,7 +3440,7 @@ class TreeSegmenterUI:
             print(buf.getvalue().strip() or "Auto-merge concluído.")
             if n1 == n0:
                 print("Nenhuma folha-irmã indistinguível (p > alpha) — nada a fundir. "
-                      "Aumente o alpha ou o 'ΔPD mínimo' para fundir mais.")
+                      f"Aumente o alpha ou o 'Δ{self._risk_label} mínimo' para fundir mais.")
         self.locked &= set(self.seg.segments)
         self._pending = None
         self._refresh()
