@@ -259,6 +259,11 @@ class ModelSegmenterUI:
                      "fraco": ("#9a6f12", "#fbf3e0"), "inútil": ("#b23a2a", "#fbe7e4"),
                      "suspeito": ("#6b46c1", "#efe9fb")}
 
+    # cores da estabilidade (PSI): estável→verde · atenção→amarelo · instável→vermelho
+    _ESTABILIDADE_COLORS = {"estável": ("#157a52", "#e7f5ee"),
+                            "atenção": ("#9a6f12", "#fbf3e0"),
+                            "instável": ("#b23a2a", "#fbe7e4")}
+
     # CSS por nível de qualidade de uma métrica (identificador visual da tabela)
     _LEVEL_CSS = {
         "bom":     "background-color:#e7f5ee;color:#157a52;font-weight:600",
@@ -346,7 +351,7 @@ class ModelSegmenterUI:
         return None
 
     def _df_html(self, df, max_height=None, color_categoria=False, center=False,
-                 color_forca=False, color_tendencia=False):
+                 color_forca=False, color_tendencia=False, color_estabilidade=False):
         sty = (df.style.hide(axis="index").set_table_styles(self._TABLE_STYLES)
                .set_properties(**{"font-size": "12px"}))
         if center:
@@ -377,6 +382,11 @@ class ModelSegmenterUI:
                     return "color:#137a3e;background-color:#e9f6ee;font-weight:600"
                 return "color:#6b7480;background-color:#f1f3f5;font-weight:600"
             sty = sty.map(_tend_css, subset=["tendencia"])
+        if color_estabilidade and "estabilidade" in df.columns:
+            def _estab_css(v):
+                fg, bg = self._ESTABILIDADE_COLORS.get(v, ("", ""))
+                return (f"color:{fg};background-color:{bg};font-weight:600" if fg else "")
+            sty = sty.map(_estab_css, subset=["estabilidade"])
         html = sty.to_html()
         if max_height:
             html = f"<div style='max-height:{max_height};overflow:auto'>{html}</div>"
@@ -654,6 +664,12 @@ class ModelSegmenterUI:
                                      bar_style="info", orientation="horizontal",
                                      layout=W.Layout(width="70%", visibility="hidden"),
                                      style={"description_width": "initial"})
+        # barra de status do treino (escondida até treinar)
+        self.pb_fit = W.IntProgress(value=0, min=0, max=1, description="treinar:",
+                                    bar_style="info", orientation="horizontal",
+                                    layout=W.Layout(width="60%", visibility="hidden"),
+                                    style={"description_width": "initial"})
+        self.out_fit_status = W.HTML()     # status do fit (treinando / concluído / erro)
         self.btn_tune.on_click(self._on_tune)
         self.cb_woe = W.Checkbox(value=False, indent=False,
                                  description="Transformar variáveis (WoE por bins)")
@@ -684,6 +700,8 @@ class ModelSegmenterUI:
             self.out_algo_help,
             self.out_woe_help,
             W.HBox([self.btn_fit, self.btn_shap]),
+            self.pb_fit,
+            self.out_fit_status,
             W.HTML("<div class='mseg-legend'>Tuning bayesiano (Optuna): busca os melhores "
                    "hiperparâmetros do algoritmo selecionado e treina com eles.</div>"),
             W.HBox([self.sl_trials, self.btn_tune]),
@@ -924,7 +942,7 @@ class ModelSegmenterUI:
                 rk = rk.rename(columns={"bins_manuais": "manual"})
             self.out_vars.value = self._df_html(rk, max_height="320px",
                                                 color_categoria=True, color_forca=True,
-                                                color_tendencia=True)
+                                                color_tendencia=True, color_estabilidade=True)
         except Exception as e:
             self.out_vars.value = f"<i>falha ao calcular IV: {e}</i>"
         self._refresh_var_preview()
@@ -1344,17 +1362,37 @@ class ModelSegmenterUI:
     def _on_fit(self, b):
         algo = self.dd_algo.value
         transform = "woe" if self.cb_woe.value else "raw"
+        # barra "ocupada" enquanto o fit (síncrono) roda
+        self.btn_fit.disabled = True
+        self.pb_fit.bar_style = "info"
+        self.pb_fit.value = self.pb_fit.max
+        self.pb_fit.description = "treinando…"
+        self.pb_fit.layout.visibility = "visible"
+        self.out_fit_status.value = (f"<div class='mseg-legend'><i>ajustando o modelo "
+                                     f"({algo})… pode levar alguns segundos.</i></div>")
         try:
             self.seg.fit(algo, hyperparams=self._collect_hyperparams(algo), transform=transform)
             modo = "WoE/bins" if transform == "woe" else "valores crus"
             self._log(f"[fit] {algo} treinado com {len(self.seg.model_features)} "
                       f"variáveis ({modo}).")
+            self.pb_fit.bar_style = "success"
+            self.pb_fit.description = "concluído ✓"
+            self.out_fit_status.value = (
+                f"<div class='mseg-legend'><span style='color:#157a52;font-weight:600'>"
+                f"✓ {algo} treinado com {len(self.seg.model_features)} variáveis "
+                f"({modo}).</span></div>")
             self._render_metrics()
             self._render_model_plots()
             self._render_formula()
             self._refresh_bar()
         except Exception as e:
+            self.pb_fit.bar_style = "danger"
+            self.pb_fit.description = "erro"
+            self.out_fit_status.value = (f"<div style='color:#b23a2a;font-size:12px'>"
+                                         f"<b>Erro no fit:</b> {type(e).__name__}: {e}</div>")
             self._log(f"[fit] erro: {e}")
+        finally:
+            self.btn_fit.disabled = False
 
     def _on_tune(self, b):
         algo = self.dd_algo.value

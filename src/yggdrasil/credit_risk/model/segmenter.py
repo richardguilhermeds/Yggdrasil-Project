@@ -223,6 +223,25 @@ def _count_inversions(ordered, values) -> tuple:
     return n_inv, n_pairs
 
 
+def _inverted_pairs(ordered, values) -> list:
+    """Pares ``(a, b)`` cuja ordem de risco inverte vs. a referência: ``a`` vem
+    ANTES de ``b`` em ``ordered`` (risco crescente na referência), mas tem risco
+    MAIOR que ``b`` em ``values`` (dict rótulo→risco). Ex.: a régua diz C < D na
+    DES, mas na OOT C > D → devolve ``[("C", "D")]``."""
+    pairs = []
+    for a in range(len(ordered)):
+        va = values.get(ordered[a], float("nan"))
+        if pd.isna(va):
+            continue
+        for b in range(a + 1, len(ordered)):
+            vb = values.get(ordered[b], float("nan"))
+            if pd.isna(vb):
+                continue
+            if va > vb:
+                pairs.append((ordered[a], ordered[b]))
+    return pairs
+
+
 def _fit_optbinning_splits(b, x, y) -> list:
     """Roda ``b.fit(x, y)`` e devolve ``list(b.splits)``; silencia warnings
     benignos e devolve ``[]`` se o ajuste falhar."""
@@ -2502,17 +2521,35 @@ class ModelSegmenter:
         return pd.DataFrame(rows).sort_values("psi", ascending=False).reset_index(drop=True)
 
     def monotonicity_report(self) -> pd.DataFrame:
-        """Verifica se o risco médio é monotônico ao longo dos ratings, por amostra."""
+        """Verifica se o risco médio é monotônico ao longo dos ratings, por amostra.
+
+        A coluna ``inverte_vs_DES`` lista os ratings cuja ordem de risco se inverte
+        em relação à referência (DES) — ex.: ``C↔D`` quando a régua diz C < D na DES
+        mas a amostra (p.ex. OOT) traz C > D. ``—`` = nenhuma inversão."""
         rating = self._rating_series()
         labels = self.rating_labels_
+        # ordem de referência: ratings ordenados pelo risco na DES (crescente)
+        ref_mask = (pd.Series(True, index=self.df.index) if self.sample_col is None
+                    else self.df[self.sample_col] == self.ref_sample)
+        ref_risco = {l: self._risco(self.df.loc[(rating == l) & ref_mask, self.target])
+                     for l in labels}
+        ordered = sorted(labels, key=lambda l: (np.inf if pd.isna(ref_risco[l])
+                                                 else ref_risco[l]))
         rows = []
         for a in self._samples():
             am = (pd.Series(True, index=self.df.index) if self.sample_col is None
                   else self.df[self.sample_col] == a)
-            risco = [self._risco(self.df.loc[(rating == l) & am, self.target]) for l in labels]
+            vals = {l: self._risco(self.df.loc[(rating == l) & am, self.target]) for l in labels}
+            risco = [vals[l] for l in labels]
             trend, n_inv = _trend(risco)
+            if self.sample_col is not None and a == self.ref_sample:
+                inv_txt = "(referência)"
+            else:
+                pares = _inverted_pairs(ordered, vals)
+                inv_txt = ", ".join(f"{x}↔{y}" for x, y in pares) if pares else "—"
             rows.append({"amostra": a, "monotonico": n_inv == 0,
-                         "tendencia": trend, "n_inversoes": n_inv})
+                         "tendencia": trend, "n_inversoes": n_inv,
+                         "inverte_vs_DES": inv_txt})
         return pd.DataFrame(rows)
 
     def backtest(self, time_col=None, sample=None, tol=0.10) -> pd.DataFrame:
