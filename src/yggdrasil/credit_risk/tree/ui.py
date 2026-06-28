@@ -2109,7 +2109,7 @@ class TreeSegmenterUI:
             disp = sug.copy()
             disp["passa_teste"] = disp["passa_teste"].map({True: "✅", False: "—"})
             disp = disp.rename(columns={"n_bins": "nº bins", "passa_teste": "passa teste"})
-            self.out_suggest.value = self._df_html(disp, center=True)
+            self.out_suggest.value = self._df_html(disp, center=True, color=True)
             print(f"TOP {len(sug)} splits sugeridos para a folha selecionada.")
 
     def _on_importance(self, _):
@@ -3242,11 +3242,36 @@ class TreeSegmenterUI:
             return f"<div style='max-height:{max_height};overflow:auto'>{html}</div>"
         return html
 
-    def _df_html(self, df, max_height=None, center=False):
+    @staticmethod
+    def _css_forca(v):                       # força do IV (forte/médio/suspeito)
+        return {"forte": "color:#137a3e;font-weight:600",
+                "médio": "color:#9a6b00;font-weight:600",
+                "suspeito": "color:#6b3fa0;font-weight:600"}.get(v, "color:#9aa2b1")
+
+    @staticmethod
+    def _css_estab(v):                       # estabilidade (estável/atenção/instável)
+        return {"estável": "color:#137a3e",
+                "atenção": "color:#9a6b00;font-weight:600",
+                "instável": "color:#b3261e;font-weight:600"}.get(v, "color:#9aa2b1")
+
+    @staticmethod
+    def _css_psi(v):                         # PSI numérico (verde<0.10<amarelo<0.25<vermelho)
+        if pd.isna(v):
+            return "color:#9aa2b1"
+        a = abs(v)
+        c = "#137a3e" if a < 0.10 else "#9a6b00" if a < 0.25 else "#b3261e"
+        return f"color:{c};font-weight:600"
+
+    @staticmethod
+    def _css_passa(v):                       # passa no teste de hipótese (✅)
+        return "color:#137a3e;font-weight:600" if str(v).strip() == "✅" else "color:#9aa2b1"
+
+    def _df_html(self, df, max_height=None, center=False, color=False):
         """HTML de um DataFrame cru (sem índice), p/ atribuir a um widget HTML.
         Aplica bordas por célula (divisão de colunas nítida). Por padrão alinha à
         esquerda as colunas de texto; com ``center=True`` centraliza tudo
-        (cabeçalho e células)."""
+        (cabeçalho e células). Com ``color=True`` colore por NOME de coluna: força
+        (IV), psi_* numéricas, psi_classificacao (estabilidade) e passa teste."""
         sty = (df.style.hide(axis="index")
                        .set_table_styles(self._TABLE_STYLES)
                        .set_properties(**{"font-size": "12px"}))
@@ -3258,6 +3283,17 @@ class TreeSegmenterUI:
             txt_cols = [c for c in df.columns if df[c].dtype == object]
             if txt_cols:
                 sty = sty.set_properties(subset=txt_cols, **{"text-align": "left"})
+        if color:
+            for c in df.columns:
+                lc = str(c).lower()
+                if lc in ("forca", "força"):
+                    sty = sty.map(self._css_forca, subset=[c])
+                elif lc in ("psi_classificacao", "estabilidade", "estab."):
+                    sty = sty.map(self._css_estab, subset=[c])
+                elif lc.startswith("psi") and pd.api.types.is_numeric_dtype(df[c]):
+                    sty = sty.map(self._css_psi, subset=[c])
+                elif lc in ("passa teste", "passa_teste"):
+                    sty = sty.map(self._css_passa, subset=[c])
         return self._styler_html(sty, max_height)
 
     def _display_fig(self, fig, border=True):
