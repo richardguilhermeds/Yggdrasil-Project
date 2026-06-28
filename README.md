@@ -66,11 +66,11 @@ Algoritmos disponíveis (registry extensível em `ALGORITHMS`):
 | Regressão Logística / Linear | clf / reg | scikit-learn (core) |
 | Random Forest, Extra Trees | clf + reg | scikit-learn (core) |
 | Gradient Boosting, Hist Gradient Boosting | clf + reg | scikit-learn (core) |
-| LightGBM | clf + reg | extra `[lgbm]` |
-| XGBoost | clf + reg | extra `[xgboost]` |
+| LightGBM | clf + reg | core |
+| XGBoost | clf + reg | core |
 | CatBoost | clf + reg | extra `[catboost]` |
 
-> Também aceita um modelo já treinado via `set_model(...)`. Os motores de boosting opcionais são importados sob demanda. Sem o pacote instalado, o erro orienta qual extra instalar.
+> Também aceita um modelo já treinado via `set_model(...)`. LightGBM e XGBoost vêm no core; o CatBoost é importado sob demanda e, sem ele, o erro orienta a instalar o extra `[catboost]`.
 
 **Tuning bayesiano (Optuna):** `seg.tune_optuna(algorithm="lightgbm", n_trials=40)` busca os hiperparâmetros que maximizam AUC (clf) ou R² (reg) no OOT e re-treina com os melhores. Na UI há um slider de *trials* e o botão Tunar com Optuna (com barra de progresso) na aba Modelo. Requer o extra `[optuna]`.
 
@@ -99,12 +99,12 @@ Mais na UI e no segmentador: ratings em decis/quantil/árvore/optbin, e também 
 pip install -e ".[dev]"          # núcleo + ferramentas de teste/notebook
 pip install -e ".[ui]"           # opcional: UIs interativas (ipywidgets)
 pip install -e ".[spark]"        # opcional: geração/aplicação de régua em PySpark (fora do Databricks)
-pip install -e ".[boosting]"     # opcional: LightGBM + XGBoost + CatBoost para o ModelSegmenter
+pip install -e ".[catboost]"     # opcional: CatBoost (LightGBM e XGBoost já vêm no core)
 pip install -e ".[optuna]"       # opcional: tuning bayesiano (ModelSegmenter.tune_optuna)
 pip install -e ".[pycaret]"      # opcional: treino automatizado via PyCaret
 ```
 
-> Os motores de boosting também podem ser instalados individualmente: `.[lgbm]`, `.[xgboost]` ou `.[catboost]`.
+> CatBoost é o único motor de boosting não incluído por padrão (`pip install -e ".[catboost]"`).
 
 > Localmente, o MLflow 3.x exige `MLFLOW_ALLOW_FILE_STORE=true` para usar o backend `./mlruns` (os notebooks já definem isso). No Databricks, use o tracking do workspace.
 

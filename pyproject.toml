@@ -24,6 +24,10 @@ dependencies = [
     "optbinning>=0.19",
     "matplotlib>=3.6",
     "seaborn>=0.12",
+    # Motores de boosting incluídos por padrão (o ModelSegmenter os usa direto;
+    # RandomForest/ExtraTrees/GradientBoosting/HistGB já vêm via scikit-learn).
+    "lightgbm>=4.0",
+    "xgboost>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -36,12 +40,13 @@ ui = ["ipywidgets>=8.0", "ipython>=8.0"]
 # Geração/aplicação da régua de LGD em PySpark (no Databricks o pyspark já vem
 # no cluster; instale só fora dele).
 spark = ["pyspark>=3.4"]
-# Algoritmos de boosting opcionais para o ModelSegmenter (RandomForest,
-# ExtraTrees, GradientBoosting e HistGradientBoosting já vêm via scikit-learn).
+# Boosting: LightGBM e XGBoost já vêm no core (acima). CatBoost segue opcional.
+# (RandomForest/ExtraTrees/GradientBoosting/HistGB vêm via scikit-learn.) Os
+# extras lgbm/xgboost ficam por compatibilidade — no-op se já instalados.
 lgbm = ["lightgbm>=4.0"]
 xgboost = ["xgboost>=2.0"]
 catboost = ["catboost>=1.2"]
-# Atalho: todos os motores de boosting opcionais de uma vez.
+# Atalho dos motores de boosting (CatBoost é o único não incluído no core).
 boosting = ["lightgbm>=4.0", "xgboost>=2.0", "catboost>=1.2"]
 # Tuning de hiperparâmetros por otimização bayesiana (ModelSegmenter.tune_optuna).
 optuna = ["optuna>=3.0"]
