@@ -316,6 +316,9 @@ class TreeSegmenter:
                 f"task_type inválido: {task_type!r}. Use um de {TASK_TYPES}.")
         self.task_type = task_type
         self._is_clf = task_type == "classification"
+        # rótulos de risco por tipo de alvo (PD na classificação · LGD na regressão)
+        self._risk_word = "PD" if self._is_clf else "LGD"
+        self._risk_mean = "PD média" if self._is_clf else "LGD médio"
         # classe de optbinning e nome do kwarg de diferença mínima por tipo de alvo
         self._OptBin = OptimalBinning if self._is_clf else ContinuousOptimalBinning
         self._diff_kwarg = "min_event_rate_diff" if self._is_clf else "min_mean_diff"
@@ -1461,7 +1464,8 @@ class TreeSegmenter:
                               fontweight="bold", linespacing=1.12, clip_on=True)
             fit_items.append((t_split, bw * 0.94, bh * 0.58))
             # 2) representatividade e PD (em %, 2 casas) na MESMA linha, separados por barra
-            pd_txt = f"PD {pdv * 100:.2f}%" if not pd.isna(pdv) else "PD —"
+            pd_txt = (f"{self._risk_word} {pdv * 100:.2f}%" if not pd.isna(pdv)
+                      else f"{self._risk_word} —")
             metr = f"repr. {rep:.1f}%  |  {pd_txt}"
             if show_samples and self.sample_col is not None:
                 amostras = list(self.df[self.sample_col].dropna().unique())
@@ -1489,7 +1493,7 @@ class TreeSegmenter:
         cbar = fig.colorbar(sm, ax=ax, fraction=0.025, pad=0.01)
         from matplotlib.ticker import PercentFormatter
         cbar.ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=1))
-        cbar.set_label(f"PD média{' (DES)' if ref else ''} "
+        cbar.set_label(f"{self._risk_mean}{' (DES)' if ref else ''} "
                        f"(escala 0–{vmax * 100:.1f}%)", fontsize=9)
         fig.tight_layout()
 
@@ -1937,9 +1941,11 @@ class TreeSegmenter:
                         textcoords="offset points", xytext=(6, 4), fontsize=9)
         ax.set_xlim(0, lim_hi)
         ax.set_ylim(0, lim_hi)
-        ax.set_xlabel(f"PD prevista (régua · {self.ref_sample if self.sample_col else 'todos'})")
-        ax.set_ylabel(f"PD realizada ({chk if chk else 'todos'})")
-        ax.set_title("Calibração da régua de PD por folha", fontsize=12,
+        _prev = "PD prevista" if self._is_clf else "LGD previsto"
+        _real = "PD realizada" if self._is_clf else "LGD realizado"
+        ax.set_xlabel(f"{_prev} (régua · {self.ref_sample if self.sample_col else 'todos'})")
+        ax.set_ylabel(f"{_real} ({chk if chk else 'todos'})")
+        ax.set_title(f"Calibração da régua de {self._risk_word} por folha", fontsize=12,
                      fontweight="bold", color="#15324a")
         ax.legend(fontsize=8, loc="upper left")
         ax.grid(alpha=0.2)
@@ -2502,12 +2508,13 @@ class TreeSegmenter:
                     ha="center", va="center" if dentro else "bottom", fontsize=8,
                     color="white" if dentro else col_bar, fontweight="bold")
 
-        # LINHA = PD média por faixa, eixo da direita (vermelho)
+        # LINHA = risco médio por faixa, eixo da direita (vermelho)
+        _lab = "Taxa de default (PD)" if self._is_clf else "LGD (alvo)"
         ax2 = ax.twinx()
         line, = ax2.plot(xs, pds, color=col_line, marker="o", lw=2.2,
                          markersize=7, markeredgecolor="#fff", zorder=5,
-                         label="Taxa de default (PD)")
-        ax2.set_ylabel("Taxa de default (PD)", color=col_line, fontweight="bold")
+                         label=_lab)
+        ax2.set_ylabel(_lab, color=col_line, fontweight="bold")
         ax2.tick_params(axis="y", labelcolor=col_line)
         pmax = float(np.nanmax(pds)) if pds.size else 0.0
         ax2.set_ylim(0, max(pmax * 1.3 + 0.02, 0.02))
@@ -2520,7 +2527,7 @@ class TreeSegmenter:
         ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=8.5)
         rot = self.feature_labels.get(feature, feature)
         mono = "monotônico" if tbl.attrs.get("mono_ok") else "NÃO monotônico"
-        ax.set_title(f"'{rot}': representatividade (barra) × PD (linha) — "
+        ax.set_title(f"'{rot}': representatividade (barra) × {self._risk_word} (linha) — "
                      f"{modo}, {mono}", fontsize=11.5, fontweight="bold", color="#15324a")
         ax.legend(handles=[bars, line], loc="upper left", fontsize=9, framealpha=0.9)
         ax.grid(axis="y", alpha=0.15)
@@ -2632,17 +2639,21 @@ class TreeSegmenter:
         ax.barh([0], [p], height=0.5, color="#d6453e" if (not np.isnan(pc) and p > pc)
                 else "#1aa64b", alpha=0.85, edgecolor="#33424f",
                 xerr=[[p - lo], [hi - p]], capsize=5, error_kw=dict(ecolor="#33424f", lw=1.1))
-        ax.text(p, 0, f"  PD {p:.3f}", va="center", ha="left", fontsize=10,
+        ax.text(p, 0, f"  {self._risk_word} {p:.3f}", va="center", ha="left", fontsize=10,
                 fontweight="bold", color="#15324a")
         if not np.isnan(pc):
             ax.axvline(pc, color="#0f3d57", lw=1.6, ls="--",
-                       label=f"PD carteira {pc:.3f}")
+                       label=f"{self._risk_word} carteira {pc:.3f}")
             ax.legend(fontsize=8, loc="lower right")
         ax.set_yticks([])
         ax.set_xlim(0, xmax)
-        ax.set_xlabel("Taxa de default (PD)")
-        ax.set_title(f"PD da folha{sfx} (n={y.size}; maus={int(y.sum())})",
-                     fontsize=10.5, fontweight="bold", color="#15324a")
+        ax.set_xlabel("Taxa de default (PD)" if self._is_clf else "LGD (alvo)")
+        if self._is_clf:
+            ax.set_title(f"PD da folha{sfx} (n={y.size}; maus={int(y.sum())})",
+                         fontsize=10.5, fontweight="bold", color="#15324a")
+        else:
+            ax.set_title(f"LGD da folha{sfx} (n={y.size})",
+                         fontsize=10.5, fontweight="bold", color="#15324a")
         ax.grid(axis="x", alpha=0.15)
         fig.tight_layout()
         if save_path:
@@ -3209,8 +3220,8 @@ class TreeSegmenter:
                     label=f"folha {nota.get(sid)}")
         ax.set_xticks(x); ax.set_xticklabels(xs, fontsize=9)
         ax.set_xlim(-0.25, len(xs) - 0.75 + 0.5)
-        ax.set_ylabel("PD média"); ax.set_xlabel("amostra")
-        ax.set_title("PD média das folhas-irmãs por amostra",
+        ax.set_ylabel(self._risk_mean); ax.set_xlabel("amostra")
+        ax.set_title(f"{self._risk_mean} das folhas-irmãs por amostra",
                      fontsize=11, fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)
         ax.legend(fontsize=8, ncol=max(1, min(len(ordered), 4)),
@@ -3252,9 +3263,9 @@ class TreeSegmenter:
                     label=f"folha {nota.get(sid)}")
         ax.set_xticks(x); ax.set_xticklabels(xs, rotation=45, ha="right", fontsize=8)
         ax.set_xlim(-0.7, len(xs) - 0.3)
-        ax.set_ylabel("PD média"); ax.set_xlabel("safra")
+        ax.set_ylabel(self._risk_mean); ax.set_xlabel("safra")
         sfx = f" · {sample}" if sample else " · todas as amostras"
-        ax.set_title(f"PD média das folhas-irmãs por safra{sfx}"
+        ax.set_title(f"{self._risk_mean} das folhas-irmãs por safra{sfx}"
                      "  ·  faixas vermelhas = inversão",
                      fontsize=11, fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)

@@ -241,6 +241,7 @@ class TreeSegmenterUI:
         self.task_type = task_type
         self._is_clf = task_type == "classification"
         self._risk_label = "PD" if self._is_clf else "LGD"   # rótulo do alvo na UI
+        self._risk_mean = "PD média" if self._is_clf else "LGD médio"   # frase "X média/médio"
         self._tree_samples_cfg = tree_samples
         self.date_col = date_col
         self._kwargs = dict(target=target, task_type=task_type, sample_col=sample_col,
@@ -345,10 +346,12 @@ class TreeSegmenterUI:
         self.cb_mindiff = W.Checkbox(value=False, indent=False,
                                      description="exigir diferença mínima entre bins",
                                      layout=W.Layout(width="98%"))
-        self.sl_mindiff = W.FloatSlider(description="ΔPD bins", min=0.0, max=0.20, step=0.005,
+        self.sl_mindiff = W.FloatSlider(description=f"Δ{self._risk_label} bins", min=0.0,
+                                        max=0.20, step=0.005,
                                         value=0.02, readout_format=".3f",
                                         layout=W.Layout(width="98%"), style=dstyle)
-        self.sl_mindiff.tooltip = ("Diferença mínima de taxa de default entre duas bins "
+        _diff_tip = "taxa de default" if self._is_clf else "alvo médio (LGD)"
+        self.sl_mindiff.tooltip = (f"Diferença mínima de {_diff_tip} entre duas bins "
                                    "consecutivas no binning ótimo (min_mean_diff)")
         self.tx_cuts = W.Text(description="Cortes", layout=W.Layout(width="98%"), style=dstyle,
                               placeholder="num: 0.7,0.9  |  cat: a,b; c")
@@ -627,7 +630,7 @@ class TreeSegmenterUI:
         self.btn_tree_preview.on_click(self._on_tree_preview)
         self.btn_tree_preview_hide.on_click(lambda _: setattr(self.out_tree_img, "value", ""))
         self.tg_mode.observe(self._on_mode_change, names="value")
-        self.dd_feature.observe(self._on_mode_change, names="value")
+        self.dd_feature.observe(self._on_feature_change, names="value")
         self.cb_minbin.observe(lambda _: self._sync_optbin_visibility(), names="value")
         self.cb_maxbin.observe(lambda _: self._sync_optbin_visibility(), names="value")
         self.cb_mindiff.observe(lambda _: self._sync_optbin_visibility(), names="value")
@@ -1658,20 +1661,21 @@ class TreeSegmenterUI:
         out = (head
                + sec_h("Volumetria &amp; representatividade")
                + f"<div class='treeui-metrics'>{sec1}</div>"
-               + sec_h("PD média &amp; incremento vs DES")
+               + sec_h(f"{self._risk_mean} &amp; incremento vs DES")
                + f"<div class='treeui-metrics'>{sec2}</div>")
         h0_css = "font-size:10.5px;color:#8a93a3;margin:1px 0 6px;line-height:1.5"
         if test_rows:
             out += (sec_h("Aderência DES → amostra (teste de hipótese)")
                     + f"<div style='{h0_css}'><b>H₀:</b> a folha tem a <b>mesma "
-                      "distribuição de PD</b> na DES e na amostra. "
+                      f"distribuição de {self._risk_label}</b> na DES e na amostra. "
                       "<i>p&gt;0,05</i> ⇒ não rejeita H₀ (aderente); "
                       "<i>p≤0,05</i> ⇒ rejeita H₀ (não aderente).</div>"
                     + test_rows)
         if sib_rows:
             out += (sec_h("Distinção vs folha-irmã adjacente (mesmo pai)")
-                    + f"<div style='{h0_css}'><b>H₀:</b> as <b>duas folhas-irmãs têm a "
-                      "mesma PD</b>. <i>p≤0,05</i> ⇒ rejeita H₀ (folhas distintas); "
+                    + f"<div style='{h0_css}'><b>H₀:</b> as <b>duas folhas-irmãs têm "
+                      f"{'a mesma PD' if self._is_clf else 'o mesmo LGD'}</b>. "
+                      "<i>p≤0,05</i> ⇒ rejeita H₀ (folhas distintas); "
                       "<i>p&gt;0,05</i> ⇒ não rejeita H₀ (indistinguíveis · candidatas "
                       "a fusão).</div>"
                     + sib_rows)
@@ -1712,7 +1716,7 @@ class TreeSegmenterUI:
         cols = ["folha", "descricao"]
         headers = {"folha": "folha", "descricao": "descrição"}
         if self.sample_col is None:
-            for c, h in (("repr_%", "repr. %"), ("valor_medio", "PD média")):
+            for c, h in (("repr_%", "repr. %"), ("valor_medio", self._risk_mean)):
                 if c in lv.columns:
                     cols.append(c); headers[c] = h
         else:
@@ -1723,7 +1727,7 @@ class TreeSegmenterUI:
             for a in [self.ref_sample] + self._pd_nonref:    # PD DES · PD OOT
                 c = f"valor_{a}"
                 if c in lv.columns:
-                    cols.append(c); headers[c] = f"PD {ab(a)}"
+                    cols.append(c); headers[c] = f"{self._risk_label} {ab(a)}"
             for a in self._nonref:                           # PSI OOT · PSI ESTAB
                 c = f"psi_{a}"
                 if c in lv.columns:
@@ -1895,14 +1899,13 @@ class TreeSegmenterUI:
         return self.seg._detect_kind(sub, self.dd_feature.value, None)
 
     def _on_mode_change(self, _):
-        """Mostra o controle certo conforme modo e tipo da variável."""
-        # Trocar folha/variável/modo invalida qualquer preview pendente — senão o
-        # "Criar segmento" aplicaria o split na folha/variável antiga (capturada no
-        # Preview), e não na seleção atual exibida nos controles.
+        """Mostra o controle certo conforme modo e tipo da variável.
+
+        Trocar o MODO (Ótimo↔Manual) invalida o preview pendente, mas MANTÉM os
+        gráficos como referência — ex.: ao passar do Ótimo para o Manual para
+        digitar os cortes, o gráfico do ótimo permanece à vista. Quem limpa os
+        gráficos é a troca de VARIÁVEL/FOLHA (:meth:`_on_feature_change`)."""
         self._pending = None
-        if hasattr(self, "out_preview_seg"):      # widgets ainda não existem na 1ª chamada (__init__)
-            self.out_preview_seg.value = ""
-            self.out_preview_chart.value = ""
         manual = self.tg_mode.value == "Manual"
         cat = self._feature_kind() == "cat"
         self.sl_bins.layout.display = "none" if manual else ""           # máx. bins: só Ótimo
@@ -1912,6 +1915,14 @@ class TreeSegmenterUI:
         self._sync_optbin_visibility()                                   # limites de bin: só Ótimo
         if manual and cat:
             self._rebuild_cat_box()
+
+    def _on_feature_change(self, _):
+        """Trocar a VARIÁVEL/FOLHA limpa o preview (o gráfico era de outra
+        seleção) e reconfigura os controles do modo atual."""
+        if hasattr(self, "out_preview_seg"):      # widgets podem não existir na 1ª chamada
+            self.out_preview_seg.value = ""
+            self.out_preview_chart.value = ""
+        self._on_mode_change(_)
 
     def _sync_optbin_visibility(self):
         """Limites de tamanho de bin (min/max) aparecem só no modo Ótimo; cada
@@ -1961,14 +1972,14 @@ class TreeSegmenterUI:
         order = means.index.tolist()
         n = len(order)
         rows = [W.HTML("<div style='font-size:11px;color:#667;margin-bottom:4px'>"
-                       "Categorias no <b>mesmo grupo</b> viram um nó. Ordenadas por PD. "
+                       f"Categorias no <b>mesmo grupo</b> viram um nó. Ordenadas por {self._risk_label}. "
                        "Faltantes (NaN) já viram um nó próprio.</div>")]
         for k, c in enumerate(order, 1):
             dd = W.Dropdown(options=[(f"grupo {g}", g) for g in range(1, n + 1)], value=k,
                             layout=W.Layout(width="110px"))
             self._cat_widgets[c] = dd
             lab = W.HTML(f"<span style='font-size:12px'><b>{c}</b>"
-                         f"<span style='color:#889'> · PD {means[c]:.3f}</span></span>")
+                         f"<span style='color:#889'> · {self._risk_label} {means[c]:.3f}</span></span>")
             rows.append(W.HBox([dd, lab], layout=W.Layout(align_items="center")))
         na_n = int(s.isna().sum())
         if na_n:
@@ -2317,7 +2328,7 @@ class TreeSegmenterUI:
         self.leaf_chips.value = self._leaf_chips_html()
         self._refresh_iv()
         self._refresh_leaf_hist()
-        self._on_mode_change(None)   # recompõe os grupos categóricos para a nova folha
+        self._on_feature_change(None)   # nova folha: limpa o preview e recompõe os grupos
 
     def _refresh_iv(self):
         sid = self.dd_leaf.value
@@ -2410,8 +2421,9 @@ class TreeSegmenterUI:
             sty = (sty.map(psi_txt, subset=["psi"])
                       .map(estab_txt, subset=["estab."]))
         qual = "TODA A CARTEIRA" if (sid in (None, "root")) else self._leaf_label(sid)
+        _iv_kind = "binário" if self._is_clf else "contínuo"
         hint = (f"<div style='font-size:11px;color:#667;margin-bottom:4px'>folha: "
-                f"<b>{qual}</b> · PD média (DES) = {pd_med} · IV binário (optbinning)"
+                f"<b>{qual}</b> · {self._risk_mean} (DES) = {pd_med} · IV {_iv_kind} (optbinning)"
                 + (" · PSI nos mesmos bins do IV (DES × amostra)" if has_psi else "")
                 + "</div>")
         self.out_iv.value = hint + self._styler_html(sty)
@@ -3138,7 +3150,8 @@ class TreeSegmenterUI:
             mr = self.seg.monotonicity_report()
             ok = bool(mr["monotonico"].all())
             parts.append("<div style='font-size:12px;margin:2px 0 6px'>"
-                         + ("✅ PD monotônica crescente em todas as amostras."
+                         + (("✅ PD monotônica crescente em todas as amostras." if self._is_clf
+                             else "✅ LGD monotônico crescente em todas as amostras.")
                             if ok else "⚠️ Há inversões de monotonicidade (ver tabela).")
                          + "</div>")
             parts.append(self._df_html(mr[["amostra", "monotonico", "n_inversoes"]]))
