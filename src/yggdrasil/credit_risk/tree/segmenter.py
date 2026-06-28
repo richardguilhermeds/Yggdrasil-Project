@@ -643,12 +643,33 @@ class TreeSegmenter:
         print("\n→ se aprovado, repita como .grow(...) com os mesmos argumentos")
         return previews
 
+    def _assign_na_to_worst(self, filhos: dict):
+        """Quando um split NÃO gera nó de faltantes (a variável não tinha missing
+        no ajuste), roteia eventuais missings do scoring para a folha-irmã de PIOR
+        risco — maior PD (classificação) ou maior LGD (regressão) na referência
+        (DES) — marcando ``include_na=True`` na condição dessa irmã. Atribuição
+        conservadora; não faz nada se já houver um nó de faltantes entre as irmãs."""
+        if not filhos or any(f["conditions"][-1].get("kind") == "na"
+                             for f in filhos.values()):
+            return
+        ref = ((self.df[self.sample_col] == self.ref_sample).to_numpy()
+               if self.sample_col is not None else np.ones(len(self.df), dtype=bool))
+        y_all = self.df[self.target].to_numpy(dtype="float64")
+
+        def _risco(f):
+            yy = y_all[f["mask"].to_numpy() & ref]
+            yy = yy[~np.isnan(yy)]
+            return float(yy.mean()) if yy.size else -np.inf
+
+        pior = max(filhos, key=lambda cid: _risco(filhos[cid]))
+        filhos[pior]["conditions"][-1]["include_na"] = True
+
     # ------------------------------------------------------------------
     # GROW: efetiva o split (manual ou ótimo, num ou cat) em cada folha-alvo
     # ------------------------------------------------------------------
     def grow(self, feature, splits=None, dtype=None, max_n_bins=4,
              min_bin_size=0.05, only_segments=None, max_bin_size=None, relax_max=False,
-             min_mean_diff=0.0, criterion="optbin"):
+             min_mean_diff=0.0, criterion="optbin", na_to_worst=True):
         targets = {
             sid: s for sid, s in self.segments.items()
             if s["is_leaf"] and (only_segments is None or sid in only_segments)
@@ -689,6 +710,8 @@ class TreeSegmenter:
                 print(f"[{sid}] '{feature}' não separou ({len(filhos_sid)} filho) "
                       "— folha mantida")
                 continue
+            if na_to_worst:               # sem nó de faltantes → missings vão p/ a pior irmã
+                self._assign_na_to_worst(filhos_sid)
             novos.update(filhos_sid)
             self.segments[sid]["is_leaf"] = False
         self.segments.update(novos)
