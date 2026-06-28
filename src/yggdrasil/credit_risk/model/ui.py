@@ -475,6 +475,13 @@ class ModelSegmenterUI:
                                              style={"description_width": "initial"},
                                              layout=W.Layout(width="155px"))
         self.cb_require_mono = W.Checkbox(value=False, description="exigir monotonia")
+        self.out_mono_hint = W.HTML(
+            "<div style='font-size:11.5px;color:#6b7480;margin:2px 0 0 2px;line-height:1.5'>"
+            "<b>exigir monotonia</b>: no <i>Auto-selecionar</i> / <i>Auto-categorizar</i>, "
+            "só mantém a variável quando o risco (PD na classificação · alvo médio na "
+            "regressão) é <b>monotônico</b> entre as faixas do binning — sobe ou desce de "
+            "forma consistente, sem inversões. Quem inverte vai para <i>revisar</i> / "
+            "<i>descartar</i>. Desmarcado, a monotonia não entra no critério.</div>")
         self.btn_auto = W.Button(description="Auto-selecionar", button_style="primary",
                                  icon="magic",
                                  tooltip="Inclui/exclui variáveis no modelo pelos critérios "
@@ -485,9 +492,11 @@ class ModelSegmenterUI:
                                              "Só rotula — não altera a seleção do modelo.")
         self.btn_include = W.Button(description="Incluir variável no modelo",
                                     button_style="success", icon="plus",
+                                    layout=W.Layout(width="auto", min_width="234px"),
                                     tooltip="Inclui no modelo a variável escolhida em 'Variável:' "
                                             "— uma por vez, aditivo (não substitui as já incluídas).")
         self.btn_exclude = W.Button(description="Excluir do modelo", icon="minus",
+                                    layout=W.Layout(width="auto", min_width="166px"),
                                     tooltip="Remove do modelo a variável escolhida em 'Variável:'.")
         self.btn_set_cat = W.Button(description="Categorizar", icon="tag")
         self.btn_incl_all = W.Button(description="Incluir todas", icon="plus")
@@ -525,6 +534,7 @@ class ModelSegmenterUI:
             W.HTML("<div class='mseg-h'>Seleção & categorização de variáveis</div>"),
             W.HBox([self.sl_min_iv, self.sl_max_psi, self.cb_require_mono,
                     self.btn_auto, self.btn_auto_cat]),
+            self.out_mono_hint,
             # incluir/excluir UMA variável por vez — a escolhida em 'Variável:'
             W.HBox([self.dd_var, self.btn_include, self.btn_exclude]),
             W.VBox([self.sel_included,
@@ -570,6 +580,7 @@ class ModelSegmenterUI:
                                  layout=W.Layout(width="320px"))
         self.btn_create_cat = W.Button(description="Criar variável categórica",
                                        icon="plus-square", button_style="info",
+                                       layout=W.Layout(width="auto", min_width="232px"),
                                        tooltip="Materializa a binagem/agrupamento atual (faixas "
                                                "numéricas ou grupos de categorias) como uma NOVA "
                                                "variável categórica, candidata ao modelo e recriada "
