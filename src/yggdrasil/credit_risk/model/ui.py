@@ -372,7 +372,7 @@ class ModelSegmenterUI:
                                              rows=max(4, len(cands)),  # mostra todas, sem rolagem
                                              description="No modelo:",
                                              style={"description_width": "initial"},
-                                             layout=W.Layout(width="72%"))
+                                             layout=W.Layout(width="50%"))
         self.dd_categoria = W.Dropdown(
             options=[("— sem categoria", "—"),
                      ("✓ manter — entra no modelo", "manter"),
@@ -460,6 +460,8 @@ class ModelSegmenterUI:
         self.btn_refresh_vars.on_click(lambda b: self._refresh_vars())
         self.btn_clear_derived.on_click(self._on_clear_derived)
         self.dd_var.observe(lambda c: self._refresh_var_preview(), names="value")
+        # clicar numa variável na lista "No modelo" também atualiza a prévia/análise
+        self.sel_included.observe(self._on_sel_click, names="value")
 
         tab_vars = W.VBox([
             W.HTML("<div class='mseg-h'>Seleção & categorização de variáveis</div>"),
@@ -804,10 +806,12 @@ class ModelSegmenterUI:
         Sem coluna de safra, cai para o logodds por faixa."""
         feat = self.dd_var.value
         try:
+            cat = self.seg._detect_kind(feat) == "cat"
             if self.seg.date_col:
-                self.out_var_preview_h.value = (
-                    "<div class='mseg-h'>Estabilidade no tempo · risco das faixas por safra</div>")
-                fig = self.seg.plot_variable_inversion_by_safra(feat)
+                titulo = ("PD por categoria ao longo do tempo" if cat
+                          else "risco dos bins (n_bins) ao longo do tempo")
+                self.out_var_preview_h.value = f"<div class='mseg-h'>Estabilidade no tempo · {titulo}</div>"
+                fig = self.seg.plot_variable_risk_by_safra(feat)
             else:
                 self.out_var_preview_h.value = (
                     "<div class='mseg-h'>Logodds da variável por faixa "
@@ -845,6 +849,14 @@ class ModelSegmenterUI:
         self.seg.included = set(self.sel_included.value)
         self._refresh_vars(); self._refresh_bar()
         self._log(f"[seleção] {len(self.seg.included)} variáveis no modelo.")
+
+    def _on_sel_click(self, change):
+        """Ao clicar numa variável na lista 'No modelo', aponta a prévia (gráfico de
+        estabilidade no tempo) para ela — selecionando-a no dropdown 'Variável'."""
+        new = set(change.get("new") or ()); old = set(change.get("old") or ())
+        clicada = list(new - old) or list(old - new)
+        if clicada and clicada[-1] in self.dd_var.options:
+            self.dd_var.value = clicada[-1]      # dispara _refresh_var_preview
 
     def _on_clear_derived(self, b):
         removidas = self.seg.clear_derived()

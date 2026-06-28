@@ -688,7 +688,9 @@ def test_plots_variavel(seg):
               seg.plot_variable_distribution("feat_00"),
               seg.plot_variable_distribution_badrate("feat_00"),
               seg.plot_variable_inversion_by_sample("feat_00"),
-              seg.plot_variable_timeseries("feat_00")):
+              seg.plot_variable_timeseries("feat_00"),
+              seg.plot_variable_risk_by_safra("feat_00", "dt_ref"),   # numérica → bins
+              seg.plot_variable_risk_by_safra("feat_cat", "dt_ref")):  # cat → PD/categoria
         assert f is not None; plt.close(f)
 
 

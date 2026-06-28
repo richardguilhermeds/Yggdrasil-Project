@@ -1195,6 +1195,92 @@ class ModelSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
+    def plot_variable_risk_by_safra(self, feature, time_col=None, sample=None,
+                                    max_n_bins=5, min_bin_size=0.05, min_n=20,
+                                    figsize=(9.0, 3.8), dpi=150, save_path=None, ax=None):
+        """Comportamento da variável ao longo do tempo: o **risco** (event_rate/PD na
+        classificação, alvo médio na regressão) de cada bin/categoria por safra.
+
+        - **Numérica**: usa os mesmos bins do ranking (``n_bins``) — risco de cada
+          faixa por safra.
+        - **Categórica**: traz a **PD por categoria** por safra, sem reagrupar (top
+          categorias; respeita os grupos manuais se definidos). Sem ordem de risco
+          imposta (categorias não têm ordem intrínseca)."""
+        time_col = time_col or self.date_col
+        fig, ax = _new_ax(figsize, dpi, ax)
+        base = self._frame(sample) if sample else self.df
+        if not time_col or time_col not in base.columns:
+            ax.text(0.5, 0.5, "defina uma coluna de safra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        kind = self._detect_kind(feature, base)
+        ordered_by_risk = True
+        groups = []   # [(label, máscara booleana sobre 'base')]
+        if kind == "num" or self.manual_bins(feature):
+            bins, _k = self._resolve_bins(feature, max_n_bins, min_bin_size, sample=sample)
+            for b in bins:
+                groups.append((self._bin_label(feature, b), self._mask_in(base, feature, b)))
+            ordered_by_risk = (kind == "num")
+        else:
+            vc = base[feature].dropna().astype(str).value_counts()
+            top = list(vc.index[:8])
+            for c in top:
+                groups.append((str(c), base[feature].astype(str) == str(c)))
+            if len(vc) > len(top):
+                groups.append(("(outras)", base[feature].astype(str).isin(vc.index[len(top):])))
+            if base[feature].isna().any():
+                groups.append(("(faltante)", base[feature].isna()))
+            ordered_by_risk = False
+        if not groups:
+            ax.text(0.5, 0.5, "sem bins/categorias", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+
+        safra = pd.to_datetime(base[time_col], errors="coerce").dt.to_period("M")
+        pers = sorted(p for p in safra.dropna().unique())
+        if not pers:
+            ax.text(0.5, 0.5, "sem dados por safra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        xs = [str(p) for p in pers]; x = list(range(len(xs)))
+        series = []
+        for label, gmask in groups:
+            gm = gmask.to_numpy()
+            ys = []
+            for p in pers:
+                m = gm & (safra == p).to_numpy()
+                ys.append(self._risco(base.loc[m, self.target]) if int(m.sum()) >= min_n
+                          else np.nan)
+            series.append((label, ys))
+
+        is_clf = self.task_type == "classification"
+        ylabel = "PD" if is_clf else "alvo médio"
+        k = len(series)
+        if ordered_by_risk:
+            cmap = _cmap("RdYlGn_r")
+            means = [np.nanmean(ys) if np.any(np.isfinite(ys)) else np.inf
+                     for _, ys in series]
+            order = sorted(range(k), key=lambda i: means[i])
+            colors = {i: cmap(rank / (k - 1) if k > 1 else 0.5)
+                      for rank, i in enumerate(order)}
+        else:
+            cmap = _cmap("tab10")
+            colors = {i: cmap((i % 10) / 9) for i in range(k)}
+        for i, (label, ys) in enumerate(series):
+            ax.plot(x, ys, marker="o", lw=1.7, ms=4.5, color=colors[i],
+                    markeredgecolor="#33424f", markeredgewidth=0.5, label=label)
+        ax.set_xticks(x); ax.set_xticklabels(xs, rotation=45, ha="right", fontsize=8)
+        ax.set_ylabel(ylabel); ax.set_xlabel("safra")
+        titulo = "risco das faixas" if kind == "num" else f"{ylabel} por categoria"
+        ax.set_title(f"'{self.label(feature)}' — {titulo} por safra",
+                     fontsize=11, fontweight="bold", color="#15324a")
+        ax.grid(axis="y", alpha=0.15)
+        ax.legend(fontsize=7.5, ncol=max(1, min(k, 3)), loc="best", framealpha=0.85)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
     # ------------------------------------------------------------------
     # B) Seleção / categorização de variáveis
     # ------------------------------------------------------------------
