@@ -351,7 +351,8 @@ class ModelSegmenterUI:
         return None
 
     def _df_html(self, df, max_height=None, color_categoria=False, center=False,
-                 color_forca=False, color_tendencia=False, color_estabilidade=False):
+                 color_forca=False, color_tendencia=False, color_estabilidade=False,
+                 color_validation=False):
         sty = (df.style.hide(axis="index").set_table_styles(self._TABLE_STYLES)
                .set_properties(**{"font-size": "12px"}))
         if center:
@@ -387,6 +388,35 @@ class ModelSegmenterUI:
                 fg, bg = self._ESTABILIDADE_COLORS.get(v, ("", ""))
                 return (f"color:{fg};background-color:{bg};font-weight:600" if fg else "")
             sty = sty.map(_estab_css, subset=["estabilidade"])
+        if color_validation:
+            # backtest/PSI dos ratings: status (ok/alerta), gap, psi e classificacao
+            if "status" in df.columns:
+                def _status_css(v):
+                    return ("color:#137a3e;background-color:#e9f6ee;font-weight:600"
+                            if str(v).strip().lower() == "ok"
+                            else "color:#b3261e;background-color:#fdecea;font-weight:600")
+                sty = sty.map(_status_css, subset=["status"])
+            if "classificacao" in df.columns:
+                def _clf_css(v):
+                    fg, bg = self._ESTABILIDADE_COLORS.get(str(v).strip(), ("", ""))
+                    return (f"color:{fg};background-color:{bg};font-weight:600" if fg else "")
+                sty = sty.map(_clf_css, subset=["classificacao"])
+            if "psi" in df.columns and pd.api.types.is_numeric_dtype(df["psi"]):
+                def _psi_css(v):                       # verde <0.10 · âmbar <0.25 · vermelho
+                    if pd.isna(v):
+                        return ""
+                    a = abs(float(v))
+                    c = "#137a3e" if a < 0.10 else "#9a6b00" if a < 0.25 else "#b3261e"
+                    return f"color:{c};font-weight:600"
+                sty = sty.map(_psi_css, subset=["psi"])
+            if "gap" in df.columns and pd.api.types.is_numeric_dtype(df["gap"]):
+                def _gap_css(v):                       # |gap| <=0.05 verde · <=0.10 âmbar · vermelho
+                    if pd.isna(v):
+                        return ""
+                    a = abs(float(v))
+                    c = "#137a3e" if a <= 0.05 else "#9a6b00" if a <= 0.10 else "#b3261e"
+                    return f"color:{c};font-weight:600"
+                sty = sty.map(_gap_css, subset=["gap"])
         html = sty.to_html()
         if max_height:
             html = f"<div style='max-height:{max_height};overflow:auto'>{html}</div>"
@@ -1623,11 +1653,13 @@ class ModelSegmenterUI:
         tcol = self.tx_time3.value.strip() or None
         try:
             self.out_backtest.value = self._df_html(self.seg.backtest(tcol).round(4),
-                                                    max_height="320px")
+                                                    max_height="320px", center=True,
+                                                    color_validation=True)
         except Exception as e:
             self.out_backtest.value = f"<i>{e}</i>"
         try:
-            self.out_psi.value = self._df_html(self.seg.psi())
+            self.out_psi.value = self._df_html(self.seg.psi(), center=True,
+                                               color_validation=True)
         except Exception as e:
             self.out_psi.value = f"<i>{e}</i>"
 
