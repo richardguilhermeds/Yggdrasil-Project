@@ -569,6 +569,26 @@ def test_create_categorical_agrupa_e_modela(seg):
     assert nome in out.columns and nome_num in out.columns
 
 
+def test_clear_derived_reseta_variaveis_criadas(seg):
+    if seg.task_type != "classification":
+        pytest.skip("foco em classificação")
+    originais = list(seg.candidates)
+    seg.set_manual_bins("feat_cat", "A,B; C,D")
+    n1 = seg.create_categorical("feat_cat")
+    seg.set_manual_bins("feat_00", "0.0")
+    n2 = seg.create_categorical("feat_00")
+    seg.include(n1)
+    assert set(seg.derived_features()) == {n1, n2}
+    removidas = seg.clear_derived()
+    assert set(removidas) == {n1, n2}
+    assert seg.derived_features() == []
+    assert list(seg.candidates) == originais
+    assert n1 not in seg.df.columns and n2 not in seg.df.columns
+    assert n1 not in seg.included
+    # idempotente: sem nada a remover
+    assert seg.clear_derived() == []
+
+
 def test_create_categorical_save_load(seg):
     if seg.task_type != "classification":
         pytest.skip("foco em classificação")

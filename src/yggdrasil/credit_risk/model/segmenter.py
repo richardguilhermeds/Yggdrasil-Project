@@ -1216,6 +1216,25 @@ class ModelSegmenter:
         self.included = set()
         return self
 
+    def derived_features(self) -> list:
+        """Variáveis categóricas criadas via :meth:`create_categorical`."""
+        return [n for n, m in self.var_meta.items() if m.get("derived_from")]
+
+    def clear_derived(self) -> list:
+        """Remove **todas** as variáveis criadas via :meth:`create_categorical`
+        (reset): tira do DataFrame, das candidatas, da seleção e do ``var_meta``.
+        Devolve os nomes removidos."""
+        removidas = self.derived_features()
+        for n in removidas:
+            if n in self.df.columns:
+                self.df.drop(columns=n, inplace=True)
+            if n in self.candidates:
+                self.candidates.remove(n)
+            self.included.discard(n)
+            self.var_meta.pop(n, None)
+            self.feature_labels.pop(n, None)
+        return removidas
+
     def set_category(self, feature, categoria):
         """Categoriza a variável (ex.: 'manter', 'revisar', 'descartar')."""
         meta = self.var_meta.setdefault(feature, {})

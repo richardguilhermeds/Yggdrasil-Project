@@ -440,6 +440,11 @@ class ModelSegmenterUI:
         self.btn_incl_all = W.Button(description="Incluir todas", icon="plus")
         self.btn_clear = W.Button(description="Limpar", icon="trash")
         self.btn_refresh_vars = W.Button(description="Recalcular", icon="refresh")
+        self.btn_clear_derived = W.Button(description="Resetar variáveis criadas", icon="eraser",
+                                          button_style="warning",
+                                          tooltip="Remove todas as variáveis categóricas criadas "
+                                                  "na aba 'Análise de variáveis' (create_categorical), "
+                                                  "voltando ao conjunto original.")
         self.out_vars = W.HTML()
         self.out_var_preview_h = W.HTML("<div class='mseg-h'>Estabilidade da variável no tempo</div>")
         self.out_var_preview = W.HTML()
@@ -453,6 +458,7 @@ class ModelSegmenterUI:
         self.btn_clear.on_click(lambda b: (self.seg.clear_features(), self._sync_sel(),
                                            self._refresh_vars(), self._refresh_bar()))
         self.btn_refresh_vars.on_click(lambda b: self._refresh_vars())
+        self.btn_clear_derived.on_click(self._on_clear_derived)
         self.dd_var.observe(lambda c: self._refresh_var_preview(), names="value")
 
         tab_vars = W.VBox([
@@ -460,7 +466,8 @@ class ModelSegmenterUI:
             W.HBox([self.sl_min_iv, self.sl_max_psi, self.cb_require_mono,
                     self.btn_auto, self.btn_auto_cat]),
             W.HBox([self.sel_included, W.VBox([self.btn_apply_sel, self.btn_incl_all,
-                                               self.btn_clear, self.btn_refresh_vars])],
+                                               self.btn_clear, self.btn_refresh_vars,
+                                               self.btn_clear_derived])],
                    layout=W.Layout(align_items="flex-start")),
             W.HBox([self.dd_var, self.dd_categoria, self.btn_set_cat]),
             self.out_cat_hint,
@@ -837,6 +844,15 @@ class ModelSegmenterUI:
         self.seg.included = set(self.sel_included.value)
         self._refresh_vars(); self._refresh_bar()
         self._log(f"[seleção] {len(self.seg.included)} variáveis no modelo.")
+
+    def _on_clear_derived(self, b):
+        removidas = self.seg.clear_derived()
+        self._refresh_candidates(); self._refresh_vars(); self._refresh_bar()
+        if removidas:
+            self._log(f"[reset] {len(removidas)} variável(is) criada(s) removida(s): "
+                      f"{', '.join(removidas)}.")
+        else:
+            self._log("[reset] nenhuma variável criada para remover.")
 
     def _on_set_cat(self, b):
         cat = None if self.dd_categoria.value == "—" else self.dd_categoria.value
