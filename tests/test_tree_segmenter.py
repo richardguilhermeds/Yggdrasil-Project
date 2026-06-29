@@ -370,6 +370,30 @@ def test_feature_importance(seg):
         assert abs(fi["importancia_%"].sum() - 100.0) < 1.0
 
 
+def test_plot_importance_bar_estilo(task):
+    """O gráfico de importância relativa: sem eixo x (só os rótulos por barra) e
+    degradê por magnitude — mais importante steelblue, menos importante crimson."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.colors as mc
+    seg = _mk(task, n=6000, seed=3)
+    seg.fit_auto(max_depth=3, verbose=False)
+    fig = seg.plot_importance_bar()
+    ax = fig.axes[0]
+    assert list(ax.get_xticks()) == []                 # sem labels no eixo x
+    fi = seg.feature_importance()
+    if len(fi) >= 2:                                    # com ≥2 variáveis há degradê
+        vals = fi["importancia_%"].to_numpy()
+        cores = [p.get_facecolor()[:3] for p in ax.patches]
+        sb, cr = mc.to_rgb("steelblue"), mc.to_rgb("crimson")
+        assert tuple(round(x, 2) for x in cores[int(vals.argmax())]) == \
+            tuple(round(x, 2) for x in sb)             # maior → steelblue
+        assert tuple(round(x, 2) for x in cores[int(vals.argmin())]) == \
+            tuple(round(x, 2) for x in cr)             # menor → crimson
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+
 def test_suggest_splits(task):
     seg = _mk(task, com_oot=True, n=6000, seed=3)
     sug = seg.suggest_splits(top=3)

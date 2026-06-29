@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Optional  # noqa: F401  (mantido p/ compat de imports externos)
+
+from .keepalive import ClusterKeepAlive, keep_cluster_alive, stop_keep_alive
 
 
 def idx_para_letra(idx: int) -> str:
@@ -34,4 +36,5 @@ def get_logger(name: str = "yggdrasil", level: int = logging.INFO) -> logging.Lo
     return logger
 
 
-__all__ = ["idx_para_letra", "get_logger"]
+__all__ = ["idx_para_letra", "get_logger",
+           "ClusterKeepAlive", "keep_cluster_alive", "stop_keep_alive"]

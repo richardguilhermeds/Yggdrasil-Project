@@ -142,6 +142,20 @@ def test_ui_iv_refresh_e_psi_oot(task):
     assert "<table" in html.lower() and "iv" in html.lower()
     assert "psi OOT" in html               # coluna do PSI no OOT
     assert "pior caso" in html             # hint menciona OOT + pior caso
+    assert "max-content" in html           # tabela transborda → scroller horizontal
+
+
+def test_ui_iv_psi_estabilidade(task):
+    """O ranking de IV traz uma coluna de PSI por amostra de validação, incluindo
+    a safra de ESTABILIDADE (além de OOT e do pior caso)."""
+    df = make_df(task, n=6000, seed=4)
+    idx = df.sample(frac=0.15, random_state=1).index   # ~15% vira safra de estabilidade
+    df.loc[idx, "amostra"] = "ESTABILIDADE"
+    ui = _build(task, df=df)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.btn_iv_refresh.click()
+    html = ui.out_iv.value
+    assert "psi OOT" in html and "psi ESTAB" in html
 
 
 def test_ui_undo_redo_restaura_folha(task):
@@ -187,6 +201,19 @@ def test_ui_plot_tree(task):
         ui._on_autofit(None)
         ui._on_tree_preview(None)
     assert ui.out_tree_img.value and "img" in ui.out_tree_img.value.lower()
+
+
+def test_ui_diag_teste_des_oot(task):
+    """A tabela de folhas (Diagnóstico) traz, ao lado de p (irmãs), o teste de
+    aderência da estimativa comparando DES × OOT por folha."""
+    ui = _build(task, n=8000, seed=3)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)                 # cria folhas -> _refresh_table
+    html = ui.out_table.value
+    assert "p (irmãs)" in html
+    assert "p (DES×OOT)" in html        # nova coluna de aderência DES×OOT
+    # a coluna também sai no TSV copiável (Excel)
+    assert "p (DES×OOT)" in ui._leaves_tsv().splitlines()[0]
 
 
 def test_ui_diag_scorecard(task):
@@ -257,6 +284,18 @@ def test_ui_tema_escuro(task):
     assert "dark" in ui.panel._dom_classes
     ui.cb_dark.value = False
     assert "dark" not in ui.panel._dom_classes
+
+
+def test_ui_keepalive_toggle(task):
+    """O toggle de keepalive existe e, sem Spark ativo, se auto-reverte (no-op)."""
+    ui = _build(task)
+    assert hasattr(ui, "cb_keepalive")
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.cb_keepalive.value = True
+    # fora do Databricks/Spark: o toggle volta para False e nada fica rodando
+    if not (ui._keepalive and ui._keepalive.has_spark()):
+        assert ui.cb_keepalive.value is False
+        assert ui._keepalive is None or ui._keepalive.running is False
 
 
 def test_ui_relatorio_pdf(task, tmp_path):

@@ -887,7 +887,14 @@ class TreeSegmenterUI:
             "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>p alto (&gt;0,05, em vermelho)</span> "
             "⇒ <b>não</b> dá para distinguir as irmãs ⇒ candidatas a fusão; "
             "<span style='color:#137a3e'>p baixo</span> ⇒ folhas bem separadas. "
-            "Só <b>irmãs</b> são comparadas (a última de cada grupo e o nó de faltantes ficam em branco).</div>")
+            "Só <b>irmãs</b> são comparadas (a última de cada grupo e o nó de faltantes ficam em branco)."
+            "<br><b>p (DES×OOT)</b> = p-valor de um teste de hipótese da <b>aderência da "
+            f"estimativa</b>: compara a <b>distribuição do alvo ({'default' if self._is_clf else 'LGD'})</b> da "
+            "MESMA folha entre <b>DES</b> e <b>OOT</b> (mesmo teste do seletor). H₀: a folha "
+            f"tem {'a mesma PD' if self._is_clf else 'o mesmo LGD'} em DES e OOT. Semântica <b>inversa</b> à do p (irmãs): "
+            "<span style='color:#137a3e'>p alto (&gt;0,05)</span> ⇒ estimativa <b>estável</b> entre as amostras; "
+            "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>p baixo (em vermelho)</span> "
+            "⇒ a estimativa <b>deslocou</b> de DES para OOT (folha pouco aderente).</div>")
         table_scroll = W.Box([self.out_table],
                              layout=W.Layout(overflow="auto", width="100%",
                                              max_height="420px"))
@@ -1208,7 +1215,17 @@ class TreeSegmenterUI:
                                       tooltip="Alterna o tema claro/escuro da interface",
                                       layout=W.Layout(width="150px"))
         self.cb_dark.observe(self._on_dark, names="value")
-        topbar = W.HBox([self.cb_dark], layout=W.Layout(justify_content="flex-end"))
+        # mantém o cluster Databricks ativo enquanto a interface está aberta (senão ele
+        # desliga por inatividade); no-op fora do Databricks/Spark — ver utils.keepalive.
+        self._keepalive = None
+        self.cb_keepalive = W.ToggleButton(
+            value=False, description="☕ Manter cluster ativo",
+            tooltip="Databricks: dispara um job Spark mínimo a cada 2 min para o cluster "
+                    "não desligar por inatividade enquanto a interface está aberta",
+            layout=W.Layout(width="190px"))
+        self.cb_keepalive.observe(self._on_keepalive, names="value")
+        topbar = W.HBox([self.cb_keepalive, self.cb_dark],
+                        layout=W.Layout(justify_content="flex-end"))
         self.panel = W.VBox([topbar, banner, bar_box, tabs, console, self.tree_sel_style])
         self.panel.add_class("treeui")
 
@@ -1219,6 +1236,34 @@ class TreeSegmenterUI:
         else:
             self.panel.remove_class("dark")
             self.cb_dark.description = "🌙 Tema escuro"
+
+    def _on_keepalive(self, change):
+        from ...utils.keepalive import ClusterKeepAlive
+        with self.out_log:
+            self.out_log.clear_output(wait=True)
+            if change["new"]:
+                if self._keepalive is None:
+                    self._keepalive = ClusterKeepAlive(interval_seconds=120)
+                if not self._keepalive.has_spark():
+                    self._suspend_ka = True
+                    self.cb_keepalive.value = False          # reverte o toggle
+                    self._suspend_ka = False
+                    self.cb_keepalive.description = "☕ Manter cluster ativo"
+                    print("[keepalive] nenhuma SparkSession ativa — este recurso só tem "
+                          "efeito no Databricks (ou com Spark local).")
+                    return
+                self._keepalive.start()
+                self.cb_keepalive.description = "☕ Cluster ativo ✓"
+                print("[keepalive] ligado — um job Spark mínimo a cada 2 min mantém o "
+                      "cluster ativo enquanto a interface estiver aberta. Desligue ao "
+                      "terminar para o cluster poder hibernar normalmente.")
+            else:
+                if getattr(self, "_suspend_ka", False):
+                    return
+                if self._keepalive is not None:
+                    self._keepalive.stop()
+                self.cb_keepalive.description = "☕ Manter cluster ativo"
+                print("[keepalive] desligado.")
 
     # ==================================================================
     # Render
@@ -1534,11 +1579,20 @@ class TreeSegmenterUI:
                 return "color:#aab"
             return "background-color:#fde7e7;font-weight:600" if v > 0.05 else "color:#137a3e"
 
+        def p_stab_bg(v):
+            # aderência DES×OOT (H₀: mesma estimativa): semântica INVERSA à das irmãs —
+            # p alto = estável (verde); p baixo = a estimativa deslocou (alerta).
+            if pd.isna(v):
+                return "color:#aab"
+            return "color:#137a3e" if v > 0.05 else "background-color:#fde7e7;font-weight:600"
+
         sty = lv.style
         for c in psi_cols:
             sty = sty.map(psi_bg, subset=[c])
         if "p_vs_prox" in lv.columns:
             sty = sty.map(p_bg, subset=["p_vs_prox"])
+        if "p_des_oot" in lv.columns:
+            sty = sty.map(p_stab_bg, subset=["p_des_oot"])
         fmt = {"repr_%": "{:.1f}"}
         for c in lv.columns:
             if c.startswith("repr_") and c.endswith("_%"):   # % por amostra
@@ -1549,6 +1603,8 @@ class TreeSegmenterUI:
                 fmt[c] = "{:.4f}"
         if "p_vs_prox" in lv.columns:
             fmt["p_vs_prox"] = "{:.3f}"
+        if "p_des_oot" in lv.columns:
+            fmt["p_des_oot"] = "{:.3f}"
         sty = (sty.format(fmt, na_rep="—")
                   .hide(axis="index")
                   .set_table_styles(self._TABLE_STYLES)
@@ -1780,6 +1836,17 @@ class TreeSegmenterUI:
         def ab(a):
             return "ESTAB" if a == "ESTABILIDADE" else a
 
+        # teste de ADERÊNCIA da estimativa (PD/LGD) entre DES e OOT, por folha — vai
+        # ao lado do p (irmãs). H₀: a folha tem a mesma estimativa em DES e OOT;
+        # p alto = estável, p baixo = a estimativa deslocou. OOT = amostra ≠ DES COM
+        # alvo cujo nome remete a OOT (senão a 1ª com alvo).
+        oot = next((a for a in self._pd_nonref if str(a).upper() == "OOT"), None) or \
+            next((a for a in self._pd_nonref if "OOT" in str(a).upper()), None) or \
+            (self._pd_nonref[0] if self._pd_nonref else None)
+        if self.sample_col is not None and oot is not None and "segmento" in lv.columns:
+            lv["p_des_oot"] = [self._sample_value_test(sid, self.ref_sample, oot)[1]
+                               for sid in lv["segmento"]]
+
         # Colunas em blocos legíveis: identificação · % por amostra · PD média
         # por amostra (só as que têm alvo) · PSI por amostra · teste de hipótese.
         # `headers` renomeia só a EXIBIÇÃO (a formatação segue pelos nomes reais).
@@ -1804,6 +1871,9 @@ class TreeSegmenterUI:
                     cols.append(c); headers[c] = f"PSI {ab(a)}"
         if "p_vs_prox" in lv.columns:
             cols.append("p_vs_prox"); headers["p_vs_prox"] = "p (irmãs)"
+        if "p_des_oot" in lv.columns:
+            cols.append("p_des_oot")
+            headers["p_des_oot"] = f"p ({ab(self.ref_sample)}×{ab(oot)})"
         return lv, cols, headers
 
     def _refresh_table(self):
@@ -1834,7 +1904,7 @@ class TreeSegmenterUI:
                 return br(f"{v:.2%}")
             if col.startswith("psi_"):
                 return br(f"{v:.4f}")
-            if col == "p_vs_prox":
+            if col in ("p_vs_prox", "p_des_oot"):
                 return br(f"{v:.3f}")
             if col == "repr_%" or (col.startswith("repr_") and col.endswith("_%")):
                 return br(f"{v:.1f}")
@@ -2493,17 +2563,21 @@ class TreeSegmenterUI:
                 .rename(columns={"n_bins": "bins"}))
         psi_cols = []                       # colunas de PSI exibidas (p/ formato + estilo)
         if has_psi:
-            # PSI do OOT especificamente (além do pior caso entre as amostras) — é a
-            # estabilidade fora do tempo, a mais relevante para escolher a variável.
-            def _is_oot(c):
-                return (c.startswith("psi_") and c != "psi_classificacao"
-                        and "OOT" in c[4:].upper())
-            oot_col = next((c for c in iv.columns if c[4:].upper() == "OOT"
-                            and _is_oot(c)), None) or \
-                next((c for c in iv.columns if _is_oot(c)), None)
-            if oot_col is not None:
-                disp["psi OOT"] = iv[oot_col].values
-                psi_cols.append("psi OOT")
+            # uma coluna de PSI por amostra de validação (OOT, ESTABILIDADE, …) — todas
+            # as não-referência —, mais o pior caso. Ordem: OOT, depois estabilidade,
+            # depois o resto, para a leitura priorizar a estabilidade fora do tempo.
+            sample_cols = [c for c in iv.columns
+                           if c.startswith("psi_") and c != "psi_classificacao"]
+
+            def _rank(c):
+                nome = c[4:].upper()
+                return (0 if "OOT" in nome else 1 if "ESTAB" in nome else 2, nome)
+
+            for c in sorted(sample_cols, key=_rank):
+                amostra = c[4:]
+                rotulo = "psi " + ("ESTAB" if amostra == "ESTABILIDADE" else amostra)
+                disp[rotulo] = iv[c].values
+                psi_cols.append(rotulo)
             disp["psi pior"] = iv["pior_psi"].values
             psi_cols.append("psi pior")
             disp["psi_status"] = iv["psi_classificacao"].values
@@ -2517,8 +2591,12 @@ class TreeSegmenterUI:
         # estilo editorial: sem grade vertical, só régua de cabeçalho + filetes
         # horizontais; força/PSI como TEXTO colorido (sem preenchimentos).
         iv_styles = [
+            # min-width:max-content faz a tabela manter a largura natural das colunas
+            # (não comprime): quando há muitas amostras de PSI ela transborda o card e
+            # o scroller (iv_scroll) permite deslizar para a direita.
             {"selector": "", "props": [("border-collapse", "collapse"),
-                                       ("width", "100%")]},
+                                       ("width", "100%"),
+                                       ("min-width", "max-content")]},
             {"selector": "th, td", "props": [("padding", "7px 12px"),
                                              ("border", "none"),
                                              ("border-bottom", "1px solid #eef1f4"),
@@ -2592,8 +2670,8 @@ class TreeSegmenterUI:
         _iv_kind = "binário" if self._is_clf else "contínuo"
         hint = (f"<div style='font-size:11px;color:#667;margin-bottom:4px'>folha: "
                 f"<b>{qual}</b> · {self._risk_mean} (DES) = {pd_med} · IV {_iv_kind} (optbinning)"
-                + (" · PSI (OOT e pior caso) nos mesmos bins do IV (DES × amostra)"
-                   if has_psi else "")
+                + (" · PSI por amostra de validação (OOT, ESTAB, …) e pior caso, "
+                   "nos mesmos bins do IV (DES × amostra)" if has_psi else "")
                 + "</div>")
         self._set_html(self.out_iv, "iv", hint + self._styler_html(sty))
 

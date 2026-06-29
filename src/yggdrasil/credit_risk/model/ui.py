@@ -975,7 +975,17 @@ class ModelSegmenterUI:
                                       tooltip="Alterna o tema claro/escuro da interface",
                                       layout=W.Layout(width="150px"))
         self.cb_dark.observe(self._on_dark, names="value")
-        topbar = W.HBox([self.cb_dark], layout=W.Layout(justify_content="flex-end"))
+        # mantém o cluster Databricks ativo enquanto a interface está aberta — no-op
+        # fora do Databricks/Spark (ver yggdrasil.utils.keepalive).
+        self._keepalive = None
+        self.cb_keepalive = W.ToggleButton(
+            value=False, description="☕ Manter cluster ativo",
+            tooltip="Databricks: dispara um job Spark mínimo a cada 2 min para o cluster "
+                    "não desligar por inatividade enquanto a interface está aberta",
+            layout=W.Layout(width="190px"))
+        self.cb_keepalive.observe(self._on_keepalive, names="value")
+        topbar = W.HBox([self.cb_keepalive, self.cb_dark],
+                        layout=W.Layout(justify_content="flex-end"))
         self.panel = W.VBox([W.HTML(_CSS), topbar, self.banner, self.bar, self.tabs, console])
         self.panel.add_class("mseg")
 
@@ -986,6 +996,31 @@ class ModelSegmenterUI:
         else:
             self.panel.remove_class("dark")
             self.cb_dark.description = "🌙 Tema escuro"
+
+    def _on_keepalive(self, change):
+        from ...utils.keepalive import ClusterKeepAlive
+        if change["new"]:
+            if self._keepalive is None:
+                self._keepalive = ClusterKeepAlive(interval_seconds=120)
+            if not self._keepalive.has_spark():
+                self._suspend_ka = True
+                self.cb_keepalive.value = False              # reverte o toggle
+                self._suspend_ka = False
+                self.cb_keepalive.description = "☕ Manter cluster ativo"
+                self._log("[keepalive] nenhuma SparkSession ativa — recurso só funciona "
+                          "no Databricks (ou com Spark local).")
+                return
+            self._keepalive.start()
+            self.cb_keepalive.description = "☕ Cluster ativo ✓"
+            self._log("[keepalive] ligado — job Spark mínimo a cada 2 min mantém o cluster "
+                      "ativo enquanto a interface estiver aberta. Desligue ao terminar.")
+        else:
+            if getattr(self, "_suspend_ka", False):
+                return
+            if self._keepalive is not None:
+                self._keepalive.stop()
+            self.cb_keepalive.description = "☕ Manter cluster ativo"
+            self._log("[keepalive] desligado.")
 
     # ------------------------------------------------------------------ refresh
     def _refresh_bar(self):

@@ -3696,8 +3696,8 @@ class TreeSegmenter:
         Pensado para ficar ao lado da tabela de importância: mostra de relance
         quanto cada variável pesa **em relação a todas as outras**."""
         try:
-            import matplotlib.pyplot as plt
-            from matplotlib.colors import Normalize
+            import matplotlib.pyplot as plt  # noqa: F401  (garante backend p/ savefig)
+            from matplotlib.colors import LinearSegmentedColormap, Normalize
         except ImportError as e:  # pragma: no cover
             raise ImportError("plot_importance_bar requer matplotlib.") from e
         fi = self.feature_importance(normalize=True)
@@ -3709,23 +3709,29 @@ class TreeSegmenter:
         if figsize is None:
             figsize = (6.4, max(2.6, len(names) * 0.46))     # cresce com o nº de variáveis
         fig, ax = self._new_ax(figsize, dpi, ax)
-        vmax = float(vals.max()) if vals.size else 1.0
-        norm = Normalize(0.0, vmax if vmax > 1e-9 else 1.0)
-        cmap_obj = plt.get_cmap("Greens")                     # mesma paleta verde da tabela
+        # degradê pela MAGNITUDE da importância: mais importante → steelblue,
+        # menos importante → crimson (extremos = a menor e a maior da árvore).
+        vmin, vmax = float(vals.min()), float(vals.max())
+        norm = (Normalize(vmin, vmax) if (vmax - vmin) > 1e-9 else Normalize(vmin - 1.0, vmax))
+        cmap_obj = LinearSegmentedColormap.from_list("imp_crimson_steelblue",
+                                                     ["crimson", "steelblue"])
         y = list(range(len(names)))
-        ax.barh(y, vals, color=[cmap_obj(0.30 + 0.6 * norm(v)) for v in vals],
-                edgecolor="#33424f", alpha=0.92, height=0.72)
+        ax.barh(y, vals, color=[cmap_obj(norm(v)) for v in vals],
+                edgecolor="#33424f", alpha=0.95, height=0.72)
         ax.set_yticks(y); ax.set_yticklabels(names, fontsize=9)
         ax.invert_yaxis()                                     # mais importante no topo
         is_pct = col == "importancia_%"
         for yi, v in zip(y, vals):
             ax.text(v, yi, (f" {v:.1f}%" if is_pct else f" {v:.4f}"),
                     va="center", ha="left", fontsize=8.5, fontweight="bold", color="#15324a")
-        ax.set_xlabel("Importância relativa (%)" if is_pct else "Importância", fontsize=10)
+        # sem eixo x: deixamos só a importância relativa rotulada em cada barra
+        ax.set_xticks([])
+        ax.set_xlabel("")
         ax.set_xlim(0, (vmax * 1.16) if vmax > 1e-9 else 1.0)
+        for _sp in ("top", "right", "bottom"):
+            ax.spines[_sp].set_visible(False)
         ax.set_title("Importância relativa das variáveis na árvore", fontsize=12,
                      fontweight="bold", color="#15324a")
-        ax.grid(axis="x", alpha=0.2)
         fig.tight_layout()
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
