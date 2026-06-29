@@ -3070,6 +3070,151 @@ class ModelSegmenter:
                     plt.close("all")
         return path
 
+    @staticmethod
+    def _df_to_md(df: pd.DataFrame) -> str:
+        """DataFrame → tabela Markdown (GFM), sem depender de `tabulate`."""
+        def cell(v):
+            try:
+                if pd.isna(v):                  # cobre None, NaN, pd.NA, pd.NaT
+                    return "—"
+            except (TypeError, ValueError):
+                pass
+            if isinstance(v, float):
+                return f"{v:.4f}"
+            return str(v).replace("|", "\\|")
+        cols = list(df.columns)
+        linhas = ["| " + " | ".join(str(c) for c in cols) + " |",
+                  "| " + " | ".join("---" for _ in cols) + " |"]
+        for _, r in df.iterrows():
+            linhas.append("| " + " | ".join(cell(r[c]) for c in cols) + " |")
+        return "\n".join(linhas)
+
+    def report_markdown(self, path: str = "relatorio_modelo.md",
+                        time_col: str | None = None, title: str | None = None,
+                        stamp: str | None = None) -> str:
+        """Gera um relatório do modelo em **Markdown** (.md) e o devolve — alternativa
+        ao :meth:`report_pdf` em formato de texto versionável (abre no Jupyter, VS Code
+        e GitHub).
+
+        Seções: visão geral (algoritmo, variáveis, hiperparâmetros), métricas por
+        amostra, fórmula (logística/linear) ou importância SHAP (não-lineares),
+        discriminação & calibração, régua de ratings, PSI dos ratings, monotonicidade
+        e backtest por safra (se ``time_col``/``date_col``). As imagens são salvas como
+        PNG ao lado do .md e referenciadas por caminho relativo. Não exige dependência
+        extra (usa matplotlib)."""
+        import os
+        if self.score_ is None:
+            raise RuntimeError("Ajuste o modelo antes (fit / set_model).")
+        import matplotlib.pyplot as plt
+
+        base = os.path.dirname(os.path.abspath(path))
+        stem = os.path.splitext(os.path.basename(path))[0]
+        if title is None:
+            title = f"Relatório do Modelo — {self.algorithm} ({self.task_type})"
+
+        def _fig(maker):
+            try:
+                return maker()
+            except Exception:
+                plt.close("all")
+                return None
+
+        def _save(fig, name):
+            """Salva a figura ao lado do .md; devolve o nome do arquivo (ou None)."""
+            if fig is None:
+                return None
+            try:
+                fig.savefig(os.path.join(base, name), dpi=150, bbox_inches="tight")
+                return name
+            except Exception:
+                return None
+            finally:
+                plt.close(fig)
+
+        feats = list(self.model_features or self.selected_features() or self.candidates)
+        L = [f"# {title}", ""]
+        if stamp:
+            L.append(f"_Gerado em {stamp}._\n")
+        L += ["## Visão geral", "",
+              f"- **Algoritmo:** `{self.algorithm}`",
+              f"- **Tarefa:** `{self.task_type}`",
+              f"- **Target:** `{self.target}`",
+              f"- **Amostra de referência:** `{self.ref_sample}`"
+              + ("" if self.sample_col is None else f" (coluna `{self.sample_col}`)"),
+              f"- **Variáveis no modelo ({len(feats)}):** "
+              + (", ".join(f"`{f}`" for f in feats) or "(nenhuma)"),
+              f"- **Linhas:** {len(self.df):,}".replace(",", "."), ""]
+        if self.hyperparams:
+            L += ["**Hiperparâmetros:** "
+                  + ", ".join(f"`{k}={v}`" for k, v in self.hyperparams.items()), ""]
+
+        try:
+            L += ["## Métricas por amostra", "", self._df_to_md(self.metrics()), ""]
+        except Exception as e:
+            L += ["## Métricas por amostra", "", f"_não geradas: {e}_", ""]
+
+        if self.algorithm in ("logistica", "linear"):
+            try:
+                frm = self.model_formula()
+                L += ["## Fórmula do modelo", "",
+                      "```", frm["text"], "```", "",
+                      "Coeficientes (ordenados por |coef|):", "",
+                      self._df_to_md(frm["coef"]),
+                      f"\n_Intercepto:_ `{frm['intercept']:+.6f}`", ""]
+            except Exception as e:
+                L += ["## Fórmula do modelo", "", f"_não gerada: {e}_", ""]
+        else:
+            L += ["## Importância das variáveis (SHAP)", ""]
+            try:
+                L += [self._df_to_md(self.shap_importance(sample_size=800)), ""]
+            except Exception as e:
+                L += [f"_tabela SHAP não gerada: {e}_", ""]
+            img = _save(_fig(lambda: self.plot_shap_bar(sample_size=800)),
+                        f"{stem}_shap.png")
+            if img:
+                L += [f"![shap]({img})", ""]
+
+        if self.task_type == "classification":
+            imgs = [("Curva ROC", _save(_fig(self.plot_roc), f"{stem}_roc.png")),
+                    ("Curva KS", _save(_fig(self.plot_ks), f"{stem}_ks.png")),
+                    ("Calibração", _save(_fig(self.plot_calibration), f"{stem}_calibracao.png"))]
+        else:
+            imgs = [("Resíduos", _save(_fig(self.plot_residuals), f"{stem}_residuos.png")),
+                    ("Calibração", _save(_fig(self.plot_calibration), f"{stem}_calibracao.png"))]
+        imgs = [(t, n) for t, n in imgs if n]
+        if imgs:
+            L += ["## Discriminação & calibração", ""]
+            for t, n in imgs:
+                L += [f"**{t}**", "", f"![{t}]({n})", ""]
+
+        if self.rating_strategy is not None:
+            try:
+                L += ["## Régua de ratings", "", self._df_to_md(self.rating_table()), ""]
+            except Exception as e:
+                L += ["## Régua de ratings", "", f"_não gerada: {e}_", ""]
+            if self.sample_col is not None:
+                try:
+                    L += ["### PSI dos ratings (estabilidade entre amostras)", "",
+                          self._df_to_md(self.psi()), ""]
+                except Exception:
+                    pass
+            try:
+                L += ["### Monotonicidade do risco por rating", "",
+                      self._df_to_md(self.monotonicity_report()), ""]
+            except Exception:
+                pass
+
+        if time_col is not None or self.date_col is not None:
+            try:
+                L += ["## Backtest por safra (previsto × realizado no tempo)", "",
+                      self._df_to_md(self.backtest(time_col)), ""]
+            except Exception as e:
+                L += ["## Backtest por safra", "", f"_não gerado: {e}_", ""]
+
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(L))
+        return path
+
     # ------------------------------------------------------------------
     # MLflow
     # ------------------------------------------------------------------

@@ -132,6 +132,42 @@ def test_ui_undo_redo_automerge_json(task, tmp_path):
     assert n_reset == 1 and n_loaded == n_saved
 
 
+def test_ui_iv_refresh_e_psi_oot(task):
+    """O botão 'Atualizar' do card de IV calcula o IV/PSI por variável da folha
+    SEM abrir a aba de variáveis; e a tabela traz o PSI do OOT além do pior caso."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.btn_iv_refresh.click()          # calcula na raiz, sem abrir a aba de variáveis
+    html = ui.out_iv.value
+    assert "<table" in html.lower() and "iv" in html.lower()
+    assert "psi OOT" in html               # coluna do PSI no OOT
+    assert "pior caso" in html             # hint menciona OOT + pior caso
+
+
+def test_ui_undo_redo_restaura_folha(task):
+    """Desfazer/refazer volta à folha que estava selecionada naquele estado."""
+    ui = _build(task, n=6000, seed=11)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.dd_leaf.value = "root"
+        ui.dd_feature.value = "score"
+        ui.tg_mode.value = "Manual"
+        ui.tx_cuts.value = "0.8"
+        ui._on_preview(None); ui._on_split(None)
+        alvo = [s for s, v in ui.seg.segments.items() if v["is_leaf"]][0]
+        # seleciona explicitamente `alvo` e o divide (após o split ele deixa de ser folha)
+        ui.dd_leaf.value = alvo
+        ui.dd_feature.value = "score"
+        ui.tg_mode.value = "Manual"
+        ui.tx_cuts.value = "0.6"
+        ui._on_preview(None); ui._on_split(None)
+        sel_pos = ui.dd_leaf.value         # seleção após o 2º split
+        ui._on_undo(None); sel_undo = ui.dd_leaf.value
+        ui._on_redo(None); sel_redo = ui.dd_leaf.value
+    assert sel_undo == alvo                # desfazer volta à folha dividida
+    assert sel_redo == sel_pos             # refazer volta à seleção pós-split
+    assert alvo != sel_pos                 # garante que o teste é significativo
+
+
 def test_ui_merge_missing(task):
     ui = _build(task, com_na=True, n=5000, seed=7)
     with contextlib.redirect_stdout(io.StringIO()):

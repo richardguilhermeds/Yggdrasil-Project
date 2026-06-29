@@ -968,6 +968,34 @@ def test_report_pdf_model(task, tmp_path):
     assert os.path.exists(p) and os.path.getsize(p) > 1000
 
 
+def test_report_markdown_model(task, tmp_path):
+    import os
+    df = _synthetic(task, n=1500, seed=3)
+    seg = ModelSegmenter(df, target="target", task_type=task, sample_col="amostra",
+                         ref_sample="DES", date_col="dt_ref", verbose=False)
+    seg.auto_select(min_iv=0.0)
+    seg.fit(_default_algo(task))
+    seg.build_ratings(method="quantil", n_ratings=5)
+    p = str(tmp_path / "rel_model.md")
+    out = seg.report_markdown(p, time_col="dt_ref")
+    assert out == p and os.path.exists(p) and os.path.getsize(p) > 200
+    txt = open(p, encoding="utf-8").read()
+    # seções esperadas + uma tabela markdown
+    assert "## Visão geral" in txt and "## Métricas por amostra" in txt
+    assert "## Régua de ratings" in txt and "## Backtest por safra" in txt
+    assert "| amostra |" in txt or "| rating |" in txt
+    # fórmula (linear/logística) ou importância SHAP, conforme o algoritmo
+    assert ("## Fórmula do modelo" in txt) or ("## Importância das variáveis (SHAP)" in txt)
+
+
+def test_report_markdown_requires_fit(task):
+    df = _synthetic(task, n=400)
+    seg = ModelSegmenter(df, target="target", task_type=task, sample_col="amostra",
+                         ref_sample="DES", verbose=False)
+    with pytest.raises(RuntimeError):
+        seg.report_markdown("nao_deve_gerar.md")
+
+
 def test_ui_tema_escuro(task):
     pytest.importorskip("ipywidgets")
     import contextlib

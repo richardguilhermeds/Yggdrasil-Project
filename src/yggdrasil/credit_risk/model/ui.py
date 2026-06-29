@@ -879,6 +879,12 @@ class ModelSegmenterUI:
                                 icon="file-pdf-o")
         self.out_pdf = W.HTML()
         self.btn_pdf.on_click(self._on_pdf)
+        self.tx_md = W.Text(value="relatorio_modelo.md", description="Markdown:",
+                            style={"description_width": "initial"})
+        self.btn_md = W.Button(description="Gerar relatório Markdown", button_style="info",
+                               icon="file-text-o")
+        self.out_md = W.HTML()
+        self.btn_md.on_click(self._on_md)
         self.tx_experiment = W.Text(value="", description="Experimento:",
                                     style={"description_width": "initial"})
         self.tx_model = W.Text(value="", description="Modelo (UC):",
@@ -939,10 +945,13 @@ class ModelSegmenterUI:
             W.HBox([self.btn_export]), self.out_export,
         ]); card_score.add_class("mseg-card")
         card_persist = W.VBox([
-            W.HTML("<div class='mseg-h'>Persistência · JSON + modelo joblib · relatório PDF</div>"),
+            W.HTML("<div class='mseg-h'>Persistência · JSON + modelo joblib · relatório "
+                   "PDF/Markdown</div>"),
             W.HBox([self.tx_save, self.btn_save, self.btn_load]),
             W.HBox([self.tx_pdf, self.btn_pdf]),
             self.out_pdf,
+            W.HBox([self.tx_md, self.btn_md]),
+            self.out_md,
         ], layout=W.Layout(width="49%")); card_persist.add_class("mseg-card")
         card_mlflow = W.VBox([
             W.HTML("<div class='mseg-h'>Registrar no MLflow / Unity Catalog</div>"),
@@ -1794,6 +1803,24 @@ class ModelSegmenterUI:
             self._log(f"[pdf] erro: {e}"); return
         self.out_pdf.value = f"<div class='mseg-legend'>✅ Relatório salvo em <code>{path}</code>.</div>"
         self._log(f"[pdf] relatório salvo em {path}")
+
+    def _on_md(self, b):
+        if self.seg.score_ is None:
+            self.out_md.value = "<i>Treine o modelo antes de gerar o relatório.</i>"; return
+        path = (self.tx_md.value or "").strip()
+        if not path:
+            self.out_md.value = "<i>Informe o caminho do .md.</i>"; return
+        if not path.lower().endswith(".md"):
+            path += ".md"
+        try:
+            self.seg.report_markdown(path)
+        except Exception as e:
+            self.out_md.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao gerar "
+                                 f"Markdown: {type(e).__name__}: {e}</div>")
+            self._log(f"[md] erro: {e}"); return
+        self.out_md.value = (f"<div class='mseg-legend'>✅ Relatório salvo em <code>{path}</code> "
+                             "(imagens salvas ao lado).</div>")
+        self._log(f"[md] relatório salvo em {path}")
 
     def _on_load(self, b):
         try:

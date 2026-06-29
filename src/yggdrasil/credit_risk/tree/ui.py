@@ -661,6 +661,14 @@ class TreeSegmenterUI:
         self.tree_sel_style = W.HTML()
         self.out_metrics = W.HTML()
         self.out_iv = W.HTML()
+        # botão para calcular o IV/PSI por variável da folha SEM precisar abrir a aba
+        # "Análise de variáveis" (o cálculo é caro, por isso fica sob demanda).
+        self.btn_iv_refresh = W.Button(
+            description="Atualizar", button_style="info", icon="refresh",
+            tooltip="Calcula o IV e o PSI (OOT/estabilidade) de todas as variáveis na "
+                    "folha selecionada — sem precisar abrir a aba Análise de variáveis",
+            layout=W.Layout(width="auto"))
+        self.btn_iv_refresh.on_click(lambda _: self._compute_iv())
         self.out_leaf_hist = W.HTML()                     # PD da folha
         self.out_plot = W.HTML()
         self.out_boot = W.HTML()
@@ -750,9 +758,15 @@ class TreeSegmenterUI:
             tree_legend, tree_scroll,
         ], layout=W.Layout(width="54%"))
         card_tree.add_class("treeui-card")
+        iv_scroll = W.Box([self.out_iv],
+                          layout=W.Layout(overflow="auto", width="100%",
+                                          max_height="360px"))
         card_iv = W.VBox([
-            W.HTML("<div class='treeui-h'>Information Value · qual variável segmentar</div>"),
-            iv_legend, self.out_iv,
+            W.HBox([W.HTML("<div class='treeui-h' style='margin:0;flex:1'>Information Value "
+                           "· qual variável segmentar</div>"),
+                    self.btn_iv_refresh],
+                   layout=W.Layout(align_items="center", width="100%")),
+            iv_legend, iv_scroll,
         ], layout=W.Layout(width="44%"))
         card_iv.add_class("treeui-card")
         top_cols = W.HBox([card_tree, card_iv],
@@ -874,8 +888,11 @@ class TreeSegmenterUI:
             "⇒ <b>não</b> dá para distinguir as irmãs ⇒ candidatas a fusão; "
             "<span style='color:#137a3e'>p baixo</span> ⇒ folhas bem separadas. "
             "Só <b>irmãs</b> são comparadas (a última de cada grupo e o nó de faltantes ficam em branco).</div>")
+        table_scroll = W.Box([self.out_table],
+                             layout=W.Layout(overflow="auto", width="100%",
+                                             max_height="420px"))
         card_table = W.VBox([W.HTML("<div class='treeui-h'>Folhas criadas · PSI &amp; teste de hipótese (irmãs)</div>"),
-                             tbl_legend, self.out_table,
+                             tbl_legend, table_scroll,
                              W.HBox([self.btn_copy_table]), self.out_table_tsv])
         card_table.add_class("treeui-card")
 
@@ -1797,7 +1814,10 @@ class TreeSegmenterUI:
         # a última coluna (ex.: PSI ESTAB) — rola na horizontal dentro do container.
         sty = sty.set_table_styles(
             [{"selector": "", "props": [("min-width", "max-content")]}], overwrite=False)
-        self.out_table.value = self._styler_html(sty, max_height="320px")
+        # o scroller (vertical + horizontal) é o W.Box `table_scroll` que envolve este
+        # widget na aba Diagnóstico — não embutimos outro <div> rolável aqui (evita
+        # barras aninhadas e dá mais altura para ver a tabela inteira).
+        self.out_table.value = self._styler_html(sty)
 
     def _leaves_tsv(self):
         """Tabela de folhas em TSV (tab = coluna, números em pt-BR) — cola direto
@@ -1936,15 +1956,17 @@ class TreeSegmenterUI:
         self._set_html(self.leaf_header, "header", self._leaf_header_html())
         self._set_html(self.bar, "bar", self._status_html())
 
-    def _refresh(self):
+    def _refresh(self, select=None):
         # suspende o observer de folha enquanto reatribuímos os dropdowns: senão a
         # troca de dd_leaf.value re-dispara _on_leaf_change DENTRO do _refresh,
         # renderizando árvore/IV/histograma 2× por mutação.
+        # `select` (opcional) força a folha a ficar em foco — usado pelo desfazer/
+        # refazer para voltar à folha que estava selecionada naquele estado.
         self._suspend_leaf_obs = True
         try:
             opts = self._ordered_leaf_options()
             leaves = [sid for _, sid in opts]
-            cur = self.dd_leaf.value
+            cur = select if select is not None else self.dd_leaf.value
             self.dd_leaf.options = opts
             if cur in leaves:
                 self.dd_leaf.value = cur
@@ -2455,8 +2477,9 @@ class TreeSegmenterUI:
                 self.tabs.selected_index != self._iv_tab_index:
             self._iv_dirty = True
             self._set_html(self.out_iv, "iv",
-                           "<div style='font-size:12px;color:#889'>Abra esta aba para "
-                           "calcular o IV/PSI por variável da folha selecionada.</div>")
+                           "<div style='font-size:12px;color:#889'>Clique em "
+                           "<b>Atualizar</b> (acima) para calcular o IV/PSI por variável "
+                           "da folha selecionada — ou abra a aba <b>Análise de variáveis</b>.</div>")
             return
         self._compute_iv()
 
@@ -2468,8 +2491,21 @@ class TreeSegmenterUI:
         has_psi = "pior_psi" in iv.columns
         disp = (iv[["variavel", "n_bins", "iv", "forca"]].copy()
                 .rename(columns={"n_bins": "bins"}))
+        psi_cols = []                       # colunas de PSI exibidas (p/ formato + estilo)
         if has_psi:
-            disp["psi"] = iv["pior_psi"].values
+            # PSI do OOT especificamente (além do pior caso entre as amostras) — é a
+            # estabilidade fora do tempo, a mais relevante para escolher a variável.
+            def _is_oot(c):
+                return (c.startswith("psi_") and c != "psi_classificacao"
+                        and "OOT" in c[4:].upper())
+            oot_col = next((c for c in iv.columns if c[4:].upper() == "OOT"
+                            and _is_oot(c)), None) or \
+                next((c for c in iv.columns if _is_oot(c)), None)
+            if oot_col is not None:
+                disp["psi OOT"] = iv[oot_col].values
+                psi_cols.append("psi OOT")
+            disp["psi pior"] = iv["pior_psi"].values
+            psi_cols.append("psi pior")
             disp["psi_status"] = iv["psi_classificacao"].values
         disp["variavel"] = disp["variavel"].map(
             lambda v: self.seg.feature_labels.get(v, v))
@@ -2534,9 +2570,9 @@ class TreeSegmenterUI:
 
         fmt = {"iv": "{:.4f}",
                "bins": lambda v: "—" if (pd.isna(v) or v == 0) else f"{int(v)}"}
-        if has_psi:
-            fmt["psi"] = "{:.4f}"
-        num_cols = [c for c in ["bins", "iv", "psi"] if c in disp.columns]
+        for c in psi_cols:
+            fmt[c] = "{:.4f}"
+        num_cols = [c for c in (["bins", "iv"] + psi_cols) if c in disp.columns]
         sty = (disp.style.format(fmt, na_rep="—")
                .hide(axis="index")
                .set_table_styles(iv_styles)
@@ -2549,13 +2585,15 @@ class TreeSegmenterUI:
             sty = sty.apply(reco_row, axis=1)
         sty = sty.map(forca_txt, subset=["força"])
         if has_psi:
-            sty = (sty.map(psi_txt, subset=["psi"])
-                      .map(estab_txt, subset=["estab."]))
+            if psi_cols:
+                sty = sty.map(psi_txt, subset=psi_cols)
+            sty = sty.map(estab_txt, subset=["estab."])
         qual = "TODA A CARTEIRA" if (sid in (None, "root")) else self._leaf_label(sid)
         _iv_kind = "binário" if self._is_clf else "contínuo"
         hint = (f"<div style='font-size:11px;color:#667;margin-bottom:4px'>folha: "
                 f"<b>{qual}</b> · {self._risk_mean} (DES) = {pd_med} · IV {_iv_kind} (optbinning)"
-                + (" · PSI nos mesmos bins do IV (DES × amostra)" if has_psi else "")
+                + (" · PSI (OOT e pior caso) nos mesmos bins do IV (DES × amostra)"
+                   if has_psi else "")
                 + "</div>")
         self._set_html(self.out_iv, "iv", hint + self._styler_html(sty))
 
@@ -3549,8 +3587,10 @@ class TreeSegmenterUI:
     # Undo / redo de splits (e demais alterações estruturais da árvore)
     # ==================================================================
     def _snapshot(self):
-        """Estado restaurável: estrutura da árvore + folhas travadas."""
-        return {"segments": self.seg.to_dict()["segments"], "locked": set(self.locked)}
+        """Estado restaurável: estrutura da árvore + folhas travadas + folha selecionada
+        (para o desfazer/refazer voltar à folha que estava em foco)."""
+        return {"segments": self.seg.to_dict()["segments"], "locked": set(self.locked),
+                "selected": self.dd_leaf.value}
 
     def _checkpoint(self):
         """Empilha o estado atual para permitir desfazer; zera a pilha de refazer."""
@@ -3575,26 +3615,28 @@ class TreeSegmenterUI:
     def _on_undo(self, _):
         if not self._undo:
             return
+        prev = self._undo.pop()
         self._redo.append(self._snapshot())
-        self._restore(self._undo.pop())
+        self._restore(prev)
         self._pending = None
         self._sync_undo_buttons()
         with self.out_log:
             self.out_log.clear_output(wait=True)
             print("↶ desfeito.")
-        self._refresh()
+        self._refresh(select=prev.get("selected"))
 
     def _on_redo(self, _):
         if not self._redo:
             return
+        nxt = self._redo.pop()
         self._undo.append(self._snapshot())
-        self._restore(self._redo.pop())
+        self._restore(nxt)
         self._pending = None
         self._sync_undo_buttons()
         with self.out_log:
             self.out_log.clear_output(wait=True)
             print("↷ refeito.")
-        self._refresh()
+        self._refresh(select=nxt.get("selected"))
 
     # ==================================================================
     # Auto-merge: funde folhas-irmãs indistinguíveis automaticamente
