@@ -2222,8 +2222,8 @@ class TreeSegmenter:
             descr.append(r["descricao"]); vals.append(v)
         if not vals:
             raise ValueError("Sem dados para o boxplot.")
-        if figsize is None:                       # mais largo e mais baixo
-            figsize = (max(10.0, len(vals) * 1.6), 3.4)
+        if figsize is None:                       # mais largo e ALTO (legibilidade)
+            figsize = (max(10.0, len(vals) * 1.6), 5.6)
         fig, ax = self._new_ax(figsize, dpi, ax)
         norm = Normalize(0.0, 1.0)
         cmap_obj = plt.get_cmap(cmap)
@@ -4149,7 +4149,10 @@ class TreeSegmenter:
                     expr = " AND ".join(sub) if sub else "1=1"
                 else:
                     cats = ", ".join(_q(x) for x in c["cats"])
-                    expr = f"CAST({feat} AS VARCHAR) IN ({cats})"
+                    # STRING (não VARCHAR): no Spark/Databricks `CAST(x AS VARCHAR)`
+                    # sem tamanho falha ("VARCHAR requires a length parameter"); STRING
+                    # é o tipo canônico e equivale a VARCHAR(n) sem exigir comprimento.
+                    expr = f"CAST({feat} AS STRING) IN ({cats})"
                 if len(conds) > 1 or c["kind"] != "na":
                     expr = f"({expr})"
                 if c.get("include_na"):

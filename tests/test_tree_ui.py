@@ -330,8 +330,10 @@ def test_ui_plots_especificos_por_task(task):
     ui = _build(task)
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_autofit(None)
-        # botões 1 e 2: clf = ROC/KS · reg = boxplot + histograma do alvo —
-        # em ambos os modos renderizam em out_discrim
+        # botão 1: clf = ROC · reg = boxplot por folha — ambos renderizam em
+        # out_discrim. O botão 2 (KS) só existe na classificação (o histograma
+        # do alvo foi removido da UI de regressão).
         ui.btn_roc.click()
-        ui.btn_ks.click()
+        if ui._is_clf:
+            ui.btn_ks.click()
     assert ui.out_discrim.value and "Erro" not in ui.out_discrim.value

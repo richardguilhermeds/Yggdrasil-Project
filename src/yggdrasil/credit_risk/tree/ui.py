@@ -622,14 +622,12 @@ class TreeSegmenterUI:
             self.btn_roc.on_click(self._on_roc)
             self.btn_ks.on_click(self._on_ks)
         else:
-            # regressão: reusa os 2 botões da discriminação p/ boxplot e
-            # histograma do alvo (ROC/KS não se aplica a alvo contínuo)
+            # regressão: reusa o 1º botão da discriminação p/ o boxplot por folha
+            # (ROC/KS não se aplica a alvo contínuo; o histograma do alvo foi
+            # removido da UI — segue disponível via seg.plot_target_hist()).
             self.btn_roc.description = "📦 Boxplot por folha"
-            self.btn_ks.description = "📊 Histograma do alvo"
             self.btn_roc.tooltip = "Boxplot do alvo (LGD) por folha — dispersão dentro de cada folha"
-            self.btn_ks.tooltip = "Histograma do alvo (LGD) na carteira"
             self.btn_roc.on_click(self._on_box)
-            self.btn_ks.on_click(self._on_hist)
         self.btn_undo.on_click(self._on_undo)
         self.btn_redo.on_click(self._on_redo)
         self.btn_automerge.on_click(self._on_automerge)
@@ -935,16 +933,17 @@ class TreeSegmenterUI:
                 "maus; <b>AUC</b>/<b>Gini</b> = área sob a ROC. Avalie quando a árvore estiver "
                 "fechada.</div>")
         else:
-            _dh = "Dispersão do alvo por folha · boxplot &amp; histograma"
+            _dh = "Dispersão do alvo por folha · boxplot"
             discrim_legend = W.HTML(
                 "<div class='treeui-legend'>Dispersão do <b>alvo (LGD)</b> por folha — curva ROC/KS "
                 "não se aplica a alvo contínuo. <b>Boxplot por folha</b> mostra mediana, quartis e "
-                "outliers; <b>histograma do alvo</b> mostra a frequência dos valores. Avalie quando "
-                "a árvore estiver fechada.</div>")
+                "outliers de cada folha. Avalie quando a árvore estiver fechada.</div>")
+        # clf: ROC + KS · reg: só o boxplot por folha (histograma do alvo removido)
+        _discrim_btns = [self.btn_roc, self.btn_ks] if self._is_clf else [self.btn_roc]
         card_discrim = W.VBox([
             W.HTML(f"<div class='treeui-h'>{_dh}</div>"),
             discrim_legend,
-            W.HBox([self.btn_roc, self.btn_ks]),
+            W.HBox(_discrim_btns),
             self.out_discrim,
         ])
         card_discrim.add_class("treeui-card")
@@ -1004,7 +1003,7 @@ class TreeSegmenterUI:
         ], layout=W.Layout(width="100%"))
         card_score.add_class("treeui-card")
         _diag_detail = ("discriminação (ROC/KS)" if self._is_clf
-                        else "dispersão do alvo (boxplot/histograma)")
+                        else "dispersão do alvo (boxplot)")
         sep_diag2 = W.HTML("<div class='treeui-band treeui-band-muted'>Evidência detalhada · "
                            f"folhas · {_diag_detail} · métricas · IC bootstrap</div>")
         tab_diag = W.VBox([sep_diag, card_score, sep_diag2,
@@ -1409,7 +1408,7 @@ class TreeSegmenterUI:
             try:
                 for _, r in seg.psi().iterrows():
                     c = self._psi_class(r["psi"])
-                    cells.append(cell(f"PSI {r['amostra']}", f"{r['psi']:.3f}",
+                    cells.append(cell(f"PSI {r['amostra']}", f"{r['psi']:.1%}",
                                       badge=r["classificacao"], cls=c))
             except Exception:
                 pass
@@ -1423,20 +1422,20 @@ class TreeSegmenterUI:
                     else:
                         c = "green" if ks >= 0.30 else "yellow" if ks >= 0.20 else "red"
                         badge = "bom" if c == "green" else "atenção" if c == "yellow" else "fraco"
-                        cells.append(cell(f"KS {r['amostra']}", f"{ks:.3f}", color=hexc[c],
+                        cells.append(cell(f"KS {r['amostra']}", f"{ks:.1%}", color=hexc[c],
                                           badge=badge, cls=c))
                     if pd.isna(auc):
                         cells.append(cell(f"AUC {r['amostra']}", "—", color="#8a93a3"))
                     else:
                         c = "green" if auc >= 0.70 else "yellow" if auc >= 0.60 else "red"
-                        cells.append(cell(f"AUC {r['amostra']}", f"{auc:.3f}", color=hexc[c]))
+                        cells.append(cell(f"AUC {r['amostra']}", f"{auc:.1%}", color=hexc[c]))
                 else:
                     r2 = r["R2"]
                     if pd.isna(r2):
                         cells.append(cell(f"R² {r['amostra']}", "—", color="#8a93a3"))
                     else:
                         c = "green" if r2 >= 0.5 else "yellow" if r2 >= 0.2 else "red"
-                        cells.append(cell(f"R² {r['amostra']}", f"{r2:.3f}", color=hexc[c]))
+                        cells.append(cell(f"R² {r['amostra']}", f"{r2:.1%}", color=hexc[c]))
         except Exception:
             pass
         return f"<div style='display:flex;align-items:stretch'>{''.join(cells)}</div>"
@@ -1943,10 +1942,13 @@ class TreeSegmenterUI:
             return f"background-color:{c};font-weight:600"
 
         if self._is_clf:
-            fmt = {c: "{:.4f}" for c in ("taxa_default", "KS", "AUC", "Gini", "Acuracia", "F1")}
+            # métricas adimensionais/[0,1] em % (KS, AUC, Gini, taxa, acurácia, F1)
+            fmt = {c: "{:.1%}" for c in ("taxa_default", "KS", "AUC", "Gini", "Acuracia", "F1")}
             sty = (m.style.map(ks_bg, subset=["KS"]).map(auc_bg, subset=["AUC"]))
         else:
-            fmt = {c: "{:.4f}" for c in ("MAE", "RMSE", "R2")}
+            # MAE/RMSE seguem na unidade do alvo (decimal); só o R² vira %
+            fmt = {c: "{:.4f}" for c in ("MAE", "RMSE")}
+            fmt["R2"] = "{:.1%}"
             sty = m.style.map(r2_bg, subset=["R2"])
         sty = (sty
                .format(fmt, na_rep="—")
@@ -3295,17 +3297,17 @@ class TreeSegmenterUI:
                 if auc is None or auc != auc:
                     return "yellow", "—"
                 c = "green" if auc >= 0.70 else "yellow" if auc >= 0.60 else "red"
-                g = f" · Gini {gini:.3f}" if (gini is not None and gini == gini) else ""
-                return c, f"AUC DES {auc:.3f}{g}"
+                g = f" · Gini {gini:.1%}" if (gini is not None and gini == gini) else ""
+                return c, f"AUC DES {auc:.1%}{g}"
             if r2 is None or r2 != r2:
                 return "yellow", "—"
             c = "green" if r2 >= 0.5 else "yellow" if r2 >= 0.2 else "red"
-            return c, f"R² DES {r2:.3f}"
+            return c, f"R² DES {r2:.1%}"
 
         def v_estab():
             if pior_psi is None:
                 return "yellow", "sem amostras"
-            return self._psi_class(pior_psi), f"pior PSI {pior_psi:.3f}"
+            return self._psi_class(pior_psi), f"pior PSI {pior_psi:.1%}"
 
         def v_calib():
             if max_gap is None:
@@ -3373,7 +3375,7 @@ class TreeSegmenterUI:
                 rows += ("<div style='display:flex;align-items:center;gap:9px;margin:5px 0'>"
                          f"<div style='width:80px;font-size:11px;color:#6b7480'>PSI {ab}</div>"
                          f"<div class='mono' style='width:52px;font-size:12.5px;font-weight:600;"
-                         f"color:{psi_hex[cls]}'>{p:.3f}</div>{bar(p)}"
+                         f"color:{psi_hex[cls]}'>{p:.1%}</div>{bar(p)}"
                          f"<div style='width:62px;text-align:right;font-size:10.5px;"
                          f"color:{psi_hex[cls]}'>{r['classificacao']}</div></div>")
             ev += ("<div class='treeui-h' style='margin-top:14px'>Estabilidade · PSI da "
