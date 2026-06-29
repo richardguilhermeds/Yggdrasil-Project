@@ -34,6 +34,15 @@ except ImportError:  # pragma: no cover
     OptimalBinning = None
     ContinuousOptimalBinning = None
 
+# scipy.stats no topo (e não dentro de _pair_pvalue): os testes de irmãs rodam por
+# par a cada rodada de prune/auto_merge e em todo _refresh — pagar o lookup do
+# import por chamada era desperdício no hot path. import único, resolvido uma vez.
+try:
+    from scipy.stats import mannwhitneyu, ttest_ind
+except Exception:  # pragma: no cover
+    mannwhitneyu = None
+    ttest_ind = None
+
 TASK_TYPES = ("classification", "regression")
 
 # Abreviações de mês em PT-BR (independem do locale do SO; Windows não traz pt_BR).
@@ -322,6 +331,17 @@ class TreeSegmenter:
         # cache do binning ótimo por folha (o solver do optbinning é o gargalo) —
         # ver _resolve_bins_cached; chaveado por id() da máscara da folha
         self._bins_cache: dict = {}
+        # ---- caches de agregados por VERSÃO da árvore (desempenho) -------------
+        # Toda mutação estrutural (grow/prune/collapse/merge_*/auto_merge/load/
+        # fit_auto) chama _bump_version(). leaves()/_leaf_order()/_grade_map()/
+        # metrics()/psi() são reconstruídos ~4-5× por _refresh da UI varrendo
+        # máscaras full-length por folha; memoizá-los por versão elimina esse
+        # recompute redundante (o maior gargalo da UI da árvore no Databricks).
+        self._tree_version: int = 0
+        self._agg_cache: dict = {}        # (nome, *args, version) -> resultado
+        # alvo (PD/LGD) por folha restrito à referência — chaveado por id(mask),
+        # invalida sozinho quando a folha é refeita (mesma ideia do _bins_cache)
+        self._leaf_target_cache: dict = {}
         # classe de optbinning e nome do kwarg de diferença mínima por tipo de alvo
         self._OptBin = OptimalBinning if self._is_clf else ContinuousOptimalBinning
         self._diff_kwarg = "min_event_rate_diff" if self._is_clf else "min_mean_diff"
@@ -360,6 +380,18 @@ class TreeSegmenter:
             if verbose:
                 print(f"[init] amostras: {amostras} | referência PSI = {ref_sample}")
 
+        # máscaras booleanas por amostra, pré-computadas UMA vez (linhas e
+        # sample_col não mudam após a construção). PSI/CSI/metrics recriavam
+        # `df[sample_col]==a` full-length a cada chamada — caro e repetido por
+        # folha×amostra. Aqui vira lookup. _mask_ref é a máscara da referência.
+        if sample_col is not None:
+            self._sample_masks = {a: (self.df[sample_col] == a)
+                                  for a in self.df[sample_col].dropna().unique()}
+            self._mask_ref = self._sample_masks.get(ref_sample)
+        else:
+            self._sample_masks = {}
+            self._mask_ref = None
+
         # cada segmento: id -> dict(mask, label, depth, is_leaf, path, parent, conditions)
         self.segments: dict[str, dict] = {
             "root": {
@@ -375,6 +407,34 @@ class TreeSegmenter:
         self.history: list[dict] = []
         self._psi_detalhe: list[dict] = []
         self._csi_detalhe: list[dict] = []
+
+    # ------------------------------------------------------------------
+    # Versão da árvore + memoização de agregados (desempenho)
+    # ------------------------------------------------------------------
+    def _bump_version(self):
+        """Marca a árvore como alterada: invalida os caches de agregado por versão.
+        Chamado por TODA mutação estrutural (grow/prune/collapse/merge_*/
+        auto_merge/_load_segments/fit_auto)."""
+        self._tree_version += 1
+        if len(self._agg_cache) > 64:        # backstop: só guardamos a versão atual
+            self._agg_cache.clear()
+
+    def _agg_memo(self, key, build):
+        """Memoiza ``build()`` por (key, versão-da-árvore). Devolve sempre uma
+        cópia defensiva de DataFrame/dict/list para o chamador não corromper o
+        cache. ``build`` é uma função sem argumentos."""
+        ck = (key, self._tree_version)
+        hit = self._agg_cache.get(ck)
+        if hit is None:
+            hit = build()
+            self._agg_cache[ck] = hit
+        if isinstance(hit, pd.DataFrame):
+            return hit.copy()
+        if isinstance(hit, dict):
+            return dict(hit)
+        if isinstance(hit, list):
+            return list(hit)
+        return hit
 
     def _nonfeature_cols(self) -> set:
         """Colunas que NÃO entram na modelagem (não viram variáveis candidatas):
@@ -628,8 +688,10 @@ class TreeSegmenter:
         previews = {}
         for sid, seg in targets.items():
             sub = self.df[seg["mask"]]
-            bins, modo, kind = self._resolve_bins(
-                sub, feature, splits, dtype, max_n_bins, min_bin_size, max_bin_size,
+            # cache por id(mask): o Preview popula o solver e o .grow() seguinte
+            # (mesma folha/feature/args) reaproveita, sem rodar optbinning 2×.
+            bins, modo, kind = self._resolve_bins_cached(
+                sid, feature, splits, dtype, max_n_bins, min_bin_size, max_bin_size,
                 min_mean_diff=min_mean_diff, criterion=criterion)
             if not bins:
                 print(f"[{sid}] sem corte válido em '{feature}' ({modo})")
@@ -670,6 +732,7 @@ class TreeSegmenter:
     def grow(self, feature, splits=None, dtype=None, max_n_bins=4,
              min_bin_size=0.05, only_segments=None, max_bin_size=None, relax_max=False,
              min_mean_diff=0.0, criterion="optbin", na_to_worst=True):
+        self._bump_version()      # estrutura vai mudar → invalida agregados memoizados
         targets = {
             sid: s for sid, s in self.segments.items()
             if s["is_leaf"] and (only_segments is None or sid in only_segments)
@@ -683,8 +746,8 @@ class TreeSegmenter:
                     print(f"[{sid}] poucas linhas para binning ótimo "
                           f"({n_fit} < {self.min_leaf_rows}) — folha mantida")
                     continue
-            bins, modo, kind = self._resolve_bins(
-                sub, feature, splits, dtype, max_n_bins, min_bin_size, max_bin_size,
+            bins, modo, kind = self._resolve_bins_cached(
+                sid, feature, splits, dtype, max_n_bins, min_bin_size, max_bin_size,
                 relax_max=relax_max, min_mean_diff=min_mean_diff, criterion=criterion)
             modo_usado = modo
             if not bins:
@@ -799,6 +862,7 @@ class TreeSegmenter:
     #   de volta em folha (remove todos os descendentes). Desfaz um split.
     # ------------------------------------------------------------------
     def collapse(self, sid: str, verbose: bool = True):
+        self._bump_version()      # estrutura vai mudar → invalida agregados memoizados
         if sid not in self.segments:
             if verbose:
                 print(f"[collapse] segmento '{sid}' não existe")
@@ -829,6 +893,7 @@ class TreeSegmenter:
     #   Se o pai ficar com uma única folha, a fusão equivale a recolhê-lo.
     # ------------------------------------------------------------------
     def merge_leaf(self, sid: str, side: str = "left", verbose: bool = True):
+        self._bump_version()      # estrutura vai mudar → invalida agregados memoizados
         if sid not in self.segments:
             if verbose:
                 print(f"[merge] segmento '{sid}' não existe")
@@ -953,6 +1018,7 @@ class TreeSegmenter:
 
     def _merge_missing_into(self, na_sid: str, target_sid: str, verbose: bool = True):
         """Funde o nó de faltantes `na_sid` no nó populado `target_sid` (mesmo pai)."""
+        self._bump_version()      # estrutura vai mudar → invalida agregados memoizados
         if na_sid not in self.segments or target_sid not in self.segments:
             return self
         na_seg, tgt = self.segments[na_sid], self.segments[target_sid]
@@ -1118,16 +1184,24 @@ class TreeSegmenter:
     #   anterior); em árvores profundas, as notas leem 1, 2, 3 de fato.
     # ------------------------------------------------------------------
     def _node_value(self, sid: str) -> float:
-        """PD média do nó na amostra de referência (DES), com fallback p/ todas."""
-        sub = self.df[self.segments[sid]["mask"]]
-        if self.sample_col is not None:
-            sr = sub.loc[sub[self.sample_col] == self.ref_sample, self.target]
+        """PD média do nó na amostra de referência (DES), com fallback p/ todas.
+
+        Lê apenas a COLUNA-ALVO (não materializa o subframe inteiro) e reusa a
+        máscara de referência pré-computada — chamado por folha em _leaf_order."""
+        mask = self.segments[sid]["mask"]
+        if self._mask_ref is not None:
+            sr = self.df.loc[mask & self._mask_ref, self.target]
             if len(sr):
                 return float(sr.mean())
-        return float(sub[self.target].mean()) if len(sub) else float("nan")
+        sub = self.df.loc[mask, self.target]
+        return float(sub.mean()) if len(sub) else float("nan")
 
     def _leaf_order(self, ascending: bool = True) -> list:
-        """sids das folhas na ordem esquerda→direita da árvore (ver bloco acima)."""
+        """sids das folhas na ordem esquerda→direita (memoizado por versão da árvore)."""
+        return self._agg_memo(("leaf_order", ascending),
+                              lambda: self._compute_leaf_order(ascending))
+
+    def _compute_leaf_order(self, ascending: bool = True) -> list:
         filhos: dict = {}
         for sid, s in self.segments.items():
             filhos.setdefault(s["parent"], []).append(sid)
@@ -1174,6 +1248,15 @@ class TreeSegmenter:
     # ------------------------------------------------------------------
     def leaves(self, ascending: bool = True, with_psi: bool = False,
                with_test: bool = False, test: str = "mannwhitney") -> pd.DataFrame:
+        """Tabela de folhas (memoizada por versão da árvore + parâmetros). A UI
+        chama isto ~5× por _refresh (direto e via _grade_map); a memoização evita
+        revarrer as máscaras full-length por folha a cada chamada."""
+        return self._agg_memo(
+            ("leaves", ascending, with_psi, with_test, test),
+            lambda: self._compute_leaves(ascending, with_psi, with_test, test))
+
+    def _compute_leaves(self, ascending: bool = True, with_psi: bool = False,
+                        with_test: bool = False, test: str = "mannwhitney") -> pd.DataFrame:
         linhas, n_total = [], len(self.df)
         for sid, seg in self.segments.items():
             if not seg["is_leaf"]:
@@ -1218,12 +1301,20 @@ class TreeSegmenter:
 
     # contribuição de PSI por folha para cada amostra (≠ referência)
     def _append_psi_cols(self, out, eps: float = 1e-6):
+        # Vetorizado: um único crosstab(folha, amostra) substitui os laços
+        # (mask_folha & mask_amostra).sum() full-length por folha×amostra. O
+        # denominador continua o tamanho TOTAL da amostra (máscaras pré-computadas).
         leaf_ids = out["segmento"].tolist()
-        masks = {sid: self.segments[sid]["mask"] for sid in leaf_ids}
-        ref_mask = self.df[self.sample_col] == self.ref_sample
-        n_ref = ref_mask.sum()
-        ref_pct = {sid: ((masks[sid] & ref_mask).sum() / n_ref if n_ref else 0.0)
-                   for sid in leaf_ids}
+        leaf_id = self._leaf_id_series()
+        ct = pd.crosstab(leaf_id, self.df[self.sample_col])
+
+        def fracs(amostra):
+            n = float(self._sample_masks[amostra].sum())
+            col = ct[amostra] if amostra in ct.columns else None
+            return {sid: (float(col.get(sid, 0.0)) / n if (col is not None and n) else 0.0)
+                    for sid in leaf_ids}
+
+        ref_pct = fracs(self.ref_sample)
         # representatividade (% da folha DENTRO da amostra) — começa pela referência;
         # as demais amostras saem no laço abaixo, ao lado do respectivo PSI.
         out[f"repr_{self.ref_sample}_%"] = [round(100 * ref_pct[sid], 1)
@@ -1231,11 +1322,10 @@ class TreeSegmenter:
         for amostra in self.df[self.sample_col].dropna().unique():
             if amostra == self.ref_sample:
                 continue
-            s_mask = self.df[self.sample_col] == amostra
-            n_s = s_mask.sum()
+            cur_pct = fracs(amostra)
             psi_col, repr_col = [], []
             for sid in leaf_ids:
-                frac = (masks[sid] & s_mask).sum() / n_s if n_s else 0.0
+                frac = cur_pct[sid]
                 p_ref = max(ref_pct[sid], eps)
                 p_cur = max(frac, eps)
                 psi_col.append(round((p_cur - p_ref) * np.log(p_cur / p_ref), 4))
@@ -1247,18 +1337,27 @@ class TreeSegmenter:
     # alvo (PD) de uma folha, restrito à amostra de referência quando houver
     # (sem NaN, para os testes/fusões não ficarem cegos por valores ausentes)
     def _leaf_target(self, sid: str) -> np.ndarray:
-        m = self.segments[sid]["mask"]
-        if self.sample_col is not None:
-            m = m & (self.df[self.sample_col] == self.ref_sample)
+        # Cache por id() da máscara da folha: prune/auto_merge e o teste de
+        # adjacência re-extraem o alvo da MESMA folha dezenas de vezes por rodada.
+        # A máscara da referência (DES) é pré-computada (self._mask_ref) em vez de
+        # recriar `df[sample_col]==ref` full-length a cada chamada.
+        mask = self.segments[sid]["mask"]
+        ck = id(mask)
+        hit = self._leaf_target_cache.get(ck)
+        if hit is not None and hit[1] is mask:    # confirma que o id não foi reciclado
+            return hit[0]
+        m = mask if self._mask_ref is None else (mask & self._mask_ref)
         vals = self.df.loc[m, self.target].to_numpy(dtype="float64")
-        return vals[~np.isnan(vals)]
+        vals = vals[~np.isnan(vals)]
+        if len(self._leaf_target_cache) > 4000:   # backstop de memória
+            self._leaf_target_cache.clear()
+        self._leaf_target_cache[ck] = (vals, mask)   # guarda mask p/ o id não reciclar
+        return vals
 
     # p-valor do teste de igualdade de PD entre duas folhas (na referência)
     def _pair_pvalue(self, sid_a: str, sid_b: str, test: str = "mannwhitney",
                      min_n: int = 8) -> float:
-        try:
-            from scipy.stats import mannwhitneyu, ttest_ind
-        except Exception:
+        if mannwhitneyu is None:        # scipy ausente (importado no topo do módulo)
             return np.nan
         a, b = self._leaf_target(sid_a), self._leaf_target(sid_b)
         if len(a) < min_n or len(b) < min_n:
@@ -1307,10 +1406,31 @@ class TreeSegmenter:
 
     # mapeia segmento -> (nota, descrição) para uso no assign
     def _grade_map(self, ascending: bool = True):
+        # memoizado por versão: a UI chama _grade_map 4× por _refresh (tree_html,
+        # leaf_header, leaf_chips, ordered_leaf_options)
+        d = self._agg_memo(("grade_map", ascending),
+                           lambda: self._compute_grade_map(ascending))
+        return d["nota"], d["desc"]
+
+    def _compute_grade_map(self, ascending: bool = True):
         lv = self.leaves(ascending=ascending)
         nota = dict(zip(lv["segmento"], lv["nota"]))
         desc = dict(zip(lv["segmento"], lv["descricao"]))
-        return nota, desc
+        return {"nota": nota, "desc": desc}
+
+    def _leaf_id_series(self, leaf_ids=None) -> pd.Series:
+        """Série (index = df.index) com o id da folha de cada linha (NA se nenhuma).
+        Como as folhas são mutuamente exclusivas, isso permite trocar os laços
+        ``(mask_folha & mask_amostra).sum()`` por um único ``pd.crosstab``.
+        Memoizada por versão da árvore."""
+        def build():
+            ids = leaf_ids if leaf_ids is not None else \
+                [sid for sid, s in self.segments.items() if s["is_leaf"]]
+            s = pd.Series(pd.NA, index=self.df.index, dtype=object)
+            for sid in ids:
+                s.values[self.segments[sid]["mask"].values] = sid
+            return s
+        return self._agg_memo(("leaf_id_series",), build)
 
     # ------------------------------------------------------------------
     # TREE: desenha a árvore hierárquica (nós internos + folhas) em texto.
@@ -1383,14 +1503,13 @@ class TreeSegmenter:
         maior taxa observada para dar contraste."""
         if not self._is_clf:
             return 0.0, 1.0
-        vals = []
-        for sid, s in self.segments.items():
-            sub = self.df[s["mask"]]
-            if len(sub):
-                v = sub[self.target].mean()
-                if not pd.isna(v):
-                    vals.append(float(v))
-        vmax = max(vals) if vals else 0.01
+        # só FOLHAS (a média de um nó interno é média ponderada das folhas, logo
+        # ≤ a maior média de folha → o vmax é o mesmo) e via um único groupby
+        # vetorizado, em vez de materializar o subframe de cada segmento.
+        leaf_ids = [sid for sid, s in self.segments.items() if s["is_leaf"]]
+        leaf_id = self._leaf_id_series(leaf_ids)
+        means = self.df[self.target].groupby(leaf_id).mean()
+        vmax = float(means.max()) if len(means) and not means.isna().all() else 0.01
         return 0.0, (vmax if vmax > 1e-9 else 0.01)
 
     # ------------------------------------------------------------------
@@ -1596,16 +1715,26 @@ class TreeSegmenter:
     def psi(self, eps: float = 1e-6) -> pd.DataFrame:
         if self.sample_col is None:
             raise ValueError("PSI requer sample_col definido no construtor.")
+        return self._agg_memo(("psi", round(float(eps), 12)),
+                              lambda: self._compute_psi(eps))
+
+    def _compute_psi(self, eps: float = 1e-6) -> pd.DataFrame:
         leaf_ids = [sid for sid, s in self.segments.items() if s["is_leaf"]]
         if not leaf_ids:
             raise ValueError("Nenhuma folha — cresça a segmentação antes do PSI.")
 
+        # distribuição (% por folha) por amostra via UM crosstab vetorizado, em vez
+        # de (mask_folha & mask_amostra).sum() full-length por folha×amostra.
+        # Denominador = tamanho TOTAL da amostra (igual ao código original), via
+        # máscaras de amostra pré-computadas.
+        leaf_id_por_linha = self._leaf_id_series(leaf_ids)
+        ct = pd.crosstab(leaf_id_por_linha, self.df[self.sample_col])
         dist = {}
         for amostra in self.df[self.sample_col].dropna().unique():
-            mask_am = self.df[self.sample_col] == amostra
-            n_am = mask_am.sum()
+            n_am = float(self._sample_masks[amostra].sum())
+            col = ct[amostra] if amostra in ct.columns else None
             dist[amostra] = {
-                sid: ((self.segments[sid]["mask"] & mask_am).sum() / n_am if n_am else 0.0)
+                sid: (float(col.get(sid, 0.0)) / n_am if (col is not None and n_am) else 0.0)
                 for sid in leaf_ids
             }
 
@@ -1658,7 +1787,7 @@ class TreeSegmenter:
 
         nonref = [a for a in self.df[self.sample_col].dropna().unique()
                   if a != self.ref_sample]
-        ref_mask = self.df[self.sample_col] == self.ref_sample
+        ref_mask = self._mask_ref
         n_ref = int(ref_mask.sum())
         self._csi_detalhe = []
 
@@ -1677,15 +1806,18 @@ class TreeSegmenter:
                 rows.append(row)
                 continue
 
-            ref_pct = [((self._mask_in(self.df, feat, b) & ref_mask).sum() / n_ref)
-                       for b in bins]
+            # máscara de cada bin sobre o df calculada UMA vez (inclui o .astype(str)
+            # caro das categóricas) e reusada para a referência e todas as amostras —
+            # antes era recomputada 1+n_amostras vezes por bin.
+            bin_masks = [self._mask_in(self.df, feat, b) for b in bins]
+            ref_pct = [(int((bm & ref_mask).sum()) / n_ref) for bm in bin_masks]
             pior = 0.0
             for a in nonref:
-                a_mask = self.df[self.sample_col] == a
+                a_mask = self._sample_masks[a]
                 n_a = int(a_mask.sum())
                 csi_tot = 0.0
-                for b, p_ref in zip(bins, ref_pct):
-                    p_cur = ((self._mask_in(self.df, feat, b) & a_mask).sum() / n_a
+                for b, p_ref, bm in zip(bins, ref_pct, bin_masks):
+                    p_cur = (int((bm & a_mask).sum()) / n_a
                              if n_a else 0.0)
                     pr, pc = max(p_ref, eps), max(p_cur, eps)
                     contrib = (pc - pr) * np.log(pc / pr)
@@ -1719,32 +1851,38 @@ class TreeSegmenter:
     #   o corte KS-ótimo por amostra (ou `cutoff`, se informado).
     # ------------------------------------------------------------------
     def metrics(self, cutoff: float | None = None) -> pd.DataFrame:
-        """Métricas da régua como modelo, por amostra.
+        """Métricas da régua como modelo, por amostra (memoizada por versão).
 
         classification → taxa de default + KS/AUC/Gini/Acurácia/F1.
         regression → MAE/RMSE/R² (``cutoff`` é ignorado)."""
+        ck = cutoff if cutoff is None else round(float(cutoff), 12)
+        return self._agg_memo(("metrics", ck), lambda: self._compute_metrics(cutoff))
+
+    def _compute_metrics(self, cutoff: float | None = None) -> pd.DataFrame:
         if self._is_clf:
             from yggdrasil.metrics.classification import classification_metrics
 
         leaf_ids = [sid for sid, s in self.segments.items() if s["is_leaf"]]
         if self.sample_col is not None:
-            ref_mask = self.df[self.sample_col] == self.ref_sample
+            ref_mask = self._mask_ref
         else:
             ref_mask = pd.Series(True, index=self.df.index)
         overall = self.df.loc[ref_mask, self.target].mean()
 
-        # score por linha = PD média do segmento na referência (régua)
-        pred = pd.Series(np.nan, index=self.df.index)
-        for sid in leaf_ids:
-            m = self.segments[sid]["mask"]
-            v = self.df.loc[m & ref_mask, self.target].mean()
-            pred[m.values] = overall if pd.isna(v) else v
+        # score por linha = PD média do segmento na referência (régua). Em vez de
+        # `pred[m.values] = v` full-length por folha, agrega o alvo da referência
+        # por folha num ÚNICO groupby e mapeia de volta via leaf_id por linha.
+        leaf_id = self._leaf_id_series(leaf_ids)
+        ref_pd = self.df.loc[ref_mask, self.target].groupby(leaf_id[ref_mask]).mean()
+        pd_map = {sid: (overall if pd.isna(ref_pd.get(sid, np.nan))
+                        else float(ref_pd.get(sid))) for sid in leaf_ids}
+        pred = leaf_id.map(pd_map).astype("float64")
 
         # ordem das amostras: referência primeiro
         if self.sample_col is not None:
             todas = list(self.df[self.sample_col].dropna().unique())
             ordem = ([self.ref_sample] + [a for a in todas if a != self.ref_sample])
-            grupos = [(a, self.df[self.sample_col] == a) for a in ordem]
+            grupos = [(a, self._sample_masks[a]) for a in ordem]
         else:
             grupos = [("todos", pd.Series(True, index=self.df.index))]
 
@@ -1803,19 +1941,29 @@ class TreeSegmenter:
         else:
             sample = check_sample = None
 
+        sample_mask = (self._sample_masks.get(sample)
+                       if (self.sample_col is not None and sample is not None) else None)
         lv = self.leaves()  # ordem de nota
         rows = []
         for _, r in lv.iterrows():
             sid = r["segmento"]
             m = self.segments[sid]["mask"]
-            m_s = (m & (self.df[self.sample_col] == sample)
-                   if (self.sample_col is not None and sample is not None) else m)
+            m_s = (m & sample_mask) if sample_mask is not None else m
             vals = self.df.loc[m_s, self.target].to_numpy(dtype="float64")
             vals = vals[~np.isnan(vals)]
             n = len(vals)
             if n >= 2:
-                idx = rng.integers(0, n, size=(n_boot, n))
-                means = vals[idx].mean(axis=1)
+                # bootstrap em BLOCOS de n_boot: limita a matriz de reamostragem a
+                # ~4M elementos (em vez de n_boot×n inteiro de uma vez — uma folha
+                # com n=100k estouraria a memória do driver no Databricks).
+                means = np.empty(n_boot, dtype="float64")
+                passo = max(1, min(n_boot, 4_000_000 // max(n, 1)))
+                feito = 0
+                while feito < n_boot:
+                    b = min(passo, n_boot - feito)
+                    idx = rng.integers(0, n, size=(b, n))
+                    means[feito:feito + b] = vals[idx].mean(axis=1)
+                    feito += b
                 lo, hi = np.quantile(means, [alpha, 1 - alpha])
                 pt = float(vals.mean())
             elif n == 1:
@@ -1833,7 +1981,7 @@ class TreeSegmenter:
                 "amplitude": round(float(hi - lo), 4) if not np.isnan(hi) else np.nan,
             }
             if check_sample is not None:
-                m_c = m & (self.df[self.sample_col] == check_sample)
+                m_c = m & self._sample_masks[check_sample]
                 cvals = self.df.loc[m_c, self.target].to_numpy(dtype="float64")
                 cvals = cvals[~np.isnan(cvals)]
                 pd_c = float(cvals.mean()) if len(cvals) else np.nan
@@ -3784,6 +3932,7 @@ class TreeSegmenter:
             raise ValueError("Árvore inválida: segmento 'root' ausente.")
         self.segments = novo
         self.history = []
+        self._bump_version()      # árvore recarregada → invalida agregados memoizados
         return self
 
     def save(self, path: str) -> str:
@@ -4300,6 +4449,7 @@ class TreeSegmenter:
         import io
         import math
         import contextlib
+        self._bump_version()      # reconstrói a árvore → invalida agregados memoizados
         if subtree is not None and subtree not in self.segments:
             raise ValueError(f"Folha '{subtree}' não existe na árvore atual.")
         if subtree is None:                       # árvore inteira (comportamento padrão)

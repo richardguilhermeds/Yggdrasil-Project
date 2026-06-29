@@ -33,7 +33,7 @@ import pandas as pd
 
 try:
     import ipywidgets as W
-    from IPython.display import display
+    from IPython.display import clear_output, display
 except Exception as e:  # pragma: no cover
     raise ImportError("Este módulo requer ipywidgets e IPython (Jupyter).") from e
 
@@ -226,6 +226,14 @@ class ModelSegmenterUI:
         self.date_col = date_col
         self.result = None
         self.score_df = None   # base externa opcional p/ escorar (ui.score_df = df_novo)
+        # --- estado de desempenho da UI ---------------------------------------
+        # buffer limitado do console: W.Output acumula TODOS os prints (o estado
+        # serializado cresce sem limite e trafega pelo comm a cada ação). Mantemos
+        # só as últimas N linhas reescrevendo a área com clear_output.
+        self._log_lines: list = []
+        # cache do <img> base64 da prévia da variável por (feature, versão de bins):
+        # trocar/clicar na lista de variáveis regenerava a figura a cada vez.
+        self._preview_cache: dict = {}
         self._build()
         self._refresh_bar()
         self._refresh_vars()
@@ -239,7 +247,10 @@ class ModelSegmenterUI:
         buf = _io.BytesIO()
         # tight=False → o PNG sai exatamente em figsize×dpi (mesma figsize ⇒ mesmo
         # tamanho de imagem), garantindo gráficos lado a lado com a MESMA altura.
-        save_kw = {"format": "png", "dpi": fig.get_dpi()}
+        # dpi limitado a 110 nas PRÉVIAS inline (este método só gera <img> para
+        # exibição; export usa save_path nos plot_*): corta o PNG/base64 ~40% sem
+        # perda visual perceptível, aliviando o tráfego kernel↔browser.
+        save_kw = {"format": "png", "dpi": min(int(fig.get_dpi()), 110)}
         if tight:
             save_kw["bbox_inches"] = "tight"
         fig.savefig(buf, **save_kw)
@@ -430,8 +441,14 @@ class ModelSegmenterUI:
         return html
 
     def _log(self, msg):
+        # mantém só as últimas 40 linhas: reescreve a área (clear_output) em vez de
+        # acumular indefinidamente o estado do W.Output (que trafega pelo comm).
+        self._log_lines.append(str(msg))
+        if len(self._log_lines) > 40:
+            self._log_lines = self._log_lines[-40:]
         with self.out_log:
-            print(msg)
+            clear_output(wait=True)
+            print("\n".join(self._log_lines))
 
     @staticmethod
     def _pill(text, cls="muted"):
@@ -459,7 +476,10 @@ class ModelSegmenterUI:
         self.dd_var = W.Dropdown(options=self._opts(cands), description="Variável:",
                                  style={"description_width": "initial"})
         self.sel_included = W.SelectMultiple(options=self._opts(cands), value=tuple(self.seg.included),
-                                             rows=max(4, len(cands)),  # mostra todas, sem rolagem
+                                             # rolagem a partir de ~14 itens: com muitas
+                                             # candidatas, 1 <option> por linha estica o DOM
+                                             # e encarece cada re-render do <select>.
+                                             rows=min(14, max(4, len(cands))),
                                              description="No modelo:",
                                              style={"description_width": "initial"},
                                              layout=W.Layout(width="99%"))
@@ -1014,15 +1034,25 @@ class ModelSegmenterUI:
             if self.seg.date_col:
                 titulo = ("PD por categoria ao longo do tempo" if cat
                           else "risco dos bins (n_bins) ao longo do tempo")
-                self.out_var_preview_h.value = f"<div class='mseg-h'>Estabilidade no tempo · {titulo}</div>"
-                fig = self.seg.plot_variable_risk_by_safra(feat)
+                hdr = f"<div class='mseg-h'>Estabilidade no tempo · {titulo}</div>"
             else:
-                self.out_var_preview_h.value = (
-                    "<div class='mseg-h'>Logodds da variável por faixa "
-                    "<span style='font-weight:400;text-transform:none'>(defina uma coluna de "
-                    "safra para ver a estabilidade no tempo)</span></div>")
-                fig = self.seg.plot_variable_logodds(feat)
-            self.out_var_preview.value = self._fig_html(fig, tight=False)
+                hdr = ("<div class='mseg-h'>Logodds da variável por faixa "
+                       "<span style='font-weight:400;text-transform:none'>(defina uma coluna de "
+                       "safra para ver a estabilidade no tempo)</span></div>")
+            self.out_var_preview_h.value = hdr
+            # cache do <img> por (feature, versão de bins): revisitar a mesma
+            # variável (clicar na lista / trocar dropdown) reusa o PNG em vez de
+            # re-renderizar a figura e reencodá-la a cada interação.
+            ck = (feat, bool(self.seg.date_col), self.seg._rank_version)
+            html = self._preview_cache.get(ck)
+            if html is None:
+                fig = (self.seg.plot_variable_risk_by_safra(feat) if self.seg.date_col
+                       else self.seg.plot_variable_logodds(feat))
+                html = self._fig_html(fig, tight=False)
+                if len(self._preview_cache) > 128:      # backstop de memória
+                    self._preview_cache.clear()
+                self._preview_cache[ck] = html
+            self.out_var_preview.value = html
         except Exception as e:
             self.out_var_preview.value = f"<i>{e}</i>"
 

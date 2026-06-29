@@ -289,6 +289,17 @@ class TreeSegmenterUI:
             self._samples, self._nonref, self._sample_masks = [], [], {}
             self._tree_nonref, self._psi_only, self._pd_nonref = [], [], []
 
+        # --- estado de desempenho da UI ---------------------------------------
+        # flag p/ suspender o observer de seleção de folha enquanto o _refresh
+        # reatribui dd_leaf.value (senão _on_leaf_change re-dispara DENTRO do
+        # _refresh → árvore/IV/histograma renderizados 2× por mutação).
+        self._suspend_leaf_obs = False
+        # cache de HTML por widget (hash-and-skip): só reescreve .value quando o
+        # conteúdo muda — evita reenviar blobs idênticos pelo comm kernel↔browser.
+        self._last_html: dict = {}
+        # cache do PNG (base64) do histograma da folha, por (sid, versão da árvore)
+        self._leaf_hist_cache: dict = {}
+
         self._build()
         self._on_mode_change(None)   # estado inicial de visibilidade dos controles
         self._sync_autoconc_visibility()   # sliders de concentração do auto-fit
@@ -1154,6 +1165,12 @@ class TreeSegmenterUI:
                                     "Validar & Exportar", "Avançado", "Histórico"]):
             tabs.set_title(i, titulo)
         tabs.add_class("treeui-tabs")
+        # a tabela de IV (optbinning de TODAS as variáveis na folha) é o item mais
+        # caro do open/refresh e fica na aba 1 (não-visível por padrão). Adiamos seu
+        # cálculo até a aba ser realmente aberta (render preguiçoso) — ver _refresh_iv.
+        self.tabs = tabs
+        self._iv_tab_index = 1
+        tabs.observe(self._on_tab_change, names="selected_index")
 
         # ---- console persistente (log de todas as abas) -----------------
         self.btn_clear_log.layout.width = "150px"
@@ -1860,33 +1877,71 @@ class TreeSegmenterUI:
         rec("root")
         return opts
 
-    def _refresh(self):
-        opts = self._ordered_leaf_options()
-        leaves = [sid for _, sid in opts]
-        cur = self.dd_leaf.value
-        self.dd_leaf.options = opts
-        if cur in leaves:
-            self.dd_leaf.value = cur
-        elif opts:
-            self.dd_leaf.value = opts[0][1]
-        # dropdown de folha da aba "Análise de variáveis": raiz + folhas
-        cur_v = self.dd_var_leaf.value
-        var_opts = [("TODA A CARTEIRA (raiz)", "root")] + opts
-        self.dd_var_leaf.options = var_opts
-        self.dd_var_leaf.value = cur_v if cur_v in [s for _, s in var_opts] else "root"
-        # seletor de grupos de folhas-irmãs (aba Diagnóstico)
-        sib_opts = [(g["label"], g["parent"]) for g in self.seg.sibling_leaf_groups()]
-        cur_sib = self.dd_sib_group.value
-        self.dd_sib_group.options = sib_opts
-        if cur_sib in [p for _, p in sib_opts]:
-            self.dd_sib_group.value = cur_sib
-        elif sib_opts:
-            self.dd_sib_group.value = sib_opts[0][1]
+    def _set_html(self, widget, key, html):
+        """Escreve ``widget.value`` SÓ quando o conteúdo muda (hash-and-skip).
+        Reatribuir .value sempre dispara um update completo pelo comm kernel↔
+        browser (reparse do HTML/CSS inline do Styler ou do <img> base64); pular
+        os updates idênticos corta a maior parte do tráfego redundante por ação."""
+        if self._last_html.get(key) != html:
+            widget.value = html
+            self._last_html[key] = html
 
-        self.bar.value = self._status_html()
-        self.out_tree.value = self._tree_html()
-        self.leaf_header.value = self._leaf_header_html()
-        self.leaf_chips.value = self._leaf_chips_html()
+    def _refresh_lock_labels(self):
+        """Atualiza SÓ o que depende de self.locked (rótulo 🔒): a árvore e os
+        rótulos dos dropdowns de folha. Usado por lock/unlock para não pagar o
+        _refresh completo (IV/PSI/metrics/tabela/PNG) só para alternar um cadeado."""
+        self._suspend_leaf_obs = True
+        try:
+            cur = self.dd_leaf.value
+            opts = self._ordered_leaf_options()
+            self.dd_leaf.options = opts
+            if cur in [s for _, s in opts]:
+                self.dd_leaf.value = cur
+            var_opts = [("TODA A CARTEIRA (raiz)", "root")] + opts
+            cur_v = self.dd_var_leaf.value
+            self.dd_var_leaf.options = var_opts
+            self.dd_var_leaf.value = cur_v if cur_v in [s for _, s in var_opts] else "root"
+        finally:
+            self._suspend_leaf_obs = False
+        self._set_html(self.out_tree, "tree", self._tree_html())
+        self._set_html(self.leaf_chips, "chips", self._leaf_chips_html())
+        self._set_html(self.leaf_header, "header", self._leaf_header_html())
+        self._set_html(self.bar, "bar", self._status_html())
+
+    def _refresh(self):
+        # suspende o observer de folha enquanto reatribuímos os dropdowns: senão a
+        # troca de dd_leaf.value re-dispara _on_leaf_change DENTRO do _refresh,
+        # renderizando árvore/IV/histograma 2× por mutação.
+        self._suspend_leaf_obs = True
+        try:
+            opts = self._ordered_leaf_options()
+            leaves = [sid for _, sid in opts]
+            cur = self.dd_leaf.value
+            self.dd_leaf.options = opts
+            if cur in leaves:
+                self.dd_leaf.value = cur
+            elif opts:
+                self.dd_leaf.value = opts[0][1]
+            # dropdown de folha da aba "Análise de variáveis": raiz + folhas
+            cur_v = self.dd_var_leaf.value
+            var_opts = [("TODA A CARTEIRA (raiz)", "root")] + opts
+            self.dd_var_leaf.options = var_opts
+            self.dd_var_leaf.value = cur_v if cur_v in [s for _, s in var_opts] else "root"
+            # seletor de grupos de folhas-irmãs (aba Diagnóstico)
+            sib_opts = [(g["label"], g["parent"]) for g in self.seg.sibling_leaf_groups()]
+            cur_sib = self.dd_sib_group.value
+            self.dd_sib_group.options = sib_opts
+            if cur_sib in [p for _, p in sib_opts]:
+                self.dd_sib_group.value = cur_sib
+            elif sib_opts:
+                self.dd_sib_group.value = sib_opts[0][1]
+        finally:
+            self._suspend_leaf_obs = False
+
+        self._set_html(self.bar, "bar", self._status_html())
+        self._set_html(self.out_tree, "tree", self._tree_html())
+        self._set_html(self.leaf_header, "header", self._leaf_header_html())
+        self._set_html(self.leaf_chips, "chips", self._leaf_chips_html())
         self._refresh_iv()
         self._refresh_leaf_hist()
         self._refresh_metrics()
@@ -1969,6 +2024,13 @@ class TreeSegmenterUI:
         """Monta um seletor de grupo por categoria presente na folha (ordenadas por PD)."""
         sid = self.dd_leaf.value
         feat = self.dd_feature.value
+        # guarda: recriar N Dropdowns (novos modelos no comm + nós no DOM) é caro;
+        # se o contexto (variável, folha) não mudou e os widgets já existem, mantém.
+        # _on_feature_change/_on_mode_change disparam a cada troca de folha, mas
+        # navegar entre folhas no modo Manual+cat não precisa reinstanciar tudo.
+        if (getattr(self, "_cat_ctx", None) == (feat, sid)
+                and getattr(self, "_cat_widgets", None)):
+            return
         self._cat_widgets = {}
         self._cat_ctx = (feat, sid)
         if sid is None or sid not in self.seg.segments:
@@ -2336,14 +2398,41 @@ class TreeSegmenterUI:
         return grupos if grupos else None
 
     def _on_leaf_change(self, _):
-        self.out_tree.value = self._tree_html()
-        self.leaf_header.value = self._leaf_header_html()
-        self.leaf_chips.value = self._leaf_chips_html()
+        # ignora o disparo programático durante o _refresh (a árvore/IV/histograma
+        # já são renderizados lá) — evita renderização dupla por mutação.
+        if self._suspend_leaf_obs:
+            return
+        # trocar a folha selecionada NÃO altera a estrutura: a árvore é a mesma,
+        # só muda o realce. _set_html evita reescrever out_tree se o HTML não mudou
+        # (o realce é a única diferença, então normalmente muda só esse blob).
+        self._set_html(self.out_tree, "tree", self._tree_html())
+        self._set_html(self.leaf_header, "header", self._leaf_header_html())
+        self._set_html(self.leaf_chips, "chips", self._leaf_chips_html())
         self._refresh_iv()
         self._refresh_leaf_hist()
         self._on_feature_change(None)   # nova folha: limpa o preview e recompõe os grupos
 
+    def _on_tab_change(self, change):
+        """Ao abrir a aba 'Análise de variáveis', calcula a tabela de IV se estiver
+        pendente (render preguiçoso — não pagamos o optbinning de todas as variáveis
+        na abertura nem em cada mutação enquanto a aba não está à vista)."""
+        if change.get("new") == self._iv_tab_index and getattr(self, "_iv_dirty", False):
+            self._compute_iv()
+
     def _refresh_iv(self):
+        # só calcula se a aba de variáveis estiver à vista; senão marca pendente e
+        # mostra um placeholder (o cálculo roda quando a aba for aberta).
+        if getattr(self, "tabs", None) is not None and \
+                self.tabs.selected_index != self._iv_tab_index:
+            self._iv_dirty = True
+            self._set_html(self.out_iv, "iv",
+                           "<div style='font-size:12px;color:#889'>Abra esta aba para "
+                           "calcular o IV/PSI por variável da folha selecionada.</div>")
+            return
+        self._compute_iv()
+
+    def _compute_iv(self):
+        self._iv_dirty = False
         sid = self.dd_leaf.value
         iv = self.seg.variable_iv(sid)
         pd_med = iv.attrs.get("valor_medio")
@@ -2439,22 +2528,33 @@ class TreeSegmenterUI:
                 f"<b>{qual}</b> · {self._risk_mean} (DES) = {pd_med} · IV {_iv_kind} (optbinning)"
                 + (" · PSI nos mesmos bins do IV (DES × amostra)" if has_psi else "")
                 + "</div>")
-        self.out_iv.value = hint + self._styler_html(sty)
+        self._set_html(self.out_iv, "iv", hint + self._styler_html(sty))
 
     def _refresh_leaf_hist(self):
         """Alvo da folha selecionada (DES): taxa de default + IC de Wilson
         (classificação) ou histograma do alvo (regressão)."""
         sid = self.dd_leaf.value
         if sid is None or sid not in self.seg.segments:
-            self.out_leaf_hist.value = "<div style='font-size:11px;color:#889'>—</div>"
+            self._set_html(self.out_leaf_hist, "leaf_hist",
+                           "<div style='font-size:11px;color:#889'>—</div>")
             return
-        try:
-            plot = (self.seg.plot_leaf_target_hist if self._is_clf
-                    else self.seg.plot_leaf_value_hist)
-            self.out_leaf_hist.value = self._fig_html(plot(sid, figsize=self._PREVIEW_FIGSIZE))
-        except Exception as e:
-            self.out_leaf_hist.value = (f"<div style='font-size:11px;color:#b3261e'>"
-                                        f"(gráfico não gerado: {type(e).__name__})</div>")
+        # cache do PNG por (sid, versão da árvore): revisitar a mesma folha (ou um
+        # _refresh após lock/seleção que não mudou a massa da folha) reusa o blob
+        # base64 em vez de re-renderizar a figura e reencodá-la a cada ação.
+        ck = (sid, self.seg._tree_version)
+        html = self._leaf_hist_cache.get(ck)
+        if html is None:
+            try:
+                plot = (self.seg.plot_leaf_target_hist if self._is_clf
+                        else self.seg.plot_leaf_value_hist)
+                html = self._fig_html(plot(sid, figsize=self._PREVIEW_FIGSIZE))
+            except Exception as e:
+                html = (f"<div style='font-size:11px;color:#b3261e'>"
+                        f"(gráfico não gerado: {type(e).__name__})</div>")
+            if len(self._leaf_hist_cache) > 256:      # backstop de memória
+                self._leaf_hist_cache.clear()
+            self._leaf_hist_cache[ck] = html
+        self._set_html(self.out_leaf_hist, "leaf_hist", html)
 
     # ==================================================================
     # Aba "Análise de variáveis"
@@ -2853,7 +2953,9 @@ class TreeSegmenterUI:
             self.locked.add(sid)
             with self.out_log:
                 print("🔒 fechada:", self._leaf_label(sid))
-            self._refresh()
+            # lock só muda o rótulo 🔒: atualiza árvore/dropdowns, NÃO o _refresh
+            # completo (IV/PSI/metrics/tabela/PNG são idênticos após travar).
+            self._refresh_lock_labels()
 
     def _on_unlock(self, _):
         sid = self._selected_leaf()
@@ -2861,7 +2963,7 @@ class TreeSegmenterUI:
             self.locked.discard(sid)
             with self.out_log:
                 print("🔓 reaberta:", self._leaf_label(sid))
-            self._refresh()
+            self._refresh_lock_labels()
 
     def _on_prune(self, _):
         with self.out_log:
@@ -3227,7 +3329,10 @@ class TreeSegmenterUI:
         import base64
         import io as _io
         buf = _io.BytesIO()
-        fig.savefig(buf, format="png", dpi=fig.get_dpi(), bbox_inches="tight")
+        # dpi limitado a 110 nas prévias inline (export usa save_path nos plot_*):
+        # corta o PNG/base64 ~40% sem perda visual perceptível, aliviando o comm.
+        buf_dpi = min(int(fig.get_dpi()), 110)
+        fig.savefig(buf, format="png", dpi=buf_dpi, bbox_inches="tight")
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         style = ("width:100%;height:auto" if full_width else "max-width:100%;height:auto")
         if border:

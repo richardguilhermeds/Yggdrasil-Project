@@ -496,10 +496,24 @@ class ModelSegmenter:
         self.df = df.copy()
         # caches de performance (memoização): binning ótimo por variável (caro —
         # solver CP-SAT do optbinning) e máscara de linhas por amostra. O cache de
-        # bins é invalidado em set/clear_manual_bins e clear_derived; a máscara é
-        # invariante (linhas e sample_col não mudam após a construção).
+        # bins é invalidado SÓ NA VARIÁVEL editada em set/clear_manual_bins e nas
+        # derivadas em clear_derived; a máscara é invariante (linhas e sample_col
+        # não mudam após a construção).
         self._bins_cache: dict = {}
         self._mask_cache: dict = {}
+        # cache do RANKING caro de variable_iv (binning+IV+PSI por variável). A
+        # parte mutável barata (incluida/categoria/motivo) é reanexada a cada
+        # chamada, então include/exclude/set_category NÃO recomputam o ranking;
+        # _rank_version sobe só quando bins/derivadas/amostra mudam de fato.
+        self._rank_cache: dict = {}
+        self._rank_version: int = 0
+        # lista de amostras (constante após a construção) memoizada — _samples()
+        # era recalculado (dropna().unique()) dezenas de vezes por clique.
+        self._samples_cache: list | None = None
+        # cache das métricas do modelo por identidade do score_ (muda só em
+        # fit/set_model); evita recomputar AUC/KS/ROC por amostra em cada render +
+        # metric_shifts no mesmo clique.
+        self._metrics_cache: tuple | None = None
         self.target = target
         self.task_type = task_type
         self.sample_col = sample_col
@@ -563,11 +577,15 @@ class ModelSegmenter:
         return "num" if pd.api.types.is_numeric_dtype(col) else "cat"
 
     def _samples(self) -> list:
-        """Amostras presentes, referência primeiro."""
+        """Amostras presentes, referência primeiro (memoizado — invariante após a
+        construção; era recomputado dezenas de vezes por clique nos loops de
+        tabela/inversão/variável)."""
         if self.sample_col is None:
             return [self.ref_sample]
-        ams = list(self.df[self.sample_col].dropna().unique())
-        return [self.ref_sample] + [a for a in ams if a != self.ref_sample]
+        if self._samples_cache is None:
+            ams = list(self.df[self.sample_col].dropna().unique())
+            self._samples_cache = [self.ref_sample] + [a for a in ams if a != self.ref_sample]
+        return self._samples_cache
 
     def _nonref_samples(self) -> list:
         return [a for a in self._samples() if a != self.ref_sample]
@@ -587,11 +605,19 @@ class ModelSegmenter:
             return self.df
         if sample is None:
             sample = self.ref_sample
+        return self.df[self._frame_mask(sample)]
+
+    def _frame_mask(self, sample=None):
+        """Máscara booleana (numpy) das linhas da amostra, memoizada (invariante
+        após a construção). Reusada por _frame/metrics em vez de recriar a
+        comparação `df[sample_col]==a` full-length a cada chamada."""
+        if sample is None:
+            sample = self.ref_sample
         mask = self._mask_cache.get(sample)
         if mask is None:
             mask = (self.df[self.sample_col] == sample).to_numpy()
             self._mask_cache[sample] = mask
-        return self.df[mask]
+        return mask
 
     def label(self, feature) -> str:
         return self.feature_labels.get(feature, feature)
@@ -622,11 +648,20 @@ class ModelSegmenter:
             return tuple(tuple(g) for g in sp)
         return tuple(sp)
 
+    def _invalidate_bins(self, *features):
+        """Invalida o cache de binning APENAS das variáveis dadas (as chaves do
+        _bins_cache começam pela feature) e marca o ranking como obsoleto — em vez
+        de limpar o cache inteiro e re-rodar o optbinning de TODAS as candidatas."""
+        feats = set(features)
+        for k in [k for k in self._bins_cache if k[0] in feats]:
+            self._bins_cache.pop(k, None)
+        self._rank_version += 1
+
     def _resolve_bins(self, feature, max_n_bins=5, min_bin_size=0.05, splits=None,
                       sample=None):
         """Memoiza :meth:`_resolve_bins_uncached` (caro: roda o solver CP-SAT do
-        optbinning). A chave cobre tudo que altera o resultado; o cache é limpo
-        em set/clear_manual_bins e clear_derived."""
+        optbinning). A chave cobre tudo que altera o resultado; o cache é
+        invalidado POR VARIÁVEL em set/clear_manual_bins e clear_derived."""
         eff_splits = splits if splits is not None else self.var_meta.get(feature, {}).get("splits")
         sample_key = sample if sample is not None else self.ref_sample
         ck = (feature, max_n_bins, min_bin_size, sample_key, self._splits_key(eff_splits))
@@ -793,10 +828,36 @@ class ModelSegmenter:
         """Ranking das variáveis candidatas para apoiar a seleção: ``variavel,
         tipo, n_bins, iv, forca, tendencia, n_inversoes, psi_<amostra>, estabilidade,
         incluida, categoria``. IV binário (Siddiqi) na classificação; IV contínuo
-        na regressão. PSI calculado nos mesmos bins (DES × cada amostra)."""
-        features = list(features) if features is not None else list(self.candidates)
-        nonref = self._nonref_samples() if (with_psi and self.sample_col) else []
+        na regressão. PSI calculado nos mesmos bins (DES × cada amostra).
 
+        A parte CARA (binning + IV + PSI por variável) é memoizada por assinatura de
+        bins/amostra (``_rank_version``); a parte MUTÁVEL barata (incluida/categoria/
+        motivo) é reanexada a cada chamada. Assim include/exclude/set_category e a 2ª
+        chamada após auto_select/auto_categorize NÃO recomputam o ranking inteiro."""
+        features = list(features) if features is not None else list(self.candidates)
+        base = self._variable_iv_base(tuple(features), sample, max_n_bins,
+                                      min_bin_size, bool(with_psi))
+        df = base.copy()
+        feats = df["variavel"].tolist()
+        # estado mutável (barato) reanexado fresco — não invalida o cache caro
+        df["incluida"] = [f in self.included for f in feats]
+        df["categoria"] = [self.var_meta.get(f, {}).get("categoria") for f in feats]
+        df["motivo"] = [self.var_meta.get(f, {}).get("motivo", "") for f in feats]
+        df["bins_manuais"] = [bool(self.var_meta.get(f, {}).get("splits")) for f in feats]
+        if not df["motivo"].astype(bool).any():
+            df = df.drop(columns="motivo")   # só aparece após auto-categorizar
+        return df
+
+    def _variable_iv_base(self, features, sample, max_n_bins, min_bin_size,
+                          with_psi) -> pd.DataFrame:
+        """Parte CARA do ranking (binning/IV/PSI), memoizada por _rank_version.
+        Não inclui incluida/categoria/motivo (estado mutável, reanexado em
+        :meth:`variable_iv`)."""
+        key = (features, sample, max_n_bins, min_bin_size, with_psi, self._rank_version)
+        hit = self._rank_cache.get(key)
+        if hit is not None:
+            return hit
+        nonref = self._nonref_samples() if (with_psi and self.sample_col) else []
         rows = []
         for feat in features:
             iv, nb, kind, trend, n_inv = np.nan, 0, "—", "—", 0
@@ -825,17 +886,14 @@ class ModelSegmenter:
                 pior = max(validos) if validos else np.nan
                 row["pior_psi"] = round(float(pior), 4) if np.isfinite(pior) else np.nan
                 row["estabilidade"] = _classifica_psi(pior)
-            row["incluida"] = feat in self.included
-            row["categoria"] = self.var_meta.get(feat, {}).get("categoria")
-            row["motivo"] = self.var_meta.get(feat, {}).get("motivo", "")
-            row["bins_manuais"] = bool(self.var_meta.get(feat, {}).get("splits"))
             rows.append(row)
-        df = (pd.DataFrame(rows)
-              .sort_values("iv", ascending=False, na_position="last")
-              .reset_index(drop=True))
-        if "motivo" in df and not df["motivo"].astype(bool).any():
-            df = df.drop(columns="motivo")   # só aparece após auto-categorizar
-        return df
+        base = (pd.DataFrame(rows)
+                .sort_values("iv", ascending=False, na_position="last")
+                .reset_index(drop=True))
+        if len(self._rank_cache) > 8:      # backstop de memória (versões antigas)
+            self._rank_cache.clear()
+        self._rank_cache[key] = base
+        return base
 
     def _variable_psi(self, feature, samples, max_n_bins=5, min_bin_size=0.05,
                       eps=1e-6) -> dict:
@@ -1471,7 +1529,7 @@ class ModelSegmenter:
             self.var_meta.pop(n, None)
             self.feature_labels.pop(n, None)
         if removidas:
-            self._bins_cache.clear()   # variáveis derivadas saíram → invalida o cache
+            self._invalidate_bins(*removidas)   # invalida só as derivadas removidas
         return removidas
 
     def set_category(self, feature, categoria):
@@ -1525,13 +1583,13 @@ class ModelSegmenter:
             meta["splits"] = splits
         else:
             meta.pop("splits", None)
-        self._bins_cache.clear()      # bins mudaram → invalida o cache de binning
+        self._invalidate_bins(feature)   # só ESTA variável re-bina; demais ficam quentes
         return self
 
     def clear_manual_bins(self, feature):
         """Remove os bins manuais da variável (volta ao binning ótimo)."""
         self.var_meta.get(feature, {}).pop("splits", None)
-        self._bins_cache.clear()      # volta ao binning ótimo → invalida o cache
+        self._invalidate_bins(feature)   # só ESTA variável volta ao ótimo
         return self
 
     def manual_bins(self, feature):
@@ -1930,10 +1988,14 @@ class ModelSegmenter:
         mape, smape, medae, r2, mean_bias)."""
         if self.score_ is None:
             raise RuntimeError("Ajuste o modelo antes (fit / set_model).")
+        # cache por identidade do score_ (invalida em fit/set_model, que criam um
+        # novo score_): _render_metrics + metric_shifts pediam metrics() 2× por clique.
+        if self._metrics_cache is not None and self._metrics_cache[0] is self.score_:
+            return self._metrics_cache[1].copy()
         rows = []
         for a in self._samples():
             mask = (pd.Series(True, index=self.df.index) if self.sample_col is None
-                    else self.df[self.sample_col] == a)
+                    else self._frame_mask(a))
             y = self.df.loc[mask, self.target].to_numpy(dtype="float64")
             sc = self.score_[mask].to_numpy(dtype="float64")
             ok = ~np.isnan(y) & ~np.isnan(sc)
@@ -1943,7 +2005,9 @@ class ModelSegmenter:
             m = (classification_metrics(y, sc) if self.task_type == "classification"
                  else regression_metrics(y, sc))
             rows.append({"amostra": a, "n": int(y.size), **m})
-        return pd.DataFrame(rows)
+        out = pd.DataFrame(rows)
+        self._metrics_cache = (self.score_, out)
+        return out.copy()
 
     def metric_shifts(self) -> dict:
         """Variação de cada métrica DES→OOT (oot − des)."""
@@ -2337,19 +2401,35 @@ class ModelSegmenter:
         rating = self._rating_series()
         labels = self.rating_labels_
         prefix = "event_rate" if self.task_type == "classification" else "alvo"
-        ref_mask = (pd.Series(True, index=self.df.index) if self.sample_col is None
-                    else self.df[self.sample_col] == self.ref_sample)
+        # risco (= nanmean, ver _risco) por (rating, amostra) num ÚNICO groupby, em
+        # vez de recriar `(rating==lab) & (sample==a)` full-length por célula.
+        if self.sample_col is None:
+            risk = self.df.groupby(rating, observed=True)[self.target].mean()
+            n_by = rating.value_counts()
+            n_ref_tot = max(len(self.df), 1)
+            rows = []
+            for lab in labels:
+                n = int(n_by.get(lab, 0))
+                v = risk.get(lab, np.nan)
+                rows.append({"rating": lab, "n": n,
+                             "repr_%": round(100 * n / n_ref_tot, 1),
+                             f"{prefix}_{self.ref_sample}":
+                                 round(float(v), 4) if pd.notna(v) else np.nan})
+            return pd.DataFrame(rows)
+
+        risk = self.df.groupby([rating, self.df[self.sample_col]],
+                               observed=True)[self.target].mean()
+        ref_mask = self._frame_mask(self.ref_sample)
+        n_ref = rating[ref_mask].value_counts()
         n_ref_tot = max(int(ref_mask.sum()), 1)
         rows = []
         for lab in labels:
-            m_ref = (rating == lab) & ref_mask
-            row = {"rating": lab, "n": int(m_ref.sum()),
-                   "repr_%": round(100 * int(m_ref.sum()) / n_ref_tot, 1)}
+            n = int(n_ref.get(lab, 0))
+            row = {"rating": lab, "n": n,
+                   "repr_%": round(100 * n / n_ref_tot, 1)}
             for a in self._samples():
-                am = (pd.Series(True, index=self.df.index) if self.sample_col is None
-                      else self.df[self.sample_col] == a)
-                row[f"{prefix}_{a}"] = round(self._risco(self.df.loc[(rating == lab) & am,
-                                                                     self.target]), 4)
+                v = risk.get((lab, a), np.nan)
+                row[f"{prefix}_{a}"] = round(float(v), 4) if pd.notna(v) else np.nan
             rows.append(row)
         return pd.DataFrame(rows)
 
@@ -2360,21 +2440,30 @@ class ModelSegmenter:
         labels = self.rating_labels_
         risco_by = {}
 
-        def risco(mask):
-            return self._risco(self.df.loc[mask, self.target])
+        # risco (= nanmean) por (rating, amostra) num único groupby — substitui o
+        # `(rating==lab) & (sample==a)` full-length por célula (rating × amostra).
+        if self.sample_col is None:
+            _risk_overall = self.df.groupby(rating, observed=True)[self.target].mean()
+
+            def _risk_of(lab, a):
+                v = _risk_overall.get(lab, np.nan)
+                return float(v) if pd.notna(v) else float("nan")
+        else:
+            _risk = self.df.groupby([rating, self.df[self.sample_col]],
+                                    observed=True)[self.target].mean()
+
+            def _risk_of(lab, a):
+                v = _risk.get((lab, a), np.nan)
+                return float(v) if pd.notna(v) else float("nan")
 
         # ordem de referência: pela média de risco na DES
-        ref_mask = (pd.Series(True, index=self.df.index) if self.sample_col is None
-                    else self.df[self.sample_col] == self.ref_sample)
-        ref_risco = {lab: risco((rating == lab) & ref_mask) for lab in labels}
+        ref_risco = {lab: _risk_of(lab, self.ref_sample) for lab in labels}
         ordered = sorted(labels, key=lambda l: (np.inf if pd.isna(ref_risco[l])
                                                 else ref_risco[l]))
         # por amostra
         sample_rows = []
         for a in self._samples():
-            am = (pd.Series(True, index=self.df.index) if self.sample_col is None
-                  else self.df[self.sample_col] == a)
-            vals = {lab: risco((rating == lab) & am) for lab in labels}
+            vals = {lab: _risk_of(lab, a) for lab in labels}
             risco_by[a] = vals
             n_inv, npp = _count_inversions(ordered, vals)
             sample_rows.append({"amostra": a, "n_inv": n_inv, "n_pares": npp})
@@ -2551,18 +2640,28 @@ class ModelSegmenter:
         mas a amostra (p.ex. OOT) traz C > D. ``—`` = nenhuma inversão."""
         rating = self._rating_series()
         labels = self.rating_labels_
+        # risco (= nanmean) por (rating, amostra) num único groupby (ver rating_table)
+        if self.sample_col is None:
+            _risk_overall = self.df.groupby(rating, observed=True)[self.target].mean()
+
+            def _risk_of(lab, a):
+                v = _risk_overall.get(lab, np.nan)
+                return float(v) if pd.notna(v) else float("nan")
+        else:
+            _risk = self.df.groupby([rating, self.df[self.sample_col]],
+                                    observed=True)[self.target].mean()
+
+            def _risk_of(lab, a):
+                v = _risk.get((lab, a), np.nan)
+                return float(v) if pd.notna(v) else float("nan")
+
         # ordem de referência: ratings ordenados pelo risco na DES (crescente)
-        ref_mask = (pd.Series(True, index=self.df.index) if self.sample_col is None
-                    else self.df[self.sample_col] == self.ref_sample)
-        ref_risco = {l: self._risco(self.df.loc[(rating == l) & ref_mask, self.target])
-                     for l in labels}
+        ref_risco = {l: _risk_of(l, self.ref_sample) for l in labels}
         ordered = sorted(labels, key=lambda l: (np.inf if pd.isna(ref_risco[l])
                                                  else ref_risco[l]))
         rows = []
         for a in self._samples():
-            am = (pd.Series(True, index=self.df.index) if self.sample_col is None
-                  else self.df[self.sample_col] == a)
-            vals = {l: self._risco(self.df.loc[(rating == l) & am, self.target]) for l in labels}
+            vals = {l: _risk_of(l, a) for l in labels}
             risco = [vals[l] for l in labels]
             trend, n_inv = _trend(risco)
             if self.sample_col is not None and a == self.ref_sample:
@@ -2725,6 +2824,7 @@ class ModelSegmenter:
         self.var_meta[name] = {"categoria": None, "derived_from": feature,
                                "derived_kind": kind, "derived_bins": bins}
         self.feature_labels.setdefault(name, f"{self.label(feature)} (cat.)")
+        self._rank_version += 1   # nova candidata → o ranking de IV precisa recalcular
         return name
 
     def _apply_derived(self, X):
