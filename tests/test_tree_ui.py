@@ -337,3 +337,46 @@ def test_ui_plots_especificos_por_task(task):
         if ui._is_clf:
             ui.btn_ks.click()
     assert ui.out_discrim.value and "Erro" not in ui.out_discrim.value
+
+
+def test_ui_overwrite_pede_confirmacao(task, tmp_path):
+    """Salvar (JSON) num caminho que já existe NÃO sobrescreve direto: abre a
+    janela de confirmação e só grava quando o usuário confirma (do_save)."""
+    import json
+    import os
+    ui = _build(task, n=6000, seed=2)
+    p = str(tmp_path / "arvore.json")
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)                       # árvore com várias folhas
+        ui.tx_json_path.value = p
+        ui._on_save_json(None)                     # não existe -> salva direto
+    assert os.path.exists(p)
+    with open(p, encoding="utf-8") as f:
+        antes = json.load(f)
+    # altera a árvore e tenta salvar de novo no MESMO caminho (já existe)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_reset(None)                         # volta para a raiz (1 folha)
+        ui._on_save_json(None)                     # existe -> aguarda confirmação
+    with open(p, encoding="utf-8") as f:
+        depois = json.load(f)
+    assert depois == antes                         # não sobrescreveu sem confirmar
+    # confirmar (o que o botão 'Sobrescrever' faz) grava de fato
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._do_save_json(p)
+    with open(p, encoding="utf-8") as f:
+        confirmado = json.load(f)
+    assert confirmado != antes
+
+
+def test_ui_confirm_overwrite_gate(task, tmp_path):
+    """O gate executa do_save direto quando o arquivo (.json/.png) não existe e o
+    adia (aguardando o clique em 'Sobrescrever') quando já existe."""
+    ui = _build(task)
+    p = str(tmp_path / "img.png")
+    chamadas = []
+    ui._confirm_overwrite(p, lambda: chamadas.append(1))   # não existe -> executa
+    assert chamadas == [1]
+    open(p, "w").close()                                   # passa a existir
+    chamadas.clear()
+    ui._confirm_overwrite(p, lambda: chamadas.append(1))   # existe -> não executa
+    assert chamadas == []

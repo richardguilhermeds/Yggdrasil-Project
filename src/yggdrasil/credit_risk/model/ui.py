@@ -1815,10 +1815,41 @@ class ModelSegmenterUI:
             self.out_score.value = f"<i>{e}</i>"
             self._log(f"[escorar] erro: {e}")
 
+    def _confirm_overwrite(self, path, do_save):
+        """Se ``path`` já existir, abre uma janela de confirmação (no console) e
+        só executa ``do_save()`` quando o usuário clica em 'Sobrescrever'. Se o
+        arquivo não existir (ou ``path`` for vazio), salva direto."""
+        import html as _html
+        import os
+        path = (path or "").strip()
+        if not path or not os.path.exists(path):
+            do_save(); return
+        aviso = W.HTML(
+            "<div style='border:1px solid #f0c36d;background:#fff8e6;border-radius:10px;"
+            "padding:10px 12px;font-size:12.5px;color:#664d03;line-height:1.5'>"
+            "<b>⚠️ O arquivo já existe</b><br>"
+            f"<code>{_html.escape(path)}</code><br>Deseja sobrescrever?</div>")
+        btn_yes = W.Button(description="Sobrescrever", button_style="danger",
+                           icon="exclamation-triangle")
+        btn_no = W.Button(description="Cancelar", icon="times")
+        def _yes(_):
+            self.out_log.clear_output()
+            do_save()
+        def _no(_):
+            self._log(f"[save] cancelado — '{path}' não foi sobrescrito.")
+        btn_yes.on_click(_yes); btn_no.on_click(_no)
+        with self.out_log:
+            clear_output(wait=True)
+            display(W.VBox([aviso, W.HBox([btn_yes, btn_no])]))
+
     def _on_save(self, b):
+        path = (self.tx_save.value or "").strip()
+        self._confirm_overwrite(path, lambda: self._do_save(path))
+
+    def _do_save(self, path):
         try:
-            self.seg.save(self.tx_save.value)
-            self._log(f"[save] salvo em {self.tx_save.value} (+ .model.joblib).")
+            self.seg.save(path)
+            self._log(f"[save] salvo em {path} (+ .model.joblib).")
         except Exception as e:
             self._log(f"[save] erro: {e}")
 

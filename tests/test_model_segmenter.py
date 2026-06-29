@@ -743,6 +743,28 @@ def test_ui_layout_abas(task):
     assert all(not t[:1] in "①②③④⑤" for t in titulos)
 
 
+def test_ui_save_overwrite_confirma(task, tmp_path):
+    """Salvar o modelo (.json) num caminho que já existe não grava direto: o gate
+    executa do_save só quando não há conflito e aguarda confirmação se já existir."""
+    pytest.importorskip("ipywidgets")
+    import contextlib
+    import io
+    from yggdrasil.credit_risk.model import ModelSegmenterUI
+
+    df = _synthetic(task, com_cat=True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui = ModelSegmenterUI(df, target="target", task_type=task,
+                              sample_col="amostra", ref_sample="DES", date_col="dt_ref")
+    p = str(tmp_path / "modelo.json")
+    chamadas = []
+    ui._confirm_overwrite(p, lambda: chamadas.append(1))   # não existe -> executa
+    assert chamadas == [1]
+    open(p, "w").close()                                   # passa a existir
+    chamadas.clear()
+    ui._confirm_overwrite(p, lambda: chamadas.append(1))   # existe -> aguarda confirmação
+    assert chamadas == []
+
+
 def test_ui_fluxo_treina_e_ratings(task):
     pytest.importorskip("ipywidgets")
     import contextlib

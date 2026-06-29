@@ -3770,13 +3770,47 @@ class TreeSegmenterUI:
     # ==================================================================
     # Persistência: salvar / carregar a árvore em JSON
     # ==================================================================
+    def _confirm_overwrite(self, path, do_save):
+        """Se ``path`` já existir, abre uma janela de confirmação (no log) e só
+        executa ``do_save()`` quando o usuário clica em 'Sobrescrever'. Se o
+        arquivo não existir (ou ``path`` for vazio), salva direto."""
+        import html as _html
+        import os
+        if not path or not os.path.exists(path):
+            do_save(); return
+        aviso = W.HTML(
+            "<div style='border:1px solid #f0c36d;background:#fff8e6;border-radius:10px;"
+            "padding:10px 12px;font-size:12.5px;color:#664d03;line-height:1.5'>"
+            "<b>⚠️ O arquivo já existe</b><br>"
+            f"<code>{_html.escape(path)}</code><br>Deseja sobrescrever?</div>")
+        btn_yes = W.Button(description="Sobrescrever", button_style="danger",
+                           icon="exclamation-triangle")
+        btn_no = W.Button(description="Cancelar", icon="times")
+        def _yes(_):
+            self.out_log.clear_output()
+            do_save()
+        def _no(_):
+            with self.out_log:
+                self.out_log.clear_output(wait=True)
+                print(f"Operação cancelada — '{path}' não foi sobrescrito.")
+        btn_yes.on_click(_yes); btn_no.on_click(_no)
+        with self.out_log:
+            self.out_log.clear_output(wait=True)
+            display(W.VBox([aviso, W.HBox([btn_yes, btn_no])]))
+
     def _on_save_json(self, _):
+        path = self.tx_json_path.value.strip()
+        if not path:
+            with self.out_log:
+                self.out_log.clear_output(wait=True)
+                print("Informe o caminho do arquivo .json.")
+            return
+        self._confirm_overwrite(path, lambda: self._do_save_json(path))
+
+    def _do_save_json(self, path):
         import json
         with self.out_log:
             self.out_log.clear_output(wait=True)
-            path = self.tx_json_path.value.strip()
-            if not path:
-                print("Informe o caminho do arquivo .json."); return
             try:
                 data = self.seg.to_dict()
                 data["_ui"] = {"locked": sorted(self.locked)}
@@ -3818,7 +3852,15 @@ class TreeSegmenterUI:
     # Imagem da árvore (matplotlib)
     # ==================================================================
     def _on_plot(self, _):
+        import os
         path = self.tx_img_path.value.strip() or None
+        if path and os.path.exists(path):
+            self._do_plot(None)                       # mostra a árvore sem exportar
+            self._confirm_overwrite(path, lambda: self._do_plot(path))
+        else:
+            self._do_plot(path)
+
+    def _do_plot(self, path):
         try:
             # sem destaque da folha selecionada: todas as folhas com o mesmo estilo
             fig = self.seg.plot_tree(save_path=path)    # repr. % + alvo (DES)
