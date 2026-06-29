@@ -655,6 +655,10 @@ class TreeSegmenterUI:
         # Output+display+clear_output causa quando o clear não limpa).
         self.bar = W.HTML()
         self.out_tree = W.HTML()
+        # bloco <style> que aplica o REALCE da folha selecionada via CSS (data-leaf).
+        # Trocar a folha atualiza só este blob minúsculo, sem remontar/reenviar a
+        # árvore inteira pelo comm — o _tree_html passa a ser independente da seleção.
+        self.tree_sel_style = W.HTML()
         self.out_metrics = W.HTML()
         self.out_iv = W.HTML()
         self.out_leaf_hist = W.HTML()                     # PD da folha
@@ -1188,7 +1192,7 @@ class TreeSegmenterUI:
                                       layout=W.Layout(width="150px"))
         self.cb_dark.observe(self._on_dark, names="value")
         topbar = W.HBox([self.cb_dark], layout=W.Layout(justify_content="flex-end"))
-        self.panel = W.VBox([topbar, banner, bar_box, tabs, console])
+        self.panel = W.VBox([topbar, banner, bar_box, tabs, console, self.tree_sel_style])
         self.panel.add_class("treeui")
 
     def _on_dark(self, change):
@@ -1213,11 +1217,13 @@ class TreeSegmenterUI:
         return f"rgb({r},{g},69)"
 
     def _node_value(self, sid, sample=None):
+        # lê só a coluna-alvo (não materializa o subframe inteiro) — chamado por nó
+        # × amostra em _tree_html, que percorre a árvore inteira a cada render.
         m = self.seg.segments[sid]["mask"]
         if sample is not None and sample in self._sample_masks:
             m = m & self._sample_masks[sample]
-        sub = self.df[m]
-        return sub[self.target].mean() if len(sub) else float("nan")
+        sr = self.df[self.target][m]
+        return sr.mean() if len(sr) else float("nan")
 
     def _leaf_values(self):
         ref = self.ref_sample if self.sample_col is not None else None
@@ -1401,8 +1407,9 @@ class TreeSegmenterUI:
         rows = []
 
         def stat(sid):
-            sub = self.df[seg.segments[sid]["mask"]]
-            return len(sub), 100 * len(sub) / n_total
+            # mask.sum() em vez de materializar self.df[mask] só para contar linhas
+            n = int(seg.segments[sid]["mask"].sum())
+            return n, 100 * n / n_total
 
         def value_str(sid):
             if self.sample_col is not None:
@@ -1444,29 +1451,29 @@ class TreeSegmenterUI:
             color = self._color(self._node_value(sid, ref), lo, hi)
             sw = (f"<span style='display:inline-block;width:11px;height:11px;background:{color};"
                   f"border-radius:2px;vertical-align:middle;margin:0 5px'></span>")
-            is_sel = (s["is_leaf"] and sid == self.dd_leaf.value)
+            # HTML INDEPENDENTE DA SELEÇÃO: o realce da folha ativa é aplicado por
+            # CSS (ver _leaf_highlight_style), via o atributo data-leaf=<nota>. Assim
+            # trocar de folha não remonta nem reenvia a árvore inteira.
             tags = ""
+            sel_marker = ""
             if s["is_leaf"]:
                 tags += f" · <b>folha {nota_map.get(sid, '?')}</b>"
                 if sid in self.locked:
                     tags += " 🔒"
-                if is_sel:
-                    tags += (" <span style='color:#e8870b;font-weight:700'>"
-                             "◀ selecionada</span>")
+                sel_marker = "<i class='tsel'></i>"   # ::after injeta '◀ selecionada'
             # continuação do prefixo (mantém os traços verticais alinhados na 2ª linha)
             cont = "" if is_root else prefix + ("   " if is_last else "│  ")
             psi_html = psi_str(sid) if s["is_leaf"] else ""
             # linha 1 — rótulo (condição do nó) + nº da folha
-            nome_cor = "#e8870b" if is_sel else "#15324a"
             linha1 = (f"<div style='{mono};font-size:12px;padding:1px 2px 0'>"
-                      f"{prefix}{conn}{sw}<b style='color:{nome_cor}'>{rotulo(sid)}</b>{tags}</div>")
+                      f"{prefix}{conn}{sw}<b class='tlname' style='color:#15324a'>"
+                      f"{rotulo(sid)}</b>{tags}{sel_marker}</div>")
             # linha 2 — métricas EMBAIXO: volumetria, representatividade, PD e PSI
             vol = f"{n:,}".replace(",", ".")        # separador de milhar pt-BR
             linha2 = (f"<div style='{mono};font-size:11px;color:#7c8893;padding:0 2px 3px'>"
                       f"{cont}    vol {vol} · repr. {rep:.1f}%{sep_bar}{value_str(sid)}{psi_html}</div>")
-            wrap = ("background:#fff5e6;border-radius:5px;box-shadow:inset 3px 0 0 #e8870b"
-                    if is_sel else "")
-            rows.append(f"<div style='{wrap}'>{linha1}{linha2}</div>")
+            data_attr = f' data-leaf="{nota_map.get(sid)}"' if s["is_leaf"] else ""
+            rows.append(f"<div class='tnode'{data_attr}>{linha1}{linha2}</div>")
             ch = sorted(filhos.get(sid, []), key=min_nota)
             for i, c in enumerate(ch):
                 child_prefix = "" if is_root else prefix + ("   " if is_last else "│  ")
@@ -1474,6 +1481,26 @@ class TreeSegmenterUI:
 
         rec("root", "", True, True)
         return "<div class='treeui-tree'>" + "".join(rows) + "</div>"
+
+    def _leaf_highlight_style(self):
+        """Bloco <style> que realça a folha selecionada (por data-leaf=<nota>):
+        fundo âmbar, nome laranja e o marcador '◀ selecionada' via ::after. É o
+        único blob que muda ao trocar de folha (vs. remontar a árvore inteira)."""
+        sid = self.dd_leaf.value
+        if sid is None or sid not in self.seg.segments:
+            return ""
+        nota_map, _ = self.seg._grade_map()
+        n = nota_map.get(sid)
+        if n is None:
+            return ""
+        return (
+            "<style>"
+            f'.tnode[data-leaf="{n}"]{{background:#fff5e6;border-radius:5px;'
+            "box-shadow:inset 3px 0 0 #e8870b;}"
+            f'.tnode[data-leaf="{n}"] .tlname{{color:#e8870b !important;}}'
+            f'.tnode[data-leaf="{n}"] .tsel::after{{content:" ◀ selecionada";'
+            "color:#e8870b;font-weight:700;}"
+            "</style>")
 
     def _style_leaves(self, lv):
         psi_cols = [c for c in lv.columns if c.startswith("psi_")]
@@ -1904,6 +1931,7 @@ class TreeSegmenterUI:
         finally:
             self._suspend_leaf_obs = False
         self._set_html(self.out_tree, "tree", self._tree_html())
+        self.tree_sel_style.value = self._leaf_highlight_style()
         self._set_html(self.leaf_chips, "chips", self._leaf_chips_html())
         self._set_html(self.leaf_header, "header", self._leaf_header_html())
         self._set_html(self.bar, "bar", self._status_html())
@@ -1940,6 +1968,7 @@ class TreeSegmenterUI:
 
         self._set_html(self.bar, "bar", self._status_html())
         self._set_html(self.out_tree, "tree", self._tree_html())
+        self.tree_sel_style.value = self._leaf_highlight_style()
         self._set_html(self.leaf_header, "header", self._leaf_header_html())
         self._set_html(self.leaf_chips, "chips", self._leaf_chips_html())
         self._refresh_iv()
@@ -2402,10 +2431,10 @@ class TreeSegmenterUI:
         # já são renderizados lá) — evita renderização dupla por mutação.
         if self._suspend_leaf_obs:
             return
-        # trocar a folha selecionada NÃO altera a estrutura: a árvore é a mesma,
-        # só muda o realce. _set_html evita reescrever out_tree se o HTML não mudou
-        # (o realce é a única diferença, então normalmente muda só esse blob).
-        self._set_html(self.out_tree, "tree", self._tree_html())
+        # trocar a folha NÃO altera a estrutura: a árvore HTML é a mesma. O realce
+        # é aplicado por CSS (data-leaf) → só atualizamos o <style> minúsculo, sem
+        # remontar nem reenviar a árvore inteira pelo comm.
+        self.tree_sel_style.value = self._leaf_highlight_style()
         self._set_html(self.leaf_header, "header", self._leaf_header_html())
         self._set_html(self.leaf_chips, "chips", self._leaf_chips_html())
         self._refresh_iv()
@@ -3532,6 +3561,10 @@ class TreeSegmenterUI:
         self._sync_undo_buttons()
 
     def _restore(self, snap):
+        # registra as máscaras atuais (por condições) antes de carregar: os
+        # segmentos que o undo/redo NÃO altera viram cache-hit e não são
+        # recalculados via _match_conditions_pandas (o freeze do desfazer/refazer).
+        self.seg._prime_mask_cache()
         self.seg._load_segments(snap["segments"])
         self.locked = set(snap["locked"]) & set(self.seg.segments)
 

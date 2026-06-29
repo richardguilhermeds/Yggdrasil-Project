@@ -342,6 +342,11 @@ class TreeSegmenter:
         # alvo (PD/LGD) por folha restrito à referência — chaveado por id(mask),
         # invalida sozinho quando a folha é refeita (mesma ideia do _bins_cache)
         self._leaf_target_cache: dict = {}
+        # máscara por ASSINATURA DE CONDIÇÕES: como (condições → máscara) é função
+        # PURA do df (que não muda), o cache nunca fica stale. Acelera undo/redo —
+        # _load_segments reconstruía toda máscara via _match_conditions_pandas a
+        # cada desfazer/refazer; agora os segmentos inalterados são cache-hit.
+        self._mask_cache_by_conds: dict = {}
         # classe de optbinning e nome do kwarg de diferença mínima por tipo de alvo
         self._OptBin = OptimalBinning if self._is_clf else ContinuousOptimalBinning
         self._diff_kwarg = "min_event_rate_diff" if self._is_clf else "min_mean_diff"
@@ -3914,13 +3919,41 @@ class TreeSegmenter:
             "segments": segs,
         }
 
+    def _conds_key(self, conds_json):
+        """Assinatura hashável das condições serializadas (chave do cache de máscara)."""
+        import json
+        return json.dumps(conds_json, sort_keys=True, default=str)
+
+    def _mask_from_conds(self, conds_json, conds_runtime):
+        """Máscara das condições, reusando o cache (condições→máscara é função pura
+        do df). Só recomputa via _match_conditions_pandas no 1º encontro."""
+        key = self._conds_key(conds_json)
+        m = self._mask_cache_by_conds.get(key)
+        if m is None:
+            m = _match_conditions_pandas(self.df, conds_runtime)
+            if len(self._mask_cache_by_conds) > 4000:      # backstop de memória
+                self._mask_cache_by_conds.clear()
+            self._mask_cache_by_conds[key] = m
+        return m
+
+    def _prime_mask_cache(self):
+        """Registra as máscaras VIVAS (por condições) no cache, para um restore
+        seguinte (undo/redo) reusar as inalteradas em vez de recomputá-las."""
+        cache = self._mask_cache_by_conds
+        if len(cache) > 4000:
+            cache.clear()
+        for s in self.segments.values():
+            cache.setdefault(self._conds_key(self._conditions_json(s["conditions"])),
+                             s["mask"])
+
     def _load_segments(self, segs: dict):
-        """Reconstrói self.segments a partir da forma serializada (recalcula máscaras)."""
+        """Reconstrói self.segments a partir da forma serializada. Reusa máscaras
+        já calculadas (cache por condições) — chave p/ undo/redo barato."""
         novo = {}
         for sid, s in segs.items():
             conds = self._conditions_from_json(s["conditions"])
             novo[sid] = {
-                "mask": _match_conditions_pandas(self.df, conds),
+                "mask": self._mask_from_conds(s["conditions"], conds),
                 "label": s["label"],
                 "depth": int(s["depth"]),
                 "is_leaf": bool(s["is_leaf"]),
