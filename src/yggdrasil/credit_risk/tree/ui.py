@@ -432,8 +432,8 @@ class TreeSegmenterUI:
         self.dd_criterion.tooltip = ("Como escolher os cortes no Auto-fit: binning ótimo "
                                      "(multi-bin por IV) ou um critério de split binário (CART/CHAID).")
         # ---- widgets da aba "Avançado" (sugerir splits, importância, SQL, diff) ----
-        self.btn_suggest3 = mk("Sugerir TOP 3 splits", "info",
-                               "Lista as 3 melhores variáveis p/ dividir a folha selecionada", "lightbulb-o")
+        self.btn_suggest3 = mk("Sugerir TOP 5 splits", "info",
+                               "Lista as 5 melhores variáveis p/ dividir a folha selecionada", "lightbulb-o")
         self.out_suggest = W.HTML()
         self.btn_importance = mk("Calcular importância", "info",
                                  "Importância das variáveis que entraram na árvore", "bar-chart")
@@ -1127,8 +1127,8 @@ class TreeSegmenterUI:
 
         # ---- ABA AVANÇADO: sugerir splits · auto-merge · importância · SQL · diff ----
         card_sug = W.VBox([
-            W.HTML("<div class='treeui-h'>Sugerir splits (TOP 3)</div>"),
-            W.HTML("<div class='treeui-legend'>As 3 variáveis de maior IV para a <b>folha "
+            W.HTML("<div class='treeui-h'>Sugerir splits (TOP 5)</div>"),
+            W.HTML("<div class='treeui-legend'>As 5 variáveis de maior IV para a <b>folha "
                    "selecionada</b> (aba Construir), com nº de bins, PSI por amostra (OOT/"
                    "ESTABILIDADE), se a separação de risco passa no teste de hipótese e o IV.</div>"),
             self.btn_suggest3, self.out_suggest]); card_sug.add_class("treeui-card")
@@ -2188,7 +2188,7 @@ class TreeSegmenterUI:
                 self.out_suggest.value = "<i>Selecione uma folha na aba Construir.</i>"
                 return
             try:
-                sug = self.seg.suggest_splits(sid, top=3)
+                sug = self.seg.suggest_splits(sid, top=5)
             except Exception as e:
                 self.out_suggest.value = (f"<div style='color:#b3261e;font-size:12px'>Erro: "
                                           f"{type(e).__name__}: {e}</div>")
