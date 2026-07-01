@@ -331,6 +331,34 @@ def _pct_axis(ax, axis="y", xmax=1.0):
         ax.xaxis.set_major_formatter(PercentFormatter(xmax=xmax, decimals=None))
 
 
+def _fit_labels_x(fig, ax, texts, pad_frac=0.04, passes=2):
+    """Alarga os limites do eixo-x até que todos os ``texts`` (rótulos no fim de
+    barras horizontais) caibam dentro da área de plotagem. O texto tem largura
+    fixa em pixels; com um ``span`` pequeno ele estoura o ``xlim`` — mede a
+    extensão real de cada rótulo e amplia os limites (2 passadas convergem).
+    Best-effort: nunca derruba o plot."""
+    if not texts:
+        return
+    try:
+        for _ in range(passes):
+            fig.canvas.draw()
+            rnd = fig.canvas.get_renderer()
+            inv = ax.transData.inverted()
+            x0, x1 = ax.get_xlim()
+            nx0, nx1 = x0, x1
+            for t in texts:
+                bb = t.get_window_extent(renderer=rnd)
+                nx0 = min(nx0, inv.transform((bb.x0, 0))[0])
+                nx1 = max(nx1, inv.transform((bb.x1, 0))[0])
+            pad = pad_frac * (nx1 - nx0)
+            new0, new1 = nx0 - pad, nx1 + pad
+            if abs(new0 - x0) < 1e-9 and abs(new1 - x1) < 1e-9:
+                break
+            ax.set_xlim(new0, new1)
+    except Exception:  # noqa: BLE001 - ajuste cosmético; nunca derruba o plot
+        pass
+
+
 def _is_stability_sample(name) -> bool:
     """Heurística: a *safra de estabilidade* é a amostra cujo nome remete a
     estabilidade (ex.: ``ESTABILIDADE``, ``ESTAB``) — convenção do repositório
@@ -551,6 +579,7 @@ class ModelSegmenter:
         features: list | None = None,
         date_col: str | None = None,
         verbose: bool = True,
+        score_scale: float = 1000.0,
     ):
         if task_type not in ("classification", "regression"):
             raise ValueError("task_type deve ser 'classification' ou 'regression'.")
@@ -612,6 +641,12 @@ class ModelSegmenter:
         self.hyperparams: dict = {}
         self.feature_transform: str = "raw"   # "raw" | "woe" (binagem + WoE/risco do bin)
         self.model_features: list = []
+        # escala de negócio do score: o modelo produz uma predição crua (prob. em
+        # [0,1] na classificação; alvo previsto na regressão) guardada em ``score_``
+        # — usada pelas MÉTRICAS, calibração e ratings (fidelidade numérica). O que
+        # o negócio consome (escoragem :meth:`predict`/:meth:`assign` e os eixos de
+        # score dos gráficos) é ``score_ * score_scale`` — 0–1000 por padrão.
+        self.score_scale: float = float(score_scale)
         self.score_: pd.Series | None = None
         self.rating_strategy = None
         self.rating_col_: str | None = None
@@ -2285,6 +2320,15 @@ class ModelSegmenter:
         self._shap_cache = {}
         return self
 
+    @property
+    def score_points_(self):
+        """Score em **escala de negócio** (0–``score_scale``, i.e. 0–1000 por
+        padrão): o ``score_`` cru multiplicado por ``score_scale``. É a escala
+        apresentada na escoragem (:meth:`predict`/:meth:`assign`) e nos eixos de
+        score dos gráficos. ``score_`` continua cru (probabilidade/predição) para
+        métricas e calibração. ``None`` se o modelo ainda não foi ajustado."""
+        return None if self.score_ is None else self.score_ * self.score_scale
+
     # ---- fórmula do modelo linear/logístico (coeficientes) ----
     def _design_feature_names(self, pre, use_labels=True) -> list:
         """Nomes dos termos do desenho (saída do ``ColumnTransformer``), sem o
@@ -2417,7 +2461,7 @@ class ModelSegmenter:
         accuracy, f1, precision, recall, brier, logloss) ou regressão (rmse, mae,
         mape, smape, medae, r2, mean_bias)."""
         if self.score_ is None:
-            raise RuntimeError("Ajuste o modelo antes (fit / set_model).")
+            raise RuntimeError("Ajuste o modelo antes (fit / set_model / load).")
         # cache por identidade do score_ (invalida em fit/set_model, que criam um
         # novo score_): _render_metrics + metric_shifts pediam metrics() 2× por clique.
         if self._metrics_cache is not None and self._metrics_cache[0] is self.score_:
@@ -2436,6 +2480,11 @@ class ModelSegmenter:
                  else regression_metrics(y, sc))
             rows.append({"amostra": a, "n": int(y.size), **m})
         out = pd.DataFrame(rows)
+        # ks_cutoff é um LIMIAR na escala do score → apresenta na mesma escala de
+        # negócio (0–1000). As demais métricas são invariantes à escala (rank) ou
+        # calculadas sobre o score CRU (brier/logloss, RMSE/R²), então não mudam.
+        if "ks_cutoff" in out.columns:
+            out["ks_cutoff"] = out["ks_cutoff"] * self.score_scale
         self._metrics_cache = (self.score_, out)
         return out.copy()
 
@@ -2485,6 +2534,7 @@ class ModelSegmenter:
 
     def plot_ks(self, sample=None, figsize=(6.4, 4.2), dpi=150, save_path=None, ax=None):
         y, sc = self._sample_scores(sample)
+        sc = sc * self.score_scale                          # score na escala de negócio
         fig, ax = _new_ax(figsize, dpi, ax)
         if len(np.unique(y)) < 2:
             ax.text(0.5, 0.5, "amostra com 1 classe", ha="center", va="center",
@@ -2499,8 +2549,8 @@ class ModelSegmenter:
         ax.plot(grid, cdf_pos, color="#d6453e", lw=2, label="evento (1)")
         ax.vlines(grid[j], cdf_pos[j], cdf_neg[j], color="#15324a", lw=2,
                   label=f"KS={diff[j]:.3f}")
-        ax.set_xlabel("score"); ax.set_ylabel("CDF acumulada")
-        _pct_axis(ax, "x")
+        ax.set_xlabel(f"score (0–{self.score_scale:.0f})"); ax.set_ylabel("CDF acumulada")
+        # x é o score (0–score_scale, plain); a CDF (y) segue como antes
         ax.set_title(f"Curva KS · {sample or self.ref_sample}", fontsize=11,
                      fontweight="bold", color="#15324a")
         ax.legend(fontsize=9, loc="center right"); ax.grid(alpha=0.15)
@@ -2512,6 +2562,7 @@ class ModelSegmenter:
     def plot_score_distribution(self, sample=None, bins=30, figsize=(6.6, 3.8),
                                 dpi=150, save_path=None, ax=None):
         y, sc = self._sample_scores(sample)
+        sc = sc * self.score_scale                          # score na escala de negócio
         fig, ax = _new_ax(figsize, dpi, ax)
         if self.task_type == "classification" and len(np.unique(y)) == 2:
             ax.hist(sc[y == 0], bins=bins, color="#1aa64b", alpha=0.55, label="não-evento (0)",
@@ -2521,8 +2572,7 @@ class ModelSegmenter:
             ax.legend(fontsize=9)
         else:
             ax.hist(sc, bins=bins, color="steelblue", alpha=0.85, edgecolor="#2f5d82")
-        ax.set_xlabel("score"); ax.set_ylabel("densidade")
-        _pct_axis(ax, "x")
+        ax.set_xlabel(f"score (0–{self.score_scale:.0f})"); ax.set_ylabel("densidade")
         ax.set_title(f"Distribuição do score · {sample or self.ref_sample}",
                      fontsize=11, fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)
@@ -2538,6 +2588,10 @@ class ModelSegmenter:
         (média observada ± 1,96·desvio, por faixa de previsto) e a **cobertura** — %
         das observações (pontos) que caem dentro da banda."""
         y, sc = self._sample_scores(sample)
+        # previsto E observado na MESMA escala de negócio (0–score_scale): mantém a
+        # diagonal y=x e a cobertura da banda (transformação linear, invariante).
+        sc = sc * self.score_scale
+        y = y * self.score_scale
         fig, ax = _new_ax(figsize, dpi, ax)
         if y.size == 0:
             ax.axis("off"); fig.tight_layout(); return fig
@@ -2590,8 +2644,8 @@ class ModelSegmenter:
                                   ec="#c9d4df", alpha=0.85))
         lim = [min(ax.get_xlim()[0], ax.get_ylim()[0]), max(ax.get_xlim()[1], ax.get_ylim()[1])]
         ax.plot(lim, lim, color="#bbb", ls="--", lw=1)
-        ax.set_xlabel("previsto"); ax.set_ylabel("observado")
-        _pct_axis(ax, "both")
+        ax.set_xlabel(f"previsto (0–{self.score_scale:.0f})")
+        ax.set_ylabel(f"observado (0–{self.score_scale:.0f})")
         ax.set_title(f"Calibração · {sample or self.ref_sample}", fontsize=11,
                      fontweight="bold", color="#15324a")
         ax.grid(alpha=0.15)
@@ -2603,12 +2657,12 @@ class ModelSegmenter:
     def plot_residuals(self, sample=None, figsize=(6.6, 4.0), dpi=150, save_path=None, ax=None):
         """Regressão: resíduo (observado − previsto) vs. previsto."""
         y, sc = self._sample_scores(sample)
+        sc = sc * self.score_scale                          # previsto e resíduo na
+        res = (y * self.score_scale) - sc                   # escala de negócio (0–score_scale)
         fig, ax = _new_ax(figsize, dpi, ax)
-        res = y - sc
         ax.scatter(sc, res, s=10, alpha=0.35, color="#3b6ea5", edgecolors="none")
         ax.axhline(0, color="#d6453e", lw=1)
-        ax.set_xlabel("previsto"); ax.set_ylabel("resíduo (obs − prev)")
-        _pct_axis(ax, "both")
+        ax.set_xlabel(f"previsto (0–{self.score_scale:.0f})"); ax.set_ylabel("resíduo (obs − prev)")
         ax.set_title(f"Resíduos · {sample or self.ref_sample}", fontsize=11,
                      fontweight="bold", color="#15324a")
         ax.grid(alpha=0.15)
@@ -2661,11 +2715,13 @@ class ModelSegmenter:
         ax.barh(yp, rels, color=cols, edgecolor="#33424f", alpha=0.9, height=0.62)
         ax.axvline(0, color="#33424f", lw=1)
         span = max((abs(r) for r in rels), default=1.0) or 1.0
+        txts = []
         for yi, r, d in zip(yp, rels, deltas):
             off = span * 0.02
-            ax.text(r + (off if r >= 0 else -off), yi, f"{r:+.1f}%  (Δ{d:+.3f})",
-                    ha="left" if r >= 0 else "right", va="center", fontsize=8,
-                    color="#15324a")
+            t = ax.text(r + (off if r >= 0 else -off), yi, f"{r:+.1f}%  (Δ{d:+.3f})",
+                        ha="left" if r >= 0 else "right", va="center", fontsize=8,
+                        color="#15324a")
+            txts.append(t)
         ax.set_yticks(yp); ax.set_yticklabels(labels, fontsize=9)
         ax.set_xlim(-span * 1.35, span * 1.35)
         ax.set_xlabel("variação DES → OOT (%)")
@@ -2680,6 +2736,9 @@ class ModelSegmenter:
                   fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.16),
                   ncol=2, framealpha=0.85, columnspacing=1.4, handlelength=1.2)
         fig.tight_layout()
+        # alarga o eixo-x p/ que os rótulos no fim das barras não saiam da caixa
+        # (o texto tem largura fixa em px; com span pequeno ele estourava o xlim)
+        _fit_labels_x(fig, ax, txts)
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
@@ -2792,7 +2851,7 @@ class ModelSegmenter:
         ``manual_percentil`` usa ``percentiles`` (lista 0–100). Reaproveita
         :mod:`yggdrasil.ratings`."""
         if self.score_ is None:
-            raise RuntimeError("Gere o score antes (fit / set_model).")
+            raise RuntimeError("Gere o score antes (fit / set_model / load).")
         if method not in RATING_REGISTRY:
             raise ValueError(f"Método de rating desconhecido: {method!r}. "
                              f"Opções: {sorted(RATING_REGISTRY)}")
@@ -3294,7 +3353,7 @@ class ModelSegmenter:
         """Cópia do df com o score e o rating de cada linha."""
         out = self.df.copy()
         if self.score_ is not None:
-            out[col_score] = self.score_
+            out[col_score] = self.score_ * self.score_scale     # escala de negócio
         if self.rating_ is not None:
             out[col_rating] = self.rating_
         return out
@@ -3333,10 +3392,12 @@ class ModelSegmenter:
             raise RuntimeError("Ajuste/defina o modelo antes (fit / set_model).")
         X = self._apply_derived(X)        # recria variáveis derivadas a partir da origem
         sc = pd.Series(self._predict_score_array(self.model, X[self.model_features]),
-                       index=X.index, name=col_score, dtype="float64")
-        out = pd.DataFrame({col_score: sc}, index=X.index)
+                       index=X.index, dtype="float64")           # predição CRUA
+        # o negócio recebe o score na escala 0–score_scale (0–1000); os ratings,
+        # porém, seguem a estratégia salva na escala CRUA (bins definidos no fit).
+        out = pd.DataFrame({col_score: sc * self.score_scale}, index=X.index)
         if self.rating_strategy is not None:
-            wf = pd.DataFrame({"score": sc}, index=X.index)
+            wf = pd.DataFrame({"score": sc}, index=X.index)      # rating na escala crua
             cfg = self._make_cfg("_amostra")
             wf["_amostra"] = self.ref_sample
             out[col_rating] = self.rating_strategy.transform(wf, cfg).values
@@ -3564,7 +3625,8 @@ class ModelSegmenter:
             "schema": SCHEMA,
             "meta": {"target": self.target, "task_type": self.task_type,
                      "sample_col": self.sample_col, "ref_sample": self.ref_sample,
-                     "date_col": self.date_col, "feature_labels": self.feature_labels},
+                     "date_col": self.date_col, "feature_labels": self.feature_labels,
+                     "score_scale": self.score_scale},
             "candidates": list(self.candidates),
             "included": sorted(self.included),
             "var_meta": self.var_meta,
@@ -3594,7 +3656,7 @@ class ModelSegmenter:
                   sample_col=meta.get("sample_col"), ref_sample=meta.get("ref_sample", "DES"),
                   feature_labels=meta.get("feature_labels"),
                   features=data.get("candidates"), date_col=meta.get("date_col"),
-                  verbose=verbose)
+                  verbose=verbose, score_scale=meta.get("score_scale", 1000.0))
         seg.included = set(data.get("included", seg.candidates))
         seg.var_meta = data.get("var_meta", seg.var_meta)
         seg.algorithm = data.get("algorithm")
@@ -3605,8 +3667,12 @@ class ModelSegmenter:
         return seg
 
     def load(self, path: str, df: pd.DataFrame = None):
-        """Carrega configuração + modelo. Se ``df`` for dado, recalcula score e
-        (se havia rating) reaproveita a estratégia salva para reaplicar os ratings."""
+        """Carrega configuração + modelo **no próprio objeto** (in-place) e o
+        devolve (``return self``), para que tanto ``seg.load(path)`` quanto
+        ``seg = ModelSegmenter(...).load(path)`` funcionem. Se ``df`` for dado,
+        usa-o (senão, o ``df`` atual); recalcula o score e, se havia rating,
+        reaproveita a estratégia salva para reaplicar os ratings — deixando o
+        modelo pronto para métricas, ratings e escoragem sem re-treinar."""
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         seg = ModelSegmenter.from_dict(data, self.df if df is None else df, verbose=False)
@@ -3625,7 +3691,10 @@ class ModelSegmenter:
                 seg.rating_ = seg.rating_strategy.transform(wf, cfg)
                 seg.rating_col_ = seg.rating_strategy.column
                 seg.rating_labels_ = list(seg.rating_strategy.labels_)
-        return seg
+        # adota o estado carregado no próprio objeto: evita o erro clássico de
+        # ``seg.load(path)`` "não fazer nada" (antes só o retorno vinha carregado).
+        self.__dict__.update(seg.__dict__)
+        return self
 
     # ------------------------------------------------------------------
     # REPORT_PDF: relatório do modelo em PDF (capa + métricas + fórmula/SHAP +
@@ -3725,7 +3794,7 @@ class ModelSegmenter:
         extra (usa matplotlib)."""
         import os
         if self.score_ is None:
-            raise RuntimeError("Ajuste o modelo antes (fit / set_model).")
+            raise RuntimeError("Ajuste o modelo antes (fit / set_model / load).")
         import matplotlib.pyplot as plt
 
         base = os.path.dirname(os.path.abspath(path))

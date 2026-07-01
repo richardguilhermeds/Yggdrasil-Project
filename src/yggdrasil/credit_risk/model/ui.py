@@ -324,7 +324,8 @@ class ModelSegmenterUI:
                    desc="Máxima separação entre as CDFs de evento e não-evento.",
                    rec="≥ 0,30 (bom) · ≥ 0,40 forte", baixa="< 0,20"),
         "ks_cutoff": dict(nome="KS cutoff", dir="info",
-                          desc="Score onde o KS é máximo (ponto de corte). Informativo.",
+                          desc="Score onde o KS é máximo (ponto de corte, na escala do "
+                               "score 0–1000). Informativo.",
                           rec="—", baixa="—"),
         "accuracy": dict(nome="Acurácia", dir="up", bands=(0.80, 0.70),
                          desc="% de acertos no corte 0,5. ⚠ enganosa em base desbalanceada.",
@@ -944,8 +945,9 @@ class ModelSegmenterUI:
                                              ("Manual · percentis", "manual_percentil")],
                                     value="quantil", description="Metodologia:",
                                     style={"description_width": "initial"})
-        # entrada dos métodos manuais (cortes de score OU percentis), só quando aplicável
-        self.tx_manual = W.Text(value="", placeholder="cortes de score (ex.: 0.2, 0.5, 0.8)",
+        # entrada dos métodos manuais (cortes de score OU percentis), só quando aplicável.
+        # Os cortes de score são digitados na escala de negócio (0–1000).
+        self.tx_manual = W.Text(value="", placeholder="cortes de score 0–1000 (ex.: 200, 500, 800)",
                                 description="cortes/percentis:",
                                 style={"description_width": "initial"},
                                 layout=W.Layout(width="42%", display="none"))
@@ -1005,18 +1007,22 @@ class ModelSegmenterUI:
         self.out_psi_rating = W.HTML()   # PSI por rating (DES × OOT/ESTABILIDADE)
         self.btn_export = W.Button(description="Exportar DataFrame", icon="download")
         self.out_export = W.HTML()
+        # rótulo e largura idênticos nos três campos ⇒ as caixas (e os botões que
+        # vêm depois) ficam alinhadas verticalmente no card de Persistência.
+        _persist_sty = {"description_width": "84px"}
+        _persist_lay = W.Layout(width="280px")
         self.tx_save = W.Text(value="modelo_segmenter.json", description="Arquivo:",
-                              style={"description_width": "initial"})
+                              style=_persist_sty, layout=_persist_lay)
         self.btn_save = W.Button(description="Salvar", button_style="success", icon="save")
         self.btn_load = W.Button(description="Carregar", icon="upload")
         self.tx_pdf = W.Text(value="relatorio_modelo.pdf", description="PDF:",
-                             style={"description_width": "initial"})
+                             style=_persist_sty, layout=_persist_lay)
         self.btn_pdf = W.Button(description="Gerar relatório PDF", button_style="primary",
                                 icon="file-pdf-o")
         self.out_pdf = W.HTML()
         self.btn_pdf.on_click(self._on_pdf)
         self.tx_md = W.Text(value="relatorio_modelo.md", description="Markdown:",
-                            style={"description_width": "initial"})
+                            style=_persist_sty, layout=_persist_lay)
         self.btn_md = W.Button(description="Gerar relatório Markdown", button_style="info",
                                icon="file-text-o")
         self.out_md = W.HTML()
@@ -1071,8 +1077,10 @@ class ModelSegmenterUI:
         card_score = W.VBox([
             W.HTML("<div class='mseg-h'>Escoragem da base · score + rating + valor previsto "
                    "(régua)</div>"),
-            W.HTML("<div class='mseg-legend'>Devolve <code>score</code>, <code>rating</code> e o "
-                   "valor previsto do alvo daquele rating (ex.: LGD/PD previsto). A base só precisa "
+            W.HTML("<div class='mseg-legend'>Devolve <code>score</code> (escala de negócio "
+                   "<b>0–1000</b>), <code>rating</code> e o "
+                   "valor previsto do alvo daquele rating (ex.: LGD/PD previsto, na unidade do "
+                   "alvo). A base só precisa "
                    "das <b>variáveis originais do modelo</b> — binagem/WoE e faixas são recriadas ao "
                    "escorar. <b>Tabela Databricks</b>: <code>catalog.schema.tabela</code> (via Spark; "
                    "saída opcional) → <code>ui.result</code>. <b>Em memória</b>: deixe em branco (ou "
@@ -2036,7 +2044,7 @@ class ModelSegmenterUI:
         manual = m in ("manual_score", "manual_percentil")
         self.tx_manual.layout.display = "" if manual else "none"
         if m == "manual_score":
-            self.tx_manual.placeholder = "cortes de score (ex.: 0.2, 0.5, 0.8)"
+            self.tx_manual.placeholder = "cortes de score 0–1000 (ex.: 200, 500, 800)"
         elif m == "manual_percentil":
             self.tx_manual.placeholder = "percentis 0–100 (ex.: 20, 40, 60, 80)"
         self.sl_nratings.disabled = manual
@@ -2057,32 +2065,43 @@ class ModelSegmenterUI:
             if not nums:
                 self._log("[ratings] informe os cortes (manual_score) ou percentis "
                           "(manual_percentil)."); return
-            kw = {"cuts": nums} if method == "manual_score" else {"percentiles": nums}
+            if method == "manual_score":
+                # o usuário digita na escala de negócio (0–1000); build_ratings opera
+                # no score CRU (0–1) → converte dividindo por score_scale.
+                scale = getattr(self.seg, "score_scale", 1.0) or 1.0
+                kw = {"cuts": [c / scale for c in nums]}
+            else:
+                kw = {"percentiles": nums}
         try:
             self.seg.build_ratings(method=method,
                                    n_ratings=int(self.sl_nratings.value),
                                    monotonic_fusion=self.cb_fusion.value, **kw)
             self._log(f"[ratings] {len(self.seg.rating_labels_)} faixas ({method}).")
-            rt = self.seg.rating_table().round(4)
-            rate_cols = [c for c in rt.columns if c.startswith(("event_rate", "alvo"))]
-            self.out_rating_table.value = self._df_html(rt, center=True, pct_cols=rate_cols)
-            self.out_rating_badrate.value = self._fig_html(self.seg.plot_rating_badrate())
-            self.out_rating_dist.value = self._fig_html(self.seg.plot_rating_distribution())
-            # mesma figsize + tight=False ⇒ os dois gráficos de inversão (amostras ×
-            # safras) saem com a MESMA altura nas colunas 50/50
-            inv_size = (8.4, 4.0)
-            self.out_rating_inv_s.value = self._fig_html(
-                self.seg.plot_rating_inversion_by_sample(figsize=inv_size), tight=False)
-            self.out_rating_mono.value = self._df_html(
-                self.seg.monotonicity_report(), center=True)
-            try:
-                self.out_rating_inv_t.value = self._fig_html(
-                    self.seg.plot_rating_inversion_by_safra(figsize=inv_size), tight=False)
-            except Exception as e:
-                self.out_rating_inv_t.value = f"<i>{e}</i>"
-            self._refresh_bar()
+            self._render_ratings()
         except Exception as e:
             self._log(f"[ratings] erro: {e}")
+
+    def _render_ratings(self):
+        """Renderiza tabela e gráficos dos ratings a partir do estado atual do
+        ``seg`` (usado ao gerar ratings e ao carregar um modelo já ratingado)."""
+        rt = self.seg.rating_table().round(4)
+        rate_cols = [c for c in rt.columns if c.startswith(("event_rate", "alvo"))]
+        self.out_rating_table.value = self._df_html(rt, center=True, pct_cols=rate_cols)
+        self.out_rating_badrate.value = self._fig_html(self.seg.plot_rating_badrate())
+        self.out_rating_dist.value = self._fig_html(self.seg.plot_rating_distribution())
+        # mesma figsize + tight=False ⇒ os dois gráficos de inversão (amostras ×
+        # safras) saem com a MESMA altura nas colunas 50/50
+        inv_size = (8.4, 4.0)
+        self.out_rating_inv_s.value = self._fig_html(
+            self.seg.plot_rating_inversion_by_sample(figsize=inv_size), tight=False)
+        self.out_rating_mono.value = self._df_html(
+            self.seg.monotonicity_report(), center=True)
+        try:
+            self.out_rating_inv_t.value = self._fig_html(
+                self.seg.plot_rating_inversion_by_safra(figsize=inv_size), tight=False)
+        except Exception as e:
+            self.out_rating_inv_t.value = f"<i>{e}</i>"
+        self._refresh_bar()
 
     # ------------------------------------------------------------------ Aba 5 handlers
     def _on_backtest(self, b):
@@ -2301,10 +2320,37 @@ class ModelSegmenterUI:
     def _on_load(self, b):
         try:
             self.seg = self.seg.load(self.tx_save.value, self.df)
-            self._refresh_bar(); self._refresh_vars()
+            self.refresh_model()
             self._log(f"[load] carregado de {self.tx_save.value}.")
         except Exception as e:
             self._log(f"[load] erro: {e}")
+
+    def refresh_model(self):
+        """Sincroniza a UI com o estado atual de ``self.seg`` — útil depois de
+        carregar (botão 'Carregar') **ou** de injetar um modelo por fora
+        (``ui.seg.set_model(...)`` / ``ui.seg = ...``). Ajusta o algoritmo
+        selecionado, atualiza a barra/variáveis e re-renderiza métricas, gráficos,
+        fórmula e — se já houver — os ratings, sem precisar re-treinar."""
+        s = self.seg
+        # espelha o algoritmo do modelo no dropdown, quando for uma opção válida
+        algo = getattr(s, "algorithm", None)
+        valid = {v for _, v in self.dd_algo.options}
+        if algo in valid and self.dd_algo.value != algo:
+            self.dd_algo.value = algo          # dispara _sync_algo_visibility
+        self._refresh_bar(); self._refresh_vars(); self._sync_sel()
+        if s.score_ is not None:
+            self.out_fit_status.value = ("<div style='color:#157a52;font-size:12px'>"
+                                         "<b>Modelo carregado</b> — pronto para métricas, "
+                                         "ratings e escoragem.</div>")
+            try:
+                self._render_metrics(); self._render_model_plots(); self._render_formula()
+            except Exception as e:
+                self._log(f"[load] falha ao renderizar métricas/gráficos: {e}")
+        if getattr(s, "rating_", None) is not None:
+            try:
+                self._render_ratings()
+            except Exception as e:
+                self._log(f"[load] falha ao renderizar ratings: {e}")
 
     def _on_mlflow(self, b):
         try:
