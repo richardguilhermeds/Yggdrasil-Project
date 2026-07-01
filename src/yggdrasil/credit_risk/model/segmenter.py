@@ -2341,22 +2341,25 @@ class ModelSegmenter:
                 raw = None
         if raw is None:
             raw = list(self.model_features)
-        out = []
-        for nm in raw:
-            for p in ("num__", "cat__"):
-                if nm.startswith(p):
-                    nm = nm[len(p):]
-                    break
-            # termos transformados vêm como 'WoE(feat)'/'bin(feat)': rotula o miolo
-            wrap = None
-            for w in ("WoE", "bin"):
-                if nm.startswith(f"{w}(") and nm.endswith(")"):
-                    wrap, nm = w, nm[len(w) + 1:-1]
-                    break
-            if use_labels and nm in self.feature_labels:
-                nm = self.feature_labels[nm]
-            out.append(f"{wrap}({nm})" if wrap else nm)
-        return out
+        return [self._display_feature_name(nm, use_labels) for nm in raw]
+
+    def _display_feature_name(self, nm, use_labels=True) -> str:
+        """Nome de exibição de UM termo do desenho/SHAP: remove o prefixo
+        ``num__``/``cat__``, desembrulha ``WoE(...)``/``bin(...)`` e aplica o alias
+        de ``feature_labels`` quando houver — mesma convenção da fórmula."""
+        for p in ("num__", "cat__"):
+            if nm.startswith(p):
+                nm = nm[len(p):]
+                break
+        # termos transformados vêm como 'WoE(feat)'/'bin(feat)': rotula o miolo
+        wrap = None
+        for w in ("WoE", "bin"):
+            if nm.startswith(f"{w}(") and nm.endswith(")"):
+                wrap, nm = w, nm[len(w) + 1:-1]
+                break
+        if use_labels and nm in self.feature_labels:
+            nm = self.feature_labels[nm]
+        return f"{wrap}({nm})" if wrap else nm
 
     def _logit_wald_pvalues(self, est, pre, names) -> dict:
         """p-valores de Wald (aprox.) por termo da **logística**: z = coef/EP,
@@ -2572,6 +2575,13 @@ class ModelSegmenter:
             ax.legend(fontsize=9)
         else:
             ax.hist(sc, bins=bins, color="steelblue", alpha=0.85, edgecolor="#2f5d82")
+        # eixo x na faixa CHEIA do score (0–score_scale) p/ ver a distribuição no
+        # contexto geral, não só onde caem os dados; estende se houver valor fora.
+        if sc.size:
+            ax.set_xlim(min(0.0, float(np.nanmin(sc))),
+                        max(float(self.score_scale), float(np.nanmax(sc))))
+        else:
+            ax.set_xlim(0.0, float(self.score_scale))
         ax.set_xlabel(f"score (0–{self.score_scale:.0f})"); ax.set_ylabel("densidade")
         ax.set_title(f"Distribuição do score · {sample or self.ref_sample}",
                      fontsize=11, fontweight="bold", color="#15324a")
@@ -2583,15 +2593,16 @@ class ModelSegmenter:
 
     def plot_calibration(self, sample=None, n_bins=10, figsize=(5.6, 5.2), dpi=150,
                          save_path=None, ax=None):
-        """Classificação: previsto×observado por decil de score. Regressão:
-        previsto×observado com uma **banda de 95%** em torno da curva de calibração
-        (média observada ± 1,96·desvio, por faixa de previsto) e a **cobertura** — %
-        das observações (pontos) que caem dentro da banda."""
-        y, sc = self._sample_scores(sample)
-        # previsto E observado na MESMA escala de negócio (0–score_scale): mantém a
-        # diagonal y=x e a cobertura da banda (transformação linear, invariante).
-        sc = sc * self.score_scale
-        y = y * self.score_scale
+        """Classificação: previsto×observado por decil. Regressão: previsto×observado
+        com uma **banda de 95%** em torno da curva de calibração (média observada ±
+        1,96·desvio, por faixa de previsto) e a **cobertura** — % das observações
+        (pontos) que caem dentro da banda.
+
+        Eixos na **unidade do alvo** (LGD/PD previsto vs. observado), NÃO na escala
+        de score 0–1000: a calibração é sobre o risco previsto casar com o realizado
+        (mesma família de ``valor_previsto``/``backtest``). Distribuição e KS é que
+        usam a escala de negócio (ranking)."""
+        y, sc = self._sample_scores(sample)                 # previsto/observado CRUS (alvo)
         fig, ax = _new_ax(figsize, dpi, ax)
         if y.size == 0:
             ax.axis("off"); fig.tight_layout(); return fig
@@ -2644,8 +2655,8 @@ class ModelSegmenter:
                                   ec="#c9d4df", alpha=0.85))
         lim = [min(ax.get_xlim()[0], ax.get_ylim()[0]), max(ax.get_xlim()[1], ax.get_ylim()[1])]
         ax.plot(lim, lim, color="#bbb", ls="--", lw=1)
-        ax.set_xlabel(f"previsto (0–{self.score_scale:.0f})")
-        ax.set_ylabel(f"observado (0–{self.score_scale:.0f})")
+        ax.set_xlabel("previsto"); ax.set_ylabel("observado")
+        _pct_axis(ax, "both")                               # unidade do alvo (LGD/PD), em %
         ax.set_title(f"Calibração · {sample or self.ref_sample}", fontsize=11,
                      fontweight="bold", color="#15324a")
         ax.grid(alpha=0.15)
@@ -2655,14 +2666,15 @@ class ModelSegmenter:
         return fig
 
     def plot_residuals(self, sample=None, figsize=(6.6, 4.0), dpi=150, save_path=None, ax=None):
-        """Regressão: resíduo (observado − previsto) vs. previsto."""
-        y, sc = self._sample_scores(sample)
-        sc = sc * self.score_scale                          # previsto e resíduo na
-        res = (y * self.score_scale) - sc                   # escala de negócio (0–score_scale)
+        """Regressão: resíduo (observado − previsto) vs. previsto, na **unidade do
+        alvo** (LGD previsto), não na escala de score 0–1000."""
+        y, sc = self._sample_scores(sample)                 # previsto/observado CRUS (alvo)
         fig, ax = _new_ax(figsize, dpi, ax)
+        res = y - sc
         ax.scatter(sc, res, s=10, alpha=0.35, color="#3b6ea5", edgecolors="none")
         ax.axhline(0, color="#d6453e", lw=1)
-        ax.set_xlabel(f"previsto (0–{self.score_scale:.0f})"); ax.set_ylabel("resíduo (obs − prev)")
+        ax.set_xlabel("previsto"); ax.set_ylabel("resíduo (obs − prev)")
+        _pct_axis(ax, "both")                               # unidade do alvo (LGD/PD), em %
         ax.set_title(f"Resíduos · {sample or self.ref_sample}", fontsize=11,
                      fontweight="bold", color="#15324a")
         ax.grid(alpha=0.15)
@@ -2786,13 +2798,33 @@ class ModelSegmenter:
         sv, Xs = self.shap_values(sample, sample_size)
         return shap_feature_importance(sv, Xs.columns)
 
+    @staticmethod
+    def _truncate_label(s, n=28) -> str:
+        """Corta rótulos muito longos (evita que os nomes dominem e 'espalhem' o
+        gráfico SHAP, espremendo o swarm). Corta pelo MEIO — preserva início e fim
+        — para não confundir nomes com prefixo comum (ex.: ``..._var_02`` vs
+        ``..._var_03``)."""
+        s = str(s)
+        if len(s) <= n:
+            return s
+        head = (n - 1) // 2
+        tail = n - 1 - head
+        return s[:head] + "…" + s[-tail:]
+
+    def _shap_feature_names(self, cols) -> list:
+        """Rótulos das variáveis para os gráficos SHAP: alias (``feature_labels``)
+        + corte de nomes muito longos."""
+        return [self._truncate_label(self._display_feature_name(c)) for c in cols]
+
     def plot_shap_beeswarm(self, sample=None, sample_size=2000, max_display=15):
-        """Beeswarm SHAP do modelo (usa pyplot; devolve a figura)."""
+        """Beeswarm SHAP do modelo (usa pyplot; devolve a figura). Usa o alias das
+        variáveis (``feature_labels``) e corta nomes longos no eixo Y."""
         import matplotlib.pyplot as plt
         import shap
         sv, Xs = self.shap_values(sample, sample_size)
+        names = self._shap_feature_names(Xs.columns)     # alias + corte (não muta Xs/cache)
         plt.figure()
-        shap.summary_plot(sv, Xs, show=False, max_display=max_display)
+        shap.summary_plot(sv, Xs, feature_names=names, show=False, max_display=max_display)
         fig = plt.gcf()
         try:                                   # eixos/legenda em português
             fig.axes[0].set_xlabel("valor SHAP (impacto na saída do modelo)")
@@ -2808,12 +2840,15 @@ class ModelSegmenter:
         return fig
 
     def plot_shap_bar(self, sample=None, sample_size=2000, max_display=15):
-        """Importância global SHAP (barras)."""
+        """Importância global SHAP (barras). Usa o alias das variáveis
+        (``feature_labels``) e corta nomes longos no eixo Y."""
         import matplotlib.pyplot as plt
         import shap
         sv, Xs = self.shap_values(sample, sample_size)
+        names = self._shap_feature_names(Xs.columns)     # alias + corte (não muta Xs/cache)
         plt.figure()
-        shap.summary_plot(sv, Xs, plot_type="bar", show=False, max_display=max_display)
+        shap.summary_plot(sv, Xs, plot_type="bar", feature_names=names, show=False,
+                          max_display=max_display)
         fig = plt.gcf()
         try:
             fig.axes[0].set_xlabel("média(|valor SHAP|) — impacto médio na saída do modelo")
@@ -3672,9 +3707,29 @@ class ModelSegmenter:
         ``seg = ModelSegmenter(...).load(path)`` funcionem. Se ``df`` for dado,
         usa-o (senão, o ``df`` atual); recalcula o score e, se havia rating,
         reaproveita a estratégia salva para reaplicar os ratings — deixando o
-        modelo pronto para métricas, ratings e escoragem sem re-treinar."""
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        modelo pronto para métricas, ratings e escoragem sem re-treinar.
+
+        Espera o **.json de configuração** gerado por :meth:`save` (o modelo
+        binário fica ao lado em ``<arquivo>.model.joblib`` e é carregado sozinho).
+        Se você apontar por engano para o próprio ``.model.joblib`` (ou outro
+        ``.joblib``/``.pkl``), o load corrige o sufixo automaticamente e, se ainda
+        assim o arquivo não for um JSON de texto, levanta um erro explicando."""
+        # Engano comum: apontar para o binário '<cfg>.model.joblib' em vez do
+        # .json — dá "utf-8 can't decode byte 0x80" (0x80 = início de pickle).
+        # Corrige o sufixo para o .json de configuração correspondente.
+        if path.endswith(".model.joblib"):
+            path = path[: -len(".model.joblib")]
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise ValueError(
+                f"'{path}' não é um JSON de configuração válido do ModelSegmenter "
+                f"({type(e).__name__}: {e}). O load espera o arquivo .json gerado por "
+                f"save(); o modelo binário fica ao lado em '<arquivo>.model.joblib' e "
+                f"é carregado automaticamente. Se você apontou para um .joblib/.pkl "
+                f"(binário — começa com o byte 0x80 do pickle), passe o .json no lugar."
+            ) from e
         seg = ModelSegmenter.from_dict(data, self.df if df is None else df, verbose=False)
         try:
             import joblib
