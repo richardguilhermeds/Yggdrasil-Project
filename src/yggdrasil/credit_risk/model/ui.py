@@ -844,6 +844,7 @@ class ModelSegmenterUI:
         self.cb_woe.observe(lambda c: self._sync_woe_hint(), names="value")
         self.out_algo_help = W.HTML()   # tutorial do algoritmo/parâmetros selecionado
         self.out_metrics = W.HTML()
+        self.out_metric_shift = W.HTML()   # gráfico do shift DES→OOT das principais métricas
         self.out_formula = W.HTML()
         self.out_model_a = W.HTML()
         self.out_model_b = W.HTML()
@@ -879,7 +880,8 @@ class ModelSegmenterUI:
 
         tab_model = W.VBox([
             train_card,
-            W.VBox([W.HTML("<div class='mseg-h'>Métricas por amostra</div>"), self.out_metrics]),
+            W.VBox([W.HTML("<div class='mseg-h'>Métricas por amostra</div>"), self.out_metrics,
+                    self.out_metric_shift]),
             self.formula_card,
             W.HBox([W.VBox([self.out_model_a], layout=W.Layout(width="33.33%")),
                     W.VBox([self.out_model_b], layout=W.Layout(width="33.33%")),
@@ -1751,15 +1753,29 @@ class ModelSegmenterUI:
         m = self.seg.metrics().round(4)
         self.out_metrics.value = (self._metrics_table_html(m)
                                   + self._metrics_guide_html(list(m.columns)))
+        # shift DES→OOT das principais métricas (só quando há OOT para comparar)
+        if self.seg.metric_shifts():
+            try:
+                self.out_metric_shift.value = (
+                    "<div class='mseg-h'>Shift das principais métricas · DES → OOT</div>"
+                    + self._fig_html(self.seg.plot_metric_shift(figsize=(7.2, 3.6))))
+            except Exception as e:
+                self.out_metric_shift.value = f"<i>{e}</i>"
+        else:
+            self.out_metric_shift.value = ""
 
     def _metrics_table_html(self, m):
         """Tabela de métricas centralizada e com identificador visual: cada célula
         ganha cor (verde/amarelo/vermelho) conforme o guia de bolso da métrica."""
         metric_cols = [c for c in m.columns if c in self._METRIC_GUIDE]
         fmt = {c: "{:.4f}" for c in m.columns if c not in ("amostra", "n")}
+        # centraliza cabeçalho E células: as regras `th`/`td` precisam vir DEPOIS do
+        # `th, td {text-align:right}` de _TABLE_STYLES e com a mesma especificidade,
+        # senão o `#T td` (id+elemento) vence o estilo por célula e volta p/ direita.
         sty = (m.style.hide(axis="index").set_table_styles(self._TABLE_STYLES)
-               .set_properties(**{"font-size": "12px", "text-align": "center"})
-               .set_table_styles([{"selector": "th", "props": [("text-align", "center")]}],
+               .set_table_styles([{"selector": "th", "props": [("text-align", "center")]},
+                                  {"selector": "td", "props": [("text-align", "center"),
+                                                               ("font-size", "12px")]}],
                                  overwrite=False)
                .format(fmt))
 

@@ -775,6 +775,38 @@ def test_plots_modelo(seg):
             assert f is not None; plt.close(f)
 
 
+def test_plot_metric_shift(seg):
+    # barra horizontal do shift DES→OOT das principais métricas do task
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    seg.fit(_default_algo(seg.task_type))
+    fig = seg.plot_metric_shift()
+    ax = fig.axes[0]
+    bars = [p for c in ax.containers for p in c.patches]
+    assert len(bars) >= 3                                   # ao menos 3 métricas
+    labs = {t.get_text() for t in ax.get_yticklabels() if t.get_text()}
+    esperado = ({"AUC", "Gini", "KS", "F1"} if seg.task_type == "classification"
+                else {"R²", "RMSE", "MAE", "sMAPE"})
+    assert labs & esperado                                  # rótulos das métricas
+    plt.close(fig)
+
+
+def test_plot_metric_shift_sem_oot():
+    # sem amostra OOT (sem sample_col) → mensagem amigável, sem barras
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    df = _synthetic("regression").drop(columns=["amostra"])
+    seg = ModelSegmenter(df, target="target", task_type="regression",
+                         date_col="dt_ref", verbose=False)
+    seg.fit("linear")
+    ax = seg.plot_metric_shift().axes[0]
+    assert not any(ax.containers)
+    assert any("OOT" in t.get_text() for t in ax.texts)
+    plt.close(ax.figure)
+
+
 def test_plots_variavel(seg):
     import matplotlib
     matplotlib.use("Agg")
@@ -874,6 +906,28 @@ def test_ui_fluxo_treina_e_ratings(task):
         assert ui.seg.score_ is not None
         ui._on_build_ratings(None)
         assert ui.seg.rating_ is not None
+
+
+def test_ui_metrics_centralizada_e_shift(task):
+    """A tabela de métricas por amostra fica com as células centralizadas (a regra
+    `td` center vence a de direita herdada) e o gráfico do shift DES→OOT aparece."""
+    pytest.importorskip("ipywidgets")
+    import contextlib
+    import io
+    import re
+    from yggdrasil.credit_risk.model import ModelSegmenterUI
+
+    df = _synthetic(task, com_cat=True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui = ModelSegmenterUI(df, target="target", task_type=task,
+                              sample_col="amostra", ref_sample="DES", date_col="dt_ref")
+        ui._on_fit(None)
+    html = ui.out_metrics.value
+    # célula (td) centralizada e a regra vem depois da de direita (vence por ordem)
+    assert re.search(r"td\s*\{[^}]*text-align:\s*center", html)
+    assert html.rindex("text-align: center") > html.index("text-align: right")
+    # gráfico do shift DES→OOT renderizado junto às métricas
+    assert "img" in ui.out_metric_shift.value
 
 
 def test_ui_bins_manuais_e_formula(task):

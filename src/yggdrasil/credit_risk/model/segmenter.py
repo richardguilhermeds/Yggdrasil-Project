@@ -292,6 +292,13 @@ def _pct_axis(ax, axis="y", xmax=1.0):
         ax.xaxis.set_major_formatter(PercentFormatter(xmax=xmax, decimals=None))
 
 
+def _is_stability_sample(name) -> bool:
+    """Heurística: a *safra de estabilidade* é a amostra cujo nome remete a
+    estabilidade (ex.: ``ESTABILIDADE``, ``ESTAB``) — convenção do repositório
+    (ver PSI por rating: DES × OOT e ESTABILIDADE)."""
+    return "estab" in str(name).strip().lower()
+
+
 def _fmt_safras(safras) -> list:
     """Rótulos de safra → 'mmm/aa' (padrão de mês/ano do repositório).
 
@@ -2405,7 +2412,10 @@ class ModelSegmenter:
 
     def plot_calibration(self, sample=None, n_bins=10, figsize=(5.6, 5.2), dpi=150,
                          save_path=None, ax=None):
-        """Classificação: previsto×observado por decil de score. Regressão: previsto×observado."""
+        """Classificação: previsto×observado por decil de score. Regressão:
+        previsto×observado com uma **banda de 95%** em torno da curva de calibração
+        (média observada ± 1,96·desvio, por faixa de previsto) e a **cobertura** — %
+        das observações (pontos) que caem dentro da banda."""
         y, sc = self._sample_scores(sample)
         fig, ax = _new_ax(figsize, dpi, ax)
         if y.size == 0:
@@ -2421,7 +2431,42 @@ class ModelSegmenter:
                     pred.append(sc[m].mean()); obs.append(y[m].mean())
             ax.plot(pred, obs, marker="o", color="#15324a", lw=2, ms=6)
         else:
-            ax.scatter(sc, y, s=10, alpha=0.35, color="#3b6ea5", edgecolors="none")
+            # nuvem bruta + curva de calibração por faixa de previsto com BANDA de
+            # 95% (média observada ± 1,96·desvio) e a cobertura: % das observações
+            # que caem dentro da banda.
+            ax.scatter(sc, y, s=10, alpha=0.16, color="#9db8d2", edgecolors="none",
+                       zorder=1)
+            q = np.unique(np.quantile(sc, np.linspace(0, 1, n_bins + 1)))
+            cov_txt = None
+            if len(q) >= 2:
+                idx = np.clip(np.searchsorted(q, sc, side="right") - 1, 0, len(q) - 2)
+                nb = len(q) - 1
+                cx = np.full(nb, np.nan); cy = np.full(nb, np.nan)
+                lo = np.full(nb, np.nan); hi = np.full(nb, np.nan)
+                for g in range(nb):
+                    m = idx == g
+                    n = int(m.sum())
+                    if n == 0:
+                        continue
+                    yg = y[m]
+                    cx[g] = sc[m].mean(); cy[g] = yg.mean()
+                    sd = yg.std(ddof=1) if n > 1 else 0.0
+                    lo[g] = cy[g] - 1.96 * sd; hi[g] = cy[g] + 1.96 * sd
+                ok = ~np.isnan(cx)
+                if ok.any():
+                    order = np.argsort(cx[ok])           # banda contígua por previsto
+                    bx = cx[ok][order]
+                    ax.fill_between(bx, lo[ok][order], hi[ok][order], color="#8aa4bf",
+                                    alpha=0.28, zorder=2, label="IC 95%")
+                    ax.plot(bx, cy[ok][order], color="#15324a", lw=1.8, marker="o",
+                            ms=5, zorder=3)
+                    inside = (y >= lo[idx]) & (y <= hi[idx])
+                    cov_txt = f"{100 * inside.mean():.0f}% das observações dentro do IC 95%"
+            if cov_txt:
+                ax.text(0.03, 0.97, cov_txt, transform=ax.transAxes, ha="left",
+                        va="top", fontsize=8.5, color="#15324a",
+                        bbox=dict(boxstyle="round,pad=0.3", fc="white",
+                                  ec="#c9d4df", alpha=0.85))
         lim = [min(ax.get_xlim()[0], ax.get_ylim()[0]), max(ax.get_xlim()[1], ax.get_ylim()[1])]
         ax.plot(lim, lim, color="#bbb", ls="--", lw=1)
         ax.set_xlabel("previsto"); ax.set_ylabel("observado")
@@ -2446,6 +2491,73 @@ class ModelSegmenter:
         ax.set_title(f"Resíduos · {sample or self.ref_sample}", fontsize=11,
                      fontweight="bold", color="#15324a")
         ax.grid(alpha=0.15)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def plot_metric_shift(self, figsize=(7.4, 4.0), dpi=150, save_path=None, ax=None):
+        """Shift das principais métricas da referência (DES) para o OOT, como
+        **variação relativa (%)** em barras horizontais, colorida por melhora
+        (verde) / piora (vermelho) conforme a direção de cada métrica. O rótulo
+        traz também o Δ absoluto (OOT − DES). Usa :meth:`metric_shifts`."""
+        fig, ax = _new_ax(figsize, dpi, ax)
+        oot = self._oot_sample()
+        shifts = self.metric_shifts()
+        if not shifts or oot == self.ref_sample:
+            ax.text(0.5, 0.5, "sem amostra OOT para comparar", ha="center",
+                    va="center", transform=ax.transAxes, color="#8891a0")
+            ax.axis("off"); fig.tight_layout()
+            if save_path:
+                fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+            return fig
+        names = {"auc": "AUC", "gini": "Gini", "ks": "KS", "f1": "F1", "r2": "R²",
+                 "rmse": "RMSE", "mae": "MAE", "smape": "sMAPE"}
+        order = (["auc", "gini", "ks", "f1"] if self.task_type == "classification"
+                 else ["r2", "rmse", "mae", "smape"])
+        better_up = {"auc", "gini", "ks", "f1", "r2"}      # maior = melhor
+        m = self.metrics().set_index("amostra")
+        labels, rels, deltas, cols = [], [], [], []
+        for c in order:
+            if c not in shifts:
+                continue
+            des = float(m.loc[self.ref_sample, c])
+            if not np.isfinite(des) or abs(des) < 1e-9:
+                continue                                    # % relativo instável
+            delta = shifts[c]
+            improve = (delta > 0) if c in better_up else (delta < 0)
+            labels.append(names.get(c, c))
+            rels.append(100.0 * delta / abs(des)); deltas.append(delta)
+            cols.append("#1aa64b" if improve else "#d6453e")
+        if not labels:
+            ax.text(0.5, 0.5, "sem métricas comparáveis", ha="center", va="center",
+                    transform=ax.transAxes, color="#8891a0")
+            ax.axis("off"); fig.tight_layout()
+            if save_path:
+                fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+            return fig
+        yp = np.arange(len(labels))[::-1]                   # 1ª métrica no topo
+        ax.barh(yp, rels, color=cols, edgecolor="#33424f", alpha=0.9, height=0.62)
+        ax.axvline(0, color="#33424f", lw=1)
+        span = max((abs(r) for r in rels), default=1.0) or 1.0
+        for yi, r, d in zip(yp, rels, deltas):
+            off = span * 0.02
+            ax.text(r + (off if r >= 0 else -off), yi, f"{r:+.1f}%  (Δ{d:+.3f})",
+                    ha="left" if r >= 0 else "right", va="center", fontsize=8,
+                    color="#15324a")
+        ax.set_yticks(yp); ax.set_yticklabels(labels, fontsize=9)
+        ax.set_xlim(-span * 1.35, span * 1.35)
+        ax.set_xlabel("variação DES → OOT (%)")
+        _pct_axis(ax, "x", xmax=100)
+        ax.set_title(f"Shift das principais métricas · DES → {oot}", fontsize=11,
+                     fontweight="bold", color="#15324a")
+        ax.grid(axis="x", alpha=0.15)
+        # legenda melhora/piora FORA do eixo (não colide com os rótulos das barras)
+        from matplotlib.patches import Patch
+        ax.legend(handles=[Patch(color="#1aa64b", label="melhora"),
+                           Patch(color="#d6453e", label="piora")],
+                  fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.16),
+                  ncol=2, framealpha=0.85, columnspacing=1.4, handlelength=1.2)
         fig.tight_layout()
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
@@ -2813,8 +2925,12 @@ class ModelSegmenter:
         ax.bar(xs, risco, color=cols, edgecolor="#33424f", alpha=0.9, width=0.72)
         for x0, r in zip(xs, risco):
             if np.isfinite(r):
-                ax.text(x0, r, f"{r*100:.1f}%", ha="center", va="bottom", fontsize=7.5,
-                        color="#15324a")
+                ax.annotate(f"{r*100:.1f}%", (x0, r), textcoords="offset points",
+                            xytext=(0, 4), ha="center", va="bottom", fontsize=8.5,
+                            color="#15324a")
+        finite = [r for r in risco if np.isfinite(r)]
+        if finite:
+            ax.set_ylim(top=max(finite) * 1.12)      # espaço p/ o rótulo afastado
         ax.set_xticks(xs); ax.set_xticklabels(labels, fontsize=9)
         ax.set_ylabel("event_rate" if self.task_type == "classification" else "alvo médio")
         _pct_axis(ax, "y")
@@ -2833,14 +2949,19 @@ class ModelSegmenter:
         samples = self._samples()
         fig, ax = _new_ax(figsize, dpi, ax)
         x = np.arange(len(labels)); w = 0.8 / max(len(samples), 1)
-        palette = ["steelblue", "crimson"]
+        palette = ["steelblue", "crimson"]       # base: referência × comparação
+        stab_color = "#7e57c2"                    # 3ª cor (roxo) p/ a safra de estabilidade
+        base_i = 0
         for k, a in enumerate(samples):
             am = (pd.Series(True, index=self.df.index) if self.sample_col is None
                   else self.df[self.sample_col] == a)
             n_a = max(int(am.sum()), 1)
             pct = [100 * int(((rating == l) & am).sum()) / n_a for l in labels]
-            ax.bar(x + k * w, pct, width=w, label=a, alpha=0.9,
-                   color=palette[k % len(palette)])
+            if _is_stability_sample(a):
+                color = stab_color
+            else:
+                color = palette[base_i % len(palette)]; base_i += 1
+            ax.bar(x + k * w, pct, width=w, label=a, alpha=0.9, color=color)
         ax.set_xticks(x + 0.4 - w / 2); ax.set_xticklabels(labels, fontsize=9)
         ax.set_ylabel("% da amostra"); ax.legend(fontsize=8)
         _pct_axis(ax, "y", xmax=100)
