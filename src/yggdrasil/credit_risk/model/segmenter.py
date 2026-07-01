@@ -93,59 +93,98 @@ ADVANCED_HYPERPARAMS: dict[str, tuple] = {
     "catboost": ("subsample", "l2_leaf_reg"),
 }
 
+#: Espaço de busca do tuning bayesiano (Optuna) por algoritmo — fonte única de
+#: verdade consumida por :func:`_optuna_space` e exposta para edição na UI
+#: (``ModelSegmenterUI``: quais hiperparâmetros tunar e seus intervalos). Cada
+#: parâmetro traz o ``type`` (``int``/``float``/``categorical``) e a faixa
+#: PADRÃO (``low``/``high``; ``step`` p/ inteiros, ``log`` p/ floats em escala
+#: logarítmica, ``choices`` p/ categóricos). Os nomes são 1:1 com o parâmetro
+#: real do estimador (ver :func:`_build_estimator`).
+OPTUNA_SEARCH_SPACE: dict[str, dict[str, dict]] = {
+    "logistica": {
+        "C": {"type": "float", "low": 1e-3, "high": 1e2, "log": True},
+    },
+    "random_forest": {
+        "n_estimators": {"type": "int", "low": 100, "high": 600, "step": 50},
+        "max_depth": {"type": "int", "low": 3, "high": 16},
+        "min_samples_leaf": {"type": "int", "low": 1, "high": 80},
+        "max_features": {"type": "categorical", "choices": ["sqrt", "log2", None]},
+    },
+    "extra_trees": {
+        "n_estimators": {"type": "int", "low": 100, "high": 600, "step": 50},
+        "max_depth": {"type": "int", "low": 3, "high": 16},
+        "min_samples_leaf": {"type": "int", "low": 1, "high": 80},
+        "max_features": {"type": "categorical", "choices": ["sqrt", "log2", None]},
+    },
+    "gradient_boosting": {
+        "n_estimators": {"type": "int", "low": 100, "high": 600, "step": 50},
+        "max_depth": {"type": "int", "low": 2, "high": 6},
+        "learning_rate": {"type": "float", "low": 1e-3, "high": 0.3, "log": True},
+        "subsample": {"type": "float", "low": 0.6, "high": 1.0},
+    },
+    "hist_gradient_boosting": {
+        "max_iter": {"type": "int", "low": 100, "high": 600, "step": 50},
+        "max_depth": {"type": "int", "low": 2, "high": 12},
+        "learning_rate": {"type": "float", "low": 1e-3, "high": 0.3, "log": True},
+        "l2_regularization": {"type": "float", "low": 1e-8, "high": 10.0, "log": True},
+    },
+    "lightgbm": {
+        "n_estimators": {"type": "int", "low": 100, "high": 800, "step": 50},
+        "num_leaves": {"type": "int", "low": 15, "high": 255},
+        "learning_rate": {"type": "float", "low": 1e-3, "high": 0.3, "log": True},
+        "subsample": {"type": "float", "low": 0.6, "high": 1.0},
+        "colsample_bytree": {"type": "float", "low": 0.6, "high": 1.0},
+    },
+    "xgboost": {
+        "n_estimators": {"type": "int", "low": 100, "high": 800, "step": 50},
+        "max_depth": {"type": "int", "low": 2, "high": 12},
+        "learning_rate": {"type": "float", "low": 1e-3, "high": 0.3, "log": True},
+        "subsample": {"type": "float", "low": 0.6, "high": 1.0},
+        "colsample_bytree": {"type": "float", "low": 0.6, "high": 1.0},
+    },
+    "catboost": {
+        "iterations": {"type": "int", "low": 100, "high": 800, "step": 50},
+        "depth": {"type": "int", "low": 2, "high": 10},
+        "learning_rate": {"type": "float", "low": 1e-3, "high": 0.3, "log": True},
+    },
+}
+
 _EPS = 1e-6
 
 
-def _optuna_space(trial, algorithm: str) -> dict:
-    """Espaço de busca de hiperparâmetros por algoritmo para o Optuna."""
-    if algorithm == "logistica":
-        return {"C": trial.suggest_float("C", 1e-3, 1e2, log=True)}
-    if algorithm in ("random_forest", "extra_trees"):
-        return {
-            "n_estimators": trial.suggest_int("n_estimators", 100, 600, step=50),
-            "max_depth": trial.suggest_int("max_depth", 3, 16),
-            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 80),
-            "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2", None]),
-        }
-    if algorithm == "gradient_boosting":
-        return {
-            "n_estimators": trial.suggest_int("n_estimators", 100, 600, step=50),
-            "max_depth": trial.suggest_int("max_depth", 2, 6),
-            "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
-            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-        }
-    if algorithm == "hist_gradient_boosting":
-        return {
-            "max_iter": trial.suggest_int("max_iter", 100, 600, step=50),
-            "max_depth": trial.suggest_int("max_depth", 2, 12),
-            "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
-            "l2_regularization": trial.suggest_float("l2_regularization", 1e-8, 10.0, log=True),
-        }
-    if algorithm == "lightgbm":
-        return {
-            "n_estimators": trial.suggest_int("n_estimators", 100, 800, step=50),
-            "num_leaves": trial.suggest_int("num_leaves", 15, 255),
-            "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
-            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-        }
-    if algorithm == "xgboost":
-        return {
-            "n_estimators": trial.suggest_int("n_estimators", 100, 800, step=50),
-            "max_depth": trial.suggest_int("max_depth", 2, 12),
-            "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
-            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-        }
-    if algorithm == "catboost":
-        return {
-            "iterations": trial.suggest_int("iterations", 100, 800, step=50),
-            "depth": trial.suggest_int("depth", 2, 10),
-            "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
-        }
-    raise ValueError(
-        f"O algoritmo {algorithm!r} não tem espaço de tuning. "
-        f"Tunáveis: {TUNABLE_ALGORITHMS}.")
+def _optuna_space(trial, algorithm: str, space: dict | None = None) -> dict:
+    """Sugere um conjunto de hiperparâmetros para o Optuna, a partir do catálogo
+    :data:`OPTUNA_SEARCH_SPACE` do algoritmo.
+
+    ``space`` (opcional): sobrescreve o catálogo — dict ``{nome: {type, low,
+    high, log?, step?, choices?}}`` (ex.: o que a UI monta a partir dos limites
+    escolhidos). Só os parâmetros presentes em ``space`` **e** válidos para o
+    algoritmo são sugeridos; os ausentes ficam no default do estimador. ``space``
+    vazio (ou sem interseção) cai de volta no catálogo padrão."""
+    base = OPTUNA_SEARCH_SPACE.get(algorithm)
+    if base is None:
+        raise ValueError(
+            f"O algoritmo {algorithm!r} não tem espaço de tuning. "
+            f"Tunáveis: {TUNABLE_ALGORITHMS}.")
+    if not space:
+        space = base
+    else:                                   # só nomes válidos p/ o algoritmo
+        space = {k: v for k, v in space.items() if k in base}
+        if not space:
+            space = base
+    out = {}
+    for name, spec in space.items():
+        t = spec.get("type")
+        if t == "int":
+            step = int(spec.get("step") or 1)
+            out[name] = trial.suggest_int(name, int(spec["low"]), int(spec["high"]),
+                                          step=step)
+        elif t == "categorical":
+            out[name] = trial.suggest_categorical(name, list(spec["choices"]))
+        else:                               # float (log opcional)
+            out[name] = trial.suggest_float(name, float(spec["low"]), float(spec["high"]),
+                                            log=bool(spec.get("log", False)))
+    return out
 
 
 # ======================================================================
@@ -1938,13 +1977,19 @@ class ModelSegmenter:
     def tune_optuna(self, algorithm=None, n_trials=30, transform="raw", features=None,
                     timeout=None, random_state=42, fit_best=True, verbose=False,
                     progress_callback=None, log_mlflow=False, mlflow_experiment=None,
-                    mlflow_run_name=None):
+                    mlflow_run_name=None, search_space=None, register_model=False,
+                    mlflow_model_name=None):
         """Otimização bayesiana de hiperparâmetros com **Optuna** (dependência
         core). Treina na referência (DES) e avalia no OOT (se houver alvo;
         senão, num split 75/25 do DES), maximizando **AUC** (classificação) ou
         **R²** (regressão). Guarda o resultado em ``self.tuning_`` (e o estudo em
         ``self.study_``); com ``fit_best=True`` reajusta o modelo com os melhores
         hiperparâmetros. Algoritmos tunáveis: :data:`TUNABLE_ALGORITHMS`.
+
+        ``search_space`` (opcional): sobrescreve quais hiperparâmetros são
+        buscados e seus intervalos — dict ``{nome: {type, low, high, log?, step?,
+        choices?}}`` (ver :data:`OPTUNA_SEARCH_SPACE` e :func:`_optuna_space`).
+        ``None`` usa o catálogo padrão do algoritmo.
 
         Cada trial guarda, em ``trial.user_attrs``, dois grupos de métricas —
         ``modelagem`` (AUC/KS/Gini ou RMSE/MAE/R² na validação) e ``monitoramento``
@@ -1953,6 +1998,13 @@ class ModelSegmenter:
         ``modelagem/…`` e ``monitoramento/…``), sob um run-pai com o resumo do
         estudo (melhores hiperparâmetros e gráficos do Optuna). Ver também
         :meth:`log_optuna_to_mlflow` para logar um estudo já concluído.
+
+        ``register_model`` (só com ``log_mlflow=True`` e ``fit_best=True``): loga
+        também o **modelo re-treinado com os melhores hiperparâmetros** no run-pai
+        (``mlflow.sklearn``). Com ``mlflow_model_name``, registra no Model Registry
+        evitando colidir com um nome já existente — vira ``nome_v2``, ``nome_v3``…
+        (ou, sem acesso ao registry, ganha um carimbo de tempo). Ver
+        :meth:`_unique_registered_model_name`.
 
         ``progress_callback`` (opcional): chamado após CADA trial com
         ``(n_concluidos, n_total, melhor_valor)`` — útil p/ barra de progresso na
@@ -1990,7 +2042,7 @@ class ModelSegmenter:
 
         def objective(trial):
             from ...monitoring import psi as _psi_num
-            hp = _optuna_space(trial, algorithm)
+            hp = _optuna_space(trial, algorithm, search_space)
             pipe = self._build_pipeline(feats, algorithm, hp, transform=transform)
             pipe.fit(Xtr, ytr)
             s = self._predict_score_array(pipe, Xva)
@@ -2025,6 +2077,18 @@ class ModelSegmenter:
                     pass                          # progresso é cosmético; nunca derruba o tuning
             callbacks.append(_progress_cb)
 
+        def _finish_best():
+            """Fecha o estudo: grava ``study_``/``tuning_`` e, com ``fit_best``,
+            reajusta o modelo com os melhores hiperparâmetros."""
+            self.study_ = study
+            self.tuning_ = {"algorithm": algorithm, "metric": "auc" if is_clf else "r2",
+                            "n_trials": len(study.trials),
+                            "best_value": round(float(study.best_value), 6),
+                            "best_params": dict(study.best_params)}
+            if fit_best:
+                self.fit(algorithm=algorithm, hyperparams=study.best_params,
+                         features=feats, transform=transform)
+
         # --- MLflow: run-pai + um run aninhado por trial (opcional) ----------
         if log_mlflow:
             import mlflow
@@ -2037,17 +2101,74 @@ class ModelSegmenter:
                 study.optimize(objective, n_trials=n_trials, timeout=timeout,
                                callbacks=callbacks + [_mlflow_cb])
                 self._log_optuna_parent(mlflow, study, algorithm, transform, is_clf, feats)
+                # re-treina o melhor modelo DENTRO do run-pai e o registra junto
+                # dos trials (evita colisão de nome no Model Registry).
+                _finish_best()
+                if register_model and fit_best:
+                    self._log_fitted_model(mlflow, registered_model_name=mlflow_model_name,
+                                           verbose=verbose)
         else:
             study.optimize(objective, n_trials=n_trials, timeout=timeout, callbacks=callbacks)
-
-        self.study_ = study
-        self.tuning_ = {"algorithm": algorithm, "metric": "auc" if is_clf else "r2",
-                        "n_trials": len(study.trials), "best_value": round(float(study.best_value), 6),
-                        "best_params": dict(study.best_params)}
-        if fit_best:
-            self.fit(algorithm=algorithm, hyperparams=study.best_params,
-                     features=feats, transform=transform)
+            _finish_best()
         return self.tuning_
+
+    @staticmethod
+    def _unique_registered_model_name(base: str) -> str:
+        """Nome de modelo para o MLflow Model Registry que **não colida** com um
+        já existente. Se ``base`` estiver livre, usa-o; senão tenta ``base_v2``,
+        ``base_v3``… (o próprio ``base`` conta como v1). Sem acesso ao registry
+        (offline/backend sem suporte), anexa um carimbo de tempo
+        (``base_AAAAMMDD_HHMMSS``)."""
+        try:
+            from mlflow.tracking import MlflowClient
+            client = MlflowClient()
+
+            def _exists(nome):
+                try:
+                    client.get_registered_model(nome)
+                    return True
+                except Exception:
+                    return False
+
+            if not _exists(base):
+                return base
+            for v in range(2, 1000):
+                cand = f"{base}_v{v}"
+                if not _exists(cand):
+                    return cand
+        except Exception:
+            pass
+        import datetime as _dt
+        return f"{base}_{_dt.datetime.now():%Y%m%d_%H%M%S}"
+
+    def _log_fitted_model(self, mlflow, registered_model_name=None,
+                          artifact_path="modelo", verbose=False):
+        """Loga o modelo ajustado no run MLflow **ativo** (``mlflow.sklearn``).
+        Com ``registered_model_name``, registra no Model Registry usando um nome
+        único (:meth:`_unique_registered_model_name`) para não sobrescrever/colidir
+        com um modelo já existente. Retorna o nome efetivamente registrado (ou
+        ``None`` se só foi logado como artefato). Best-effort."""
+        if getattr(self, "model", None) is None:
+            return None
+        name = (self._unique_registered_model_name(registered_model_name)
+                if registered_model_name else None)
+        try:
+            import mlflow.sklearn
+            # cloudpickle: default histórico e compatível com mlflow 2.9→3.x — o
+            # 3.x passou a serializar sklearn via 'skops', que rejeita tipos como
+            # numpy.dtype (comum em RF/GBM) e derrubaria o log do modelo.
+            mlflow.sklearn.log_model(self.model, artifact_path,
+                                     registered_model_name=name,
+                                     serialization_format="cloudpickle")
+            mlflow.set_tag("modelo_registrado", name or "(artefato, sem registry)")
+            if verbose:
+                print(f"[mlflow] modelo logado"
+                      + (f" e registrado como '{name}'." if name else " (artefato)."))
+            return name
+        except Exception as e:
+            if verbose:
+                print(f"[mlflow] modelo não logado: {e}")
+            return None
 
     # ------------------------------------------------------------------
     # MLflow: logging dos trials do Optuna (agrupado por finalidade)
@@ -3745,8 +3866,11 @@ class ModelSegmenter:
                 pass
             try:
                 import mlflow.sklearn
+                # cloudpickle: compatível com mlflow 2.9→3.x (o 3.x passou a usar
+                # 'skops' por padrão, que rejeita numpy.dtype e quebra RF/GBM).
                 mlflow.sklearn.log_model(self.model, artifact_path,
-                                         registered_model_name=registered_model_name)
+                                         registered_model_name=registered_model_name,
+                                         serialization_format="cloudpickle")
             except Exception as e:
                 if verbose:
                     print(f"[mlflow] modelo não logado: {e}")

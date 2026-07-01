@@ -38,7 +38,21 @@ except Exception as e:  # pragma: no cover
     raise ImportError("Este módulo requer ipywidgets e IPython (Jupyter).") from e
 
 from .segmenter import (ADVANCED_HYPERPARAMS, ALGORITHMS, BOOSTING_ALGORITHMS,
-                        ModelSegmenter)
+                        OPTUNA_SEARCH_SPACE, ModelSegmenter)
+
+#: Ordem e rótulo de exibição dos hiperparâmetros na gaveta de "Ajuste do tuning
+#: (Optuna)" — a união dos parâmetros de :data:`OPTUNA_SEARCH_SPACE`.
+_SPACE_ORDER = ["C", "n_estimators", "max_iter", "iterations", "num_leaves",
+                "max_depth", "depth", "min_samples_leaf", "learning_rate",
+                "subsample", "colsample_bytree", "l2_regularization", "max_features"]
+_SPACE_LABEL = {
+    "C": "C (regularização)", "n_estimators": "n_estimators", "max_iter": "max_iter",
+    "iterations": "iterations", "num_leaves": "num_leaves", "max_depth": "max_depth",
+    "depth": "depth", "min_samples_leaf": "min_samples_leaf",
+    "learning_rate": "learning_rate", "subsample": "subsample",
+    "colsample_bytree": "colsample_bytree", "l2_regularization": "L2 (l2_regularization)",
+    "max_features": "max_features",
+}
 
 #: Nomes do parâmetro de regularização L2 nos diferentes motores — todos são
 #: expostos pela MESMA linha "L2" na UI (a gaveta de avançados).
@@ -253,7 +267,7 @@ class ModelSegmenterUI:
         self._sync_bin_controls()
 
     # ------------------------------------------------------------------ render utils
-    def _fig_html(self, fig, border=False, tight=True):
+    def _fig_html(self, fig, border=False, tight=True, stretch=False):
         import base64
         import io as _io
         import matplotlib.pyplot as plt
@@ -269,7 +283,9 @@ class ModelSegmenterUI:
         fig.savefig(buf, **save_kw)
         plt.close(fig)
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-        style = "max-width:100%;height:auto"
+        # stretch=True ⇒ a imagem preenche a largura da coluna (dashboards lado a
+        # lado); senão fica no tamanho natural, limitada a 100% do contêiner.
+        style = "width:100%;height:auto" if stretch else "max-width:100%;height:auto"
         if border:
             style += ";border:1px solid #e6e8eb;border-radius:6px"
         return f"<img src='data:image/png;base64,{b64}' style='{style}'/>"
@@ -795,6 +811,8 @@ class ModelSegmenterUI:
         for _cb in (self.cb_min_leaf, self.cb_subsample, self.cb_colsample,
                     self.cb_num_leaves, self.cb_l2):
             _cb.observe(lambda c: self._sync_algo_visibility(), names="value")
+        # --- gaveta "Ajuste do tuning (Optuna)": quais HP tunar + intervalos ---
+        self._build_tuning_space()
         # caixas que aparecem/somem conforme o algoritmo escolhido
         self.box_logit = W.HBox([self.tx_C])
         self.box_ensemble = W.VBox([self.sl_n_est,
@@ -807,10 +825,14 @@ class ModelSegmenterUI:
         self.sl_trials = W.IntSlider(description="trials", min=5, max=100, value=30,
                                      layout=W.Layout(width="60%"))
         self.cb_tune_mlflow = W.Checkbox(value=False, indent=False,
-                                         description="registrar trials no MLflow")
+                                         description="registrar trials + modelo no MLflow")
         self.cb_tune_mlflow.tooltip = ("Cada trial vira um run aninhado no MLflow, com "
                                        "parâmetros e métricas agrupadas (modelagem/ e "
                                        "monitoramento/), sob um run-pai com o resumo do estudo. "
+                                       "O modelo re-treinado com os melhores hiperparâmetros "
+                                       "também é logado no run-pai (e registrado no Model "
+                                       "Registry se você preencher 'Modelo (UC)' na aba Validar "
+                                       "& Exportar; nomes duplicados viram nome_v2, nome_v3…). "
                                        "Usa o campo 'Experimento' da aba Validar & Exportar; "
                                        "se vazio, registra no experimento ativo da sessão "
                                        "(no Databricks, o do próprio notebook).")
@@ -860,6 +882,7 @@ class ModelSegmenterUI:
             W.HTML("<div class='mseg-h'>Treinar (ou usar modelo pré-ajustado via set_model)</div>"),
             W.HBox([self.dd_algo, self.cb_woe]),
             self.box_logit, self.box_ensemble, self.box_lr, self.box_adv,
+            self.box_tuning_space,
             self.out_algo_help,
             self.out_woe_help,
             W.HBox([self.btn_fit, self.btn_shap]),
@@ -878,14 +901,35 @@ class ModelSegmenterUI:
             self.out_formula])
         self.formula_card.add_class("mseg-card")
 
+        # rótulos da 2ª linha de gráficos conforme a tarefa (reg: calibração +
+        # resíduos · clf: ROC + KS)
+        if self.task_type == "classification":
+            _head_a, _head_b = "Curva ROC", "Curva KS"
+        else:
+            _head_a, _head_b = "Calibração · DES", "Resíduos · DES"
+        # linha 1: shift das métricas (ampliado) + distribuição do score, lado a lado
+        row_shift_dist = W.HBox([
+            W.VBox([W.HTML("<div class='mseg-h'>Shift das principais métricas · DES → OOT</div>"),
+                    self.out_metric_shift], layout=W.Layout(width="58%")),
+            W.VBox([W.HTML("<div class='mseg-h'>Distribuição do score</div>"),
+                    self.out_model_c], layout=W.Layout(width="41%")),
+        ], layout=W.Layout(justify_content="space-between"))
+        # linha 2: calibração (DES) + resíduos, lado a lado
+        row_calib_resid = W.HBox([
+            W.VBox([W.HTML(f"<div class='mseg-h'>{_head_a}</div>"), self.out_model_a],
+                   layout=W.Layout(width="49.5%")),
+            W.VBox([W.HTML(f"<div class='mseg-h'>{_head_b}</div>"), self.out_model_b],
+                   layout=W.Layout(width="49.5%")),
+        ], layout=W.Layout(justify_content="space-between"))
+        metrics_card = W.VBox([
+            W.HTML("<div class='mseg-h'>Métricas por amostra</div>"), self.out_metrics,
+            row_shift_dist, row_calib_resid,
+        ]); metrics_card.add_class("mseg-card")
+
         tab_model = W.VBox([
             train_card,
-            W.VBox([W.HTML("<div class='mseg-h'>Métricas por amostra</div>"), self.out_metrics,
-                    self.out_metric_shift]),
+            metrics_card,
             self.formula_card,
-            W.HBox([W.VBox([self.out_model_a], layout=W.Layout(width="33.33%")),
-                    W.VBox([self.out_model_b], layout=W.Layout(width="33.33%")),
-                    W.VBox([self.out_model_c], layout=W.Layout(width="33.33%"))]),
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>SHAP — beeswarm</div>"), self.out_shap],
                            layout=W.Layout(width="55%")),
                     W.VBox([W.HTML("<div class='mseg-h'>SHAP — importância</div>"), self.out_shap_bar],
@@ -1394,6 +1438,94 @@ class ModelSegmenterUI:
             self._log(f"[nova variável] erro: {e}")
 
     # ------------------------------------------------------------------ Aba 3 handlers
+    def _build_tuning_space(self):
+        """Monta a gaveta 'Ajuste do tuning (Optuna)': por parâmetro, um checkbox
+        (tunar ou não) e o intervalo [mín, máx] — ou, para categóricos, os valores
+        candidatos. As linhas visíveis e os limites default seguem o algoritmo
+        selecionado (:data:`OPTUNA_SEARCH_SPACE`); só os habilitados entram na
+        busca (os demais ficam no default do estimador)."""
+        # tipo de cada parâmetro (o mesmo nome tem o mesmo tipo em todo algoritmo)
+        types = {}
+        for params in OPTUNA_SEARCH_SPACE.values():
+            for name, spec in params.items():
+                types.setdefault(name, spec.get("type"))
+        self._sp_enable, self._sp_low, self._sp_high = {}, {}, {}
+        self._sp_choices, self._sp_rows = {}, {}
+        self._sp_last_algo = None
+        num_lay = W.Layout(width="118px")
+        num_sty = {"description_width": "30px"}
+        rows = []
+        for name in _SPACE_ORDER:
+            t = types.get(name)
+            if t is None:
+                continue
+            cb = W.Checkbox(value=True, indent=False, description=_SPACE_LABEL.get(name, name),
+                            layout=W.Layout(width="240px"))
+            self._sp_enable[name] = cb
+            if t == "categorical":
+                sel = W.SelectMultiple(
+                    options=[("sqrt", "sqrt"), ("log2", "log2"), ("todas", "(todas)")],
+                    value=("sqrt", "log2", "(todas)"), rows=3,
+                    layout=W.Layout(width="150px"))
+                self._sp_choices[name] = sel
+                row = W.HBox([cb, sel])
+            else:
+                Box = W.IntText if t == "int" else W.FloatText
+                lo = Box(value=0, description="mín", layout=num_lay, style=num_sty)
+                hi = Box(value=1, description="máx", layout=num_lay, style=num_sty)
+                self._sp_low[name] = lo
+                self._sp_high[name] = hi
+                row = W.HBox([cb, lo, hi])
+            self._sp_rows[name] = row
+            rows.append(row)
+        inner = W.VBox([
+            W.HTML("<div class='mseg-legend'>Marque quais hiperparâmetros o Optuna deve "
+                   "buscar e ajuste o intervalo <b>[mín, máx]</b>. Desmarcados ficam no "
+                   "valor padrão do algoritmo. Os limites se ajustam ao algoritmo "
+                   "escolhido — edite à vontade.</div>"),
+        ] + rows)
+        self.box_tuning_space = W.Accordion(children=[inner])
+        self.box_tuning_space.set_title(
+            0, "Ajuste do tuning (Optuna) · hiperparâmetros e intervalos")
+        self.box_tuning_space.selected_index = None      # colapsado por padrão
+
+    def _apply_space_defaults(self, algo):
+        """Reseta os limites (mín/máx) dos parâmetros numéricos para os defaults
+        do algoritmo (:data:`OPTUNA_SEARCH_SPACE`). Categóricos preservam a
+        seleção do usuário."""
+        for name, spec in OPTUNA_SEARCH_SPACE.get(algo, {}).items():
+            lo, hi = self._sp_low.get(name), self._sp_high.get(name)
+            if lo is None or hi is None:
+                continue
+            if spec.get("type") == "int":
+                lo.value, hi.value = int(spec["low"]), int(spec["high"])
+            else:
+                lo.value, hi.value = float(spec["low"]), float(spec["high"])
+
+    def _collect_search_space(self, algo):
+        """Monta o ``search_space`` para :meth:`ModelSegmenter.tune_optuna` a
+        partir dos controles habilitados do algoritmo. Retorna ``None`` quando
+        nada foi habilitado (⇒ usa o catálogo padrão)."""
+        space = {}
+        for name, spec in OPTUNA_SEARCH_SPACE.get(algo, {}).items():
+            cb = self._sp_enable.get(name)
+            if cb is None or not cb.value:
+                continue                             # desabilitado → não tuna
+            if spec.get("type") == "categorical":
+                sel = self._sp_choices[name].value
+                choices = [None if c == "(todas)" else c for c in sel]
+                if choices:
+                    space[name] = {"type": "categorical", "choices": choices}
+            else:
+                lo = self._sp_low[name].value
+                hi = self._sp_high[name].value
+                if hi < lo:                          # tolera inversão do usuário
+                    lo, hi = hi, lo
+                new = dict(spec)                     # preserva type/step/log
+                new["low"], new["high"] = lo, hi
+                space[name] = new
+        return space or None
+
     def _sync_algo_visibility(self):
         """Mostra só os hiperparâmetros do algoritmo escolhido: C (logística),
         n_estimators/max_depth (random forest · gradient boosting), nada (linear)."""
@@ -1423,6 +1555,16 @@ class ModelSegmenterUI:
         self.sl_num_leaves.layout.display = "" if self.cb_num_leaves.value else "none"
         self.fl_l2.layout.display = "" if self.cb_l2.value else "none"
         self.box_adv.layout.display = "" if adv else "none"
+        # --- espaço de busca do tuning: revela só os HP do algoritmo e, quando o
+        # algoritmo MUDA, reseta os limites para os defaults dele (preservando
+        # edições enquanto o algoritmo é o mesmo).
+        sp = OPTUNA_SEARCH_SPACE.get(algo, {})
+        for name, row in self._sp_rows.items():
+            row.layout.display = "" if name in sp else "none"
+        if self._sp_last_algo != algo:
+            self._apply_space_defaults(algo)
+            self._sp_last_algo = algo
+        self.box_tuning_space.layout.display = "" if sp else "none"
         # a fórmula só faz sentido para modelos lineares/logísticos
         linear = algo in ("logistica", "linear")
         self.formula_card.layout.display = "" if linear else "none"
@@ -1719,12 +1861,16 @@ class ModelSegmenterUI:
                                    f"melhor até agora = <b>{best:.4f}</b></div>")
 
         log_mlflow = self.cb_tune_mlflow.value
+        search_space = self._collect_search_space(algo)     # limites escolhidos na gaveta
         try:
             res = self.seg.tune_optuna(algorithm=algo, n_trials=n_trials,
                                        transform=transform, fit_best=True,
                                        progress_callback=_progress,
                                        log_mlflow=log_mlflow,
-                                       mlflow_experiment=(self.tx_experiment.value or None))
+                                       mlflow_experiment=(self.tx_experiment.value or None),
+                                       search_space=search_space,
+                                       register_model=log_mlflow,
+                                       mlflow_model_name=(self.tx_model.value or None))
         except Exception as e:
             self.pb_tune.bar_style = "danger"
             self.btn_tune.disabled = False
@@ -1741,9 +1887,14 @@ class ModelSegmenterUI:
             f"<div class='mseg-legend'><b>Optuna</b> · {res['n_trials']} trials · melhor "
             f"<b>{res['metric'].upper()} = {res['best_value']:.4f}</b> (no OOT/validação)"
             f"<br>{bp}</div>")
+        if log_mlflow:
+            _mod = self.tx_model.value or "(artefato, sem registry)"
+            _mlflow_msg = f" Trials + modelo registrados no MLflow (modelo: {_mod})."
+        else:
+            _mlflow_msg = ""
         self._log(f"[tune] {algo}: melhor {res['metric']}={res['best_value']:.4f} "
                   f"em {res['n_trials']} trials; modelo re-treinado com os melhores."
-                  + (" Trials registrados no MLflow." if log_mlflow else ""))
+                  + _mlflow_msg)
         self._render_metrics()
         self._render_model_plots()
         self._render_formula()
@@ -1753,16 +1904,18 @@ class ModelSegmenterUI:
         m = self.seg.metrics().round(4)
         self.out_metrics.value = (self._metrics_table_html(m)
                                   + self._metrics_guide_html(list(m.columns)))
-        # shift DES→OOT das principais métricas (só quando há OOT para comparar)
+        # shift DES→OOT das principais métricas (só quando há OOT para comparar).
+        # O título vem do layout (row_shift_dist); aqui vai só a figura, ampliada
+        # e esticada p/ preencher a coluna ao lado da distribuição do score.
         if self.seg.metric_shifts():
             try:
-                self.out_metric_shift.value = (
-                    "<div class='mseg-h'>Shift das principais métricas · DES → OOT</div>"
-                    + self._fig_html(self.seg.plot_metric_shift(figsize=(7.2, 3.6))))
+                self.out_metric_shift.value = self._fig_html(
+                    self.seg.plot_metric_shift(figsize=(8.4, 4.7)), stretch=True)
             except Exception as e:
                 self.out_metric_shift.value = f"<i>{e}</i>"
         else:
-            self.out_metric_shift.value = ""
+            self.out_metric_shift.value = ("<div class='mseg-legend'>Sem amostra OOT "
+                                           "para comparar.</div>")
 
     def _metrics_table_html(self, m):
         """Tabela de métricas centralizada e com identificador visual: cada célula
@@ -1815,19 +1968,19 @@ class ModelSegmenterUI:
             "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></details>")
 
     def _render_model_plots(self):
+        # linha 2 (calibração + resíduos · reg / ROC + KS · clf) e a distribuição
+        # do score, que fica na linha 1 ao lado do shift. stretch=True ⇒ cada
+        # gráfico preenche a largura da sua coluna.
         if self.task_type == "classification":
-            specs = [(self.out_model_a, self.seg.plot_roc),
-                     (self.out_model_b, self.seg.plot_ks),
-                     (self.out_model_c, self.seg.plot_score_distribution)]
+            fn_a, fn_b = self.seg.plot_roc, self.seg.plot_ks
         else:
-            specs = [(self.out_model_a, self.seg.plot_calibration),
-                     (self.out_model_b, self.seg.plot_residuals),
-                     (self.out_model_c, self.seg.plot_score_distribution)]
-        # figsize comum + tight=False ⇒ os 3 gráficos saem do mesmo tamanho
-        common = (5.2, 4.3)
-        for out, fn in specs:
+            fn_a, fn_b = self.seg.plot_calibration, self.seg.plot_residuals
+        specs = [(self.out_model_a, fn_a, (6.0, 5.0)),
+                 (self.out_model_b, fn_b, (6.4, 5.0)),
+                 (self.out_model_c, self.seg.plot_score_distribution, (6.4, 4.7))]
+        for out, fn, fs in specs:
             try:
-                out.value = self._fig_html(fn(figsize=common), tight=False)
+                out.value = self._fig_html(fn(figsize=fs), tight=False, stretch=True)
             except Exception as e:
                 out.value = f"<i>{e}</i>"
 
