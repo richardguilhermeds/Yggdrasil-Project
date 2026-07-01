@@ -2492,7 +2492,10 @@ class TreeSegmenterUI:
             out_name = self.tx_spark_out.value.strip()
             if out_name:
                 try:
-                    out.write.mode("overwrite").saveAsTable(out_name)
+                    # mergeSchema: evolui o schema (colunas novas: segmento/nota/
+                    # valor_regua) ao sobrescrever a base se ela já existir.
+                    (out.write.mode("overwrite").option("mergeSchema", "true")
+                        .saveAsTable(out_name))
                     print(f"✓ tabela '{out_name}' gravada (segmento, nota, valor_regua).")
                 except Exception as e:
                     print(f"Régua aplicada, mas falhou ao gravar '{out_name}':",

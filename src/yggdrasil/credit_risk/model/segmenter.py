@@ -3794,7 +3794,10 @@ class ModelSegmenter:
                                    cat_suffix=cat_suffix, progress_callback=progress_callback)
             if output_table:
                 _emit_progress(progress_callback, "save", f"Salvar em '{output_table}'", "run")
-                out.write.mode(mode).saveAsTable(output_table)
+                # mergeSchema: evolui o schema (colunas novas: score/rating/valor) ao
+                # sobrescrever (mode='overwrite' por padrão) se a base já existir.
+                (out.write.mode(mode).option("mergeSchema", "true")
+                    .saveAsTable(output_table))
                 _emit_progress(progress_callback, "save", f"Salvar em '{output_table}'", "ok")
             _emit_progress(progress_callback, "done", "Escoragem concluída", "ok")
             return out
