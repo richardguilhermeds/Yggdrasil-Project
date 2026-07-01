@@ -37,7 +37,20 @@ try:
 except Exception as e:  # pragma: no cover
     raise ImportError("Este módulo requer ipywidgets e IPython (Jupyter).") from e
 
-from .segmenter import ALGORITHMS, BOOSTING_ALGORITHMS, ModelSegmenter
+from .segmenter import (ADVANCED_HYPERPARAMS, ALGORITHMS, BOOSTING_ALGORITHMS,
+                        ModelSegmenter)
+
+#: Nomes do parâmetro de regularização L2 nos diferentes motores — todos são
+#: expostos pela MESMA linha "L2" na UI (a gaveta de avançados).
+_L2_PARAM_NAMES = ("l2_regularization", "reg_lambda", "l2_leaf_reg")
+
+
+def _l2_param_for(algo: str):
+    """Nome do parâmetro L2 do algoritmo (ou ``None`` se ele não tem um)."""
+    for name in _L2_PARAM_NAMES:
+        if name in ADVANCED_HYPERPARAMS.get(algo, ()):  # 1 por algoritmo
+            return name
+    return None
 
 _CSS = """
 <style>
@@ -450,6 +463,11 @@ class ModelSegmenterUI:
             clear_output(wait=True)
             print("\n".join(self._log_lines))
 
+    def _on_clear_log(self, _):
+        """Limpa o console (histórico de mensagens) — botão no cabeçalho."""
+        self._log_lines = []
+        self.out_log.clear_output()
+
     @staticmethod
     def _pill(text, cls="muted"):
         return f"<span class='pill pill-{cls}'>{text}</span>"
@@ -471,6 +489,10 @@ class ModelSegmenterUI:
         self.banner = W.HTML()
         self.bar = W.HTML()
         self.out_log = W.Output(layout=W.Layout(max_height="160px", overflow="auto"))
+        self.btn_clear_log = W.Button(description="Limpar log", icon="eraser",
+                                      tooltip="Limpa o histórico de mensagens do console",
+                                      layout=W.Layout(width="140px"))
+        self.btn_clear_log.on_click(self._on_clear_log)
 
         # ---------- Aba 1: Variáveis ----------
         self.dd_var = W.Dropdown(options=self._opts(cands), description="Variável:",
@@ -661,6 +683,8 @@ class ModelSegmenterUI:
         self.out_an_inv_safra = W.HTML()
         self.out_an_time = W.HTML()
         self.out_an_psi = W.HTML()
+        self.out_an_share = W.HTML()   # % de cada faixa/categoria ao longo do tempo
+        self.out_an_optbin_share = W.HTML()   # faixas do optimal binning no tempo (numéricas)
         self.btn_analyze.on_click(self._on_analyze)
 
         bin_card = W.VBox([
@@ -692,11 +716,22 @@ class ModelSegmenterUI:
         # linha 3: variável ao longo do tempo (percentis) · PSI por safra
         row3 = _row(_col("Variável ao longo do tempo · percentis por safra", self.out_an_time),
                     _col("PSI da variável por safra vs DES", self.out_an_psi))
+        # linha 4 (largura total): % de cada faixa/categoria ao longo do tempo —
+        # logo ABAIXO do comportamento (média/percentis), como pedido.
+        row_share = W.VBox(
+            [W.HTML("<div class='mseg-h'>% de cada faixa/categoria ao longo do tempo</div>"),
+             self.out_an_share], layout=W.Layout(width="100%"))
+        # linha 5 (largura total): distribuição das faixas do OPTIMAL BINNING no
+        # tempo (só variáveis numéricas; ignora bins manuais).
+        row_optbin = W.VBox(
+            [W.HTML("<div class='mseg-h'>Distribuição das faixas do optimal binning ao longo "
+                    "do tempo (numéricas)</div>"),
+             self.out_an_optbin_share], layout=W.Layout(width="100%"))
         tab_an = W.VBox([
             W.HBox([self.dd_var2, self.dd_sample2, self.tx_time2, self.btn_analyze]),
             bin_card,
             self.out_an_cards,
-            row1, row2, row3,
+            row1, row2, row3, row_share, row_optbin,
         ], layout=W.Layout(padding="2px"))
 
         # ---------- Aba 3: Modelo ----------
@@ -715,6 +750,51 @@ class ModelSegmenterUI:
         self.tx_lr = W.FloatText(value=0.05, step=0.01, description="learning_rate",
                                  style={"description_width": "initial"})
         self.tx_lr.tooltip = "Taxa de aprendizado dos modelos de boosting (menor = mais árvores/regularização)"
+        # --- hiperparâmetros AVANÇADOS (opcionais, por algoritmo) -----------
+        # Só entram no fit quando habilitados; ficam numa gaveta colapsada.
+        adv_style = {"description_width": "initial"}
+        self.cb_min_leaf = W.Checkbox(value=False, indent=False,
+                                      description="definir min_samples_leaf")
+        self.sl_min_leaf = W.IntSlider(value=20, min=1, max=200, description="min_samples_leaf",
+                                       style=adv_style)
+        self.sl_min_leaf.tooltip = "Mínimo de amostras por folha da árvore (maior = mais regularização)"
+        self.dd_max_feat = W.Dropdown(
+            options=[("padrão do modelo", "__default__"), ("sqrt", "sqrt"),
+                     ("log2", "log2"), ("todas as variáveis", "__none__")],
+            value="__default__", description="max_features", style=adv_style)
+        self.dd_max_feat.tooltip = "Nº de variáveis sorteadas por split (sqrt/log2 = mais aleatoriedade/robustez)"
+        self.cb_subsample = W.Checkbox(value=False, indent=False, description="definir subsample")
+        self.fl_subsample = W.FloatSlider(value=1.0, min=0.5, max=1.0, step=0.05,
+                                          description="subsample", style=adv_style)
+        self.fl_subsample.tooltip = "Fração de linhas amostradas por árvore (< 1 = boosting estocástico/regulariza)"
+        self.cb_colsample = W.Checkbox(value=False, indent=False, description="definir colsample_bytree")
+        self.fl_colsample = W.FloatSlider(value=1.0, min=0.5, max=1.0, step=0.05,
+                                          description="colsample_bytree", style=adv_style)
+        self.fl_colsample.tooltip = "Fração de colunas amostradas por árvore (< 1 = mais regularização)"
+        self.cb_num_leaves = W.Checkbox(value=False, indent=False, description="definir num_leaves")
+        self.sl_num_leaves = W.IntSlider(value=31, min=8, max=255, description="num_leaves",
+                                         style=adv_style)
+        self.sl_num_leaves.tooltip = "Nº máx. de folhas por árvore (LightGBM, crescimento leaf-wise); maior = mais complexo"
+        self.cb_l2 = W.Checkbox(value=False, indent=False, description="definir regularização L2")
+        self.fl_l2 = W.FloatSlider(value=1.0, min=0.0, max=20.0, step=0.5,
+                                   description="L2", style=adv_style)
+        self.fl_l2.tooltip = "Regularização L2 (HistGB: l2_regularization · LightGBM/XGBoost: reg_lambda · CatBoost: l2_leaf_reg)"
+        # linhas (rótulo → HBox), reveladas conforme o algoritmo e o checkbox
+        self._adv_rows = {
+            "min_samples_leaf": W.HBox([self.cb_min_leaf, self.sl_min_leaf]),
+            "max_features": W.HBox([self.dd_max_feat]),
+            "subsample": W.HBox([self.cb_subsample, self.fl_subsample]),
+            "colsample_bytree": W.HBox([self.cb_colsample, self.fl_colsample]),
+            "num_leaves": W.HBox([self.cb_num_leaves, self.sl_num_leaves]),
+            "l2": W.HBox([self.cb_l2, self.fl_l2]),
+        }
+        box_adv_inner = W.VBox(list(self._adv_rows.values()))
+        self.box_adv = W.Accordion(children=[box_adv_inner])
+        self.box_adv.set_title(0, "Hiperparâmetros avançados (opcional)")
+        self.box_adv.selected_index = None            # colapsado por padrão
+        for _cb in (self.cb_min_leaf, self.cb_subsample, self.cb_colsample,
+                    self.cb_num_leaves, self.cb_l2):
+            _cb.observe(lambda c: self._sync_algo_visibility(), names="value")
         # caixas que aparecem/somem conforme o algoritmo escolhido
         self.box_logit = W.HBox([self.tx_C])
         self.box_ensemble = W.VBox([self.sl_n_est,
@@ -726,12 +806,18 @@ class ModelSegmenterUI:
         # --- tuning bayesiano (Optuna) ---
         self.sl_trials = W.IntSlider(description="trials", min=5, max=100, value=30,
                                      layout=W.Layout(width="60%"))
+        self.cb_tune_mlflow = W.Checkbox(value=False, indent=False,
+                                         description="registrar trials no MLflow")
+        self.cb_tune_mlflow.tooltip = ("Cada trial vira um run aninhado no MLflow, com "
+                                       "parâmetros e métricas agrupadas (modelagem/ e "
+                                       "monitoramento/), sob um run-pai com o resumo do estudo. "
+                                       "Usa o campo 'Experimento' da aba Validar & Exportar.")
         self.btn_tune = W.Button(description="Tunar com Optuna", button_style="warning",
                                  icon="magic")
         self.btn_tune.tooltip = ("Otimização bayesiana (Optuna): busca hiperparâmetros "
                                  "do algoritmo selecionado maximizando AUC (classificação) / "
-                                 "R² (regressão) no OOT, e treina com os melhores. Requer "
-                                 "pip install yggdrasil[optuna].")
+                                 "R² (regressão) no OOT, e treina com os melhores. Os trials "
+                                 "podem ser registrados no MLflow.")
         self.out_tune = W.HTML()
         # barra de progresso do tuning (escondida até começar)
         self.pb_tune = W.IntProgress(value=0, min=0, max=100, description="0/0",
@@ -770,7 +856,7 @@ class ModelSegmenterUI:
         train_card = W.VBox([
             W.HTML("<div class='mseg-h'>Treinar (ou usar modelo pré-ajustado via set_model)</div>"),
             W.HBox([self.dd_algo, self.cb_woe]),
-            self.box_logit, self.box_ensemble, self.box_lr,
+            self.box_logit, self.box_ensemble, self.box_lr, self.box_adv,
             self.out_algo_help,
             self.out_woe_help,
             W.HBox([self.btn_fit, self.btn_shap]),
@@ -779,6 +865,7 @@ class ModelSegmenterUI:
             W.HTML("<div class='mseg-legend'>Tuning bayesiano (Optuna): busca os melhores "
                    "hiperparâmetros do algoritmo selecionado e treina com eles.</div>"),
             W.HBox([self.sl_trials, self.btn_tune]),
+            W.HBox([self.cb_tune_mlflow]),
             self.pb_tune,
             self.out_tune,
         ])
@@ -867,6 +954,7 @@ class ModelSegmenterUI:
                                      icon="calendar-check-o")
         self.out_backtest = W.HTML()
         self.out_psi = W.HTML()
+        self.out_psi_rating = W.HTML()   # PSI por rating (DES × OOT/ESTABILIDADE)
         self.btn_export = W.Button(description="Exportar DataFrame", icon="download")
         self.out_export = W.HTML()
         self.tx_save = W.Text(value="modelo_segmenter.json", description="Arquivo:",
@@ -908,6 +996,9 @@ class ModelSegmenterUI:
                                   icon="bolt")
         self.out_ruler = W.HTML()
         self.out_score = W.HTML()
+        # tabela de progresso da escoragem (carregando/escorando/salvando)
+        self.out_score_progress = W.HTML()
+        self._score_steps: list = []      # [{key,label,status,detail}] em ordem
         self.btn_backtest.on_click(self._on_backtest)
         self.btn_export.on_click(self._on_export)
         self.btn_ruler.on_click(self._on_ruler)
@@ -926,6 +1017,8 @@ class ModelSegmenterUI:
                     W.VBox([W.HTML("<div class='mseg-h'>PSI dos ratings</div>"),
                             self.out_psi], layout=W.Layout(width="38%"))],
                    layout=W.Layout(justify_content="space-between")),
+            W.HTML("<div class='mseg-h'>PSI por rating · DES × OOT e ESTABILIDADE</div>"),
+            self.out_psi_rating,
         ]); card_valid.add_class("mseg-card")
         card_score = W.VBox([
             W.HTML("<div class='mseg-h'>Escoragem da base · score + rating + valor previsto "
@@ -940,6 +1033,7 @@ class ModelSegmenterUI:
                    layout=W.Layout(justify_content="space-between")),
             W.HBox([self.tx_value_col, self.cb_recreate]),
             W.HBox([self.btn_ruler, self.btn_score]),
+            self.out_score_progress,
             self.out_ruler, self.out_score,
             W.HTML("<div class='mseg-h' style='margin-top:8px'>Exportar DataFrame rotulado</div>"),
             W.HBox([self.btn_export]), self.out_export,
@@ -969,7 +1063,10 @@ class ModelSegmenterUI:
             self.tabs.set_title(i, t)
         self.tabs.add_class("mseg-tabs")
 
-        console = W.VBox([W.HTML("<div class='mseg-h'>Console</div>"), self.out_log])
+        console = W.VBox([
+            W.HBox([W.HTML("<div class='mseg-h'>Console</div>"), self.btn_clear_log],
+                   layout=W.Layout(justify_content="space-between", align_items="center")),
+            self.out_log])
         console.add_class("mseg-card")
         self.cb_dark = W.ToggleButton(value=False, description="🌙 Tema escuro",
                                       tooltip="Alterna o tema claro/escuro da interface",
@@ -1181,6 +1278,10 @@ class ModelSegmenterUI:
         if tcol:
             for out, fn in ((self.out_an_time,
                              lambda: self.seg.plot_variable_timeseries(feat, tcol, sample)),
+                            (self.out_an_share,
+                             lambda: self.seg.plot_variable_faixa_share_timeseries(feat, tcol, sample)),
+                            (self.out_an_optbin_share,
+                             lambda: self.seg.plot_variable_optbin_share_timeseries(feat, tcol, sample)),
                             (self.out_an_inv_safra,
                              lambda: self.seg.plot_variable_inversion_by_safra(feat, tcol, sample)),
                             (self.out_an_psi,
@@ -1189,6 +1290,11 @@ class ModelSegmenterUI:
                     out.value = self._fig_html(fn())
                 except Exception as e:
                     out.value = f"<i>{e}</i>"
+        else:
+            aviso = ("<div class='mseg-legend'>Informe a coluna de safra para ver a "
+                     "distribuição ao longo do tempo.</div>")
+            self.out_an_share.value = aviso
+            self.out_an_optbin_share.value = aviso
 
     def _var_cards(self, s):
         def card(k, v):
@@ -1293,6 +1399,26 @@ class ModelSegmenterUI:
         self.box_ensemble.layout.display = "" if ensemble else "none"
         self.box_lr.layout.display = "" if algo in BOOSTING_ALGORITHMS else "none"
         self.sl_max_depth.layout.display = "" if self.cb_max_depth.value else "none"
+        # --- hiperparâmetros avançados: revela só as linhas do algoritmo ----
+        adv = set(ADVANCED_HYPERPARAMS.get(algo, ()))
+        l2_name = _l2_param_for(algo)
+        show_row = {
+            "min_samples_leaf": "min_samples_leaf" in adv,
+            "max_features": "max_features" in adv,
+            "subsample": "subsample" in adv,
+            "colsample_bytree": "colsample_bytree" in adv,
+            "num_leaves": "num_leaves" in adv,
+            "l2": l2_name is not None,
+        }
+        for key, row in self._adv_rows.items():
+            row.layout.display = "" if show_row[key] else "none"
+        # o sub-controle das linhas com checkbox só aparece quando marcado
+        self.sl_min_leaf.layout.display = "" if self.cb_min_leaf.value else "none"
+        self.fl_subsample.layout.display = "" if self.cb_subsample.value else "none"
+        self.fl_colsample.layout.display = "" if self.cb_colsample.value else "none"
+        self.sl_num_leaves.layout.display = "" if self.cb_num_leaves.value else "none"
+        self.fl_l2.layout.display = "" if self.cb_l2.value else "none"
+        self.box_adv.layout.display = "" if adv else "none"
         # a fórmula só faz sentido para modelos lineares/logísticos
         linear = algo in ("logistica", "linear")
         self.formula_card.layout.display = "" if linear else "none"
@@ -1316,6 +1442,28 @@ class ModelSegmenterUI:
                  "soma do boosting. <b>Menor</b> = aprende devagar, precisa de mais árvores "
                  "(<code>n_estimators</code>), mas costuma generalizar melhor. Troca-se "
                  "<code>learning_rate</code> por <code>n_estimators</code>.",
+            "min_samples_leaf": "<span class='pname'>min_samples_leaf</span> — mínimo de amostras "
+                 "por folha. <b>Maior</b> = folhas mais populosas, modelo mais suave e "
+                 "regularizado (menos <i>overfit</i>); <b>menor</b> = capta padrões finos. "
+                 "<i>(avançado, opcional)</i>",
+            "max_features": "<span class='pname'>max_features</span> — nº de variáveis sorteadas "
+                 "em cada divisão. <code>sqrt</code>/<code>log2</code> descorrelacionam as "
+                 "árvores (mais robustez); <i>todas</i> = cada split vê o conjunto inteiro. "
+                 "<i>(avançado, opcional)</i>",
+            "subsample": "<span class='pname'>subsample</span> — fração de <b>linhas</b> "
+                 "amostradas por árvore. Abaixo de 1 vira boosting <i>estocástico</i>: "
+                 "adiciona aleatoriedade e regulariza. <i>(avançado, opcional)</i>",
+            "colsample_bytree": "<span class='pname'>colsample_bytree</span> — fração de "
+                 "<b>colunas</b> amostradas por árvore. Abaixo de 1 descorrelaciona as árvores "
+                 "e reduz <i>overfit</i>. <i>(avançado, opcional)</i>",
+            "num_leaves": "<span class='pname'>num_leaves</span> — nº máximo de folhas por árvore "
+                 "no LightGBM (crescimento <i>leaf-wise</i>). <b>Maior</b> = mais capacidade e "
+                 "risco de <i>overfit</i>; costuma ser o principal controle de complexidade. "
+                 "<i>(avançado, opcional)</i>",
+            "l2": "<span class='pname'>regularização L2</span> — penaliza pesos/folhas grandes "
+                 "(<code>l2_regularization</code> no HistGB, <code>reg_lambda</code> no "
+                 "LightGBM/XGBoost, <code>l2_leaf_reg</code> no CatBoost). <b>Maior</b> = mais "
+                 "regularização. <i>(avançado, opcional)</i>",
         }
         meta = {
             "logistica": ("Regressão Logística",
@@ -1360,7 +1508,13 @@ class ModelSegmenterUI:
                 ["n_estimators", "max_depth", "learning_rate"]),
         }
         title, desc, params = meta.get(algo, (algo, "", []))
-        items = "".join(f"<li>{P[p]}</li>" for p in params)
+        params = list(params)
+        # anexa os avançados (opcionais) expostos para este algoritmo
+        for name in ADVANCED_HYPERPARAMS.get(algo, ()):
+            key = "l2" if name in _L2_PARAM_NAMES else name
+            if key in P and key not in params:
+                params.append(key)
+        items = "".join(f"<li>{P[p]}</li>" for p in params if p in P)
         body = (f"<ul>{items}</ul>" if items
                 else "<div class='none'>Sem hiperparâmetros a ajustar.</div>")
         return (f"<div class='mseg-help'><div class='ttl'>{title}</div>{desc}{body}</div>")
@@ -1475,6 +1629,22 @@ class ModelSegmenterUI:
             hp["max_depth"] = 3
         if algo in BOOSTING_ALGORITHMS:
             hp["learning_rate"] = float(self.tx_lr.value)
+        # --- hiperparâmetros avançados (só os habilitados p/ este algoritmo) --
+        adv = set(ADVANCED_HYPERPARAMS.get(algo, ()))
+        if "min_samples_leaf" in adv and self.cb_min_leaf.value:
+            hp["min_samples_leaf"] = int(self.sl_min_leaf.value)
+        if "max_features" in adv and self.dd_max_feat.value != "__default__":
+            hp["max_features"] = (None if self.dd_max_feat.value == "__none__"
+                                  else self.dd_max_feat.value)
+        if "subsample" in adv and self.cb_subsample.value:
+            hp["subsample"] = float(self.fl_subsample.value)
+        if "colsample_bytree" in adv and self.cb_colsample.value:
+            hp["colsample_bytree"] = float(self.fl_colsample.value)
+        if "num_leaves" in adv and self.cb_num_leaves.value:
+            hp["num_leaves"] = int(self.sl_num_leaves.value)
+        l2_name = _l2_param_for(algo)
+        if l2_name and self.cb_l2.value:
+            hp[l2_name] = float(self.fl_l2.value)
         return hp
 
     def _sync_woe_hint(self):
@@ -1544,10 +1714,13 @@ class ModelSegmenterUI:
             self.out_tune.value = (f"<div class='mseg-legend'>Optuna · trial {done}/{total} · "
                                    f"melhor até agora = <b>{best:.4f}</b></div>")
 
+        log_mlflow = self.cb_tune_mlflow.value
         try:
             res = self.seg.tune_optuna(algorithm=algo, n_trials=n_trials,
                                        transform=transform, fit_best=True,
-                                       progress_callback=_progress)
+                                       progress_callback=_progress,
+                                       log_mlflow=log_mlflow,
+                                       mlflow_experiment=(self.tx_experiment.value or None))
         except Exception as e:
             self.pb_tune.bar_style = "danger"
             self.btn_tune.disabled = False
@@ -1565,7 +1738,8 @@ class ModelSegmenterUI:
             f"<b>{res['metric'].upper()} = {res['best_value']:.4f}</b> (no OOT/validação)"
             f"<br>{bp}</div>")
         self._log(f"[tune] {algo}: melhor {res['metric']}={res['best_value']:.4f} "
-                  f"em {res['n_trials']} trials; modelo re-treinado com os melhores.")
+                  f"em {res['n_trials']} trials; modelo re-treinado com os melhores."
+                  + (" Trials registrados no MLflow." if log_mlflow else ""))
         self._render_metrics()
         self._render_model_plots()
         self._render_formula()
@@ -1754,6 +1928,17 @@ class ModelSegmenterUI:
                                                color_validation=True)
         except Exception as e:
             self.out_psi.value = f"<i>{e}</i>"
+        try:
+            det = self.seg.psi_rating_detalhe()
+            comps = [c[4:] for c in det.columns if c.startswith("PSI ")]
+            legenda = (" · ".join(f"DES × {c}" for c in comps)) or "sem amostras de comparação"
+            self.out_psi_rating.value = (
+                f"<div class='mseg-legend'>PSI por rating — {legenda}. Cada linha mostra a "
+                f"participação (%) do rating em cada amostra e a contribuição de PSI; a linha "
+                f"<b>TOTAL</b> traz o PSI agregado por amostra.</div>"
+                + self._df_html(det, center=True, max_height="360px"))
+        except Exception as e:
+            self.out_psi_rating.value = f"<i>{e}</i>"
 
     def _on_export(self, b):
         try:
@@ -1781,11 +1966,15 @@ class ModelSegmenterUI:
         recreate = self.cb_recreate.value
         in_tbl = self.tx_in_table.value.strip()
         out_tbl = self.tx_out_table.value.strip() or None
+        self._score_steps = []                            # zera a tabela de progresso
+        self._render_score_progress()
+        self.btn_score.disabled = True
+        cb = self._score_progress_cb
         try:
             if in_tbl:                                   # tabela do Databricks (Spark)
                 sout = self.seg.score_table(in_tbl, col_value=col_value,
                                             recreate_categories=recreate,
-                                            output_table=out_tbl)
+                                            output_table=out_tbl, progress_callback=cb)
                 self.result = sout                       # Spark DataFrame
                 prev = sout.limit(10).toPandas()
                 ncols = len(sout.columns)
@@ -1801,7 +1990,8 @@ class ModelSegmenterUI:
             # em memória (pandas): base carregada ou ui.score_df
             base = self.score_df if self.score_df is not None else self.seg.df
             origem = "ui.score_df" if self.score_df is not None else "base carregada"
-            out = self.seg.score_table(base, col_value=col_value, recreate_categories=recreate)
+            out = self.seg.score_table(base, col_value=col_value,
+                                       recreate_categories=recreate, progress_callback=cb)
             self.result = out
             novas = [c for c in out.columns if c not in base.columns]
             cols = ", ".join(f"<code>{c}</code>" for c in novas)
@@ -1812,8 +2002,57 @@ class ModelSegmenterUI:
                 + self._df_html(out.head(10).round(6), max_height="320px"))
             self._log(f"[escorar] {origem} escorada em ui.result ({out.shape[0]} linhas).")
         except Exception as e:
+            # marca como erro a última etapa em andamento (fica visível na tabela)
+            for row in reversed(self._score_steps):
+                if row["status"] == "run":
+                    row["status"] = "err"
+                    row["detail"] = f"{type(e).__name__}: {e}"
+                    break
+            self._render_score_progress()
             self.out_score.value = f"<i>{e}</i>"
             self._log(f"[escorar] erro: {e}")
+        finally:
+            self.btn_score.disabled = False
+
+    def _score_progress_cb(self, key, label, status, detail=""):
+        """Callback de progresso da escoragem (passado a ``score_table``): cria ou
+        atualiza a linha da etapa ``key`` e re-renderiza a tabela de progresso."""
+        for row in self._score_steps:
+            if row["key"] == key:
+                row["status"] = status
+                if detail:
+                    row["detail"] = detail
+                break
+        else:
+            self._score_steps.append({"key": key, "label": label,
+                                      "status": status, "detail": detail})
+        self._render_score_progress()
+
+    def _render_score_progress(self):
+        """Renderiza a tabela de progresso da escoragem (carregando/escorando/salvando)."""
+        if not self._score_steps:
+            self.out_score_progress.value = ""
+            return
+        icon = {"run": "⏳", "ok": "✅", "err": "❌"}
+        cor = {"run": "#9a6f12", "ok": "#157a52", "err": "#b23a2a"}
+        rot = {"run": "processando…", "ok": "concluído", "err": "erro"}
+        trs = ""
+        for r in self._score_steps:
+            st = r["status"]
+            trs += (f"<tr><td style='padding:4px 10px'>{icon.get(st, '')}</td>"
+                    f"<td style='padding:4px 10px'>{r['label']}</td>"
+                    f"<td style='padding:4px 10px;color:{cor.get(st, '#555')};font-weight:600'>"
+                    f"{rot.get(st, st)}</td>"
+                    f"<td style='padding:4px 10px;color:#6b7480'>{r.get('detail', '')}</td></tr>")
+        self.out_score_progress.value = (
+            "<div class='mseg-legend' style='margin-top:6px'>Progresso da escoragem</div>"
+            "<table style='border-collapse:collapse;font-size:12px;width:100%;margin:2px 0 8px'>"
+            "<thead><tr style='background:#eef1f5'>"
+            "<th style='padding:4px 10px'></th>"
+            "<th style='padding:4px 10px;text-align:left'>Etapa</th>"
+            "<th style='padding:4px 10px;text-align:left'>Status</th>"
+            "<th style='padding:4px 10px;text-align:left'>Detalhe</th>"
+            f"</tr></thead><tbody>{trs}</tbody></table>")
 
     def _confirm_overwrite(self, path, do_save):
         """Se ``path`` já existir, abre uma janela de confirmação (no console) e

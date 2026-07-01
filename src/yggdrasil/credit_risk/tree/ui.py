@@ -1322,30 +1322,21 @@ class TreeSegmenterUI:
         return name, p, len(va), len(vb)
 
     def _sibling_adjacent_tests(self, sid):
-        """Teste de PD (na amostra DES) entre a folha e cada IRMÃ ADJACENTE de
-        MESMO PAI — indica se a folha é estatisticamente distinta da vizinha.
-        Irmãs ordenadas por corte (num) ou por PD média (cat); o nó de faltantes
-        (na) não entra. Retorna (nome_do_teste, [(lado, descrição_irmã, p_valor)])."""
+        """Teste de PD (na amostra DES) entre a folha e cada IRMÃ TERMINAL
+        ADJACENTE de MESMO PAI — indica se a folha é estatisticamente distinta da
+        vizinha. A adjacência respeita as *runs* de folhas terminais: uma irmã
+        que se expandiu (nó intermediário) QUEBRA a adjacência, então folhas de
+        lados opostos dela não são comparadas. O nó de faltantes (na) não entra.
+        Retorna (nome_do_teste, [(lado, descrição_irmã, p_valor)])."""
         seg = self.seg
         name = "Welch t" if self.dd_test.value == "welch" else "Mann-Whitney"
         s = seg.segments.get(sid)
         if s is None or s["parent"] is None or not s["is_leaf"]:
             return name, []
-        irmaos = [i for i, v in seg.segments.items()
-                  if v["parent"] == s["parent"] and v["is_leaf"]
-                  and v["conditions"] and v["conditions"][-1]["kind"] != "na"]
-        if sid not in irmaos or len(irmaos) < 2:
-            return name, []
-        if all(seg.segments[c]["conditions"][-1]["kind"] == "num" for c in irmaos):
-            irmaos.sort(key=lambda c: seg.segments[c]["conditions"][-1]["lo"])
-        else:
-            irmaos.sort(key=lambda c: (seg._leaf_target(c).mean()
-                                       if len(seg._leaf_target(c)) else float("inf")))
-        i = irmaos.index(sid)
+        left, right = seg._adjacent_sibling_neighbors(sid)
         out = []
-        for lado, j in (("◀", i - 1), ("▶", i + 1)):
-            if 0 <= j < len(irmaos):
-                nb = irmaos[j]
+        for lado, nb in (("◀", left), ("▶", right)):
+            if nb is not None:
                 p = seg._pair_pvalue(sid, nb, test=self.dd_test.value)
                 desc = seg._descrever([seg.segments[nb]["conditions"][-1]])
                 out.append((lado, desc, p))
@@ -2049,11 +2040,14 @@ class TreeSegmenterUI:
             var_opts = [("TODA A CARTEIRA (raiz)", "root")] + opts
             self.dd_var_leaf.options = var_opts
             self.dd_var_leaf.value = cur_v if cur_v in [s for _, s in var_opts] else "root"
-            # seletor de grupos de folhas-irmãs (aba Diagnóstico)
-            sib_opts = [(g["label"], g["parent"]) for g in self.seg.sibling_leaf_groups()]
+            # seletor de grupos de folhas-irmãs (aba Diagnóstico) — cada opção é
+            # uma run de folhas terminais adjacentes (chaveada pelos sids)
+            sib_groups = self.seg.sibling_leaf_groups()
+            self._sib_group_map = {g["key"]: g for g in sib_groups}
+            sib_opts = [(g["label"], g["key"]) for g in sib_groups]
             cur_sib = self.dd_sib_group.value
             self.dd_sib_group.options = sib_opts
-            if cur_sib in [p for _, p in sib_opts]:
+            if cur_sib in self._sib_group_map:
                 self.dd_sib_group.value = cur_sib
             elif sib_opts:
                 self.dd_sib_group.value = sib_opts[0][1]
@@ -3630,12 +3624,14 @@ class TreeSegmenterUI:
             "</div>")
 
     def _on_sib_analyze(self, _):
-        pid = self.dd_sib_group.value
-        if not pid:
+        key = self.dd_sib_group.value
+        g = getattr(self, "_sib_group_map", {}).get(key) if key is not None else None
+        if not g:
             self.out_sib.value = ("<div style='font-size:12px;color:#889'>Nenhum grupo de "
-                                  "folhas-irmãs — faça ao menos um split para criar folhas de "
-                                  "mesmo pai.</div>")
+                                  "folhas-irmãs adjacentes — faça ao menos um split que deixe "
+                                  "≥2 folhas terminais contíguas sob o mesmo pai.</div>")
             return
+        pid, leaves = g["parent"], list(g["leaves"])
         tcol = (self.tx_sib_time.value or "").strip() or None
         samp = self.dd_sib_sample.value
         samp = None if samp in (None, "__all__") else samp
@@ -3645,17 +3641,18 @@ class TreeSegmenterUI:
                     f"{type(e).__name__}: {e})</div>")
 
         try:
-            summ = self.seg.sibling_inversion_summary(pid, time_col=tcol, sample=samp)
+            summ = self.seg.sibling_inversion_summary(pid, time_col=tcol, sample=samp,
+                                                      leaves=leaves)
             ind = self._sib_indicator_html(summ)
         except Exception as e:
             ind = err("indicador de inversão", e)
         try:
-            h1 = self._fig_html(self.seg.plot_sibling_value_by_sample(pid))
+            h1 = self._fig_html(self.seg.plot_sibling_value_by_sample(pid, leaves=leaves))
         except Exception as e:
             h1 = err("gráfico por amostra", e)
         try:
             h2 = self._fig_html(self.seg.plot_sibling_value_by_safra(
-                pid, time_col=tcol, sample=samp))
+                pid, time_col=tcol, sample=samp, leaves=leaves))
         except Exception as e:
             h2 = err("gráfico por safra", e)
         charts = (f"<div style='display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start'>"

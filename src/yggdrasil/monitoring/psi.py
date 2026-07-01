@@ -104,6 +104,40 @@ def psi_rating_over_time(
     return out
 
 
+def psi_rating_by_pairs(
+    df: pd.DataFrame,
+    rating_col: str,
+    cfg: ColumnConfig,
+    baseline: Optional[str] = None,
+    comparison_samples: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
+    """PSI da distribuição de um rating: baseline (DES) vs. **cada** amostra de
+    comparação — por padrão as demais amostras (ex.: OOT e ESTABILIDADE), com as
+    de ``analysis_samples`` à frente.
+
+    Uma linha por par baseline×comparação. Colunas:
+    ``[baseline, comparacao, psi, n_baseline, n_comparacao, flag]``.
+    """
+    baseline = baseline or cfg.dev_sample
+    base_labels = df.loc[df[cfg.sample_col] == baseline, rating_col].dropna()
+    categorias = sorted(df[rating_col].dropna().unique())
+    if comparison_samples is None:
+        present = [s for s in df[cfg.sample_col].dropna().unique() if s != baseline]
+        ordered = [s for s in cfg.analysis_samples if s in present]   # OOT/ESTAB à frente
+        comparison_samples = ordered + [s for s in present if s not in ordered]
+    linhas: List[dict] = []
+    for comp in comparison_samples:
+        comp_labels = df.loc[df[cfg.sample_col] == comp, rating_col].dropna()
+        valor = psi_categorical(base_labels, comp_labels, categories=categorias)
+        linhas.append({
+            "baseline": baseline, "comparacao": comp,
+            "psi": round(float(valor), 6) if np.isfinite(valor) else float("nan"),
+            "n_baseline": int(len(base_labels)), "n_comparacao": int(len(comp_labels)),
+            "flag": classify_psi(valor),
+        })
+    return pd.DataFrame(linhas)
+
+
 def psi_score_over_time(
     df: pd.DataFrame,
     cfg: ColumnConfig,

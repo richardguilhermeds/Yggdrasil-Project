@@ -78,6 +78,21 @@ BOOSTING_ALGORITHMS = ("gradient_boosting", "hist_gradient_boosting",
 TUNABLE_ALGORITHMS = ("logistica", "random_forest", "extra_trees", "gradient_boosting",
                       "hist_gradient_boosting", "lightgbm", "xgboost", "catboost")
 
+#: Hiperparâmetros AVANÇADOS (opcionais) que a UI expõe por algoritmo, além dos
+#: básicos (``C``/``n_estimators``/``max_depth``/``learning_rate``). Cada nome é
+#: passado diretamente ao estimador em :func:`_build_estimator` — mantê-los 1:1
+#: com o parâmetro real do sklearn/boosting evita remapeamentos. Só entram no
+#: ``hyperparams`` quando o usuário os habilita explicitamente (ver a UI).
+ADVANCED_HYPERPARAMS: dict[str, tuple] = {
+    "random_forest": ("min_samples_leaf", "max_features"),
+    "extra_trees": ("min_samples_leaf", "max_features"),
+    "gradient_boosting": ("min_samples_leaf", "max_features", "subsample"),
+    "hist_gradient_boosting": ("min_samples_leaf", "l2_regularization"),
+    "lightgbm": ("num_leaves", "subsample", "colsample_bytree", "reg_lambda"),
+    "xgboost": ("subsample", "colsample_bytree", "reg_lambda"),
+    "catboost": ("subsample", "l2_leaf_reg"),
+}
+
 _EPS = 1e-6
 
 
@@ -277,24 +292,25 @@ def _pct_axis(ax, axis="y", xmax=1.0):
         ax.xaxis.set_major_formatter(PercentFormatter(xmax=xmax, decimals=None))
 
 
-# Abreviações de mês em PT-BR (independem do locale do SO; Windows não traz pt_BR).
-_MESES_PT = ("jan", "fev", "mar", "abr", "mai", "jun",
-             "jul", "ago", "set", "out", "nov", "dez")
-
-
 def _fmt_safras(safras) -> list:
-    """Rótulos de safra 'AAAA-MM' → 'mmm/AA' (ex.: '2022-01' → 'jan/22').
+    """Rótulos de safra → 'mmm/aa' (padrão de mês/ano do repositório).
 
-    Valores fora do padrão são devolvidos como string, sem alteração."""
-    out = []
-    for s in safras:
-        s = str(s)
-        try:
-            ano, mes = s.split("-")[:2]
-            out.append(f"{_MESES_PT[int(mes) - 1]}/{ano[-2:]}")
-        except (ValueError, IndexError):
-            out.append(s)
-    return out
+    Delega ao helper único :func:`yggdrasil.reporting.style.fmt_month_year`."""
+    from ...reporting.style import fmt_month_year
+    return fmt_month_year(safras)
+
+
+def _emit_progress(cb, key: str, label: str, status: str, detail: str = "") -> None:
+    """Dispara um evento de progresso (escoragem) para a UI, se houver callback.
+
+    ``status``: ``"run"`` (iniciando a etapa), ``"ok"`` (concluída) ou ``"err"``.
+    Nunca derruba a ação — o progresso é cosmético (mesma política do tuning)."""
+    if cb is None:
+        return
+    try:
+        cb(key, label, status, detail)
+    except Exception:  # noqa: BLE001 - progresso é cosmético
+        pass
 
 
 def _require(module: str, algorithm: str):
@@ -382,6 +398,8 @@ def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None):
             hp["iterations"] = hp.pop("n_estimators")
         if "max_depth" in hp:
             hp["depth"] = min(int(hp.pop("max_depth")), 16)  # teto do CatBoost
+        if "subsample" in hp:            # subsample só vale com bootstrap amostral
+            hp.setdefault("bootstrap_type", "Bernoulli")
         hp.setdefault("iterations", 300)
         hp.setdefault("learning_rate", 0.05)
         hp.setdefault("random_seed", 42)
@@ -1311,6 +1329,146 @@ class ModelSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
+    def variable_faixa_share_by_safra(self, feature, time_col=None, sample=None,
+                                      max_n_bins=6, min_bin_size=0.05, bins=None) -> pd.DataFrame:
+        """% de cada **faixa/categoria** da variável por safra (mês).
+
+        Usa as MESMAS faixas da análise (:meth:`_resolve_bins`) — vale para
+        variáveis numéricas (faixas) e categóricas (grupos). Colunas: ``safra`` +
+        uma por faixa (% da safra). Linhas sem faixa (ex.: faltantes fora dos
+        bins) entram em ``(faltante)``.
+
+        ``bins`` (opcional): lista de bins já resolvida a usar no lugar de
+        :meth:`_resolve_bins` — útil para forçar as faixas do optimal binning
+        (ver :meth:`plot_variable_optbin_share_timeseries`)."""
+        time_col = time_col or self.date_col
+        if time_col is None:
+            raise ValueError("Informe time_col ou configure date_col.")
+        sub = self._frame(sample)
+        if time_col not in sub.columns:
+            raise ValueError(f"Coluna de tempo '{time_col}' não existe no DataFrame.")
+        if bins is None:
+            bins, _kind = self._resolve_bins(feature, max_n_bins, min_bin_size, None, sample)
+        safra = pd.to_datetime(sub[time_col], errors="coerce").dt.to_period("M").astype(str)
+        faixa = pd.Series("(faltante)", index=sub.index, dtype=object)
+        ordem = []
+        for b in bins or []:
+            lab = self._bin_label(feature, b)
+            ordem.append(lab)
+            m = self._mask_in(sub, feature, b).to_numpy()
+            faixa.loc[sub.index[m]] = lab
+        tmp = pd.DataFrame({"safra": safra.to_numpy(), "faixa": faixa.to_numpy()})
+        tmp = tmp[tmp["safra"] != "NaT"]
+        if tmp.empty or not ordem:
+            return pd.DataFrame(columns=["safra"])
+        tab = pd.crosstab(tmp["safra"], tmp["faixa"])
+        pct = tab.div(tab.sum(axis=1), axis=0) * 100
+        cols = [c for c in dict.fromkeys(ordem) if c in pct.columns]
+        if "(faltante)" in pct.columns and "(faltante)" not in cols:
+            cols.append("(faltante)")
+        pct = pct[cols].round(1).sort_index()
+        pct.index.name = "safra"
+        return pct.reset_index()
+
+    def plot_variable_faixa_share_timeseries(self, feature, time_col=None, sample=None,
+                                             max_n_bins=6, min_bin_size=0.05,
+                                             figsize=(8.6, 3.4), dpi=150,
+                                             save_path=None, ax=None, bins=None,
+                                             titulo=None, legend_title="faixa"):
+        """**% de cada faixa/categoria da variável ao longo do tempo** — uma LINHA
+        por faixa. Complementa o gráfico de comportamento (percentis/share): mostra
+        como a composição da variável migra entre as faixas ao longo das safras.
+
+        ``bins``/``titulo`` (opcionais): forçam as faixas e o título — usados por
+        :meth:`plot_variable_optbin_share_timeseries`."""
+        import matplotlib.colors as mcolors
+        sh = self.variable_faixa_share_by_safra(feature, time_col, sample,
+                                                max_n_bins, min_bin_size, bins=bins)
+        fig, ax = _new_ax((figsize[0], 3.6), dpi, ax)
+        cats = [c for c in sh.columns if c != "safra"]
+        if sh.empty or not cats:
+            ax.text(0.5, 0.5, "sem dados por safra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        x = list(range(len(sh)))
+        cmap = mcolors.LinearSegmentedColormap.from_list("sc", ["steelblue", "crimson"])
+        base = [c for c in cats if c not in ("outras", "(faltante)")]
+        for c in cats:
+            if c == "(faltante)":
+                cor = "#c98a8a"
+            elif c == "outras":
+                cor = "#b9c0cb"
+            else:
+                cor = cmap(base.index(c) / max(len(base) - 1, 1)) if c in base else "#889"
+            ax.plot(x, sh[c].fillna(0).to_numpy(), marker="o", ms=3.5, lw=1.8,
+                    color=cor, label=c)
+        ax.set_ylim(bottom=0); ax.margins(x=0)
+        ax.set_xticks(x)
+        ax.set_xticklabels(_fmt_safras(sh["safra"]), rotation=45, ha="right", fontsize=8)
+        ax.set_ylabel("% da safra")
+        ax.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5),
+                  framealpha=0.9, title=legend_title)
+        ax.set_title(titulo or f"'{self.label(feature)}' — % de cada faixa ao longo do tempo",
+                     fontsize=11, fontweight="bold", color="#15324a")
+        ax.grid(alpha=0.12)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def _optbin_numeric_bins(self, feature, sample=None, max_n_bins=5, min_bin_size=0.05):
+        """Faixas do **OPTIMAL BINNING** de uma variável NUMÉRICA — sempre roda o
+        optbinning na amostra de ajuste, IGNORANDO eventuais bins manuais. Retorna
+        a lista de bins numéricos (+ ``na`` se houver faltantes) ou ``[]`` quando
+        não dá para binar. (:meth:`_resolve_bins` respeita bins manuais; este não.)"""
+        if OptimalBinning is None:
+            raise ImportError("optbinning não instalado. Rode: pip install optbinning")
+        fit = self._frame(sample)
+        if self._detect_kind(feature, fit) != "num":
+            return []
+        x = fit[feature].to_numpy(dtype="float64")
+        y = fit[self.target].to_numpy(dtype="float64")
+        ok = ~np.isnan(y)
+        x, y = x[ok], y[ok]
+        x_obs = x[~np.isnan(x)]
+        if len(y) < 4 or x_obs.size == 0 or np.unique(x_obs).size < 2:
+            return []
+        if self.task_type == "classification":
+            b = OptimalBinning(name=feature, dtype="numerical", max_n_bins=max_n_bins,
+                               min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
+            cortes = _fit_optbinning_splits(b, x, y.astype(int))
+        else:
+            b = ContinuousOptimalBinning(name=feature, dtype="numerical", max_n_bins=max_n_bins,
+                                         min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
+            cortes = _fit_optbinning_splits(b, x, y)
+        if not cortes:
+            return []
+        edges = [-np.inf, *cortes, np.inf]
+        bins = [{"kind": "num", "lo": edges[i], "hi": edges[i + 1]}
+                for i in range(len(edges) - 1)]
+        if fit[feature].isna().any():
+            bins.append({"kind": "na"})
+        return bins
+
+    def plot_variable_optbin_share_timeseries(self, feature, time_col=None, sample=None,
+                                              max_n_bins=5, min_bin_size=0.05,
+                                              figsize=(8.6, 3.4), dpi=150,
+                                              save_path=None, ax=None):
+        """**Distribuição das categorias do OPTIMAL BINNING ao longo do tempo**
+        (só variáveis NUMÉRICAS): % de cada faixa gerada pelo binning ótimo por
+        safra, uma linha por faixa. Sempre usa o optbinning (ignora bins manuais),
+        para acompanhar a estabilidade das faixas do algoritmo no tempo."""
+        if self._detect_kind(feature, self._frame(sample)) != "num":
+            fig, ax = _new_ax((figsize[0], 3.6), dpi, ax)
+            ax.text(0.5, 0.5, "apenas para variáveis numéricas", ha="center",
+                    va="center", transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        bins = self._optbin_numeric_bins(feature, sample, max_n_bins, min_bin_size)
+        titulo = f"'{self.label(feature)}' — faixas do optimal binning ao longo do tempo"
+        return self.plot_variable_faixa_share_timeseries(
+            feature, time_col, sample, max_n_bins, min_bin_size, figsize, dpi,
+            save_path, ax, bins=bins, titulo=titulo, legend_title="faixa (optbin)")
+
     def plot_variable_psi_by_safra(self, feature, time_col=None, figsize=(9.6, 4.4),
                                    dpi=150, save_path=None, ax=None):
         """PSI da variável por safra vs DES (barras coloridas)."""
@@ -1772,19 +1930,27 @@ class ModelSegmenter:
 
     def tune_optuna(self, algorithm=None, n_trials=30, transform="raw", features=None,
                     timeout=None, random_state=42, fit_best=True, verbose=False,
-                    progress_callback=None):
-        """Otimização bayesiana de hiperparâmetros com **Optuna** (extra opcional
-        ``[optuna]``). Treina na referência (DES) e avalia no OOT (se houver alvo;
+                    progress_callback=None, log_mlflow=False, mlflow_experiment=None,
+                    mlflow_run_name=None):
+        """Otimização bayesiana de hiperparâmetros com **Optuna** (dependência
+        core). Treina na referência (DES) e avalia no OOT (se houver alvo;
         senão, num split 75/25 do DES), maximizando **AUC** (classificação) ou
         **R²** (regressão). Guarda o resultado em ``self.tuning_`` (e o estudo em
         ``self.study_``); com ``fit_best=True`` reajusta o modelo com os melhores
         hiperparâmetros. Algoritmos tunáveis: :data:`TUNABLE_ALGORITHMS`.
 
+        Cada trial guarda, em ``trial.user_attrs``, dois grupos de métricas —
+        ``modelagem`` (AUC/KS/Gini ou RMSE/MAE/R² na validação) e ``monitoramento``
+        (PSI do score DES→validação, volumetria). Com ``log_mlflow=True`` cada
+        trial vira um **run aninhado** no MLflow (params + métricas agrupadas por
+        ``modelagem/…`` e ``monitoramento/…``), sob um run-pai com o resumo do
+        estudo (melhores hiperparâmetros e gráficos do Optuna). Ver também
+        :meth:`log_optuna_to_mlflow` para logar um estudo já concluído.
+
         ``progress_callback`` (opcional): chamado após CADA trial com
         ``(n_concluidos, n_total, melhor_valor)`` — útil p/ barra de progresso na
         UI. Exceções no callback são ignoradas (não derrubam o tuning)."""
         optuna = _require("optuna", "optuna")
-        from sklearn.metrics import r2_score, roc_auc_score
         from sklearn.model_selection import train_test_split
 
         if algorithm is None:
@@ -1813,13 +1979,31 @@ class ModelSegmenter:
         ytr = tr[self.target].astype(int) if is_clf else tr[self.target]
         yva = va[self.target].astype(int) if is_clf else va[self.target]
         Xtr, Xva = tr[feats], va[feats]
+        val_sample = oot if (oot and oot != self.ref_sample and va is not None) else "split"
 
         def objective(trial):
+            from ...monitoring import psi as _psi_num
             hp = _optuna_space(trial, algorithm)
             pipe = self._build_pipeline(feats, algorithm, hp, transform=transform)
             pipe.fit(Xtr, ytr)
             s = self._predict_score_array(pipe, Xva)
-            return roc_auc_score(yva, s) if is_clf else r2_score(yva, s)
+            s_tr = self._predict_score_array(pipe, Xtr)
+            # grupo MODELAGEM (qualidade na validação) + o valor-objetivo
+            if is_clf:
+                modelagem = classification_metrics(yva, s)
+                valor = modelagem.get("auc", float("nan"))
+            else:
+                modelagem = regression_metrics(yva, s)
+                valor = modelagem.get("r2", float("nan"))
+            # grupo MONITORAMENTO (estabilidade/volumetria)
+            monitoramento = {
+                "psi_score_des_val": round(float(_psi_num(s_tr, s)), 6),
+                "n_treino": int(len(Xtr)), "n_validacao": int(len(Xva)),
+            }
+            trial.set_user_attr("modelagem", modelagem)
+            trial.set_user_attr("monitoramento", monitoramento)
+            trial.set_user_attr("val_sample", val_sample)
+            return float(valor) if np.isfinite(valor) else float("-1e9")
 
         if not verbose:
             optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -1833,7 +2017,22 @@ class ModelSegmenter:
                 except Exception:
                     pass                          # progresso é cosmético; nunca derruba o tuning
             callbacks.append(_progress_cb)
-        study.optimize(objective, n_trials=n_trials, timeout=timeout, callbacks=callbacks)
+
+        # --- MLflow: run-pai + um run aninhado por trial (opcional) ----------
+        if log_mlflow:
+            import mlflow
+            from ...tracking.mlflow_logger import DEFAULT_EXPERIMENT
+            mlflow.set_experiment(mlflow_experiment or DEFAULT_EXPERIMENT)
+            run_name = mlflow_run_name or f"optuna_{algorithm}"
+            with mlflow.start_run(run_name=run_name):
+                def _mlflow_cb(study, trial):
+                    self._log_optuna_trial(mlflow, trial, algorithm, transform)
+                study.optimize(objective, n_trials=n_trials, timeout=timeout,
+                               callbacks=callbacks + [_mlflow_cb])
+                self._log_optuna_parent(mlflow, study, algorithm, transform, is_clf, feats)
+        else:
+            study.optimize(objective, n_trials=n_trials, timeout=timeout, callbacks=callbacks)
+
         self.study_ = study
         self.tuning_ = {"algorithm": algorithm, "metric": "auc" if is_clf else "r2",
                         "n_trials": len(study.trials), "best_value": round(float(study.best_value), 6),
@@ -1842,6 +2041,109 @@ class ModelSegmenter:
             self.fit(algorithm=algorithm, hyperparams=study.best_params,
                      features=feats, transform=transform)
         return self.tuning_
+
+    # ------------------------------------------------------------------
+    # MLflow: logging dos trials do Optuna (agrupado por finalidade)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _log_optuna_trial(mlflow, trial, algorithm, transform) -> None:
+        """Loga UM trial do Optuna como run aninhado no MLflow, com os parâmetros
+        e as métricas agrupadas por finalidade (``modelagem/…`` e
+        ``monitoramento/…``). Best-effort — nunca derruba o tuning."""
+        try:
+            with mlflow.start_run(nested=True, run_name=f"trial_{trial.number:03d}"):
+                mlflow.set_tags({
+                    "grupo": "trial",
+                    "algoritmo": algorithm,
+                    "transform": transform,
+                    "optuna_trial": trial.number,
+                    "optuna_state": getattr(trial.state, "name", str(trial.state)),
+                    "val_sample": trial.user_attrs.get("val_sample", "?"),
+                })
+                # parâmetros do trial (os hiperparâmetros sugeridos)
+                mlflow.log_params({f"hp/{k}": v for k, v in trial.params.items()})
+                # métricas agrupadas: prefixo por finalidade -> "abas" na leitura
+                for grupo in ("modelagem", "monitoramento"):
+                    for nome, valor in (trial.user_attrs.get(grupo) or {}).items():
+                        try:
+                            v = float(valor)
+                        except (TypeError, ValueError):
+                            continue
+                        if np.isfinite(v):
+                            mlflow.log_metric(f"{grupo}/{nome}", v)
+                if trial.value is not None and np.isfinite(trial.value):
+                    mlflow.log_metric("modelagem/objetivo", float(trial.value))
+        except Exception:  # noqa: BLE001 - logging é best-effort
+            pass
+
+    def _log_optuna_parent(self, mlflow, study, algorithm, transform, is_clf, feats) -> None:
+        """Loga no run-pai o resumo do estudo: config, melhores hiperparâmetros/
+        métricas e os gráficos do Optuna (história e importância)."""
+        import os
+        import tempfile
+        try:
+            mlflow.set_tags({"framework": "yggdrasil-ml", "grupo": "tuning-optuna",
+                             "algoritmo": algorithm, "trained_by": "richard-guilherme"})
+            mlflow.log_params({
+                "algoritmo": algorithm, "transform": transform,
+                "n_trials": len(study.trials), "n_features": len(feats),
+                "metric": "auc" if is_clf else "r2", "direction": "maximize",
+            })
+            mlflow.log_params({f"melhor_hp/{k}": v for k, v in study.best_params.items()})
+            if study.best_value is not None and np.isfinite(study.best_value):
+                mlflow.log_metric("melhor/objetivo", float(study.best_value))
+            best = study.best_trial
+            for grupo in ("modelagem", "monitoramento"):
+                for nome, valor in (best.user_attrs.get(grupo) or {}).items():
+                    try:
+                        v = float(valor)
+                    except (TypeError, ValueError):
+                        continue
+                    if np.isfinite(v):
+                        mlflow.log_metric(f"melhor/{grupo}/{nome}", v)
+            mlflow.log_dict(dict(study.best_params), "optuna/best_params.json")
+            # gráficos do Optuna (best-effort: requerem matplotlib e ≥2 trials)
+            tmp = tempfile.mkdtemp(prefix="optuna_viz_")
+            try:
+                import matplotlib.pyplot as plt
+                from optuna.visualization.matplotlib import (
+                    plot_optimization_history, plot_param_importances)
+                for fn, nome in ((plot_optimization_history, "optimization_history"),
+                                 (plot_param_importances, "param_importances")):
+                    try:
+                        ax = fn(study)
+                        fig = ax.figure
+                        p = os.path.join(tmp, f"{nome}.png")
+                        fig.savefig(p, dpi=110, bbox_inches="tight")
+                        plt.close(fig)
+                        mlflow.log_artifact(p, artifact_path="optuna")
+                    except Exception:  # noqa: BLE001
+                        pass
+            except Exception:  # noqa: BLE001 - viz é opcional
+                pass
+        except Exception:  # noqa: BLE001 - logging é best-effort
+            pass
+
+    def log_optuna_to_mlflow(self, experiment=None, run_name=None):
+        """Loga no MLflow um estudo do Optuna **já concluído** (``self.study_``,
+        produzido por :meth:`tune_optuna`) — run-pai com o resumo + um run aninhado
+        por trial, com métricas agrupadas por ``modelagem/…`` e ``monitoramento/…``.
+        Use quando o tuning rodou sem ``log_mlflow=True`` e você quer registrá-lo
+        depois. Retorna o ``run_id`` do run-pai."""
+        if getattr(self, "study_", None) is None:
+            raise RuntimeError("Rode tune_optuna antes (não há self.study_).")
+        import mlflow
+        from ...tracking.mlflow_logger import DEFAULT_EXPERIMENT
+        algorithm = self.tuning_.get("algorithm", "?")
+        is_clf = self.task_type == "classification"
+        transform = getattr(self, "feature_transform", "raw")
+        feats = list(self.model_features or self.selected_features() or self.candidates)
+        mlflow.set_experiment(experiment or DEFAULT_EXPERIMENT)
+        with mlflow.start_run(run_name=run_name or f"optuna_{algorithm}") as run:
+            for trial in self.study_.trials:
+                self._log_optuna_trial(mlflow, trial, algorithm, transform)
+            self._log_optuna_parent(mlflow, self.study_, algorithm, transform, is_clf, feats)
+            return run.info.run_id
 
     def set_model(self, model, features=None):
         """Recebe um modelo já ajustado (sklearn/pipeline). ``features`` indica as
@@ -2632,6 +2934,50 @@ class ModelSegmenter:
                          "classificacao": _classifica_psi(psi)})
         return pd.DataFrame(rows).sort_values("psi", ascending=False).reset_index(drop=True)
 
+    def psi_rating_detalhe(self, comparison_samples=None, eps: float = 1e-6) -> pd.DataFrame:
+        """PSI **por rating** decomposto: distribuição de cada rating na referência
+        (DES) vs. cada amostra de comparação — por padrão **OOT e ESTABILIDADE**
+        (todas as não-referência) — com a contribuição de PSI de cada rating.
+
+        Para cada rating: ``%<ref>`` e, por amostra comparada, ``%<amostra>`` e
+        ``PSI <amostra>`` (a parcela daquele rating no PSI). A última linha
+        (``TOTAL``) traz o PSI agregado por amostra e a classificação
+        (estável/atenção/instável). Complementa :meth:`psi` (que dá só o agregado)
+        mostrando de ONDE vem a instabilidade — quais ratings mais deslocaram."""
+        if self.sample_col is None:
+            raise ValueError("PSI requer sample_col.")
+        rating = self._rating_series()
+        labels = self.rating_labels_
+        ref = self.ref_sample
+        if comparison_samples is None:
+            comparison_samples = self._nonref_samples()
+        comparison_samples = [a for a in comparison_samples if a != ref]
+
+        def _dist(sample):
+            am = self.df[self.sample_col] == sample
+            n = max(int(am.sum()), 1)
+            return {l: int(((rating == l) & am).sum()) / n for l in labels}
+
+        ref_dist = _dist(ref)
+        comp_dists = {a: _dist(a) for a in comparison_samples}
+        rows, totais = [], {a: 0.0 for a in comparison_samples}
+        for l in labels:
+            row = {"rating": l, f"%{ref}": round(100 * ref_dist[l], 2)}
+            for a in comparison_samples:
+                pct_a = comp_dists[a][l]
+                contrib = ((max(pct_a, eps) - max(ref_dist[l], eps)) *
+                           np.log(max(pct_a, eps) / max(ref_dist[l], eps)))
+                totais[a] += contrib
+                row[f"%{a}"] = round(100 * pct_a, 2)
+                row[f"PSI {a}"] = round(float(contrib), 4)
+            rows.append(row)
+        total = {"rating": "TOTAL", f"%{ref}": round(100 * sum(ref_dist.values()), 1)}
+        for a in comparison_samples:
+            total[f"%{a}"] = round(100 * sum(comp_dists[a].values()), 1)
+            total[f"PSI {a}"] = round(float(totais[a]), 4)
+        rows.append(total)
+        return pd.DataFrame(rows)
+
     def monotonicity_report(self) -> pd.DataFrame:
         """Verifica se o risco médio é monotônico ao longo dos ratings, por amostra.
 
@@ -2856,31 +3202,44 @@ class ModelSegmenter:
                 self.df[src], meta.get("derived_bins") or [], src).to_numpy()
 
     def _score_pandas(self, pdf, col_score="score", col_rating="rating", col_value=None,
-                      ruler_sample=None, recreate_categories=None, cat_suffix="_faixa"):
+                      ruler_sample=None, recreate_categories=None, cat_suffix="_faixa",
+                      progress_callback=None):
         """Escora um pandas DataFrame: colunas originais + score + rating (+ valor
         previsto) e, quando o modelo usou variáveis categorizadas, as faixas
-        recriadas. A tabela só precisa ter as variáveis originais do modelo."""
+        recriadas. A tabela só precisa ter as variáveis originais do modelo.
+
+        ``progress_callback`` (opcional): ``cb(key, label, status, detail)`` por
+        etapa — ver :func:`_emit_progress`."""
         pdf = self._apply_derived(pd.DataFrame(pdf))    # recria derivadas (se houver)
         missing = [f for f in self.model_features if f not in pdf.columns]
         if missing:
             raise ValueError(
                 f"Faltam variáveis do modelo na tabela: {missing}. "
                 f"Ela precisa conter: {list(self.model_features)}.")
+        n = len(pdf)
+        _emit_progress(progress_callback, "score", "Escorar (score + rating)", "run",
+                       f"{n:,} linhas".replace(",", "."))
         scored = self.predict(pdf, col_score=col_score, col_rating=col_rating,
                               col_value=col_value, ruler_sample=ruler_sample)
         out = pdf.copy()
         for c in scored.columns:
             out[c] = scored[c].to_numpy()
+        _emit_progress(progress_callback, "score", "Escorar (score + rating)", "ok",
+                       f"{n:,} linhas".replace(",", "."))
         if recreate_categories is None:
             recreate_categories = (self.feature_transform == "woe")
         if recreate_categories:
+            _emit_progress(progress_callback, "categories", "Recriar categorias (faixas)", "run")
             cats = self.recreate_categories(pdf, suffix=cat_suffix)
             for c in cats.columns:
                 out[c] = cats[c].to_numpy()
+            _emit_progress(progress_callback, "categories", "Recriar categorias (faixas)", "ok",
+                           f"{cats.shape[1]} coluna(s)")
         return out
 
     def apply_spark(self, sdf, col_score="score", col_rating="rating", col_value=None,
-                    ruler_sample=None, recreate_categories=None, cat_suffix="_faixa"):
+                    ruler_sample=None, recreate_categories=None, cat_suffix="_faixa",
+                    progress_callback=None):
         """Escora um **Spark DataFrame** (ex.: tabela do Databricks/Unity Catalog) e
         devolve um Spark DataFrame com ``score`` + ``rating`` (+ valor previsto) e,
         quando o modelo usou variáveis categorizadas (WoE/bins), as faixas recriadas.
@@ -2901,15 +3260,23 @@ class ModelSegmenter:
             raise ValueError(
                 f"Colunas ausentes no Spark DataFrame: {missing}. A tabela precisa ter "
                 f"as variáveis do modelo: {list(self.model_features)}.")
+        _emit_progress(progress_callback, "collect", "Coletar no driver (toPandas)", "run")
         pdf = sdf.toPandas()
+        _emit_progress(progress_callback, "collect", "Coletar no driver (toPandas)", "ok",
+                       f"{len(pdf):,} linhas".replace(",", "."))
         out = self._score_pandas(pdf, col_score, col_rating, col_value, ruler_sample,
-                                 recreate_categories, cat_suffix)
+                                 recreate_categories, cat_suffix,
+                                 progress_callback=progress_callback)
+        _emit_progress(progress_callback, "build_spark", "Montar Spark DataFrame", "run")
         spark = SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
-        return spark.createDataFrame(out)
+        sout = spark.createDataFrame(out)
+        _emit_progress(progress_callback, "build_spark", "Montar Spark DataFrame", "ok")
+        return sout
 
     def score_table(self, data, col_score="score", col_rating="rating", col_value=None,
                     ruler_sample=None, recreate_categories=None, cat_suffix="_faixa",
-                    output_table=None, mode="overwrite", spark=None):
+                    output_table=None, mode="overwrite", spark=None,
+                    progress_callback=None):
         """Escora uma tabela e devolve as **notas (score)** e os **ratings**.
 
         ``data`` pode ser o **nome** de uma tabela do Databricks (``catalog.schema.
@@ -2919,23 +3286,35 @@ class ModelSegmenter:
 
         - nome de tabela ou Spark DataFrame → devolve um **Spark DataFrame** (e grava
           em ``output_table`` quando informado);
-        - pandas DataFrame → devolve **pandas**."""
+        - pandas DataFrame → devolve **pandas**.
+
+        ``progress_callback`` (opcional): ``cb(key, label, status, detail)`` chamado
+        a cada etapa (carregar/coletar/escorar/recriar/salvar) — útil p/ uma tabela
+        de progresso na UI. Ver :func:`_emit_progress`."""
         if self.model is None:
             raise RuntimeError("Ajuste/defina o modelo antes (fit / set_model).")
         if isinstance(data, str):
             from pyspark.sql import SparkSession
+            _emit_progress(progress_callback, "load", f"Carregar tabela '{data}'", "run")
             spark = spark or SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
             data = spark.table(data)
+            _emit_progress(progress_callback, "load", f"Carregar tabela", "ok")
         if hasattr(data, "toPandas"):                       # Spark DataFrame
             out = self.apply_spark(data, col_score=col_score, col_rating=col_rating,
                                    col_value=col_value, ruler_sample=ruler_sample,
                                    recreate_categories=recreate_categories,
-                                   cat_suffix=cat_suffix)
+                                   cat_suffix=cat_suffix, progress_callback=progress_callback)
             if output_table:
+                _emit_progress(progress_callback, "save", f"Salvar em '{output_table}'", "run")
                 out.write.mode(mode).saveAsTable(output_table)
+                _emit_progress(progress_callback, "save", f"Salvar em '{output_table}'", "ok")
+            _emit_progress(progress_callback, "done", "Escoragem concluída", "ok")
             return out
-        return self._score_pandas(pd.DataFrame(data), col_score, col_rating, col_value,
-                                  ruler_sample, recreate_categories, cat_suffix)
+        out = self._score_pandas(pd.DataFrame(data), col_score, col_rating, col_value,
+                                 ruler_sample, recreate_categories, cat_suffix,
+                                 progress_callback=progress_callback)
+        _emit_progress(progress_callback, "done", "Escoragem concluída", "ok")
+        return out
 
     def to_dict(self) -> dict:
         """Configuração serializável (sem o modelo binário — ver :meth:`save`)."""

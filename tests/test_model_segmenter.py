@@ -134,6 +134,52 @@ def test_variable_psi_by_safra(seg):
     assert len(ps) >= 1
 
 
+def test_variable_faixa_share_by_safra_num_e_cat(seg):
+    # % de cada faixa/categoria ao longo do tempo — numérica (faixas) e cat (grupos)
+    shn = seg.variable_faixa_share_by_safra("feat_00")
+    assert "safra" in shn.columns and shn.shape[1] >= 2
+    faixas = [c for c in shn.columns if c != "safra"]
+    # cada safra soma ~100% entre as faixas
+    soma = shn[faixas].sum(axis=1)
+    assert ((soma - 100).abs() < 0.5).all()
+    shc = seg.variable_faixa_share_by_safra("feat_cat")   # 'seg' já tem feat_cat
+    assert "safra" in shc.columns and shc.shape[1] >= 2
+
+
+def test_plot_variable_faixa_share_timeseries_render(seg):
+    import matplotlib
+    matplotlib.use("Agg")
+    fig = seg.plot_variable_faixa_share_timeseries("feat_00")
+    ax = fig.axes[0]
+    # uma linha por faixa e eixo X em mmm/aa (padrão do repo)
+    assert len(ax.get_lines()) >= 2
+    labs = [t.get_text() for t in ax.get_xticklabels() if t.get_text()]
+    assert any("/" in s for s in labs)
+
+
+def test_optbin_share_numerica_ignora_bins_manuais(seg):
+    # Gráfico das faixas do OPTIMAL BINNING no tempo: sempre optbin, mesmo com
+    # bins manuais definidos (só numéricas).
+    import matplotlib
+    matplotlib.use("Agg")
+    n_opt = len(seg._optbin_numeric_bins("feat_00"))
+    assert n_opt >= 2
+    seg.set_manual_bins("feat_00", [0.0])              # 2 faixas manuais
+    assert len(seg._optbin_numeric_bins("feat_00")) == n_opt   # optbin não muda
+    fig = seg.plot_variable_optbin_share_timeseries("feat_00")
+    ax = fig.axes[0]
+    assert len(ax.get_lines()) == len([b for b in seg._optbin_numeric_bins("feat_00")
+                                       if b["kind"] == "num"]) or len(ax.get_lines()) >= 2
+
+
+def test_optbin_share_categorica_placeholder(seg):
+    import matplotlib
+    matplotlib.use("Agg")
+    fig = seg.plot_variable_optbin_share_timeseries("feat_cat")
+    txts = " ".join(t.get_text() for t in fig.axes[0].texts)
+    assert "numéric" in txts.lower()
+
+
 # ----------------------------------------------------------------------
 # Seleção / categorização
 # ----------------------------------------------------------------------
@@ -497,6 +543,55 @@ def test_psi_ratings(seg):
     psi = seg.psi()
     assert {"amostra", "psi", "classificacao"}.issubset(psi.columns)
     assert (psi["amostra"] == "OOT").any()
+
+
+def test_psi_rating_detalhe_des_oot_estab(task):
+    # PSI por rating comparando DES × OOT e DES × ESTABILIDADE (Task 3).
+    df = _synthetic(task, n=1800, seed=3)
+    rng = np.random.default_rng(3)
+    df["amostra"] = rng.choice(["DES", "OOT", "ESTABILIDADE"], size=len(df),
+                               p=[0.5, 0.3, 0.2])
+    seg = ModelSegmenter(df, target="target", task_type=task, sample_col="amostra",
+                         ref_sample="DES", date_col="dt_ref", verbose=False)
+    seg.fit(_default_algo(task))
+    seg.build_ratings(method="quantil", n_ratings=5)
+    det = seg.psi_rating_detalhe()
+    # colunas de contribuição por amostra de comparação
+    assert "PSI OOT" in det.columns and "PSI ESTABILIDADE" in det.columns
+    assert "%DES" in det.columns
+    # última linha é o TOTAL e bate com o PSI agregado de psi()
+    assert det.iloc[-1]["rating"] == "TOTAL"
+    agg = seg.psi().set_index("amostra")["psi"]
+    tot = det.iloc[-1]
+    assert abs(float(tot["PSI OOT"]) - float(agg["OOT"])) < 1e-3
+    assert abs(float(tot["PSI ESTABILIDADE"]) - float(agg["ESTABILIDADE"])) < 1e-3
+
+
+def test_advanced_hyperparams_fit(task):
+    # Task 2: hiperparâmetros avançados chegam ao estimador sem quebrar o fit.
+    df = _synthetic(task, n=1200, seed=7)
+    seg = ModelSegmenter(df, target="target", task_type=task, sample_col="amostra",
+                         ref_sample="DES", verbose=False)
+    hp = {"n_estimators": 40, "min_samples_leaf": 10, "max_features": "sqrt"}
+    seg.fit("random_forest", hyperparams=hp)
+    est = seg.model.named_steps["est"]
+    assert est.get_params()["min_samples_leaf"] == 10
+    assert est.get_params()["max_features"] == "sqrt"
+
+
+def test_score_table_progress_callback(seg):
+    # Task 4: score_table dispara eventos de progresso (carregando/escorando).
+    seg.fit(_default_algo(seg.task_type))
+    seg.build_ratings(method="quantil", n_ratings=5)
+    eventos = []
+    out = seg.score_table(seg.df.head(200),
+                          progress_callback=lambda *a: eventos.append(a))
+    assert len(out) == 200
+    chaves = {e[0] for e in eventos}
+    assert "score" in chaves and "done" in chaves
+    # cada etapa segue o contrato (key, label, status, detail)
+    assert all(len(e) == 4 for e in eventos)
+    assert any(e[2] == "ok" for e in eventos)
 
 
 def test_backtest(seg):
@@ -913,6 +1008,46 @@ def test_tune_optuna(task):
     assert res["n_trials"] == 5 and isinstance(res["best_params"], dict)
     assert seg.score_ is not None              # fit_best treinou o modelo
     assert seg.tuning_["best_value"] == res["best_value"]
+
+
+def test_tune_optuna_agrupa_metricas_nos_trials(task):
+    # Task 7: cada trial guarda os grupos 'modelagem' e 'monitoramento'.
+    pytest.importorskip("optuna")
+    df = _synthetic(task, n=1200, seed=4)
+    seg = ModelSegmenter(df, target="target", task_type=task, sample_col="amostra",
+                         ref_sample="DES", verbose=False)
+    seg.auto_select(min_iv=0.0)
+    seg.tune_optuna(algorithm="random_forest", n_trials=4, fit_best=False)
+    tr = seg.study_.trials[0]
+    assert "modelagem" in tr.user_attrs and "monitoramento" in tr.user_attrs
+    chave = "auc" if task == "classification" else "r2"
+    assert chave in tr.user_attrs["modelagem"]
+    assert "psi_score_des_val" in tr.user_attrs["monitoramento"]
+
+
+def test_tune_optuna_log_mlflow_nested(task, tmp_path):
+    # Task 7: com log_mlflow=True, cada trial vira um run aninhado com métricas
+    # agrupadas por 'modelagem/…' e 'monitoramento/…' sob um run-pai.
+    pytest.importorskip("optuna")
+    pytest.importorskip("mlflow")
+    import mlflow
+    mlflow.set_tracking_uri((tmp_path / "mlruns").as_uri())
+    df = _synthetic(task, n=1200, seed=6)
+    seg = ModelSegmenter(df, target="target", task_type=task, sample_col="amostra",
+                         ref_sample="DES", verbose=False)
+    seg.auto_select(min_iv=0.0)
+    exp = f"optuna_{task}"
+    seg.tune_optuna(algorithm="random_forest", n_trials=3, fit_best=False,
+                    log_mlflow=True, mlflow_experiment=exp)
+    experiment = mlflow.get_experiment_by_name(exp)
+    runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id],
+                              output_format="list")
+    trial_runs = [r for r in runs if r.data.tags.get("grupo") == "trial"]
+    assert len(trial_runs) == 3
+    # métricas agrupadas presentes em ao menos um trial
+    metric_keys = set().union(*(r.data.metrics.keys() for r in trial_runs))
+    assert any(k.startswith("modelagem/") for k in metric_keys)
+    assert any(k.startswith("monitoramento/") for k in metric_keys)
 
 
 def test_tune_optuna_algoritmo_nao_tunavel(task):

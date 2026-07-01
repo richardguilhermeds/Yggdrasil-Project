@@ -28,6 +28,10 @@ dependencies = [
     # RandomForest/ExtraTrees/GradientBoosting/HistGB já vêm via scikit-learn).
     "lightgbm>=4.0",
     "xgboost>=2.0",
+    # Tuning bayesiano de hiperparâmetros (ModelSegmenter.tune_optuna) — agora
+    # parte do core: a UI do modelo traz o botão "Tunar com Optuna" por padrão e
+    # os trials são logáveis no MLflow.
+    "optuna>=3.0",
 ]
 
 [project.optional-dependencies]
@@ -48,7 +52,8 @@ xgboost = ["xgboost>=2.0"]
 catboost = ["catboost>=1.2"]
 # Atalho dos motores de boosting (CatBoost é o único não incluído no core).
 boosting = ["lightgbm>=4.0", "xgboost>=2.0", "catboost>=1.2"]
-# Tuning de hiperparâmetros por otimização bayesiana (ModelSegmenter.tune_optuna).
+# Optuna já vem no core (acima). O extra fica por compatibilidade — no-op se já
+# instalado.
 optuna = ["optuna>=3.0"]
 # Ferramentas de desenvolvimento, testes e execução de notebooks.
 dev = [

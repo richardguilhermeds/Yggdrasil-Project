@@ -244,6 +244,28 @@ def test_auto_merge_funde_irmas_indistinguiveis(task):
     assert len(seg.leaves()) <= n0
 
 
+def test_comparacao_irmas_so_terminais_adjacentes(task):
+    # Task 1: irmãs só são comparáveis/fundíveis quando TERMINAIS e ADJACENTES
+    # (mesma run); um nó intermediário que se expande quebra a adjacência.
+    seg = _mk(task)
+    seg.grow("score", splits=[0.7, 1.0])                 # 3 bins numéricos sob a raiz
+    filhos = seg._ordered_direct_children("root")
+    assert len(filhos) == 3
+    l1, meio, l2 = filhos[0][0], filhos[1][0], filhos[2][0]
+    # com os 3 terminais → 2 pares adjacentes (l1-meio, meio-l2)
+    assert len(seg._adjacent_sibling_pairs("root")) == 2
+
+    # expande a folha do MEIO → vira nó intermediário não-terminal
+    seg.grow("garantia", splits=[["A", "B"], ["C", "D"]], only_segments={meio})
+    assert seg.segments[meio]["is_leaf"] is False
+    # agora l1 e l2 caem em runs distintas → NENHUM par adjacente sob a raiz
+    assert seg._adjacent_sibling_pairs("root") == []
+    # e o teste 'p (irmãs)' das folhas externas fica NaN (sem irmã adjacente)
+    lv = seg.leaves(with_test=True)
+    externas = lv[lv["segmento"].isin([l1, l2])]
+    assert externas["p_vs_prox"].isna().all()
+
+
 def test_prune_respeita_protect(seg):
     seg.grow("score", splits=[0.6, 0.8, 1.0])
     folhas = [s for s, v in seg.segments.items() if v["is_leaf"]]

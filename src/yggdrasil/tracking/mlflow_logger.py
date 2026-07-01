@@ -34,17 +34,21 @@ def _log_metric_dict(mlflow, metrics: Dict[str, float], suffix: str = "") -> Non
 def _plot_psi_series(series: pd.DataFrame, titulo: str, path: str) -> None:
     import matplotlib.pyplot as plt
     from ..monitoring.psi import PSI_SIGNIFICANT, PSI_STABLE
-    from ..reporting.style import COR_NEUTRA, COR_PRIMARIA, COR_SECUNDARIA
+    from ..reporting.style import (COR_NEUTRA, COR_PRIMARIA, COR_SECUNDARIA,
+                                   month_year_axis)
 
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(series["mes"], series["psi"], marker="o", color=COR_PRIMARIA, linewidth=2)
+    x = range(len(series))
+    ax.plot(x, series["psi"], marker="o", color=COR_PRIMARIA, linewidth=2)
     ax.axhline(PSI_STABLE, color=COR_NEUTRA, ls="--", lw=1, label=f"estável ({PSI_STABLE})")
     ax.axhline(PSI_SIGNIFICANT, color=COR_SECUNDARIA, ls="--", lw=1, label=f"instável ({PSI_SIGNIFICANT})")
     ax.set_title(titulo, fontweight="bold")
     ax.set_ylabel("PSI")
     ax.set_xlabel("Mês de referência")
     ax.legend(fontsize=8)
-    fig.autofmt_xdate()
+    month_year_axis(ax, series["mes"])           # eixo X em mmm/aa (padrão do repo)
+    for lbl in ax.get_xticklabels():
+        lbl.set_rotation(45); lbl.set_ha("right")
     fig.tight_layout()
     fig.savefig(path, dpi=110, bbox_inches="tight")
     plt.close(fig)

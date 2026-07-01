@@ -13,7 +13,8 @@ import numpy as np
 import pandas as pd
 
 from ..config import ColumnConfig
-from ..reporting.style import COR_NEUTRA, COR_PRIMARIA, COR_SECUNDARIA, colormap, gradient
+from ..reporting.style import (COR_NEUTRA, COR_PRIMARIA, COR_SECUNDARIA, colormap,
+                               gradient, month_year_axis)
 from .bivariate import event_rate_by_bin
 from .config import EDAConfig
 from .dtypes import as_numeric, infer_feature_kind
@@ -83,7 +84,8 @@ def plot_missing_over_time(df, col, cfg, eda_cfg=None, ax=None):
     if ax is None:
         fig = _figure((8, 4))
         ax = fig.add_subplot(111)
-    ax.plot(tab["periodo"], tab["pct_missing"] * 100, marker="o", color=COR_PRIMARIA, lw=2)
+    x = range(len(tab))
+    ax.plot(x, tab["pct_missing"] * 100, marker="o", color=COR_PRIMARIA, lw=2)
     if tab.attrs.get("quebra"):
         ax.set_title(f"% missing no tempo · {col}  (QUEBRA detectada)", fontsize=11,
                      fontweight="bold", color=COR_SECUNDARIA)
@@ -91,6 +93,7 @@ def plot_missing_over_time(df, col, cfg, eda_cfg=None, ax=None):
         ax.set_title(f"% missing no tempo · {col}", fontsize=11, fontweight="bold")
     ax.set_ylabel("% missing")
     ax.set_xlabel("safra")
+    month_year_axis(ax, tab["periodo"])          # eixo X em mmm/aa (padrão do repo)
     ax.tick_params(axis="x", rotation=45)
     return fig
 
@@ -102,17 +105,18 @@ def plot_percentile_fan(df, col, cfg, eda_cfg=None, ax=None):
     if ax is None:
         fig = _figure((8, 4))
         ax = fig.add_subplot(111)
-    x = tab["periodo"]
+    x = range(len(tab))
     pares = [("p10", "p90"), ("p25", "p75")]
     for lo, hi in pares:
         if lo in tab.columns and hi in tab.columns:
-            ax.fill_between(x, tab[lo], tab[hi], color=COR_PRIMARIA, alpha=0.18)
+            ax.fill_between(list(x), tab[lo], tab[hi], color=COR_PRIMARIA, alpha=0.18)
     if "p50" in tab.columns:
-        ax.plot(x, tab["p50"], marker="o", color=COR_SECUNDARIA, lw=2, label="mediana")
+        ax.plot(list(x), tab["p50"], marker="o", color=COR_SECUNDARIA, lw=2, label="mediana")
         ax.legend(fontsize=8)
     ax.set_title(f"Percentis no tempo · {col}", fontsize=11, fontweight="bold")
     ax.set_ylabel(col)
     ax.set_xlabel("safra")
+    month_year_axis(ax, tab["periodo"])          # eixo X em mmm/aa (padrão do repo)
     ax.tick_params(axis="x", rotation=45)
     return fig
 
@@ -171,12 +175,14 @@ def plot_feature_psi_over_time(df, col, cfg, eda_cfg=None, ax=None):
     if ax is None:
         fig = _figure((8, 4))
         ax = fig.add_subplot(111)
-    ax.plot(tab["periodo"], tab["psi"], marker="o", color=COR_PRIMARIA, lw=2)
+    x = range(len(tab))
+    ax.plot(x, tab["psi"], marker="o", color=COR_PRIMARIA, lw=2)
     ax.axhline(PSI_STABLE, color=COR_NEUTRA, ls="--", lw=1)
     ax.axhline(PSI_SIGNIFICANT, color=COR_SECUNDARIA, ls="--", lw=1)
     ax.set_title(f"PSI no tempo · {col}", fontsize=11, fontweight="bold")
     ax.set_ylabel("PSI")
     ax.set_xlabel("safra")
+    month_year_axis(ax, tab["periodo"])          # eixo X em mmm/aa (padrão do repo)
     ax.tick_params(axis="x", rotation=45)
     return fig
 

@@ -22,7 +22,7 @@ import pandas as pd
 from ..config import ColumnConfig
 from ..data import analysis_samples_present
 from ..interpretability import compute_shap, shap_feature_importance
-from .style import COR_PRIMARIA, COR_SECUNDARIA, colormap, gradient
+from .style import COR_PRIMARIA, COR_SECUNDARIA, colormap, fmt_month_year, gradient
 
 # Cards exibidos por tipo de problema: (rótulo, chave da métrica, formato).
 _CARDS = {
@@ -128,7 +128,7 @@ def _vintage_chart(ax, df, cfg, y_label) -> None:
     ax.bar(x, g["vol"].values, color=_COR_BARRA, alpha=0.55, edgecolor="white", width=0.7)
     ax.set_ylabel("Volumetria (nº)", fontsize=11, color=_COR_BARRA, fontweight="bold")
     ax.set_xticks(x)
-    ax.set_xticklabels([d.strftime("%Y-%m") for d in g.index], rotation=45, ha="right", fontsize=9)
+    ax.set_xticklabels(fmt_month_year(g.index), rotation=45, ha="right", fontsize=9)
     ax.set_xlabel("Mês de referência", fontsize=11)
     ax.tick_params(axis="y", labelcolor=_COR_BARRA)
     axb = ax.twinx()

@@ -45,24 +45,13 @@ except Exception:  # pragma: no cover
 
 TASK_TYPES = ("classification", "regression")
 
-# Abreviações de mês em PT-BR (independem do locale do SO; Windows não traz pt_BR).
-_MESES_PT = ("jan", "fev", "mar", "abr", "mai", "jun",
-             "jul", "ago", "set", "out", "nov", "dez")
-
 
 def _fmt_safras(safras) -> list:
-    """Rótulos de safra 'AAAA-MM' → 'mmm/AA' (ex.: '2022-01' → 'jan/22').
+    """Rótulos de safra → 'mmm/aa' (padrão de mês/ano do repositório).
 
-    Valores fora do padrão são devolvidos como string, sem alteração."""
-    out = []
-    for s in safras:
-        s = str(s)
-        try:
-            ano, mes = s.split("-")[:2]
-            out.append(f"{_MESES_PT[int(mes) - 1]}/{ano[-2:]}")
-        except (ValueError, IndexError):
-            out.append(s)
-    return out
+    Delega ao helper único :func:`yggdrasil.reporting.style.fmt_month_year`."""
+    from ...reporting.style import fmt_month_year
+    return fmt_month_year(safras)
 
 
 def _fit_optbinning_splits(b, x, y) -> list:
@@ -1096,31 +1085,22 @@ class TreeSegmenter:
                 populadas = [c for c in folhas
                              if self.segments[c]["conditions"]
                              and self.segments[c]["conditions"][-1]["kind"] != "na"]
-                # --- fusão por vizinhança entre irmãs populadas ---
-                if len(populadas) >= 2:
-                    if all(self.segments[c]["conditions"][-1]["kind"] == "num"
-                           for c in populadas):
-                        populadas_ord = sorted(
-                            populadas,
-                            key=lambda c: self.segments[c]["conditions"][-1]["lo"])
-                    else:
-                        populadas_ord = sorted(
-                            populadas,
-                            key=lambda c: (self._leaf_target(c).mean()
-                                           if len(self._leaf_target(c)) else np.inf))
-                    for i in range(len(populadas_ord) - 1):
-                        a, b = populadas_ord[i], populadas_ord[i + 1]
-                        if a in protect or b in protect:
-                            continue
-                        va, vb = self._leaf_target(a), self._leaf_target(b)
-                        gap = (abs(va.mean() - vb.mean())
-                               if len(va) and len(vb) else np.inf)
-                        p = self._pair_pvalue(a, b, test=test, min_n=min_n)
-                        if not ((not np.isnan(p) and p > alpha) or gap < min_valor_gap):
-                            continue
-                        prio = p if not np.isnan(p) else (2.0 - min(gap, 1.0))
-                        if melhor is None or prio > melhor[0]:
-                            melhor = (prio, "adj", b)
+                # --- fusão por vizinhança entre irmãs ADJACENTES ---
+                # Só pares realmente adjacentes (mesma run de folhas terminais);
+                # uma irmã que se expandiu (nó não-terminal) quebra a adjacência,
+                # então folhas de lados opostos dela nunca são fundidas entre si.
+                for a, b in self._adjacent_sibling_pairs(pai):
+                    if a in protect or b in protect:
+                        continue
+                    va, vb = self._leaf_target(a), self._leaf_target(b)
+                    gap = (abs(va.mean() - vb.mean())
+                           if len(va) and len(vb) else np.inf)
+                    p = self._pair_pvalue(a, b, test=test, min_n=min_n)
+                    if not ((not np.isnan(p) and p > alpha) or gap < min_valor_gap):
+                        continue
+                    prio = p if not np.isnan(p) else (2.0 - min(gap, 1.0))
+                    if melhor is None or prio > melhor[0]:
+                        melhor = (prio, "adj", b)
                 # --- fusão do nó de faltantes no bin populado mais próximo ---
                 if include_missing:
                     na_leaves = [c for c in folhas
@@ -1381,23 +1361,15 @@ class TreeSegmenter:
     #   A última irmã do grupo e o nó de faltantes ficam com NaN (sem par à frente).
     def _append_adjacency_test(self, out, test="mannwhitney", min_n=8):
         leaf_ids = out["segmento"].tolist()
-        por_pai: dict = {}
-        for sid in leaf_ids:
-            por_pai.setdefault(self.segments[sid]["parent"], []).append(sid)
+        # 'próxima irmã' = a vizinha à frente numa mesma run de folhas terminais
+        # adjacentes; uma irmã que se expandiu (nó não-terminal) QUEBRA a
+        # adjacência, então folhas em lados opostos dela não são comparadas.
         prox: dict = {}
-        for irmaos in por_pai.values():
-            comp = [c for c in irmaos
-                    if self.segments[c]["conditions"]
-                    and self.segments[c]["conditions"][-1]["kind"] != "na"]
-            if len(comp) < 2:
+        for pai in {self.segments[sid]["parent"] for sid in leaf_ids}:
+            if pai is None:
                 continue
-            if all(self.segments[c]["conditions"][-1]["kind"] == "num" for c in comp):
-                comp.sort(key=lambda c: self.segments[c]["conditions"][-1]["lo"])
-            else:
-                comp.sort(key=lambda c: (self._leaf_target(c).mean()
-                                         if len(self._leaf_target(c)) else np.inf))
-            for i in range(len(comp) - 1):
-                prox[comp[i]] = comp[i + 1]
+            for a, b in self._adjacent_sibling_pairs(pai):
+                prox[a] = b
         pvals = []
         for sid in leaf_ids:
             nxt = prox.get(sid)
@@ -3181,7 +3153,7 @@ class TreeSegmenter:
             ax.text(x0, p, f"{p:.2f}", ha="center", va="bottom", fontsize=7, color="#555")
         ax.axhline(0.10, color="#caa000", lw=0.8, ls="--")
         ax.axhline(0.25, color="#d6453e", lw=0.8, ls="--")
-        ax.set_xticks(x); ax.set_xticklabels(ps["safra"], rotation=45, ha="right", fontsize=8)
+        ax.set_xticks(x); ax.set_xticklabels(_fmt_safras(ps["safra"]), rotation=45, ha="right", fontsize=8)
         ax.set_xlim(-0.7, len(ps) - 0.3)                          # respiro nas bordas (eixo x)
         ax.set_ylim(0, float(np.nanmax(ps["psi"])) * 1.16 + 0.05)  # espaço p/ os rótulos
         ax.set_ylabel("PSI")
@@ -3231,35 +3203,107 @@ class TreeSegmenter:
                 for sid in leaves}
         return ordered, nota, desc, pd_ref
 
+    def _ordered_direct_children(self, parent_sid) -> list:
+        """Todos os filhos DIRETOS de `parent_sid` na ordem do split, com a flag
+        de folha. Numérico: por `lo` (ordem da variável); categórico/misto: pelo
+        risco na referência (DES). O nó de faltantes (na) vai sempre por último.
+        Retorna ``[(sid, is_leaf), ...]``."""
+        kids = [c for c, s in self.segments.items() if s["parent"] == parent_sid]
+
+        def _key(c):
+            conds = self.segments[c]["conditions"]
+            cond = conds[-1] if conds else {}
+            kind = cond.get("kind")
+            if kind == "na":
+                return (2, 0.0)                       # faltantes por último
+            if kind == "num":
+                lo = cond.get("lo")
+                return (0, lo if lo is not None else float("-inf"))
+            v = self._node_value(c)                   # risco na referência
+            return (1, v if not pd.isna(v) else float("inf"))
+
+        kids.sort(key=_key)
+        return [(c, self.segments[c]["is_leaf"]) for c in kids]
+
+    def _sibling_runs(self, parent_sid) -> list:
+        """Sequências MAXIMAIS de folhas terminais irmãs ADJACENTES (mesmo pai
+        direto). Um filho NÃO-terminal (irmã subdividida) QUEBRA a adjacência:
+        folhas terminais de lados opostos dele caem em runs distintas e não são
+        comparadas entre si. Retorna ``[[sid, ...], ...]`` (cada run = folhas)."""
+        runs, atual = [], []
+        for sid, is_leaf in self._ordered_direct_children(parent_sid):
+            if is_leaf:
+                atual.append(sid)
+            elif atual:                               # nó não-terminal encerra a run
+                runs.append(atual)
+                atual = []
+        if atual:
+            runs.append(atual)
+        return runs
+
+    def _adjacent_sibling_pairs(self, parent_sid) -> list:
+        """Pares ``(a, b)`` de folhas-irmãs TERMINAIS ADJACENTES de ``parent_sid``:
+        consecutivas dentro de uma MESMA run de :meth:`_sibling_runs` (nenhum nó
+        expandido/intermediário entre elas) e ambas populadas — o nó de faltantes
+        (na) não entra na comparação. Definição canônica de 'irmãs comparáveis/
+        fundíveis'; usada pelo teste ``p (irmãs)`` e pela fusão automática para
+        NÃO comparar folhas separadas por uma irmã que se expandiu."""
+        pairs = []
+        for run in self._sibling_runs(parent_sid):
+            seq = [c for c in run
+                   if self.segments[c]["conditions"]
+                   and self.segments[c]["conditions"][-1]["kind"] != "na"]
+            pairs.extend(zip(seq, seq[1:]))
+        return pairs
+
+    def _adjacent_sibling_neighbors(self, sid):
+        """``(esq, dir)``: as folhas-irmãs terminais imediatamente adjacentes a
+        ``sid`` (mesma run — sem nó expandido entre elas; ignora o nó de
+        faltantes). Cada lado é o sid vizinho ou ``None``."""
+        s = self.segments.get(sid)
+        if s is None or not s["is_leaf"] or s["parent"] is None:
+            return None, None
+        for run in self._sibling_runs(s["parent"]):
+            seq = [c for c in run
+                   if self.segments[c]["conditions"]
+                   and self.segments[c]["conditions"][-1]["kind"] != "na"]
+            if sid in seq:
+                i = seq.index(sid)
+                return (seq[i - 1] if i > 0 else None,
+                        seq[i + 1] if i + 1 < len(seq) else None)
+        return None, None
+
     def sibling_leaf_groups(self, min_leaves: int = 2) -> list:
-        """Grupos de folhas-irmãs (mesmo pai, ≥`min_leaves` folhas). Cada item:
-        ``{'parent', 'leaves', 'notas', 'feature', 'label'}`` — pronto para um
-        seletor na UI. Ordenado pela menor nota do grupo (esquerda→direita)."""
-        grupos: dict = {}
-        for sid, s in self.segments.items():
-            if s["is_leaf"] and s["parent"] is not None:
-                grupos.setdefault(s["parent"], []).append(sid)
+        """Grupos de folhas-irmãs TERMINAIS ADJACENTES (mesmo pai direto,
+        ≥`min_leaves` folhas). Uma irmã subdividida (nó não-terminal) quebra a
+        adjacência — folhas terminais em lados opostos dela NÃO são agrupadas.
+        Um mesmo pai pode gerar mais de um grupo (uma run por trecho contíguo de
+        folhas). Cada item: ``{'parent','leaves','notas','feature','label','key'}``
+        — pronto para um seletor na UI. Ordenado pela menor nota do grupo."""
+        pais = {s["parent"] for s in self.segments.values()
+                if s["is_leaf"] and s["parent"] is not None}
         out = []
-        for pai, kids in grupos.items():
-            if len(kids) < min_leaves:
-                continue
-            ordered, nota, _desc, _pd = self._sibling_meta(pai, kids)
-            feat = None
-            for c in kids:                       # variável do split (cond. não-na)
-                conds = self.segments[c]["conditions"]
-                if conds and conds[-1]["kind"] != "na":
-                    feat = conds[-1]["feature"]
-                    break
-            rot = self.feature_labels.get(feat, feat) if feat else "?"
-            notas = [nota.get(c) for c in ordered]
-            ns = [n for n in notas if n is not None]
-            faixa = f"{min(ns)}–{max(ns)}" if ns else "?"
-            label = f"split '{rot}' · folhas {faixa} ({len(ordered)})"
-            pai_desc = self._descrever(self.segments[pai]["conditions"])
-            if self.segments[pai]["conditions"]:
-                label += f" · pai: {pai_desc}"
-            out.append({"parent": pai, "leaves": ordered, "notas": notas,
-                        "feature": feat, "label": label})
+        for pai in pais:
+            for run in self._sibling_runs(pai):
+                if len(run) < min_leaves:
+                    continue
+                ordered, nota, _desc, _pd = self._sibling_meta(pai, run)
+                feat = None
+                for c in ordered:                    # variável do split (cond. não-na)
+                    conds = self.segments[c]["conditions"]
+                    if conds and conds[-1]["kind"] != "na":
+                        feat = conds[-1]["feature"]
+                        break
+                rot = self.feature_labels.get(feat, feat) if feat else "?"
+                notas = [nota.get(c) for c in ordered]
+                ns = [n for n in notas if n is not None]
+                faixa = f"{min(ns)}–{max(ns)}" if ns else "?"
+                label = f"split '{rot}' · folhas {faixa} ({len(ordered)})"
+                pai_desc = self._descrever(self.segments[pai]["conditions"])
+                if self.segments[pai]["conditions"]:
+                    label += f" · pai: {pai_desc}"
+                out.append({"parent": pai, "leaves": ordered, "notas": notas,
+                            "feature": feat, "label": label, "key": tuple(ordered)})
         out.sort(key=lambda g: min([n for n in g["notas"] if n is not None] or [1e9]))
         return out
 
@@ -3335,16 +3379,18 @@ class TreeSegmenter:
         return n_inv, n_pairs
 
     def sibling_inversion_summary(self, parent_sid, time_col=None, sample=None,
-                                  min_n: int = 20) -> dict:
+                                  min_n: int = 20, leaves=None) -> dict:
         """Diagnóstico de inversão das folhas-irmãs de `parent_sid`. Compara a
         ordem de PD de referência (DES) com a observada em cada AMOSTRA e em
         cada SAFRA. Retorna contagens por amostra/safra e um veredito
-        (verde/amarelo/vermelho)."""
-        ordered, nota, desc, pd_ref = self._sibling_meta(parent_sid)
+        (verde/amarelo/vermelho). `leaves` restringe a comparação a um trecho
+        contíguo de folhas terminais adjacentes (uma run de `sibling_leaf_groups`);
+        omitido, usa todas as folhas terminais diretas do pai."""
+        ordered, nota, desc, pd_ref = self._sibling_meta(parent_sid, leaves)
         k = len(ordered)
         n_pairs = k * (k - 1) // 2
 
-        _o, _n, _d, xs_s, ser_s = self._sibling_sample_series(parent_sid)
+        _o, _n, _d, xs_s, ser_s = self._sibling_sample_series(parent_sid, leaves)
         sample_rows = []
         for j, xlab in enumerate(xs_s):
             vals = {sid: ser_s[sid][j] for sid in ordered}
@@ -3354,7 +3400,7 @@ class TreeSegmenter:
         safra_rows, safra_err = [], None
         try:
             _o, _n, _d, xs_t, ser_t = self._sibling_safra_series(
-                parent_sid, time_col, sample, min_n=min_n)
+                parent_sid, time_col, sample, leaves, min_n=min_n)
             for j, xlab in enumerate(xs_t):
                 vals = {sid: ser_t[sid][j] for sid in ordered}
                 n_inv, npp = self._count_inversions(ordered, vals)
@@ -3477,7 +3523,7 @@ class TreeSegmenter:
             ax.plot(x, series[sid], marker="o", lw=1.7, ms=4.5,
                     color=cores[sid], markeredgecolor="#33424f", markeredgewidth=0.5,
                     label=f"folha {nota.get(sid)}")
-        ax.set_xticks(x); ax.set_xticklabels(xs, rotation=45, ha="right", fontsize=8)
+        ax.set_xticks(x); ax.set_xticklabels(_fmt_safras(xs), rotation=45, ha="right", fontsize=8)
         ax.set_xlim(-0.7, len(xs) - 0.3)
         ax.set_ylabel(self._risk_mean); ax.set_xlabel("safra")
         sfx = f" · {sample}" if sample else " · todas as amostras"
