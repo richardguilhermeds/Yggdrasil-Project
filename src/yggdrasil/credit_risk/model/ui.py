@@ -700,8 +700,7 @@ class ModelSegmenterUI:
         self.out_an_inv_safra = W.HTML()
         self.out_an_time = W.HTML()
         self.out_an_psi = W.HTML()
-        self.out_an_share = W.HTML()   # % de cada faixa/categoria ao longo do tempo
-        self.out_an_optbin_share = W.HTML()   # faixas do optimal binning no tempo (numéricas)
+        self.out_an_optbin_share = W.HTML()   # distribuição ACUMULADA das faixas optbin no tempo
         self.btn_analyze.on_click(self._on_analyze)
 
         bin_card = W.VBox([
@@ -733,22 +732,18 @@ class ModelSegmenterUI:
         # linha 3: variável ao longo do tempo (percentis) · PSI por safra
         row3 = _row(_col("Variável ao longo do tempo · percentis por safra", self.out_an_time),
                     _col("PSI da variável por safra vs DES", self.out_an_psi))
-        # linha 4 (largura total): % de cada faixa/categoria ao longo do tempo —
-        # logo ABAIXO do comportamento (média/percentis), como pedido.
-        row_share = W.VBox(
-            [W.HTML("<div class='mseg-h'>% de cada faixa/categoria ao longo do tempo</div>"),
-             self.out_an_share], layout=W.Layout(width="100%"))
-        # linha 5 (largura total): distribuição das faixas do OPTIMAL BINNING no
-        # tempo (só variáveis numéricas; ignora bins manuais).
+        # linha 4 (largura TOTAL, 2 colunas): distribuição ACUMULADA (área empilhada)
+        # das faixas do OPTIMAL BINNING ao longo do tempo — só numéricas, da primeira
+        # faixa (base) até a última (topo). Substitui os antigos gráficos de share.
         row_optbin = W.VBox(
-            [W.HTML("<div class='mseg-h'>Distribuição das faixas do optimal binning ao longo "
-                    "do tempo (numéricas)</div>"),
+            [W.HTML("<div class='mseg-h'>Distribuição acumulada das faixas do optimal binning "
+                    "ao longo do tempo (numéricas)</div>"),
              self.out_an_optbin_share], layout=W.Layout(width="100%"))
         tab_an = W.VBox([
             W.HBox([self.dd_var2, self.dd_sample2, self.tx_time2, self.btn_analyze]),
             bin_card,
             self.out_an_cards,
-            row1, row2, row3, row_share, row_optbin,
+            row1, row2, row3, row_optbin,
         ], layout=W.Layout(padding="2px"))
 
         # ---------- Aba 3: Modelo ----------
@@ -823,7 +818,7 @@ class ModelSegmenterUI:
                                 icon="cogs")
         self.btn_shap = W.Button(description="Calcular SHAP", icon="bar-chart")
         # --- tuning bayesiano (Optuna) ---
-        self.sl_trials = W.IntSlider(description="trials", min=5, max=100, value=30,
+        self.sl_trials = W.IntSlider(description="trials", min=5, max=500, value=30,
                                      layout=W.Layout(width="60%"))
         self.cb_tune_mlflow = W.Checkbox(value=False, indent=False,
                                          description="registrar trials + modelo no MLflow")
@@ -969,6 +964,7 @@ class ModelSegmenterUI:
         self.out_rating_dist = W.HTML()
         self.out_rating_inv_s = W.HTML()
         self.out_rating_inv_t = W.HTML()
+        self.out_rating_psi_safra = W.HTML()   # PSI dos ratings ao longo do tempo (por safra)
         self.out_rating_mono = W.HTML()
         self.btn_build_ratings.on_click(self._on_build_ratings)
 
@@ -993,6 +989,13 @@ class ModelSegmenterUI:
                             self.out_rating_inv_s], layout=W.Layout(width="50%")),
                     W.VBox([W.HTML("<div class='mseg-h'>Inversão entre ratings · safras</div>"),
                             self.out_rating_inv_t], layout=W.Layout(width="50%"))]),
+            W.VBox([W.HTML("<div class='mseg-h'>PSI dos ratings ao longo do tempo · por safra "
+                           "vs DES</div>"),
+                    W.HTML("<div class='mseg-legend'>Estabilidade da régua no tempo: PSI da "
+                           "distribuição dos ratings de cada safra vs a referência (DES). "
+                           "Verde &lt; 0,10 (estável) · amarelo &lt; 0,25 (atenção) · vermelho "
+                           "≥ 0,25 (instável). Requer coluna de data (<code>date_col</code>).</div>"),
+                    self.out_rating_psi_safra]),
             W.VBox([W.HTML("<div class='mseg-h'>Monotonicidade por amostra</div>"),
                     self.out_rating_mono]),
         ], layout=W.Layout(padding="2px"))
@@ -1326,31 +1329,37 @@ class ModelSegmenterUI:
                                                             figsize=(6.4, 3.4)), tight=False)
             vt = self.seg.variable_table(feat, sample=sample)
             self.out_an_table.value = self._df_html(vt, max_height="240px", center=True)
+            # "risco das faixas por amostra" esticado p/ preencher a coluna (menos
+            # espaço em branco até o gráfico da direita)
             self.out_an_inv_sample.value = self._fig_html(
-                self.seg.plot_variable_inversion_by_sample(feat, figsize=(6.0, 3.1)))
+                self.seg.plot_variable_inversion_by_sample(feat, figsize=(7.2, 3.4)),
+                stretch=True)
             self.out_an_cards.value = self._var_cards(self.seg.variable_summary(feat, sample))
         except Exception as e:
             self.out_an_distbad.value = f"<i>{e}</i>"
         if tcol:
-            for out, fn in ((self.out_an_time,
-                             lambda: self.seg.plot_variable_timeseries(feat, tcol, sample)),
-                            (self.out_an_share,
-                             lambda: self.seg.plot_variable_faixa_share_timeseries(feat, tcol, sample)),
-                            (self.out_an_optbin_share,
-                             lambda: self.seg.plot_variable_optbin_share_timeseries(feat, tcol, sample)),
-                            (self.out_an_inv_safra,
-                             lambda: self.seg.plot_variable_inversion_by_safra(feat, tcol, sample)),
-                            (self.out_an_psi,
-                             lambda: self.seg.plot_variable_psi_by_safra(feat, tcol))):
+            # (out, fn, stretch): tudo estica p/ preencher a coluna. O par
+            # "percentis · PSI" usa a MESMA figsize (mesmo tamanho) e TODAS as
+            # safras da base (all_samples) — o PSI já considera todas.
+            _ts = (8.8, 3.8)
+            specs = ((self.out_an_time,
+                      lambda: self.seg.plot_variable_timeseries(feat, tcol, sample,
+                                                                figsize=_ts, all_samples=True), True),
+                     (self.out_an_inv_safra,
+                      lambda: self.seg.plot_variable_inversion_by_safra(feat, tcol, sample), True),
+                     (self.out_an_psi,
+                      lambda: self.seg.plot_variable_psi_by_safra(feat, tcol, figsize=_ts), True),
+                     (self.out_an_optbin_share,
+                      lambda: self.seg.plot_variable_optbin_cumshare_timeseries(feat, tcol, sample), True))
+            for out, fn, stretch in specs:
                 try:
-                    out.value = self._fig_html(fn())
+                    out.value = self._fig_html(fn(), stretch=stretch)
                 except Exception as e:
                     out.value = f"<i>{e}</i>"
         else:
-            aviso = ("<div class='mseg-legend'>Informe a coluna de safra para ver a "
-                     "distribuição ao longo do tempo.</div>")
-            self.out_an_share.value = aviso
-            self.out_an_optbin_share.value = aviso
+            self.out_an_optbin_share.value = (
+                "<div class='mseg-legend'>Informe a coluna de safra para ver a "
+                "distribuição ao longo do tempo.</div>")
 
     def _var_cards(self, s):
         def card(k, v):
@@ -2101,6 +2110,11 @@ class ModelSegmenterUI:
                 self.seg.plot_rating_inversion_by_safra(figsize=inv_size), tight=False)
         except Exception as e:
             self.out_rating_inv_t.value = f"<i>{e}</i>"
+        try:
+            self.out_rating_psi_safra.value = self._fig_html(
+                self.seg.plot_rating_psi_by_safra(figsize=(9.6, 4.2)), stretch=True)
+        except Exception as e:
+            self.out_rating_psi_safra.value = f"<i>{e}</i>"
         self._refresh_bar()
 
     # ------------------------------------------------------------------ Aba 5 handlers

@@ -1058,12 +1058,16 @@ class ModelSegmenter:
             pass
         return res
 
-    def variable_by_safra(self, feature, time_col=None, sample=None) -> pd.DataFrame:
-        """Percentis (min, p5, média, p95, max) e %missing de variável NUMÉRICA por safra."""
+    def variable_by_safra(self, feature, time_col=None, sample=None,
+                          all_samples=False) -> pd.DataFrame:
+        """Percentis (min, p5, média, p95, max) e %missing de variável NUMÉRICA por safra.
+
+        ``all_samples=True`` usa **todas as safras da base** (todas as amostras),
+        não só a DES — útil para ver o comportamento no tempo em toda a série."""
         time_col = time_col or self.date_col
         if time_col is None:
             raise ValueError("Informe time_col ou configure date_col.")
-        sub = self._frame(sample)
+        sub = self.df if all_samples else self._frame(sample)
         safra = pd.to_datetime(sub[time_col], errors="coerce").dt.to_period("M")
         rows = []
         for per, g in sub.groupby(safra):
@@ -1083,12 +1087,14 @@ class ModelSegmenter:
             rows.append(row)
         return pd.DataFrame(rows).sort_values("safra").reset_index(drop=True)
 
-    def variable_share_by_safra(self, feature, time_col=None, sample=None, top=8) -> pd.DataFrame:
-        """Representatividade (%) de cada categoria por safra (variável CATEGÓRICA)."""
+    def variable_share_by_safra(self, feature, time_col=None, sample=None, top=8,
+                                all_samples=False) -> pd.DataFrame:
+        """Representatividade (%) de cada categoria por safra (variável CATEGÓRICA).
+        ``all_samples=True`` usa todas as safras da base (todas as amostras)."""
         time_col = time_col or self.date_col
         if time_col is None:
             raise ValueError("Informe time_col ou configure date_col.")
-        sub = self._frame(sample)
+        sub = self.df if all_samples else self._frame(sample)
         safra = pd.to_datetime(sub[time_col], errors="coerce").dt.to_period("M").astype(str)
         cat = sub[feature]
         keep = list(cat.dropna().astype(str).value_counts().head(top).index)
@@ -1345,12 +1351,15 @@ class ModelSegmenter:
         return fig
 
     def plot_variable_timeseries(self, feature, time_col=None, sample=None,
-                                 figsize=(8.6, 3.4), dpi=150, save_path=None, ax=None):
-        """Numérica: percentis por safra. Categórica: área empilhada de share."""
-        if self._detect_kind(feature, self._frame(sample)) == "cat":
+                                 figsize=(8.6, 3.4), dpi=150, save_path=None, ax=None,
+                                 all_samples=False):
+        """Numérica: percentis por safra. Categórica: área empilhada de share.
+        ``all_samples=True`` considera todas as safras da base (todas as amostras)."""
+        frame = self.df if all_samples else self._frame(sample)
+        if self._detect_kind(feature, frame) == "cat":
             return self._plot_share_timeseries(feature, time_col, sample, figsize,
-                                               dpi, save_path, ax)
-        bs = self.variable_by_safra(feature, time_col, sample)
+                                               dpi, save_path, ax, all_samples)
+        bs = self.variable_by_safra(feature, time_col, sample, all_samples=all_samples)
         fig, ax = _new_ax(figsize, dpi, ax)
         if bs.empty or bs["media"].notna().sum() == 0:
             ax.text(0.5, 0.5, "sem dados por safra", ha="center", va="center",
@@ -1375,9 +1384,10 @@ class ModelSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
-    def _plot_share_timeseries(self, feature, time_col, sample, figsize, dpi, save_path, ax):
+    def _plot_share_timeseries(self, feature, time_col, sample, figsize, dpi, save_path, ax,
+                               all_samples=False):
         import matplotlib.colors as mcolors
-        sh = self.variable_share_by_safra(feature, time_col, sample)
+        sh = self.variable_share_by_safra(feature, time_col, sample, all_samples=all_samples)
         fig, ax = _new_ax((figsize[0], 3.6), dpi, ax)
         cats = [c for c in sh.columns if c != "safra"]
         if sh.empty or not cats:
@@ -1549,6 +1559,60 @@ class ModelSegmenter:
         return self.plot_variable_faixa_share_timeseries(
             feature, time_col, sample, max_n_bins, min_bin_size, figsize, dpi,
             save_path, ax, bins=bins, titulo=titulo, legend_title="faixa (optbin)")
+
+    def plot_variable_optbin_cumshare_timeseries(self, feature, time_col=None, sample=None,
+                                                 max_n_bins=5, min_bin_size=0.05,
+                                                 figsize=(11.5, 4.2), dpi=150,
+                                                 save_path=None, ax=None):
+        """**Distribuição ACUMULADA das faixas do OPTIMAL BINNING ao longo do tempo**
+        (só variáveis NUMÉRICAS): área EMPILHADA das %s de cada faixa por safra, da
+        **primeira faixa (base) até a última (topo)**, somando 100%. Deixa ver como
+        a composição da variável migra entre as faixas no tempo. Sempre usa o
+        optbinning (ignora bins manuais)."""
+        import matplotlib.colors as mcolors
+        if self._detect_kind(feature, self._frame(sample)) != "num":
+            fig, ax = _new_ax(figsize, dpi, ax)
+            ax.text(0.5, 0.5, "apenas para variáveis numéricas", ha="center",
+                    va="center", transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        bins = self._optbin_numeric_bins(feature, sample, max_n_bins, min_bin_size)
+        sh = self.variable_faixa_share_by_safra(feature, time_col, sample, max_n_bins,
+                                                min_bin_size, bins=bins)
+        fig, ax = _new_ax(figsize, dpi, ax)
+        cats = [c for c in sh.columns if c != "safra"]
+        if sh.empty or not cats:
+            ax.text(0.5, 0.5, "sem dados por safra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        x = list(range(len(sh)))
+        # cores em gradiente (steelblue→crimson) na ordem das faixas; (faltante) cinza
+        base = [c for c in cats if c not in ("outras", "(faltante)")]
+        cmap = mcolors.LinearSegmentedColormap.from_list("sc", ["steelblue", "crimson"])
+        cores = []
+        for c in cats:
+            if c == "(faltante)":
+                cores.append("#c98a8a")
+            elif c == "outras":
+                cores.append("#b9c0cb")
+            else:
+                cores.append(cmap(base.index(c) / max(len(base) - 1, 1)) if c in base else "#889")
+        Y = [sh[c].fillna(0).to_numpy() for c in cats]
+        ax.stackplot(x, *Y, labels=cats, colors=cores, alpha=0.9,
+                     edgecolor="white", linewidth=0.3)
+        ax.set_ylim(0, 100); ax.margins(x=0)
+        ax.set_xticks(x)
+        ax.set_xticklabels(_fmt_safras(sh["safra"]), rotation=45, ha="right", fontsize=8)
+        ax.set_ylabel("% acumulado da safra")
+        ax.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5),
+                  framealpha=0.9, title="faixa (optbin)")
+        ax.set_title(f"'{self.label(feature)}' — distribuição acumulada das faixas do "
+                     f"optimal binning ao longo do tempo", fontsize=11,
+                     fontweight="bold", color="#15324a")
+        ax.grid(alpha=0.12, axis="y")
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
 
     def plot_variable_psi_by_safra(self, feature, time_col=None, figsize=(9.6, 4.4),
                                    dpi=150, save_path=None, ax=None):
@@ -2572,9 +2636,18 @@ class ModelSegmenter:
                     density=True, edgecolor="white", linewidth=0.3)
             ax.hist(sc[y == 1], bins=bins, color="#d6453e", alpha=0.55, label="evento (1)",
                     density=True, edgecolor="white", linewidth=0.3)
-            ax.legend(fontsize=9)
         else:
             ax.hist(sc, bins=bins, color="steelblue", alpha=0.85, edgecolor="#2f5d82")
+        # linhas de referência (tracejadas, na legenda): quartis e média do score.
+        # Percentis em PRETO (mediana em traço mais grosso) e média em CRIMSON —
+        # alto contraste sobre o histograma (o azul/laranja anterior sumia).
+        if sc.size:
+            refs = (("p25", float(np.nanpercentile(sc, 25)), "#111111", 1.3),
+                    ("mediana (p50)", float(np.nanpercentile(sc, 50)), "#111111", 2.1),
+                    ("p75", float(np.nanpercentile(sc, 75)), "#111111", 1.3),
+                    ("média", float(np.nanmean(sc)), "#dc143c", 1.9))
+            for lab, v, col, lw in refs:
+                ax.axvline(v, ls="--", lw=lw, color=col, alpha=0.95, label=f"{lab} = {v:.0f}")
         # eixo x na faixa CHEIA do score (0–score_scale) p/ ver a distribuição no
         # contexto geral, não só onde caem os dados; estende se houver valor fora.
         if sc.size:
@@ -2586,6 +2659,8 @@ class ModelSegmenter:
         ax.set_title(f"Distribuição do score · {sample or self.ref_sample}",
                      fontsize=11, fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)
+        if ax.get_legend_handles_labels()[0]:            # classes (clf) + quartis/média
+            ax.legend(fontsize=8, loc="upper right")
         fig.tight_layout()
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
@@ -3313,6 +3388,81 @@ class ModelSegmenter:
             total[f"PSI {a}"] = round(float(totais[a]), 4)
         rows.append(total)
         return pd.DataFrame(rows)
+
+    def rating_psi_by_safra(self, time_col=None, eps: float = 1e-6) -> pd.DataFrame:
+        """PSI da distribuição de RATINGS **por safra** vs a referência (DES).
+
+        Mede a estabilidade da régua **ao longo do tempo**: para cada safra (mês
+        de ``time_col``/``date_col``) compara a distribuição dos ratings com a da
+        amostra de referência (``ref_sample``/DES) — o mesmo PSI de :meth:`psi`,
+        porém período a período. Requer ratings gerados (:meth:`build_ratings`).
+
+        Devolve ``safra``, ``n``, ``psi`` e ``classificacao`` (estável/atenção/
+        instável, ver :func:`_classifica_psi`), ordenado por safra."""
+        time_col = time_col or self.date_col
+        if time_col is None:
+            raise ValueError("Informe time_col ou configure date_col.")
+        rating = self._rating_series()
+        labels = self.rating_labels_
+        # distribuição de referência: ratings na DES (ou toda a base, sem sample_col).
+        # Denominador = ratings NÃO-NaN (score inválido ⇒ rating NaN não entra na
+        # distribuição); assim as proporções somam 1, como o value_counts por safra.
+        ref_mask = (self._frame_mask(self.ref_sample) if self.sample_col is not None
+                    else pd.Series(True, index=self.df.index))
+        valid = rating.notna()
+        n_ref = max(int((valid & ref_mask).sum()), 1)
+        ref_pct = {l: max(int(((rating == l) & ref_mask).sum()) / n_ref, eps) for l in labels}
+        safra = pd.to_datetime(self.df[time_col], errors="coerce").dt.to_period("M")
+        rows = []
+        for per, r_g in rating.groupby(safra):        # groupby dropa safra NaT
+            n_g = int(r_g.notna().sum())              # ignora ratings NaN no denominador
+            if n_g == 0:
+                continue
+            vc = r_g.value_counts()
+            psi = 0.0
+            for l in labels:
+                p_cur = max(int(vc.get(l, 0)) / n_g, eps)
+                p_ref = ref_pct[l]
+                psi += (p_cur - p_ref) * np.log(p_cur / p_ref)
+            rows.append({"safra": str(per), "n": int(n_g), "psi": round(float(psi), 4),
+                         "classificacao": _classifica_psi(psi)})
+        return (pd.DataFrame(rows, columns=["safra", "n", "psi", "classificacao"])
+                .sort_values("safra").reset_index(drop=True))
+
+    def plot_rating_psi_by_safra(self, time_col=None, figsize=(9.6, 4.4), dpi=150,
+                                 save_path=None, ax=None):
+        """PSI da distribuição de RATINGS por safra vs DES (barras coloridas) — a
+        estabilidade da régua ao longo do tempo. Ver :meth:`rating_psi_by_safra`."""
+        ps = self.rating_psi_by_safra(time_col)
+        fig, ax = _new_ax(figsize, dpi, ax)
+        if ps.empty:
+            ax.text(0.5, 0.5, "sem PSI por safra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout()
+            if save_path:
+                fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+            return fig
+        x = list(range(len(ps)))
+        cor = ["#1aa64b" if p < 0.10 else "#caa000" if p < 0.25 else "#d6453e"
+               for p in ps["psi"]]
+        ax.bar(x, ps["psi"], color=cor, alpha=0.92, width=0.78)
+        for x0, p in zip(x, ps["psi"]):
+            ax.text(x0, p, f"{p:.2f}", ha="center", va="bottom", fontsize=7, color="#555")
+        # guia de alerta do PSI (sempre visível, mesmo com PSI pequeno)
+        ax.axhline(0.10, color="#caa000", lw=1.2, ls="--", label="alerta (0,10)")
+        ax.axhline(0.25, color="#d6453e", lw=1.2, ls="--", label="crítico (0,25)")
+        ax.set_xticks(x)
+        ax.set_xticklabels(_fmt_safras(ps["safra"]), rotation=45, ha="right", fontsize=8)
+        ax.set_xlim(-0.7, len(ps) - 0.3)
+        ax.set_ylim(0, max(float(np.nanmax(ps["psi"])) * 1.16 + 0.02, 0.28))
+        ax.set_ylabel("PSI")
+        ax.legend(fontsize=7.5, loc="upper right", framealpha=0.9)
+        ax.set_title(f"PSI dos ratings por safra vs {self.ref_sample}", fontsize=11,
+                     fontweight="bold", color="#15324a")
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
 
     def monotonicity_report(self) -> pd.DataFrame:
         """Verifica se o risco médio é monotônico ao longo dos ratings, por amostra.
