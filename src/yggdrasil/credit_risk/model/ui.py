@@ -811,7 +811,9 @@ class ModelSegmenterUI:
         self.cb_tune_mlflow.tooltip = ("Cada trial vira um run aninhado no MLflow, com "
                                        "parâmetros e métricas agrupadas (modelagem/ e "
                                        "monitoramento/), sob um run-pai com o resumo do estudo. "
-                                       "Usa o campo 'Experimento' da aba Validar & Exportar.")
+                                       "Usa o campo 'Experimento' da aba Validar & Exportar; "
+                                       "se vazio, registra no experimento ativo da sessão "
+                                       "(no Databricks, o do próprio notebook).")
         self.btn_tune = W.Button(description="Tunar com Optuna", button_style="warning",
                                  icon="magic")
         self.btn_tune.tooltip = ("Otimização bayesiana (Optuna): busca hiperparâmetros "

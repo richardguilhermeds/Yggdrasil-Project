@@ -2021,8 +2021,8 @@ class ModelSegmenter:
         # --- MLflow: run-pai + um run aninhado por trial (opcional) ----------
         if log_mlflow:
             import mlflow
-            from ...tracking.mlflow_logger import DEFAULT_EXPERIMENT
-            mlflow.set_experiment(mlflow_experiment or DEFAULT_EXPERIMENT)
+            if mlflow_experiment:                       # explícito vence; senão usa o experimento ativo da sessão
+                mlflow.set_experiment(mlflow_experiment)
             run_name = mlflow_run_name or f"optuna_{algorithm}"
             with mlflow.start_run(run_name=run_name):
                 def _mlflow_cb(study, trial):
@@ -2133,12 +2133,12 @@ class ModelSegmenter:
         if getattr(self, "study_", None) is None:
             raise RuntimeError("Rode tune_optuna antes (não há self.study_).")
         import mlflow
-        from ...tracking.mlflow_logger import DEFAULT_EXPERIMENT
         algorithm = self.tuning_.get("algorithm", "?")
         is_clf = self.task_type == "classification"
         transform = getattr(self, "feature_transform", "raw")
         feats = list(self.model_features or self.selected_features() or self.candidates)
-        mlflow.set_experiment(experiment or DEFAULT_EXPERIMENT)
+        if experiment:                                  # explícito vence; senão usa o experimento ativo da sessão
+            mlflow.set_experiment(experiment)
         with mlflow.start_run(run_name=run_name or f"optuna_{algorithm}") as run:
             for trial in self.study_.trials:
                 self._log_optuna_trial(mlflow, trial, algorithm, transform)

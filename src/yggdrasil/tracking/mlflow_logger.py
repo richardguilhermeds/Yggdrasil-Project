@@ -73,7 +73,7 @@ def log_pipeline_run(
     reports: Dict[str, pd.DataFrame],
     params: Optional[dict] = None,
     tags: Optional[dict] = None,
-    experiment: str = DEFAULT_EXPERIMENT,
+    experiment: Optional[str] = None,
     run_name: Optional[str] = None,
     X_train: Optional[pd.DataFrame] = None,
     registered_model_name: Optional[str] = None,
@@ -89,7 +89,8 @@ def log_pipeline_run(
     tmp = artifacts_dir or tempfile.mkdtemp(prefix="yggdrasil_run_")
     os.makedirs(tmp, exist_ok=True)
 
-    mlflow.set_experiment(experiment)
+    if experiment:                                   # explícito vence; senão usa o experimento ativo da sessão
+        mlflow.set_experiment(experiment)
     with mlflow.start_run(run_name=run_name) as run:
         # ── parâmetros ──────────────────────────────────────────────────
         params.setdefault("problem_type", problem_type)

@@ -21,7 +21,7 @@ from .metrics import metric_by_sample, sample_shifts
 from .monitoring import psi_summary
 from .ratings import RatingStrategy, build_ratings
 from .reporting import group_reports_all
-from .tracking import DEFAULT_EXPERIMENT, log_pipeline_run
+from .tracking import log_pipeline_run
 
 RatingSpec = Union[str, RatingStrategy]
 
@@ -83,7 +83,7 @@ class MLPipeline:
         model: Any = None,
         trainer: Any = None,
         *,
-        experiment: str = DEFAULT_EXPERIMENT,
+        experiment: Optional[str] = None,
         run_name: Optional[str] = None,
         tags: Optional[dict] = None,
         params: Optional[dict] = None,
