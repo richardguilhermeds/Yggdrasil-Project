@@ -33,7 +33,10 @@ def fmt_month_year(values) -> List[str]:
                 continue
             s = str(v)
             ano, mes = s.split("-")[:2]
-            out.append(f"{MESES_PT[int(mes) - 1]}/{ano[-2:]}")
+            m = int(mes)
+            if not 1 <= m <= 12:      # mês fora de 1–12 (ex.: '00') → não indexa
+                raise ValueError(f"mês fora de 1–12: {mes!r}")  # cai no str(v) bruto
+            out.append(f"{MESES_PT[m - 1]}/{ano[-2:]}")
         except (ValueError, IndexError, TypeError):
             out.append(str(v))
     return out

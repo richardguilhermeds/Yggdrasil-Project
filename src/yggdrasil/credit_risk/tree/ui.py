@@ -3514,6 +3514,10 @@ class TreeSegmenterUI:
         buf_dpi = min(int(fig.get_dpi()), 110)
         fig.savefig(buf, format="png", dpi=buf_dpi, bbox_inches="tight")
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        # fecha a figura: sem isso o pyplot retém TODA figura gerada (Gcf.figs) e a
+        # RAM cresce sem limite numa sessão interativa (dezenas de plots por ação).
+        import matplotlib.pyplot as _plt
+        _plt.close(fig)
         style = ("width:100%;height:auto" if full_width else "max-width:100%;height:auto")
         if border:
             style += ";border:1px solid #e6e8eb;border-radius:6px"

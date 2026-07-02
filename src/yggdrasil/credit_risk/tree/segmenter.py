@@ -286,6 +286,17 @@ def _aplicar_regua_pandas(regua, df, col_seg="segmento",
         seg[m] = leaf["id"]
         nota[m] = leaf["nota"]
         pdcol[m] = leaf["pd"]
+    # cobertura no scoring: linhas que não caíram em NENHUM segmento ficam nulas.
+    # Não é silencioso — avisa com a causa provável (faltante sem rota quando o
+    # split usou na_to_worst=False, ou categoria não vista no ajuste).
+    n_orfas = int(seg.isna().sum())
+    if n_orfas:
+        import warnings
+        warnings.warn(
+            f"{n_orfas} linha(s) sem segmento na régua (segmento nulo): valor "
+            f"faltante numa variável sem rota de faltantes (grow com "
+            f"na_to_worst=False) ou categoria não vista no ajuste.",
+            stacklevel=2)
     return pd.DataFrame({col_seg: seg, col_nota: nota, col_valor: pdcol}, index=df.index)
 
 
@@ -706,6 +717,7 @@ class TreeSegmenter:
         (DES) — marcando ``include_na=True`` na condição dessa irmã. Atribuição
         conservadora; não faz nada se já houver um nó de faltantes entre as irmãs."""
         if not filhos or any(f["conditions"][-1].get("kind") == "na"
+                             or f["conditions"][-1].get("include_na")
                              for f in filhos.values()):
             return
         ref = ((self.df[self.sample_col] == self.ref_sample).to_numpy()
@@ -717,7 +729,11 @@ class TreeSegmenter:
             yy = yy[~np.isnan(yy)]
             return float(yy.mean()) if yy.size else -np.inf
 
-        pior = max(filhos, key=lambda cid: _risco(filhos[cid]))
+        # desempate quando o risco é indefinido (folha sem dados na referência,
+        # _risco == -inf): cai para a folha de MAIOR tamanho em vez de escolher a
+        # primeira arbitrariamente — rota de missing mais representativa.
+        pior = max(filhos, key=lambda cid: (_risco(filhos[cid]),
+                                            int(filhos[cid]["mask"].sum())))
         filhos[pior]["conditions"][-1]["include_na"] = True
 
     # ------------------------------------------------------------------

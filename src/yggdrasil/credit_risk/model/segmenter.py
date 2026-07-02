@@ -1124,6 +1124,8 @@ class ModelSegmenter:
         safra = pd.to_datetime(sub[time_col], errors="coerce").dt.to_period("M")
         rows = []
         for per, g in sub.groupby(safra):
+            if pd.isna(per):        # data não parseável (NaT) — não vira safra "NaT"
+                continue
             col = g[feature]
             x = col.to_numpy(dtype="float64"); x = x[~np.isnan(x)]
             n = int(len(col)); n_miss = int(col.isna().sum())
@@ -1914,7 +1916,12 @@ class ModelSegmenter:
                 tok = tok.strip()
                 if not tok:
                     continue
-                cuts.append(float(tok))
+                try:
+                    cuts.append(float(tok))
+                except ValueError:
+                    raise ValueError(
+                        f"corte inválido: {tok!r}. Use números com ponto decimal "
+                        f"separados por vírgula (ex.: 0.7, 0.9).") from None
             return sorted(set(cuts)) or None
         grupos = []
         for grp in text.split(";"):
@@ -2557,6 +2564,12 @@ class ModelSegmenter:
         self.model_features = (list(features) if features is not None
                                else (self.model_features or self.selected_features()
                                      or list(self.candidates)))
+        # modelo externo é opaco e recebe as colunas CRUAS em _compute_score; um
+        # feature_transform="woe" residual de um fit anterior faria predict/assign
+        # aplicarem WoE antes do modelo (≠ do score_ aqui). Volta a "raw" p/ manter
+        # escoragem consistente. (Se o modelo externo já espera WoE, passe um
+        # pipeline que faça isso internamente.)
+        self.feature_transform = "raw"
         self.score_ = self._compute_score(self.df)
         self._shap_cache = {}
         return self
@@ -2696,6 +2709,11 @@ class ModelSegmenter:
         return np.ravel(model.predict(X))
 
     def _compute_score(self, df) -> pd.Series:
+        faltando = [f for f in self.model_features if f not in df.columns]
+        if faltando:
+            raise KeyError(
+                f"Colunas ausentes para escorar: {faltando}. O modelo espera "
+                f"{list(self.model_features)}.")
         X = df[self.model_features]
         return pd.Series(self._predict_score_array(self.model, X), index=df.index,
                          name="score", dtype="float64")
@@ -2741,8 +2759,12 @@ class ModelSegmenter:
         # 'ks_cutoff' é o limiar de score onde o KS é máximo (escala do score),
         # não uma métrica de desempenho — seu "shift" não é comparável aos demais.
         cols = [c for c in m.columns if c not in ("n", "ks_cutoff")]
+
+        def _num(x):     # evita np.isfinite(None)/str → TypeError (não está em try)
+            return isinstance(x, (int, float, np.integer, np.floating)) and np.isfinite(x)
+
         return {c: round(float(m.loc[oot, c] - m.loc[self.ref_sample, c]), 6)
-                for c in cols if np.isfinite(m.loc[oot, c]) and np.isfinite(m.loc[self.ref_sample, c])}
+                for c in cols if _num(m.loc[oot, c]) and _num(m.loc[self.ref_sample, c])}
 
     # ---- plots do modelo ----
     def _sample_scores(self, sample=None):
@@ -2993,6 +3015,10 @@ class ModelSegmenter:
         if self.task_type == "classification":
             q = np.quantile(sc, np.linspace(0, 1, n_bins + 1))
             q = np.unique(q)
+            if len(q) < 2:                     # score (quase) constante → sem faixas
+                ax.text(0.5, 0.5, "score constante — sem calibração por faixa",
+                        ha="center", va="center", transform=ax.transAxes, color="#889")
+                ax.axis("off"); fig.tight_layout(); return fig
             idx = np.clip(np.searchsorted(q, sc, side="right") - 1, 0, len(q) - 2)
             pred, obs = [], []
             for g in range(len(q) - 1):
@@ -4592,7 +4618,9 @@ class ModelSegmenter:
             try:
                 for _, r in self.metrics().iterrows():
                     for c, v in r.items():
-                        if c in ("amostra",) or not np.isfinite(v):
+                        if c == "amostra" or not (
+                                isinstance(v, (int, float, np.integer, np.floating))
+                                and np.isfinite(v)):
                             continue
                         mlflow.log_metric(f"{r['amostra']}_{c}", float(v))
             except Exception:
