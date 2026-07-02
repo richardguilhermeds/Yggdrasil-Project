@@ -775,6 +775,62 @@ def test_plots_modelo(seg):
             assert f is not None; plt.close(f)
 
 
+def test_plot_cap_lift_gating(seg):
+    """CAP e Lift/Gains: exclusivos de classificação (ValueError em regressão);
+    em classificação retornam Figure e a legenda da CAP traz o AR."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    seg.fit(_default_algo(seg.task_type))
+    if seg.task_type == "classification":
+        fig = seg.plot_cap()
+        assert fig is not None
+        leg = fig.axes[0].get_legend()
+        assert leg is not None and any("AR=" in t.get_text() for t in leg.get_texts())
+        plt.close(fig)
+        fig2 = seg.plot_lift(n_bins=10)
+        assert fig2 is not None
+        plt.close(fig2)
+    else:
+        with pytest.raises(ValueError):
+            seg.plot_cap()
+        with pytest.raises(ValueError):
+            seg.plot_lift()
+
+
+def test_metrics_by_safra(seg):
+    """metrics_by_safra: DataFrame por safra com as colunas do task; exige date_col."""
+    seg.fit(_default_algo(seg.task_type))
+    ms = seg.metrics_by_safra()
+    assert not ms.empty
+    assert {"safra", "n"} <= set(ms.columns)
+    if seg.task_type == "classification":
+        assert {"taxa_evento", "auc", "ks", "gini"} <= set(ms.columns)
+    else:
+        assert {"previsto_medio", "realizado_medio", "mae", "rmse", "r2"} <= set(ms.columns)
+    # sem date_col configurado → erro amigável
+    df = _synthetic(seg.task_type)
+    s2 = ModelSegmenter(df, target="target", task_type=seg.task_type,
+                        sample_col="amostra", ref_sample="DES")
+    s2.fit(_default_algo(seg.task_type))
+    with pytest.raises(ValueError):
+        s2.metrics_by_safra()
+
+
+def test_plot_metrics_by_safra_e_backtest(seg):
+    """Gráficos por safra: métricas ao longo do tempo e backtest previsto×realizado."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    seg.fit(_default_algo(seg.task_type))
+    fig = seg.plot_metrics_by_safra()
+    assert fig is not None
+    plt.close(fig)
+    figb = seg.plot_backtest(tolerancia=0.25)
+    assert figb is not None
+    plt.close(figb)
+
+
 def test_plot_metric_shift(seg):
     # barra horizontal do shift DES→OOT das principais métricas do task
     import matplotlib
@@ -862,12 +918,13 @@ def test_ui_layout_abas(task):
     ch = list(ui.panel.children)
     tabs = next(c for c in ch if isinstance(c, W.Tab))
     titulos = [tabs.get_title(i) for i in range(len(tabs.children))]
-    assert len(titulos) == 5
+    assert len(titulos) == 6
     assert any("Variáveis" in t or "variáveis" in t for t in titulos)
     assert any("Modelo" in t for t in titulos)
     assert any("Rating" in t for t in titulos)
-    # abas sem numeração (①–⑤), alinhado às UIs lgd/pd
-    assert all(not t[:1] in "①②③④⑤" for t in titulos)
+    assert any("Avançado" in t for t in titulos)
+    # abas sem numeração (①–⑥), alinhado às UIs lgd/pd
+    assert all(not t[:1] in "①②③④⑤⑥" for t in titulos)
 
 
 def test_ui_save_overwrite_confirma(task, tmp_path):
@@ -1218,6 +1275,55 @@ def test_ui_tema_escuro(task):
                               sample_col="amostra", ref_sample="DES")
         ui.cb_dark.value = True
     assert "dark" in ui.panel._dom_classes
+
+
+def test_ui_avancado_tab_handlers(task):
+    """Aba Avançado: os handlers rodam com modelo treinado e preenchem as saídas
+    (CAP/Lift só em classificação; métricas por safra e backtest nos dois)."""
+    pytest.importorskip("ipywidgets")
+    import contextlib
+    import io
+    import matplotlib
+    matplotlib.use("Agg")
+    from yggdrasil.credit_risk.model import ModelSegmenterUI
+    df = _synthetic(task, com_cat=True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui = ModelSegmenterUI(df, target="target", task_type=task,
+                              sample_col="amostra", ref_sample="DES", date_col="dt_ref")
+        ui.seg.fit(_default_algo(task))
+        ui._on_adv_msafra(None)
+        ui._on_adv_backtest(None)
+        if task == "classification":
+            ui._on_adv_cap(None)
+            ui._on_adv_lift(None)
+    assert ui.out_adv_msafra_tab.value                    # tabela de métricas por safra
+    assert "<img" in ui.out_adv_backtest.value            # figura do backtest
+    if task == "classification":
+        assert "<img" in ui.out_adv_cap.value
+        assert "<img" in ui.out_adv_lift.value
+    else:                                                 # regressão: CAP/Lift barrados
+        assert ui.out_adv_cap.value == ""
+
+
+def test_ui_modelo_desatualizado_e_reset(task):
+    """Mexer nas variáveis DEPOIS de treinar marca o modelo como desatualizado;
+    re-treinar (ou limpar a flag) volta ao estado 'em dia'."""
+    pytest.importorskip("ipywidgets")
+    import contextlib
+    import io
+    from yggdrasil.credit_risk.model import ModelSegmenterUI
+    df = _synthetic(task, com_cat=True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui = ModelSegmenterUI(df, target="target", task_type=task,
+                              sample_col="amostra", ref_sample="DES", date_col="dt_ref")
+        ui.seg.fit(_default_algo(task))
+        ui._clear_dirty()
+        assert ui._dirty_since_fit is False
+        feat = next(iter(ui.seg.included))                # included é um set
+        ui.dd_var.value = feat
+        ui._on_exclude_var(None)                          # muda a seleção pós-treino
+    assert ui._dirty_since_fit is True
+    assert "desatualizado" in ui.bar.value
 
 
 def test_tune_optuna_progress_callback(task):

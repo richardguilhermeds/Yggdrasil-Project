@@ -28,6 +28,8 @@ a modelo:
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import numpy as np
 import pandas as pd
 
@@ -261,6 +263,13 @@ class ModelSegmenterUI:
         # cache do <img> base64 da prévia da variável por (feature, versão de bins):
         # trocar/clicar na lista de variáveis regenerava a figura a cada vez.
         self._preview_cache: dict = {}
+        # ranking LAZY: variable_iv() de todas as candidatas é caro demais para
+        # pagar antes do primeiro paint — só computa sob demanda (⟳ Recalcular
+        # ou o primeiro fluxo que force, ex.: auto-selecionar / pós-load).
+        self._vars_ready: bool = False
+        # modelo "desatualizado": alterações de variáveis/bins/WoE feitas DEPOIS
+        # de um treino deixam o modelo defasado até o próximo fit.
+        self._dirty_since_fit: bool = False
         self._build()
         self._refresh_bar()
         self._refresh_vars()
@@ -495,6 +504,76 @@ class ModelSegmenterUI:
         lógica de incluir/excluir/analisar segue inalterada)."""
         return [(self.seg.label(n), n) for n in names]
 
+    # ------------------------------------------------------------------ helpers de UX
+    @contextmanager
+    def _busy(self, *botoes, status=None, msg="processando…"):
+        """Desabilita ``botoes`` enquanto uma ação síncrona roda e mostra um
+        aviso "ocupado" em ``status`` (widget HTML), na mesma mecânica do
+        :meth:`_on_fit` (disable + status + ``finally``). Ao sair, re-habilita
+        os botões SEMPRE e limpa o status apenas se o handler não o substituiu
+        por um resultado/erro próprio."""
+        busy_html = f"<div class='mseg-legend'><i>⏳ {msg}</i></div>"
+        for b in botoes:
+            b.disabled = True
+        if status is not None:
+            status.value = busy_html
+        try:
+            yield
+        finally:
+            for b in botoes:
+                b.disabled = False
+            if status is not None and status.value == busy_html:
+                status.value = ""
+
+    def _confirm_twice(self, btn, action, timeout=5.0):
+        """Confirmação em DOIS cliques para ações destrutivas: o 1º clique arma o
+        botão (vira "Confirmar?" em vermelho por ``timeout`` segundos), o 2º
+        clique executa ``action``. Sem o 2º clique, o botão desarma sozinho."""
+        import threading
+        import time
+        if not hasattr(btn, "_cc_desc"):            # guarda o rótulo/estilo originais
+            btn._cc_desc = btn.description
+            btn._cc_style = btn.button_style
+        now = time.monotonic()
+        armado = getattr(btn, "_cc_armed", 0.0)
+        if armado and now - armado <= timeout:      # 2º clique dentro da janela
+            btn._cc_armed = 0.0
+            btn.description = btn._cc_desc
+            btn.button_style = btn._cc_style
+            action()
+            return
+        btn._cc_armed = now                         # 1º clique: arma
+        btn.description = "Confirmar?"
+        btn.button_style = "danger"
+
+        def _revert():
+            # só desarma se ainda for ESTA armada (não houve 2º clique/rearme)
+            if getattr(btn, "_cc_armed", 0.0) == now:
+                btn._cc_armed = 0.0
+                btn.description = btn._cc_desc
+                btn.button_style = btn._cc_style
+        threading.Timer(timeout, _revert).start()
+
+    def _mark_dirty(self):
+        """Marca o modelo como DESATUALIZADO (variáveis/derivadas/bins/WoE mudaram
+        depois do treino): pill âmbar na barra + tarja sobre o card de métricas.
+        No-op sem modelo treinado; a flag limpa no próximo fit bem-sucedido."""
+        if self.seg.score_ is None or self._dirty_since_fit:
+            return
+        self._dirty_since_fit = True
+        self.out_dirty_warn.value = (
+            "<div style='border:1px solid #f0c36d;background:#fff8e6;border-radius:10px;"
+            "padding:9px 12px;font-size:12px;color:#664d03;margin-bottom:8px'>"
+            "⚠️ <b>Modelo desatualizado</b> — variáveis/bins/WoE mudaram depois do "
+            "treino; as métricas e gráficos abaixo refletem o modelo ANTIGO. "
+            "Re-treine na aba Modelo.</div>")
+        self._refresh_bar()
+
+    def _clear_dirty(self):
+        """Limpa a flag de modelo desatualizado (fit/tune bem-sucedido ou load)."""
+        self._dirty_since_fit = False
+        self.out_dirty_warn.value = ""
+
     # ------------------------------------------------------------------ build
     def _build(self):
         cands = self.seg.candidates
@@ -619,11 +698,19 @@ class ModelSegmenterUI:
         self.btn_exclude.on_click(self._on_exclude_var)
         self.btn_set_cat.on_click(self._on_set_cat)
         self.btn_incl_all.on_click(lambda b: (self.seg.include_all(), self._sync_sel(),
-                                              self._refresh_vars(), self._refresh_bar()))
-        self.btn_clear.on_click(lambda b: (self.seg.clear_features(), self._sync_sel(),
-                                           self._refresh_vars(), self._refresh_bar()))
-        self.btn_refresh_vars.on_click(lambda b: self._refresh_vars())
-        self.btn_clear_derived.on_click(self._on_clear_derived)
+                                              self._refresh_vars(), self._mark_dirty(),
+                                              self._refresh_bar()))
+        # ações DESTRUTIVAS (esvaziar a seleção / remover derivadas): confirmação
+        # em dois cliques — o 1º arma o botão ("Confirmar?"), o 2º executa.
+        self.btn_clear.on_click(lambda b: self._confirm_twice(
+            self.btn_clear,
+            lambda: (self.seg.clear_features(), self._sync_sel(), self._refresh_vars(),
+                     self._mark_dirty(), self._refresh_bar(),
+                     self._log("[limpar] lista 'No modelo' esvaziada."))))
+        self.btn_refresh_vars.on_click(lambda b: self._refresh_vars(force=True))
+        self.btn_clear_derived.on_click(
+            lambda b: self._confirm_twice(self.btn_clear_derived,
+                                          lambda: self._on_clear_derived(b)))
         # botões largos (~19%) → só uma pequena folga entre eles na linha
         for _b in (self.btn_incl_all, self.btn_clear,
                    self.btn_refresh_vars, self.btn_clear_derived):
@@ -654,8 +741,10 @@ class ModelSegmenterUI:
         # ---------- Aba 2: Análise de variáveis ----------
         self.dd_var2 = W.Dropdown(options=self._opts(cands), description="Variável:",
                                   style={"description_width": "initial"})
-        self.dd_sample2 = W.Dropdown(options=["(referência)"] + samples, value="(referência)",
-                                     description="Amostra:",
+        # "(referência)" já É a ref_sample — lista só as demais para não duplicar
+        self.dd_sample2 = W.Dropdown(options=["(referência)"]
+                                     + [s for s in samples if s != self.seg.ref_sample],
+                                     value="(referência)", description="Amostra:",
                                      style={"description_width": "initial"})
         self.tx_time2 = W.Text(value=self.date_col or "", description="Coluna safra:",
                                style={"description_width": "initial"})
@@ -859,7 +948,9 @@ class ModelSegmenterUI:
             "— exatamente os bins definidos na aba 'Análise de variáveis' — e cada bin "
             "é codificado pelo seu WoE (classificação) ou risco médio (regressão).")
         self.out_woe_help = W.HTML()
-        self.cb_woe.observe(lambda c: self._sync_woe_hint(), names="value")
+        # alternar o WoE com modelo já treinado deixa o modelo desatualizado
+        self.cb_woe.observe(lambda c: (self._sync_woe_hint(), self._mark_dirty()),
+                            names="value")
         self.out_algo_help = W.HTML()   # tutorial do algoritmo/parâmetros selecionado
         self.out_metrics = W.HTML()
         self.out_metric_shift = W.HTML()   # gráfico do shift DES→OOT das principais métricas
@@ -917,7 +1008,11 @@ class ModelSegmenterUI:
             W.VBox([W.HTML(f"<div class='mseg-h'>{_head_b}</div>"), self.out_model_b],
                    layout=W.Layout(width="49.5%")),
         ], layout=W.Layout(justify_content="space-between"))
+        # tarja de aviso "modelo desatualizado" (aparece sobre o card de métricas
+        # quando variáveis/bins/WoE mudam depois do treino — ver _mark_dirty)
+        self.out_dirty_warn = W.HTML()
         metrics_card = W.VBox([
+            self.out_dirty_warn,
             W.HTML("<div class='mseg-h'>Métricas por amostra</div>"), self.out_metrics,
             row_shift_dist, row_calib_resid,
         ]); metrics_card.add_class("mseg-card")
@@ -1018,6 +1113,20 @@ class ModelSegmenterUI:
                               style=_persist_sty, layout=_persist_lay)
         self.btn_save = W.Button(description="Salvar", button_style="success", icon="save")
         self.btn_load = W.Button(description="Carregar", icon="upload")
+        # confirmação de sobrescrita INLINE (área dedicada no card, abaixo do
+        # campo de caminho): o console do rodapé fica fora da viewport e um
+        # clear_output posterior apagava o diálogo pendente (o save se perdia).
+        # Botões criados UMA única vez e reutilizados (sem leak de handlers).
+        self._ow_pending = None                # do_save aguardando confirmação
+        self.out_overwrite_msg = W.HTML()
+        self.btn_ow_yes = W.Button(description="Sobrescrever", button_style="danger",
+                                   icon="exclamation-triangle")
+        self.btn_ow_no = W.Button(description="Cancelar", icon="times")
+        self.btn_ow_yes.on_click(self._on_overwrite_yes)
+        self.btn_ow_no.on_click(self._on_overwrite_no)
+        self.box_overwrite = W.VBox([self.out_overwrite_msg,
+                                     W.HBox([self.btn_ow_yes, self.btn_ow_no])])
+        self.box_overwrite.layout.display = "none"
         self.tx_pdf = W.Text(value="relatorio_modelo.pdf", description="PDF:",
                              style=_persist_sty, layout=_persist_lay)
         self.btn_pdf = W.Button(description="Gerar relatório PDF", button_style="primary",
@@ -1101,6 +1210,7 @@ class ModelSegmenterUI:
             W.HTML("<div class='mseg-h'>Persistência · JSON + modelo joblib · relatório "
                    "PDF/Markdown</div>"),
             W.HBox([self.tx_save, self.btn_save, self.btn_load]),
+            self.box_overwrite,
             W.HBox([self.tx_pdf, self.btn_pdf]),
             self.out_pdf,
             W.HBox([self.tx_md, self.btn_md]),
@@ -1116,9 +1226,75 @@ class ModelSegmenterUI:
                    layout=W.Layout(justify_content="space-between", align_items="stretch")),
         ], layout=W.Layout(padding="2px"))
 
-        self.tabs = W.Tab(children=[tab_vars, tab_an, tab_model, tab_rating, tab_export])
+        # ---------- Aba 6: Avançado ----------
+        # análises complementares de discriminação (CAP/Lift), métricas por safra
+        # e backtest gráfico. Saídas invalidadas quando o modelo é re-treinado.
+        self.dd_sample_adv = W.Dropdown(options=["(referência)"]
+                                        + [s for s in samples if s != self.seg.ref_sample],
+                                        value="(referência)", description="Amostra:",
+                                        style={"description_width": "initial"})
+        self.btn_cap = W.Button(description="Curva CAP", button_style="primary",
+                                icon="area-chart",
+                                tooltip="Curva CAP/Lorenz: % acumulado de eventos × % da "
+                                        "carteira (pior → melhor score), com o AR por amostra. "
+                                        "Somente classificação.")
+        self.btn_lift = W.Button(description="Lift/Gains", icon="bar-chart",
+                                 tooltip="Lift por decil de score (decil 1 = piores scores) + "
+                                         "gains acumulado. Somente classificação.")
+        self.out_adv_cap = W.HTML()
+        self.out_adv_lift = W.HTML()
+        self.btn_cap.on_click(self._on_adv_cap)
+        self.btn_lift.on_click(self._on_adv_lift)
+        card_adv_disc = W.VBox([
+            W.HTML("<div class='mseg-h'>Poder discriminante · CAP e Lift/Gains</div>"),
+            W.HBox([self.dd_sample_adv, self.btn_cap, self.btn_lift]),
+            W.HBox([W.VBox([self.out_adv_cap], layout=W.Layout(width="49.5%")),
+                    W.VBox([self.out_adv_lift], layout=W.Layout(width="49.5%"))],
+                   layout=W.Layout(justify_content="space-between")),
+        ]); card_adv_disc.add_class("mseg-card")
+
+        self.btn_msafra = W.Button(description="Calcular", button_style="primary",
+                                   icon="calendar",
+                                   tooltip="Métricas do modelo por safra (AUC/KS/Gini na "
+                                           "classificação · MAE/RMSE/R² na regressão). "
+                                           "Requer coluna de data (date_col).")
+        self.out_adv_msafra_tab = W.HTML()
+        self.out_adv_msafra_fig = W.HTML()
+        self.btn_msafra.on_click(self._on_adv_msafra)
+        card_adv_safra = W.VBox([
+            W.HTML("<div class='mseg-h'>Discriminação por safra</div>"),
+            W.HTML("<div class='mseg-legend'>Evolução das métricas do modelo mês a mês — "
+                   "queda persistente indica degradação do poder discriminante. Requer "
+                   "coluna de data (<code>date_col</code>).</div>"),
+            W.HBox([self.btn_msafra]),
+            self.out_adv_msafra_tab,
+            self.out_adv_msafra_fig,
+        ]); card_adv_safra.add_class("mseg-card")
+
+        self.tx_tol_adv = W.BoundedFloatText(value=20.0, min=0.0, max=100.0, step=5.0,
+                                             description="Tolerância (%):",
+                                             style={"description_width": "initial"},
+                                             layout=W.Layout(width="180px"))
+        self.btn_backtest_plot = W.Button(description="Backtest gráfico",
+                                          button_style="primary", icon="line-chart",
+                                          tooltip="Previsto × realizado por safra com banda de "
+                                                  "tolerância em torno do previsto; meses fora "
+                                                  "da banda ficam destacados.")
+        self.out_adv_backtest = W.HTML()
+        self.btn_backtest_plot.on_click(self._on_adv_backtest)
+        card_adv_bt = W.VBox([
+            W.HTML("<div class='mseg-h'>Backtest gráfico · previsto × realizado por safra</div>"),
+            W.HBox([self.tx_tol_adv, self.btn_backtest_plot]),
+            self.out_adv_backtest,
+        ]); card_adv_bt.add_class("mseg-card")
+
+        tab_adv = W.VBox([card_adv_disc, card_adv_safra, card_adv_bt],
+                         layout=W.Layout(padding="2px"))
+
+        self.tabs = W.Tab(children=[tab_vars, tab_an, tab_model, tab_rating, tab_export,
+                                    tab_adv])
         for i, t in enumerate(["Variáveis", "Análise de variáveis", "Modelo",
-                               "Ratings & Score", "Validar & Exportar"]):
+                               "Ratings & Score", "Validar & Exportar", "Avançado"]):
             self.tabs.set_title(i, t)
         self.tabs.add_class("mseg-tabs")
 
@@ -1187,19 +1363,40 @@ class ModelSegmenterUI:
             "<div class='mseg-banner'><div class='logo'>MS</div><div>"
             f"<div class='t'>ModelSegmenter — {self.task_type}</div>"
             f"<div class='s'>alvo '{s.target}' · referência {s.ref_sample}</div></div></div>")
+        # pill do modelo: verde (treinado) · amarela (não treinado) · âmbar com
+        # aviso quando variáveis/bins/WoE mudaram DEPOIS do treino (desatualizado)
+        if s.score_ is not None and getattr(self, "_dirty_since_fit", False):
+            pill_modelo = self._pill("modelo desatualizado — re-treinar", "yellow")
+        else:
+            pill_modelo = self._pill(f"modelo treinado: {treinado}",
+                                     "green" if s.score_ is not None else "yellow")
         self.bar.value = (
             "<div class='mseg-bar'>"
             + self._pill(f"task: {self.task_type}", "muted")
             + self._pill(f"candidatas: {len(s.candidates)}", "muted")
             + self._pill(f"incluídas: {len(s.included)}", "green")
-            + self._pill(f"modelo treinado: {treinado}", "green" if s.score_ is not None else "yellow")
+            + pill_modelo
             + self._pill(f"ratings: {nrat}", "muted")
             + "</div>")
 
     def _sync_sel(self):
         self.sel_included.value = tuple(f for f in self.seg.candidates if f in self.seg.included)
 
-    def _refresh_vars(self):
+    def _refresh_vars(self, force=False):
+        """Ranking IV/PSI das candidatas. LAZY na construção: ``variable_iv()`` de
+        TODAS as candidatas é caro (optbinning por variável) e bloqueava o primeiro
+        paint — até o usuário pedir (⟳ Recalcular, ``force=True``) ou um fluxo
+        forçar (auto-selecionar/pós-load), mostra só um placeholder. Depois do
+        primeiro cálculo, as chamadas seguintes atualizam normalmente."""
+        if not force and not self._vars_ready:
+            self.out_vars.value = (
+                "<div style='font-size:12px;color:#8891a0;padding:10px 6px;"
+                "line-height:1.6'>Ranking pendente — clique em <b>⟳ Recalcular</b> "
+                "para ranquear as variáveis (IV/força/inversão/PSI de todas as "
+                "candidatas; pode levar alguns segundos).</div>")
+            self._refresh_var_preview()
+            return
+        self._vars_ready = True
         try:
             rk = self.seg.variable_iv().drop(columns="n_inversoes", errors="ignore")
             if "variavel" in rk.columns:                  # exibe o alias (feature_labels)
@@ -1261,7 +1458,9 @@ class ModelSegmenterUI:
         try:
             self.seg.auto_select(min_iv=self.sl_min_iv.value, max_psi=self.sl_max_psi.value,
                                  require_monotonic=self.cb_require_mono.value)
-            self._sync_sel(); self._refresh_vars(); self._refresh_bar()
+            # o ranking já foi computado pelo auto_select → exibe (force)
+            self._sync_sel(); self._refresh_vars(force=True)
+            self._mark_dirty(); self._refresh_bar()
             self._log(f"[auto] incluídas {len(self.seg.included)} variáveis.")
         except Exception as e:
             self._log(f"[auto] erro: {e}")
@@ -1271,7 +1470,8 @@ class ModelSegmenterUI:
             rk = self.seg.auto_categorize(min_iv=self.sl_min_iv.value,
                                           max_psi=self.sl_max_psi.value,
                                           require_monotonic=self.cb_require_mono.value)
-            self._refresh_vars(); self._refresh_bar()
+            # o ranking já foi computado pelo auto_categorize → exibe (force)
+            self._refresh_vars(force=True); self._refresh_bar()
             vc = rk["categoria"].value_counts().to_dict()
             resumo = " · ".join(f"{k}: {vc.get(k, 0)}"
                                 for k in ("manter", "revisar", "descartar"))
@@ -1284,7 +1484,7 @@ class ModelSegmenterUI:
         if not feat:
             return
         self.seg.include(feat)
-        self._sync_sel(); self._refresh_vars(); self._refresh_bar()
+        self._sync_sel(); self._refresh_vars(); self._mark_dirty(); self._refresh_bar()
         self._log(f"[incluir] '{self.seg.label(feat)}' no modelo · {len(self.seg.included)} no total.")
 
     def _on_exclude_var(self, b):
@@ -1292,7 +1492,7 @@ class ModelSegmenterUI:
         if not feat:
             return
         self.seg.exclude(feat)
-        self._sync_sel(); self._refresh_vars(); self._refresh_bar()
+        self._sync_sel(); self._refresh_vars(); self._mark_dirty(); self._refresh_bar()
         self._log(f"[excluir] '{self.seg.label(feat)}' fora do modelo · {len(self.seg.included)} no total.")
 
     def _on_sel_click(self, change):
@@ -1305,7 +1505,10 @@ class ModelSegmenterUI:
 
     def _on_clear_derived(self, b):
         removidas = self.seg.clear_derived()
-        self._refresh_candidates(); self._refresh_vars(); self._refresh_bar()
+        self._refresh_candidates(); self._refresh_vars()
+        if removidas:
+            self._mark_dirty()
+        self._refresh_bar()
         if removidas:
             self._log(f"[reset] {len(removidas)} variável(is) criada(s) removida(s): "
                       f"{', '.join(removidas)}.")
@@ -1323,6 +1526,13 @@ class ModelSegmenterUI:
         feat = self.dd_var2.value
         sample = None if self.dd_sample2.value == "(referência)" else self.dd_sample2.value
         tcol = self.tx_time2.value.strip() or None
+        # limpa os painéis da variável anterior antes de recompor — evita a tela
+        # exibir, por alguns segundos, gráficos da variável antiga junto dos novos.
+        for _w in (self.out_an_distbad, self.out_an_table, self.out_an_inv_sample,
+                   self.out_an_cards, self.out_an_time, self.out_an_inv_safra,
+                   self.out_an_psi, self.out_an_optbin_share):
+            _w.value = ""
+        self.btn_analyze.disabled = True          # evita duplo clique durante o render
         try:
             self.out_an_distbad.value = self._fig_html(
                 self.seg.plot_variable_distribution_badrate(feat, sample=sample,
@@ -1360,6 +1570,7 @@ class ModelSegmenterUI:
             self.out_an_optbin_share.value = (
                 "<div class='mseg-legend'>Informe a coluna de safra para ver a "
                 "distribuição ao longo do tempo.</div>")
+        self.btn_analyze.disabled = False
 
     def _var_cards(self, s):
         def card(k, v):
@@ -1412,6 +1623,7 @@ class ModelSegmenterUI:
             else:
                 self._log(f"[bins] '{self.seg.label(feat)}': bins manuais aplicados.")
             self._render_bin_hint(feat)
+            self._mark_dirty()
             self._on_analyze(None)
             self._refresh_vars()
         except Exception as e:
@@ -1423,6 +1635,7 @@ class ModelSegmenterUI:
         self.tx_cuts.value = ""
         self.tg_binmode.value = "Ótimo"
         self._render_bin_hint(feat)
+        self._mark_dirty()
         self._log(f"[bins] '{self.seg.label(feat)}': voltou ao binning ótimo.")
         self._on_analyze(None)
         self._refresh_vars()
@@ -1448,6 +1661,7 @@ class ModelSegmenterUI:
             self.tx_new_cat.value = ""
             self._refresh_candidates()
             self._refresh_vars()
+            self._mark_dirty()
             self._refresh_bar()
             self._log(f"[nova variável] '{new}' criada de '{self.seg.label(feat)}' ({ncat} categorias) — "
                       f"já disponível na seleção e no modelo.")
@@ -1848,6 +2062,8 @@ class ModelSegmenterUI:
             self._render_metrics()
             self._render_model_plots()
             self._render_formula()
+            self._clear_dirty()               # modelo recém-treinado ⇒ em dia
+            self._clear_adv_outputs()         # descarta gráficos do modelo antigo
             self._refresh_bar()
         except Exception as e:
             self.pb_fit.bar_style = "danger"
@@ -1915,6 +2131,8 @@ class ModelSegmenterUI:
         self._render_metrics()
         self._render_model_plots()
         self._render_formula()
+        self._clear_dirty()                   # modelo re-treinado no tuning ⇒ em dia
+        self._clear_adv_outputs()
         self._refresh_bar()
 
     def _render_metrics(self):
@@ -2259,31 +2477,40 @@ class ModelSegmenterUI:
             f"</tr></thead><tbody>{trs}</tbody></table>")
 
     def _confirm_overwrite(self, path, do_save):
-        """Se ``path`` já existir, abre uma janela de confirmação (no console) e
-        só executa ``do_save()`` quando o usuário clica em 'Sobrescrever'. Se o
-        arquivo não existir (ou ``path`` for vazio), salva direto."""
+        """Se ``path`` já existir, mostra a confirmação INLINE (área dedicada no
+        card de persistência, sob o campo de caminho) e só executa ``do_save()``
+        quando o usuário clica em 'Sobrescrever'. Sem conflito (ou ``path`` vazio),
+        salva direto. Diferente do diálogo antigo (desenhado no console do rodapé,
+        que se perdia a cada ``clear_output``), o inline fica visível e persistente."""
         import html as _html
         import os
         path = (path or "").strip()
         if not path or not os.path.exists(path):
             do_save(); return
-        aviso = W.HTML(
+        self._ow_pending = do_save
+        self.out_overwrite_msg.value = (
             "<div style='border:1px solid #f0c36d;background:#fff8e6;border-radius:10px;"
             "padding:10px 12px;font-size:12.5px;color:#664d03;line-height:1.5'>"
             "<b>⚠️ O arquivo já existe</b><br>"
             f"<code>{_html.escape(path)}</code><br>Deseja sobrescrever?</div>")
-        btn_yes = W.Button(description="Sobrescrever", button_style="danger",
-                           icon="exclamation-triangle")
-        btn_no = W.Button(description="Cancelar", icon="times")
-        def _yes(_):
-            self.out_log.clear_output()
+        self.box_overwrite.layout.display = ""      # revela o diálogo inline
+        self.btn_save.disabled = True               # trava Salvar enquanto pendente
+
+    def _on_overwrite_yes(self, b):
+        do_save = self._ow_pending
+        self._ow_pending = None
+        self.box_overwrite.layout.display = "none"
+        self.out_overwrite_msg.value = ""
+        self.btn_save.disabled = False
+        if do_save is not None:
             do_save()
-        def _no(_):
-            self._log(f"[save] cancelado — '{path}' não foi sobrescrito.")
-        btn_yes.on_click(_yes); btn_no.on_click(_no)
-        with self.out_log:
-            clear_output(wait=True)
-            display(W.VBox([aviso, W.HBox([btn_yes, btn_no])]))
+
+    def _on_overwrite_no(self, b):
+        self._ow_pending = None
+        self.box_overwrite.layout.display = "none"
+        self.out_overwrite_msg.value = ""
+        self.btn_save.disabled = False
+        self._log("[save] cancelado — o arquivo não foi sobrescrito.")
 
     def _on_save(self, b):
         path = (self.tx_save.value or "").strip()
@@ -2346,12 +2573,19 @@ class ModelSegmenterUI:
         selecionado, atualiza a barra/variáveis e re-renderiza métricas, gráficos,
         fórmula e — se já houver — os ratings, sem precisar re-treinar."""
         s = self.seg
+        # o load pode ter trazido outro conjunto de candidatas / variáveis
+        # derivadas — reconstrói as listas ANTES de sincronizar a seleção, senão
+        # _sync_sel atribui valores fora das options (TraitError, aborta o refresh).
+        self._refresh_candidates()
         # espelha o algoritmo do modelo no dropdown, quando for uma opção válida
         algo = getattr(s, "algorithm", None)
         valid = {v for _, v in self.dd_algo.options}
         if algo in valid and self.dd_algo.value != algo:
             self.dd_algo.value = algo          # dispara _sync_algo_visibility
-        self._refresh_bar(); self._refresh_vars(); self._sync_sel()
+        self._sync_hyperparam_widgets()        # controles refletem o modelo carregado
+        self._clear_dirty()                    # modelo carregado está "em dia"
+        self._clear_adv_outputs()
+        self._refresh_bar(); self._refresh_vars(force=True); self._sync_sel()
         if s.score_ is not None:
             self.out_fit_status.value = ("<div style='color:#157a52;font-size:12px'>"
                                          "<b>Modelo carregado</b> — pronto para métricas, "
@@ -2366,14 +2600,138 @@ class ModelSegmenterUI:
             except Exception as e:
                 self._log(f"[load] falha ao renderizar ratings: {e}")
 
+    def _sync_hyperparam_widgets(self):
+        """Espelha ``seg.hyperparams`` (modelo carregado/treinado) nos widgets de
+        hiperparâmetro — sem isso, após 'Carregar' os controles mostram os defaults
+        e um novo 'Treinar' usaria outros valores que não os do modelo em memória.
+        Valores fora do range de um widget são ignorados (try/except)."""
+        hp = getattr(self.seg, "hyperparams", None) or {}
+
+        def _set(w, key, cast, enable=None):
+            if key in hp and w is not None:
+                try:
+                    w.value = cast(hp[key])
+                    if enable is not None:      # habilita o checkbox do parâmetro avançado
+                        enable.value = True
+                except Exception:               # noqa: BLE001 - fora de range ⇒ ignora
+                    pass
+
+        _set(self.tx_C, "C", float)
+        _set(self.sl_n_est, "n_estimators", int)
+        _set(self.sl_max_depth, "max_depth", int, self.cb_max_depth)
+        _set(self.tx_lr, "learning_rate", float)
+        _set(self.sl_min_leaf, "min_samples_leaf", int, self.cb_min_leaf)
+        _set(self.fl_subsample, "subsample", float, self.cb_subsample)
+        _set(self.fl_colsample, "colsample_bytree", float, self.cb_colsample)
+        _set(self.sl_num_leaves, "num_leaves", int, self.cb_num_leaves)
+        l2 = _l2_param_for(self.dd_algo.value)   # nome do L2 varia por algoritmo
+        if l2:
+            _set(self.fl_l2, l2, float, self.cb_l2)
+
     def _on_mlflow(self, b):
-        try:
-            rid = self.seg.log_to_mlflow(experiment=self.tx_experiment.value or None,
-                                         registered_model_name=self.tx_model.value or None,
-                                         verbose=False)
-            self._log(f"[mlflow] run_id = {rid}")
-        except Exception as e:
-            self._log(f"[mlflow] erro: {e}")
+        # validações antes de rodar (mesmo espírito da TreeSegmenterUI): exige
+        # modelo treinado e, se o nome parecer Unity Catalog, o formato de 3 níveis.
+        if self.seg.score_ is None:
+            self._log("[mlflow] treine o modelo antes de registrar.")
+            return
+        model_name = (self.tx_model.value or "").strip()
+        if model_name and "." in model_name and model_name.count(".") != 2:
+            self._log(f"[mlflow] nome inválido: '{model_name}'. Para o Unity Catalog use "
+                      "3 níveis (catalogo.schema.modelo).")
+            return
+        with self._busy(self.btn_mlflow, msg="registrando no MLflow…"):
+            try:
+                rid = self.seg.log_to_mlflow(experiment=self.tx_experiment.value or None,
+                                             registered_model_name=model_name or None,
+                                             verbose=False)
+                self._log(f"[mlflow] run_id = {rid}")
+            except Exception as e:
+                self._log(f"[mlflow] erro: {e}")
+
+    # ------------------------------------------------------------------ Aba 6 (Avançado) handlers
+    def _adv_sample(self):
+        """Amostra escolhida na aba Avançado ("(referência)" → None = ref_sample)."""
+        v = self.dd_sample_adv.value
+        return None if v == "(referência)" else v
+
+    def _clear_adv_outputs(self):
+        """Zera as saídas da aba Avançado — chamado ao re-treinar para não deixar
+        gráficos/tabelas do modelo ANTIGO na tela."""
+        for w in (self.out_adv_cap, self.out_adv_lift, self.out_adv_msafra_tab,
+                  self.out_adv_msafra_fig, self.out_adv_backtest):
+            w.value = ""
+
+    def _on_adv_cap(self, b):
+        if self.seg.score_ is None:
+            self.out_adv_cap.value = "<i>Treine o modelo primeiro.</i>"; return
+        if self.task_type != "classification":
+            self.out_adv_cap.value = ("<div class='mseg-legend'>A curva CAP é exclusiva de "
+                                      "classificação (eventos binários). Em regressão, use "
+                                      "calibração/resíduos na aba Modelo.</div>"); return
+        with self._busy(self.btn_cap, self.btn_lift, msg="gerando a curva CAP…"):
+            try:
+                self.out_adv_cap.value = self._fig_html(self.seg.plot_cap(), stretch=True)
+                self._log("[avançado] curva CAP gerada.")
+            except Exception as e:
+                self.out_adv_cap.value = f"<i>{e}</i>"
+                self._log(f"[avançado] erro na CAP: {e}")
+
+    def _on_adv_lift(self, b):
+        if self.seg.score_ is None:
+            self.out_adv_lift.value = "<i>Treine o modelo primeiro.</i>"; return
+        if self.task_type != "classification":
+            self.out_adv_lift.value = ("<div class='mseg-legend'>Lift/Gains é exclusivo de "
+                                       "classificação (eventos binários).</div>"); return
+        with self._busy(self.btn_cap, self.btn_lift, msg="gerando lift/gains…"):
+            try:
+                self.out_adv_lift.value = self._fig_html(
+                    self.seg.plot_lift(sample=self._adv_sample()), stretch=True)
+                self._log("[avançado] lift/gains gerado.")
+            except Exception as e:
+                self.out_adv_lift.value = f"<i>{e}</i>"
+                self._log(f"[avançado] erro no lift: {e}")
+
+    def _on_adv_msafra(self, b):
+        if self.seg.score_ is None:
+            self.out_adv_msafra_tab.value = "<i>Treine o modelo primeiro.</i>"; return
+        if not (self.date_col or "").strip():
+            self.out_adv_msafra_tab.value = ("<div class='mseg-legend'>Informe a coluna de "
+                                             "data (<code>date_col</code>) para métricas por "
+                                             "safra.</div>")
+            self.out_adv_msafra_fig.value = ""; return
+        with self._busy(self.btn_msafra, msg="calculando métricas por safra…"):
+            try:
+                ms = self.seg.metrics_by_safra(sample=self._adv_sample())
+                self.out_adv_msafra_tab.value = self._df_html(ms.round(4),
+                                                              max_height="300px", center=True)
+                mets = (("ks", "auc") if self.task_type == "classification"
+                        else ("mae", "rmse"))
+                self.out_adv_msafra_fig.value = self._fig_html(
+                    self.seg.plot_metrics_by_safra(sample=self._adv_sample(), metrics=mets),
+                    stretch=True)
+                self._log("[avançado] métricas por safra calculadas.")
+            except Exception as e:
+                self.out_adv_msafra_tab.value = f"<i>{e}</i>"
+                self.out_adv_msafra_fig.value = ""
+                self._log(f"[avançado] erro nas métricas por safra: {e}")
+
+    def _on_adv_backtest(self, b):
+        if self.seg.score_ is None:
+            self.out_adv_backtest.value = "<i>Treine o modelo primeiro.</i>"; return
+        if not (self.date_col or "").strip():
+            self.out_adv_backtest.value = ("<div class='mseg-legend'>Informe a coluna de "
+                                           "data (<code>date_col</code>) para o backtest por "
+                                           "safra.</div>"); return
+        with self._busy(self.btn_backtest_plot, msg="gerando o backtest gráfico…"):
+            try:
+                tol = float(self.tx_tol_adv.value) / 100.0
+                self.out_adv_backtest.value = self._fig_html(
+                    self.seg.plot_backtest(sample=self._adv_sample(), tolerancia=tol),
+                    stretch=True)
+                self._log("[avançado] backtest gráfico gerado.")
+            except Exception as e:
+                self.out_adv_backtest.value = f"<i>{e}</i>"
+                self._log(f"[avançado] erro no backtest gráfico: {e}")
 
     # ------------------------------------------------------------------ display
     def _ipython_display_(self):

@@ -150,8 +150,9 @@ def binning_table(
 
     if tem_target and problem_type == "classification":
         out["event_rate"] = g["target"].mean().round(6)
-        maus = g["target"].apply(lambda s: float((s == 1).sum()))
-        bons = g["target"].apply(lambda s: float((s == 0).sum()))
+        # Contagens vetorizadas (o apply por bin era uma passada Python por grupo).
+        maus = (tab["target"] == 1).groupby(tab["bin"], observed=True).sum().astype(float)
+        bons = (tab["target"] == 0).groupby(tab["bin"], observed=True).sum().astype(float)
         dist_mau = maus / max(maus.sum(), _EPS)
         dist_bom = bons / max(bons.sum(), _EPS)
         woe = np.log((dist_bom + _EPS) / (dist_mau + _EPS))

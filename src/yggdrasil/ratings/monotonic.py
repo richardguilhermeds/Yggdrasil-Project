@@ -19,13 +19,18 @@ from __future__ import annotations
 from typing import Dict
 
 import numpy as np
-from scipy.stats import chi2_contingency, mannwhitneyu
 
 from ..utils import idx_para_letra
+
+# NOTA DE DESEMPENHO: scipy.stats é importado **lazy** (dentro da função), não no
+# topo — este módulo é puxado por `import yggdrasil` (via ratings) e o import no
+# topo anulava o padrão lazy documentado em metrics/classification.py.
 
 
 def _p_value_inversao(v_prev: np.ndarray, v_curr: np.ndarray, problem_type: str) -> float:
     """p-valor da diferença entre dois grupos adjacentes (na amostra OOT)."""
+    from scipy.stats import chi2_contingency, mannwhitneyu
+
     if len(v_prev) == 0 or len(v_curr) == 0:
         return 1.0
 

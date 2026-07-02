@@ -3965,6 +3965,7 @@ class TreeSegmenter:
                 "task_type": self.task_type,
                 "sample_col": self.sample_col,
                 "ref_sample": self.ref_sample,
+                "date_col": self.date_col,
                 "min_leaf_rows": self.min_leaf_rows,
                 "feature_labels": dict(self.feature_labels),
             },
@@ -4031,10 +4032,17 @@ class TreeSegmenter:
     def from_dict(cls, data: dict, df: pd.DataFrame, verbose: bool = False):
         """Reconstrói um segmentador a partir de `to_dict()` + um DataFrame."""
         meta = data.get("meta", {})
+        # date_col entrou no meta depois (JSONs antigos não têm a chave → None);
+        # se o df fornecido não tiver a coluna, degrada para None em vez de
+        # falhar no construtor — a coluna é só para os gráficos no tempo.
+        date_col = meta.get("date_col")
+        if date_col is not None and date_col not in df.columns:
+            date_col = None
         seg = cls(df, target=meta.get("target", "target"),
                   task_type=meta.get("task_type", "classification"),
                   sample_col=meta.get("sample_col"),
                   ref_sample=meta.get("ref_sample", "DES"),
+                  date_col=date_col,
                   feature_labels=meta.get("feature_labels"),
                   min_leaf_rows=meta.get("min_leaf_rows", 50),
                   verbose=verbose)

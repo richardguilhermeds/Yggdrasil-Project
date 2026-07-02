@@ -39,16 +39,20 @@ def fmt_month_year(values) -> List[str]:
     return out
 
 
-def month_year_axis(ax, values=None) -> None:
+def month_year_axis(ax, values=None, max_ticks: int = 18) -> None:
     """Formata o eixo X de ``ax`` como **mmm/aa** (padrão do repositório).
 
     Com ``values`` (as datas/posições dos ticks), fixa os ticks em ``0..n-1`` e
-    aplica :func:`fmt_month_year`. Sem ``values``, reescreve os rótulos atuais do
-    eixo (útil quando já são textos 'AAAA-MM')."""
+    aplica :func:`fmt_month_year`; quando há mais safras que ``max_ticks``, os
+    ticks são afinados (1 a cada *k*) para os rótulos não colidirem. Sem
+    ``values``, reescreve os rótulos atuais do eixo (útil quando já são textos
+    'AAAA-MM')."""
     if values is not None:
         vals = list(values)
-        ax.set_xticks(range(len(vals)))
-        ax.set_xticklabels(fmt_month_year(vals))
+        step = max(1, -(-len(vals) // max_ticks))  # ceil(n / max_ticks)
+        pos = list(range(0, len(vals), step))
+        ax.set_xticks(pos)
+        ax.set_xticklabels(fmt_month_year([vals[i] for i in pos]))
     else:
         labels = [t.get_text() for t in ax.get_xticklabels()]
         if any(labels):
@@ -60,6 +64,18 @@ def colormap():
     from matplotlib.colors import LinearSegmentedColormap
 
     return LinearSegmentedColormap.from_list("yggdrasil", [COR_PRIMARIA, COR_SECUNDARIA])
+
+
+def colormap_divergente():
+    """Colormap divergente steelblue → branco → crimson.
+
+    Para grandezas com **zero neutro** (ex.: correlações em [-1, 1]): o branco
+    marca o zero e os extremos têm o mesmo peso visual — o :func:`colormap`
+    sequencial mapearia correlação 0 num tom intermediário sem significado."""
+    from matplotlib.colors import LinearSegmentedColormap
+
+    return LinearSegmentedColormap.from_list(
+        "yggdrasil_div", [COR_PRIMARIA, "#ffffff", COR_SECUNDARIA])
 
 
 def gradient(n: int) -> List:
@@ -76,5 +92,6 @@ def gradient(n: int) -> List:
     return [cmap(i / (n - 1)) for i in range(n)]
 
 
-__all__ = ["COR_PRIMARIA", "COR_SECUNDARIA", "COR_NEUTRA", "colormap", "gradient",
-           "MESES_PT", "fmt_month_year", "month_year_axis"]
+__all__ = ["COR_PRIMARIA", "COR_SECUNDARIA", "COR_NEUTRA", "colormap",
+           "colormap_divergente", "gradient", "MESES_PT", "fmt_month_year",
+           "month_year_axis"]

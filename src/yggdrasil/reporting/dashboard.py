@@ -50,6 +50,13 @@ _COR_CARD_EDGE = "#CCCCCC"
 _COR_CARD_LABEL = "#666666"
 
 
+def _style_ax(ax) -> None:
+    """Grade discreta por eixo (substitui o antigo ``sns.set_theme`` global,
+    que mutava os rcParams do notebook inteiro do usuário)."""
+    ax.set_axisbelow(True)
+    ax.grid(True, alpha=0.3, linewidth=0.8)
+
+
 def _draw_cards(fig, gs, problem_type: str, metrics: Dict[str, float]) -> None:
     from matplotlib.patches import Rectangle
 
@@ -68,6 +75,7 @@ def _draw_cards(fig, gs, problem_type: str, metrics: Dict[str, float]) -> None:
 
 
 def _shap_importance_bar(ax, importance: pd.DataFrame, max_display: int) -> None:
+    _style_ax(ax)
     d = importance.head(max_display).iloc[::-1]  # mais importante no topo
     ax.barh(range(len(d)), d["mean_abs_shap"], color=_COR_BARRA, alpha=0.85,
             edgecolor="white")
@@ -79,6 +87,7 @@ def _shap_importance_bar(ax, importance: pd.DataFrame, max_display: int) -> None
 
 def _shap_beeswarm(fig, ax, shap_values: np.ndarray, X: pd.DataFrame,
                    max_display: int) -> None:
+    _style_ax(ax)
     feature_names = list(X.columns)
     imp = np.abs(shap_values).mean(axis=0)
     ordem = np.argsort(imp)[::-1][:max_display][::-1]  # mais importante no topo
@@ -106,6 +115,7 @@ def _shap_beeswarm(fig, ax, shap_values: np.ndarray, X: pd.DataFrame,
 
 
 def _safra_distribution(ax, df, rating_col, cfg, ratings, cores) -> None:
+    _style_ax(ax)
     comp = (df.groupby(["_mes", rating_col], observed=True).size()
               .unstack(rating_col).reindex(columns=ratings).fillna(0))
     comp_pct = comp.div(comp.sum(axis=1), axis=0) * 100
@@ -122,6 +132,7 @@ def _safra_distribution(ax, df, rating_col, cfg, ratings, cores) -> None:
 
 def _vintage_chart(ax, df, cfg, y_label) -> None:
     """Carteira: volumetria por safra em BARRAS + alvo médio por safra em LINHA."""
+    _style_ax(ax)
     g = (df.groupby("_mes", observed=True)
            .agg(vol=(cfg.target_col, "size"), alvo=(cfg.target_col, "mean")))
     x = list(range(len(g)))
@@ -176,12 +187,6 @@ def build_dashboard(
             buf = BytesIO()
             self.savefig(buf, format="png", dpi=110, bbox_inches="tight")
             return buf.getvalue()
-
-    try:
-        import seaborn as sns
-        sns.set_theme(style="whitegrid", context="notebook")
-    except Exception:  # seaborn é opcional, só para o estilo da grade
-        pass
 
     eval_sample = eval_sample or cfg.oot_sample
     metrics = metrics or {}
@@ -251,6 +256,7 @@ def build_dashboard(
 
         # G1 — barras de VOLUMETRIA + linha do alvo médio, por rating (invertido)
         ax1 = fig.add_subplot(gs[row, 0])
+        _style_ax(ax1)
         ax1.bar(range(len(ratings)), agg["pct_vol"], color=_COR_BARRA, alpha=0.6,
                 edgecolor="white", linewidth=1.0)
         ax1.set_xticks(range(len(ratings)))
@@ -273,6 +279,7 @@ def build_dashboard(
 
         # G3 — série temporal do alvo médio por rating
         ax3 = fig.add_subplot(gs[row, 2])
+        _style_ax(ax3)
         serie = (df.groupby(["_mes", rating_col], observed=True)[tg].mean()
                    .unstack(rating_col).reindex(columns=ratings))
         for k, rt in enumerate(ratings):
@@ -287,6 +294,7 @@ def build_dashboard(
 
         # G4 — dispersão do alvo por rating (boxplot)
         ax4 = fig.add_subplot(gs[row, 3])
+        _style_ax(ax4)
         dados = [df.loc[df[rating_col] == rt, tg].dropna().values for rt in ratings]
         rotulos = [str(r) for r in ratings]
         try:  # matplotlib >= 3.9 renomeou 'labels' para 'tick_labels'

@@ -23,7 +23,6 @@ dependencies = [
     "shap>=0.44",
     "optbinning>=0.19",
     "matplotlib>=3.6",
-    "seaborn>=0.12",
     # Motores de boosting incluídos por padrão (o ModelSegmenter os usa direto;
     # RandomForest/ExtraTrees/GradientBoosting/HistGB já vêm via scikit-learn).
     "lightgbm>=4.0",

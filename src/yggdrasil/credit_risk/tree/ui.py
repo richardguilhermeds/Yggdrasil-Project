@@ -21,6 +21,8 @@ sobre o DataFrame e o alvo reais. Recursos:
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import pandas as pd
 
 try:
@@ -532,14 +534,27 @@ class TreeSegmenterUI:
         self.cb_automerge_na = W.Checkbox(value=False, indent=False,
                                           description="também juntar faltantes ao bin mais próximo",
                                           layout=W.Layout(width="98%"))
-        self.tx_json_path = W.Text(description="arquivo", value="arvore_pd.json",
+        _suf = self._risk_label.lower()          # "pd" (clf) ou "lgd" (reg) no nome default
+        self.tx_json_path = W.Text(description="arquivo", value=f"arvore_{_suf}.json",
                                    layout=full, style=dstyle, placeholder="caminho .json")
         self.btn_save_json = mk("Salvar árvore (JSON)", "success",
                                 "Salva a estrutura da árvore num arquivo JSON", "save")
         self.btn_load_json = mk("Carregar árvore (JSON)", "info",
                                 "Carrega uma árvore salva e reaplica ao DataFrame atual", "upload")
+        # --- confirmação de sobrescrita INLINE (aba Histórico, sob os campos de
+        # caminho): aviso + botões criados UMA vez e reutilizados a cada chamada
+        # (antes o diálogo era desenhado no console e 2 botões novos vazavam por
+        # chamada) — ver _confirm_overwrite.
+        self.html_confirm = W.HTML()
+        self.btn_confirm_yes = W.Button(description="Sobrescrever", button_style="danger",
+                                        icon="exclamation-triangle")
+        self.btn_confirm_no = W.Button(description="Cancelar", icon="times")
+        self.box_confirm = W.VBox(
+            [self.html_confirm, W.HBox([self.btn_confirm_yes, self.btn_confirm_no])],
+            layout=W.Layout(display="none", width="100%"))
+        self._confirm_pending = None      # {"path", "do_save", "owner"} enquanto aguarda
         # --- imagem da árvore (matplotlib) ---
-        self.tx_img_path = W.Text(description="imagem", value="arvore_pd.png",
+        self.tx_img_path = W.Text(description="imagem", value=f"arvore_{_suf}.png",
                                   layout=full, style=dstyle,
                                   placeholder="caminho .png/.svg (opcional)")
         self.btn_plot = mk("Ver / salvar árvore (imagem)", "info",
@@ -633,6 +648,8 @@ class TreeSegmenterUI:
         self.btn_automerge.on_click(self._on_automerge)
         self.btn_save_json.on_click(self._on_save_json)
         self.btn_load_json.on_click(self._on_load_json)
+        self.btn_confirm_yes.on_click(self._on_confirm_yes)
+        self.btn_confirm_no.on_click(self._on_confirm_no)
         self.btn_pdf.on_click(self._on_pdf)
         self.btn_plot.on_click(self._on_plot)
         self.btn_plot_hide.on_click(self._on_plot_hide)
@@ -708,7 +725,8 @@ class TreeSegmenterUI:
             f"<div class='treeui-banner'><div class='logo'>{_bg_logo}</div>"
             f"<div><div class='t'>{_bg_titulo}</div>"
             f"<div class='s'>Construtor de árvore · {_bg_sub} · "
-            "PSI ao vivo (DES) · teste de hipótese entre folhas adjacentes</div></div></div>")
+            f"PSI ao vivo ({self.ref_sample}) · teste de hipótese entre folhas adjacentes"
+            "</div></div></div>")
         bar_box = W.VBox([self.bar]); bar_box.add_class("treeui-bar")
 
         # ---- legendas reutilizadas (task-aware) -------------------------
@@ -733,8 +751,8 @@ class TreeSegmenterUI:
             f"separação da variável na <b>folha selecionada</b> (★ = maior). {_iv_faixas} "
             "<b>bins</b> = nº de faixas ideais do binning ótimo na folha.</div>"
             "<div class='treeui-legend' style='margin-top:6px;padding-top:6px;"
-            "border-top:1px solid #eef1f4'><b>PSI</b> = estabilidade da variável (DES × demais "
-            "amostras), calculado <b>nos mesmos bins do IV</b>, pior caso: "
+            f"border-top:1px solid #eef1f4'><b>PSI</b> = estabilidade da variável "
+            f"({self.ref_sample} × demais amostras), calculado <b>nos mesmos bins do IV</b>, pior caso: "
             "<span style='color:#137a3e'>&lt;0.10 estável</span> · "
             "<span style='color:#9a6b00'>0.10–0.25 atenção</span> · "
             "<span style='color:#b3261e'>&ge;0.25 instável</span>.</div>")
@@ -744,7 +762,7 @@ class TreeSegmenterUI:
         #   TOPO: Árvore & quebras  ·AO LADO·  Information Value  + régua da folha
         #   DETALHE: folha (detalhe) | dividir | ações + auto-fit  e, abaixo,
         #     distribuição da variável+cortes | histograma da PD da folha
-        #   RODAPÉ: Preview da árvore (imagem) em largura total  (Assistente OFF)
+        #   RODAPÉ: Preview da árvore (imagem) em largura total
         # ================================================================
         sep_top = W.HTML("<div class='treeui-band'>① Topo · loop árvore → folha → IV → agir</div>")
 
@@ -778,9 +796,10 @@ class TreeSegmenterUI:
         det_c1 = W.VBox([card_leaf], layout=W.Layout(width="30%"))
 
         self.btn_sugcuts.layout.width = "99%"
+        self.btn_suggest.layout.width = "99%"
         card_split = W.VBox([
             W.HTML("<div class='treeui-h'>Dividir a folha selecionada</div>"),
-            self.dd_leaf, self.dd_feature, self.btn_sugcuts, self.tg_mode,
+            self.dd_leaf, self.dd_feature, self.btn_suggest, self.btn_sugcuts, self.tg_mode,
             self.sl_bins, self.dd_split_criterion,
             self.cb_minbin, self.sl_minbin, self.cb_maxbin, self.sl_maxbin,
             self.cb_mindiff, self.sl_mindiff,
@@ -825,17 +844,17 @@ class TreeSegmenterUI:
         card_preview = W.VBox([
             W.HTML("<div class='treeui-h'>Distribuição da variável · cortes sugeridos</div>"),
             W.HTML("<div class='treeui-legend'>Distribuição da variável na folha selecionada "
-                   "(DES), com os cortes propostos marcados.</div>"),
+                   f"({self.ref_sample}), com os cortes propostos marcados.</div>"),
             self.out_preview_chart,
         ], layout=W.Layout(width="49%")); card_preview.add_class("treeui-card")
         if self._is_clf:
-            _hist_h = "PD da folha (taxa de default · DES)"
-            _hist_leg = ("Taxa de default da folha selecionada (DES), com IC de Wilson e a "
-                         "PD da carteira como referência.")
+            _hist_h = f"PD da folha (taxa de default · {self.ref_sample})"
+            _hist_leg = (f"Taxa de default da folha selecionada ({self.ref_sample}), com IC "
+                         "de Wilson e a PD da carteira como referência.")
         else:
-            _hist_h = "LGD da folha (alvo médio · DES)"
-            _hist_leg = ("Distribuição do alvo (LGD) na folha selecionada (DES), com a média "
-                         "da folha e a da carteira como referência.")
+            _hist_h = f"LGD da folha (alvo médio · {self.ref_sample})"
+            _hist_leg = (f"Distribuição do alvo (LGD) na folha selecionada ({self.ref_sample}), "
+                         "com a média da folha e a da carteira como referência.")
         card_hist = W.VBox([
             W.HTML(f"<div class='treeui-h'>{_hist_h}</div>"),
             W.HTML(f"<div class='treeui-legend'>{_hist_leg}</div>"),
@@ -845,12 +864,11 @@ class TreeSegmenterUI:
                             layout=W.Layout(width="100%", align_items="stretch",
                                             justify_content="space-between"))
 
-        # ---- Assistente: DESATIVADO por enquanto -------------------------
-        # (sugerir · auto-fundir · podar) — widgets seguem criados; p/ reativar,
-        # monte o card e inclua-o numa coluna do detalhe.
-        #   self.btn_suggest · self.sl_alpha, self.cb_automerge_na, self.btn_automerge
-        #   self.sl_repr, self.sl_gap, self.dd_test, self.btn_prune
-        # (o seletor "Teste" mora aqui; com o Assistente off, usa o padrão Mann-Whitney)
+        # ---- Assistente (sugerir · auto-fundir · podar): controles DISTRIBUÍDOS --
+        # btn_suggest → card "Dividir a folha" (acima) · sl_alpha/sl_gap/
+        # cb_automerge_na/btn_automerge → card "Auto-merge" (aba Avançado) ·
+        # sl_repr/btn_prune → card "Poda por representatividade" (aba Avançado) ·
+        # dd_test → card da tabela de folhas (aba Diagnóstico)
 
         # ---- RODAPÉ: Preview da árvore (imagem), largura total -----------
         sep_img = W.HTML("<div class='treeui-band treeui-band-muted'>③ Preview da árvore — "
@@ -871,43 +889,49 @@ class TreeSegmenterUI:
         # ================================================================
         # ABA ③ DIAGNÓSTICO — folhas · discriminação · métricas · bootstrap · qualidade
         # ================================================================
+        _ref = self.ref_sample
         tbl_legend = W.HTML(
             "<div class='treeui-legend'>"
-            "<b>PSI por amostra</b> (estabilidade da folha entre DES e a amostra): "
+            f"<b>PSI por amostra</b> (estabilidade da folha entre {_ref} e a amostra): "
             "<span style='background:#e6f6ec;padding:1px 5px;border-radius:3px'>&lt;0.10 estável</span> "
             "<span style='background:#fdf3da;padding:1px 5px;border-radius:3px'>0.10–0.25 atenção</span> "
             "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>&ge;0.25 instável</span>"
             "<br><b>p (irmãs)</b> = p-valor de um <b>teste de hipótese</b> que compara a "
             f"<b>distribuição do alvo ({'default' if self._is_clf else 'LGD'})</b> da folha com a da <b>irmã adjacente</b> (mesmo "
-            f"pai, na amostra de referência DES). H₀: as duas irmãs têm {'a mesma PD' if self._is_clf else 'o mesmo LGD'}. "
+            f"pai, na amostra de referência {_ref}). H₀: as duas irmãs têm {'a mesma PD' if self._is_clf else 'o mesmo LGD'}. "
             "O teste é o <b>Mann-Whitney U</b> (não-paramétrico, padrão) ou o <b>t de Welch</b> "
             "(médias, variâncias desiguais) — escolha no seletor <b>Teste</b>. "
             "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>p alto (&gt;0,05, em vermelho)</span> "
             "⇒ <b>não</b> dá para distinguir as irmãs ⇒ candidatas a fusão; "
             "<span style='color:#137a3e'>p baixo</span> ⇒ folhas bem separadas. "
             "Só <b>irmãs</b> são comparadas (a última de cada grupo e o nó de faltantes ficam em branco)."
-            "<br><b>p (DES×OOT)</b> = p-valor de um teste de hipótese da <b>aderência da "
+            f"<br><b>p ({_ref}×OOT)</b> = p-valor de um teste de hipótese da <b>aderência da "
             f"estimativa</b>: compara a <b>distribuição do alvo ({'default' if self._is_clf else 'LGD'})</b> da "
-            "MESMA folha entre <b>DES</b> e <b>OOT</b> (mesmo teste do seletor). H₀: a folha "
-            f"tem {'a mesma PD' if self._is_clf else 'o mesmo LGD'} em DES e OOT. Semântica <b>inversa</b> à do p (irmãs): "
+            f"MESMA folha entre <b>{_ref}</b> e <b>OOT</b> (mesmo teste do seletor). H₀: a folha "
+            f"tem {'a mesma PD' if self._is_clf else 'o mesmo LGD'} em {_ref} e OOT. Semântica <b>inversa</b> à do p (irmãs): "
             "<span style='color:#137a3e'>p alto (&gt;0,05)</span> ⇒ estimativa <b>estável</b> entre as amostras; "
             "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>p baixo (em vermelho)</span> "
-            "⇒ a estimativa <b>deslocou</b> de DES para OOT (folha pouco aderente).</div>")
+            f"⇒ a estimativa <b>deslocou</b> de {_ref} para OOT (folha pouco aderente).</div>")
         table_scroll = W.Box([self.out_table],
                              layout=W.Layout(overflow="auto", width="100%",
                                              max_height="420px"))
+        # o seletor "Teste" (citado na legenda acima) mora AQUI: escolhe o teste
+        # usado nas colunas p (irmãs) e p (DES×OOT) — trocar recalcula a tabela.
+        self.dd_test.layout = W.Layout(width="300px")
         card_table = W.VBox([W.HTML("<div class='treeui-h'>Folhas criadas · PSI &amp; teste de hipótese (irmãs)</div>"),
-                             tbl_legend, table_scroll,
+                             tbl_legend,
+                             W.HBox([self.dd_test]),
+                             table_scroll,
                              W.HBox([self.btn_copy_table]), self.out_table_tsv])
         card_table.add_class("treeui-card")
 
         sib_legend = W.HTML(
             f"<div class='treeui-legend'>Compara o <b>{_rl} médio</b> das folhas de um mesmo "
             "pai (<b>folhas-irmãs</b>) e checa se a <b>ordem de risco</b> se mantém. "
-            f"A ordem de <b>referência</b> é o {_rl} na <b>DES</b>; uma <b>inversão</b> ocorre "
+            f"A ordem de <b>referência</b> é o {_rl} na <b>{_ref}</b>; uma <b>inversão</b> ocorre "
             f"quando, numa amostra ou safra, uma folha de menor risco passa a ter {_rl} "
             "<i>maior</i> que uma irmã de maior risco (as linhas se cruzam). "
-            f"O gráfico da esquerda mostra o {_rl} por <b>amostra</b> (DES, OOT, …) e o da "
+            f"O gráfico da esquerda mostra o {_rl} por <b>amostra</b> ({_ref}, OOT, …) e o da "
             "direita por <b>safra</b> ao longo do tempo (faixas vermelhas = safras com "
             "inversão). O <b>indicador</b> resume: "
             "<span style='background:#e7f5ee;padding:1px 5px;border-radius:3px'>verde sem inversão</span> "
@@ -949,13 +973,13 @@ class TreeSegmenterUI:
         card_discrim.add_class("treeui-card")
 
         if self._is_clf:
-            _ml = ("a régua prediz a PD pela taxa de default do segmento na referência (DES); "
+            _ml = (f"a régua prediz a PD pela taxa de default do segmento na referência ({_ref}); "
                    "avaliada como modelo em cada amostra · <b>KS</b>/<b>AUC</b>/<b>Gini</b> "
                    "altos = a segmentação ordena bem o risco · <b>Acurácia</b>/<b>F1</b> no "
                    "corte KS-ótimo")
             _mh = "Discriminação (régua como modelo de PD)"
         else:
-            _ml = ("a régua prediz o LGD pela média do alvo no segmento (referência DES); "
+            _ml = (f"a régua prediz o LGD pela média do alvo no segmento (referência {_ref}); "
                    "avaliada como modelo em cada amostra · <b>MAE</b>/<b>RMSE</b> menores e "
                    "<b>R²</b> maior = a régua reproduz melhor o alvo")
             _mh = "Desempenho (régua como modelo de LGD)"
@@ -968,14 +992,14 @@ class TreeSegmenterUI:
         if self._is_clf:
             boot_legend = W.HTML(
                 "<div class='treeui-legend'>IC da PD (taxa de default) por folha via bootstrap na "
-                "referência (DES). Se houver OOT, mostra a PD de OOT e verifica a "
+                f"referência ({_ref}). Se houver OOT, mostra a PD de OOT e verifica a "
                 "<b>aderência</b>: <span style='color:#137a3e'>dentro</span> do IC = estável; "
                 "<span style='color:#b3261e'>acima/abaixo</span> = PD deslocou além da incerteza "
                 "amostral. Calcule quando a árvore estiver fechada.</div>")
         else:
             boot_legend = W.HTML(
                 "<div class='treeui-legend'>IC do alvo (LGD) por folha via bootstrap na "
-                "referência (DES). Se houver OOT, mostra o LGD de OOT e verifica a "
+                f"referência ({_ref}). Se houver OOT, mostra o LGD de OOT e verifica a "
                 "<b>aderência</b>: <span style='color:#137a3e'>dentro</span> do IC = estável; "
                 "<span style='color:#b3261e'>acima/abaixo</span> = LGD deslocou além da incerteza "
                 "amostral. Calcule quando a árvore estiver fechada.</div>")
@@ -1017,7 +1041,7 @@ class TreeSegmenterUI:
                          "monotonicidade · calibração · backtest</div>")
         valid_legend = W.HTML(
             f"<div class='treeui-legend'>Roda as três checagens: <b>monotonicidade</b> do {_rl} nas "
-            "notas (DES e demais amostras), <b>calibração</b> prevista (DES) × realizada (OOT) por "
+            f"notas ({_ref} e demais amostras), <b>calibração</b> prevista ({_ref}) × realizada (OOT) por "
             f"folha, e <b>backtest</b> do {_rl} previsto × realizado por safra (informe a coluna de "
             "tempo). O <b>relatório</b> reúne tudo num Markdown com as imagens.</div>")
         card_validacao = W.VBox([
@@ -1096,7 +1120,7 @@ class TreeSegmenterUI:
             self.out_pdf,
         ])
         card_pdf.add_class("treeui-card")
-        tab_hist = W.VBox([sep_hist, hist_row, card_pdf])
+        tab_hist = W.VBox([sep_hist, hist_row, self.box_confirm, card_pdf])
 
         # ================================================================
         # ABA ② ANÁLISE DE VARIÁVEL — perfil, distribuição e estabilidade
@@ -1140,7 +1164,7 @@ class TreeSegmenterUI:
             self.out_var_table], layout=W.Layout(width="49%"))
         card_var_table.add_class("treeui-card")
         card_var_psi = W.VBox([
-            W.HTML("<div class='treeui-h'>PSI por safra · vs. data de referência (DES)</div>"),
+            W.HTML(f"<div class='treeui-h'>PSI por safra · vs. data de referência ({self.ref_sample})</div>"),
             self.out_var_psi], layout=W.Layout(width="49%"))
         card_var_psi.add_class("treeui-card")
         var_row_b = W.HBox([card_var_table, card_var_psi],
@@ -1158,8 +1182,16 @@ class TreeSegmenterUI:
         card_merge = W.VBox([
             W.HTML("<div class='treeui-h'>Auto-merge de folhas semelhantes</div>"),
             W.HTML("<div class='treeui-legend'>Funde folhas-irmãs com risco estatisticamente "
-                   "<b>indistinguível</b> (p &gt; α no teste entre adjacentes).</div>"),
-            self.sl_alpha, self.cb_automerge_na, self.btn_automerge]); card_merge.add_class("treeui-card")
+                   "<b>indistinguível</b> (p &gt; α no teste entre adjacentes) ou com diferença "
+                   f"de {_rl} abaixo do <b>Δ{_rl} mínimo</b>.</div>"),
+            self.sl_alpha, self.sl_gap, self.cb_automerge_na, self.btn_automerge]); card_merge.add_class("treeui-card")
+        card_prune = W.VBox([
+            W.HTML("<div class='treeui-h'>Poda por representatividade</div>"),
+            W.HTML("<div class='treeui-legend'>Funde com a irmã as folhas com "
+                   "representatividade abaixo do <b>min repr%</b> ou com diferença de "
+                   f"{_rl} menor que o <b>Δ{_rl} mínimo</b> (slider do card ao lado). "
+                   "Folhas fechadas (🔒) são preservadas.</div>"),
+            self.sl_repr, self.btn_prune]); card_prune.add_class("treeui-card")
         imp_row = W.HBox(
             [W.VBox([self.out_importance], layout=W.Layout(width="49%")),
              W.VBox([self.out_importance_chart], layout=W.Layout(width="49%"))],
@@ -1181,9 +1213,13 @@ class TreeSegmenterUI:
             W.HTML("<div class='treeui-legend'>Carrega outra árvore salva em JSON e compara com a "
                    "atual: migração de notas, concordância e métricas lado a lado.</div>"),
             W.HBox([self.tx_diff_path, self.btn_diff]), self.out_diff]); card_diff.add_class("treeui-card")
+        card_sug.layout.width = "36%"
+        card_merge.layout.width = "32%"
+        card_prune.layout.width = "30%"
         tab_avancado = W.VBox([
-            W.HBox([card_sug, card_merge],
-                   layout=W.Layout(justify_content="space-between", width="100%")),
+            W.HBox([card_sug, card_merge, card_prune],
+                   layout=W.Layout(justify_content="space-between", width="100%",
+                                   align_items="stretch")),
             card_imp, card_sql, card_diff])
 
         # ---- montagem das abas (Análise de variável vem em 2º) ----------
@@ -3771,32 +3807,39 @@ class TreeSegmenterUI:
     # Persistência: salvar / carregar a árvore em JSON
     # ==================================================================
     def _confirm_overwrite(self, path, do_save):
-        """Se ``path`` já existir, abre uma janela de confirmação (no log) e só
-        executa ``do_save()`` quando o usuário clica em 'Sobrescrever'. Se o
-        arquivo não existir (ou ``path`` for vazio), salva direto."""
+        """Se ``path`` já existir, mostra a confirmação INLINE (aba Histórico, sob
+        os campos de caminho) e só executa ``do_save()`` no clique em 'Sobrescrever'.
+        Sem conflito (ou ``path`` vazio), salva direto. O diálogo inline não é
+        apagado por ``clear_output`` do console (o antigo se perdia no rodapé)."""
         import html as _html
         import os
         if not path or not os.path.exists(path):
             do_save(); return
-        aviso = W.HTML(
+        self._confirm_pending = {"path": path, "do_save": do_save}
+        self.html_confirm.value = (
             "<div style='border:1px solid #f0c36d;background:#fff8e6;border-radius:10px;"
             "padding:10px 12px;font-size:12.5px;color:#664d03;line-height:1.5'>"
             "<b>⚠️ O arquivo já existe</b><br>"
             f"<code>{_html.escape(path)}</code><br>Deseja sobrescrever?</div>")
-        btn_yes = W.Button(description="Sobrescrever", button_style="danger",
-                           icon="exclamation-triangle")
-        btn_no = W.Button(description="Cancelar", icon="times")
-        def _yes(_):
-            self.out_log.clear_output()
-            do_save()
-        def _no(_):
+        self.box_confirm.layout.display = ""      # revela o diálogo inline
+
+    def _on_confirm_yes(self, _):
+        pend = self._confirm_pending
+        self._confirm_pending = None
+        self.box_confirm.layout.display = "none"
+        self.html_confirm.value = ""
+        if pend is not None:
+            pend["do_save"]()
+
+    def _on_confirm_no(self, _):
+        pend = self._confirm_pending
+        self._confirm_pending = None
+        self.box_confirm.layout.display = "none"
+        self.html_confirm.value = ""
+        if pend is not None:
             with self.out_log:
                 self.out_log.clear_output(wait=True)
-                print(f"Operação cancelada — '{path}' não foi sobrescrito.")
-        btn_yes.on_click(_yes); btn_no.on_click(_no)
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            display(W.VBox([aviso, W.HBox([btn_yes, btn_no])]))
+                print(f"Operação cancelada — '{pend['path']}' não foi sobrescrito.")
 
     def _on_save_json(self, _):
         path = self.tx_json_path.value.strip()

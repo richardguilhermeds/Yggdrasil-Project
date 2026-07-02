@@ -14,7 +14,7 @@ import pandas as pd
 
 from ..config import ColumnConfig
 from ..reporting.style import (COR_NEUTRA, COR_PRIMARIA, COR_SECUNDARIA, colormap,
-                               gradient, month_year_axis)
+                               colormap_divergente, gradient, month_year_axis)
 from .bivariate import event_rate_by_bin
 from .config import EDAConfig
 from .dtypes import as_numeric, infer_feature_kind
@@ -196,11 +196,20 @@ def plot_correlation_heatmap(matrix: pd.DataFrame, title: str = "Correlação", 
         ax.text(0.5, 0.5, "sem features suficientes", ha="center")
         ax.axis("off")
         return fig
-    im = ax.imshow(matrix.values, cmap=colormap(), vmin=-1, vmax=1)
+    # Divergente centrado no branco: correlação 0 fica neutra (o sequencial
+    # mapeava 0 num tom intermediário sem significado).
+    im = ax.imshow(matrix.values, cmap=colormap_divergente(), vmin=-1, vmax=1)
     ax.set_xticks(range(len(matrix)))
     ax.set_xticklabels(matrix.columns, rotation=45, ha="right", fontsize=8)
     ax.set_yticks(range(len(matrix)))
     ax.set_yticklabels(matrix.index, fontsize=8)
+    if len(matrix) <= 15:  # anota os valores quando a matriz é legível
+        for i in range(len(matrix)):
+            for j in range(len(matrix)):
+                v = matrix.values[i, j]
+                if np.isfinite(v):
+                    ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=7,
+                            color="white" if abs(v) > 0.6 else "#333333")
     if fig is not None:
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     ax.set_title(title, fontsize=11, fontweight="bold")

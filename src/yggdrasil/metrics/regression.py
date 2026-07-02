@@ -8,12 +8,11 @@ from __future__ import annotations
 from typing import Dict
 
 import numpy as np
-from sklearn.metrics import (
-    mean_absolute_error,
-    median_absolute_error,
-    mean_squared_error,
-    r2_score,
-)
+
+# NOTA DE DESEMPENHO: sklearn.metrics é importado **lazy** (dentro da função),
+# não no topo — mesmo padrão de metrics/classification.py. Este módulo é puxado
+# por `import yggdrasil` (via pipeline); o import no topo anulava o esforço de
+# baratear a 1ª célula do notebook.
 
 # Métricas em que "maior é melhor".
 HIGHER_IS_BETTER = {
@@ -57,6 +56,9 @@ def smape(y_true, y_pred) -> float:
 
 def regression_metrics(y_true, y_pred, digits: int = 6) -> Dict[str, float]:
     """Calcula o pacote de métricas de regressão."""
+    from sklearn.metrics import (mean_absolute_error, median_absolute_error,
+                                 mean_squared_error, r2_score)
+
     y_true, y_pred = _as_arrays(y_true, y_pred)
     metrics = {
         "rmse": np.sqrt(mean_squared_error(y_true, y_pred)),

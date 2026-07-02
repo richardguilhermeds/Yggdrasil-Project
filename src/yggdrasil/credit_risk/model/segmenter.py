@@ -297,15 +297,28 @@ def _inverted_pairs(ordered, values) -> list:
 
 
 def _fit_optbinning_splits(b, x, y) -> list:
-    """Roda ``b.fit(x, y)`` e devolve ``list(b.splits)``; silencia warnings
-    benignos e devolve ``[]`` se o ajuste falhar."""
+    """Roda ``b.fit(x, y)`` e devolve ``list(b.splits)``.
+
+    Silencia os ``RuntimeWarning`` de "divide by zero" benignos do optbinning
+    (em ``auto_monotonic``, quando algum prebin fica com 0 registros) — o ajuste
+    ainda produz cortes válidos. Devolve ``[]`` se o ajuste falhar.
+
+    ``ValueError`` (problema inviável / sem corte) é o caminho esperado e fica
+    silencioso. Qualquer outra exceção (ex.: incompatibilidade de versão de
+    dependência) é **avisada** em vez de mascarada como "sem corte válido".
+    """
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             with np.errstate(divide="ignore", invalid="ignore"):
                 b.fit(x, y)
         return list(b.splits)
-    except Exception:
+    except ValueError:
+        return []
+    except Exception as e:
+        warnings.warn(
+            f"optbinning falhou inesperadamente em '{getattr(b, 'name', '?')}': "
+            f"{type(e).__name__}: {e}", RuntimeWarning)
         return []
 
 
@@ -2626,6 +2639,138 @@ class ModelSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
+    def plot_cap(self, samples=None, figsize=(5.8, 5.2), dpi=150, save_path=None,
+                 ax=None):
+        """Curva CAP (Cumulative Accuracy Profile / Lorenz): % acumulado de
+        **eventos** capturados × % acumulado da **carteira** ordenada do pior
+        para o melhor score. Sobrepõe múltiplas amostras na mesma figura
+        (default: referência + demais, como o ``plot_roc`` da família tree),
+        com o **AR** (accuracy ratio) de cada amostra na legenda, a diagonal
+        (modelo aleatório) e a curva do modelo perfeito (da referência).
+
+        Somente classificação — o CAP é definido sobre eventos binários."""
+        if self.task_type != "classification":
+            raise ValueError("plot_cap é exclusivo de classificação (eventos "
+                             "binários); em regressão use plot_calibration/"
+                             "plot_residuals.")
+        if self.score_ is None:
+            raise RuntimeError("Ajuste o modelo antes (fit / set_model / load).")
+        grupos = self._samples() if samples is None else [a for a in self._samples()
+                                                          if a in samples]
+        fig, ax = _new_ax(figsize, dpi, ax)
+        ax.plot([0, 1], [0, 1], color="#bbb", ls="--", lw=1, label="aleatório")
+        cores = ["#15324a", "#d6453e", "#1aa64b", "#caa000", "#6b3fa0", "#2a9d8f"]
+        perfeito_feito = False
+        alguma = False
+        for i, a in enumerate(grupos):
+            y, sc = self._sample_scores(a)
+            if y.size == 0 or len(np.unique(y)) < 2:
+                continue
+            # carteira ordenada do PIOR para o MELHOR score (maior prob. de
+            # evento primeiro) → % acumulado de eventos capturados
+            order = np.argsort(-sc, kind="mergesort")
+            y_ord = y[order]
+            n = y_ord.size
+            cum_port = np.arange(1, n + 1) / n
+            cum_ev = np.cumsum(y_ord) / max(float(y_ord.sum()), 1.0)
+            x_cap = np.concatenate(([0.0], cum_port))
+            y_cap = np.concatenate(([0.0], cum_ev))
+            # AR = (área do modelo − 0,5) / (área do perfeito − 0,5)
+            tx_ev = float(y.mean())
+            # Área sob a CAP pela regra do trapézio (manual: independe da versão
+            # do numpy — trapz foi deprecado na 2.0 e trapezoid não existe <2.0).
+            area_mod = float(np.sum(np.diff(x_cap) * (y_cap[:-1] + y_cap[1:]) / 2.0))
+            area_perf = 1.0 - tx_ev / 2.0
+            ar = ((area_mod - 0.5) / (area_perf - 0.5)
+                  if area_perf > 0.5 else float("nan"))
+            if not perfeito_feito:                       # perfeito da 1ª amostra útil
+                ax.plot([0, tx_ev, 1], [0, 1, 1], color="#8891a0", ls=":", lw=1.4,
+                        label="modelo perfeito")
+                perfeito_feito = True
+            ax.plot(x_cap, y_cap, color=cores[i % len(cores)], lw=2.0,
+                    label=f"{a} · AR={ar:.3f}")
+            alguma = True
+        if not alguma:
+            ax.text(0.5, 0.5, "sem as duas classes para a curva CAP", ha="center",
+                    va="center", transform=ax.transAxes, color="#889")
+        ax.set_xlim(0, 1); ax.set_ylim(0, 1.02)
+        ax.set_xlabel("% acumulado da carteira (pior → melhor score)")
+        ax.set_ylabel("% acumulado de eventos capturados")
+        _pct_axis(ax, "both")
+        ax.set_title("Curva CAP (Lorenz)", fontsize=11, fontweight="bold",
+                     color="#15324a")
+        ax.legend(fontsize=8, loc="lower right"); ax.grid(alpha=0.15)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def plot_lift(self, sample=None, n_bins=10, figsize=(7.2, 4.2), dpi=150,
+                  save_path=None, ax=None):
+        """Lift por decil de score (barras; decil 1 = piores scores) + linha de
+        **gains** acumulado (% de eventos capturados até o decil) num segundo
+        eixo. Linha de referência em lift = 1 (modelo aleatório).
+
+        Somente classificação — lift/gains são definidos sobre eventos binários."""
+        if self.task_type != "classification":
+            raise ValueError("plot_lift é exclusivo de classificação (eventos "
+                             "binários); em regressão use plot_calibration/"
+                             "plot_residuals.")
+        if self.score_ is None:
+            raise RuntimeError("Ajuste o modelo antes (fit / set_model / load).")
+        y, sc = self._sample_scores(sample)
+        fig, ax = _new_ax(figsize, dpi, ax)
+        if y.size == 0 or len(np.unique(y)) < 2:
+            ax.text(0.5, 0.5, "amostra com 1 classe", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        # decil 1 = PIORES scores (maior prob. de evento) — ordena descendente e
+        # fatia em n_bins grupos de tamanho ~igual (robusto a empates de score).
+        order = np.argsort(-sc, kind="mergesort")
+        y_ord = y[order]
+        n = y_ord.size
+        n_bins = max(2, min(int(n_bins), n))
+        idx = np.minimum((np.arange(n) * n_bins) // n, n_bins - 1)
+        tx_geral = float(y_ord.mean())
+        tot_ev = max(float(y_ord.sum()), 1.0)
+        lifts, gains = [], []
+        acum = 0.0
+        for g in range(n_bins):
+            m = idx == g
+            tx_g = float(y_ord[m].mean()) if m.any() else float("nan")
+            lifts.append(tx_g / tx_geral if tx_geral > 0 else float("nan"))
+            acum += float(y_ord[m].sum())
+            gains.append(acum / tot_ev)
+        x = np.arange(1, n_bins + 1)
+        ax.bar(x, lifts, color="#3b6ea5", edgecolor="#2f5d82", alpha=0.9,
+               width=0.72, label="lift do decil")
+        ax.axhline(1.0, color="#d6453e", lw=1.2, ls="--", label="lift = 1 (aleatório)")
+        for x0, lf in zip(x, lifts):
+            if np.isfinite(lf):
+                ax.text(x0, lf, f"{lf:.2f}", ha="center", va="bottom", fontsize=7.5,
+                        color="#15324a")
+        ax.set_xticks(list(x))
+        ax.set_xlabel("decil de score (1 = piores scores)")
+        ax.set_ylabel("lift (taxa do decil / taxa geral)")
+        ax.set_ylim(0, max([l for l in lifts if np.isfinite(l)] + [1.0]) * 1.18)
+        # gains acumulado no eixo secundário (% de eventos capturados)
+        ax2 = ax.twinx()
+        ax2.plot(x, gains, color="#15324a", lw=2.0, marker="o", ms=4.5,
+                 label="gains acumulado")
+        ax2.set_ylim(0, 1.05)
+        ax2.set_ylabel("% de eventos capturados (acum.)")
+        _pct_axis(ax2, "y")
+        h1, l1 = ax.get_legend_handles_labels()
+        h2, l2 = ax2.get_legend_handles_labels()
+        ax.legend(h1 + h2, l1 + l2, fontsize=8, loc="center right", framealpha=0.9)
+        ax.set_title(f"Lift e gains por decil de score · {sample or self.ref_sample}",
+                     fontsize=11, fontweight="bold", color="#15324a")
+        ax.grid(axis="y", alpha=0.15)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
     def plot_score_distribution(self, sample=None, bins=30, figsize=(6.6, 3.8),
                                 dpi=150, save_path=None, ax=None):
         y, sc = self._sample_scores(sample)
@@ -2826,6 +2971,98 @@ class ModelSegmenter:
         # alarga o eixo-x p/ que os rótulos no fim das barras não saiam da caixa
         # (o texto tem largura fixa em px; com span pequeno ele estourava o xlim)
         _fit_labels_x(fig, ax, txts)
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    # ---- discriminação por safra ----
+    def metrics_by_safra(self, sample=None, time_col=None) -> pd.DataFrame:
+        """Métricas do modelo **por safra** (mês de ``date_col``/``time_col``).
+
+        Classificação: ``safra, n, taxa_evento, auc, ks, gini``. Regressão:
+        ``safra, n, previsto_medio, realizado_medio, mae, rmse, r2``. Reutiliza
+        :func:`~yggdrasil.metrics.classification_metrics` /
+        :func:`~yggdrasil.metrics.regression_metrics` (mesmo pacote de
+        :meth:`metrics`). Safras com poucas linhas ou classe única não quebram —
+        as métricas ficam NaN.
+
+        ``sample=None`` usa toda a base (as safras normalmente já separam
+        DES/OOT); informe uma amostra para restringir."""
+        time_col = time_col or self.date_col
+        if time_col is None:
+            raise ValueError("Informe time_col ou configure date_col.")
+        if self.score_ is None:
+            raise RuntimeError("Ajuste o modelo antes (fit / set_model / load).")
+        base = self._frame(sample) if sample else self.df
+        if time_col not in base.columns:
+            raise ValueError(f"Coluna de tempo '{time_col}' não existe no DataFrame.")
+        is_clf = self.task_type == "classification"
+        sc_full = self.score_.reindex(base.index)
+        safra = pd.to_datetime(base[time_col], errors="coerce").dt.to_period("M")
+        met_cols = (["taxa_evento", "auc", "ks", "gini"] if is_clf
+                    else ["previsto_medio", "realizado_medio", "mae", "rmse", "r2"])
+        rows = []
+        for per, g in base.groupby(safra):            # groupby dropa safra NaT
+            y = g[self.target].to_numpy(dtype="float64")
+            sc = sc_full.reindex(g.index).to_numpy(dtype="float64")
+            ok = ~np.isnan(y) & ~np.isnan(sc)
+            y, sc = y[ok], sc[ok]
+            row = {"safra": str(per), "n": int(y.size)}
+            row.update({c: float("nan") for c in met_cols})
+            if is_clf:
+                row["taxa_evento"] = self._risco(y)
+                if y.size >= 2 and len(np.unique(y)) == 2:
+                    try:
+                        m = classification_metrics(y, sc)
+                        row.update({c: m.get(c, float("nan"))
+                                    for c in ("auc", "ks", "gini")})
+                    except Exception:  # noqa: BLE001 - safra degenerada ⇒ NaN
+                        pass
+            else:
+                row["previsto_medio"] = float(np.mean(sc)) if sc.size else float("nan")
+                row["realizado_medio"] = self._risco(y)
+                if y.size >= 2:
+                    try:
+                        m = regression_metrics(y, sc)
+                        row.update({c: m.get(c, float("nan"))
+                                    for c in ("mae", "rmse", "r2")})
+                    except Exception:  # noqa: BLE001 - safra degenerada ⇒ NaN
+                        pass
+            rows.append(row)
+        return (pd.DataFrame(rows, columns=["safra", "n"] + met_cols)
+                .sort_values("safra").reset_index(drop=True))
+
+    def plot_metrics_by_safra(self, sample=None, metrics=("ks", "auc"),
+                              time_col=None, figsize=(9.6, 4.2), dpi=150,
+                              save_path=None, ax=None):
+        """Evolução das métricas do modelo por safra (linhas), a partir de
+        :meth:`metrics_by_safra`. ``metrics`` que não existirem para o
+        ``task_type`` são ignoradas (default de regressão: ``mae``/``rmse``)."""
+        ms = self.metrics_by_safra(sample, time_col)
+        cols = [m for m in metrics if m in ms.columns and m not in ("safra", "n")]
+        if not cols:                        # default de clf pedido em regressão
+            cols = [c for c in ("mae", "rmse") if c in ms.columns]
+        fig, ax = _new_ax(figsize, dpi, ax)
+        if ms.empty or not cols:
+            ax.text(0.5, 0.5, "sem métricas por safra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        x = list(range(len(ms)))
+        cores = ["#15324a", "#d6453e", "#1aa64b", "#caa000", "#6b3fa0", "#2a9d8f"]
+        for i, c in enumerate(cols):
+            ax.plot(x, ms[c], marker="o", lw=2.0, ms=4.5, color=cores[i % len(cores)],
+                    markeredgecolor="#33424f", markeredgewidth=0.5, label=c.upper())
+        # rótulos mmm/aa; com muitas safras, afina os ticks p/ não sobrepor
+        labels = _fmt_safras(ms["safra"])
+        step = max(1, len(ms) // 18)
+        ax.set_xticks(x[::step])
+        ax.set_xticklabels(labels[::step], rotation=45, ha="right", fontsize=8)
+        ax.set_xlabel("safra"); ax.set_ylabel("métrica")
+        ax.set_title(f"Métricas por safra · {sample or 'todas as amostras'}",
+                     fontsize=11, fontweight="bold", color="#15324a")
+        ax.grid(alpha=0.15)
+        ax.legend(fontsize=8, loc="best", framealpha=0.9)
+        fig.tight_layout()
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
@@ -3530,6 +3767,54 @@ class ModelSegmenter:
                          "status": ("ok" if (np.isfinite(gap) and abs(gap) <= tol)
                                     else "alerta")})
         return pd.DataFrame(rows).sort_values("safra").reset_index(drop=True)
+
+    def plot_backtest(self, sample=None, tolerancia=0.2, time_col=None,
+                      figsize=(9.6, 4.4), dpi=150, save_path=None, ax=None):
+        """Backtest gráfico: previsto × realizado por safra (duas linhas) com
+        **banda de tolerância** sombreada em torno do previsto
+        (``previsto ± tolerancia·previsto``; ``tolerancia=0.2`` = ±20%) e
+        marcadores destacados nos meses em que o realizado sai da banda.
+        Funciona nos dois ``task_type`` (unidade do alvo: PD/LGD). Usa a mesma
+        agregação por safra de :meth:`backtest`."""
+        bt = self.backtest(time_col=time_col, sample=sample)
+        fig, ax = _new_ax(figsize, dpi, ax)
+        if bt.empty:
+            ax.text(0.5, 0.5, "sem dados por safra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        x = list(range(len(bt)))
+        prev = bt["previsto_medio"].to_numpy(dtype="float64")
+        real = bt["realizado_medio"].to_numpy(dtype="float64")
+        lo = prev * (1.0 - float(tolerancia))
+        hi = prev * (1.0 + float(tolerancia))
+        ax.fill_between(x, lo, hi, color="#8aa4bf", alpha=0.25,
+                        label=f"tolerância ±{100 * tolerancia:.0f}%")
+        ax.plot(x, prev, color="#15324a", lw=2.2, marker="o", ms=4.5,
+                label="previsto (médio)")
+        ax.plot(x, real, color="#1aa64b", lw=2.0, marker="o", ms=4.5,
+                label="realizado (médio)")
+        # meses FORA da banda: marcador destacado em vermelho sobre o realizado
+        fora = np.isfinite(real) & np.isfinite(prev) & ((real < lo) | (real > hi))
+        if fora.any():
+            xs = [x0 for x0, f in zip(x, fora) if f]
+            ax.plot(xs, real[fora], "o", ms=9, mfc="none", mec="#d6453e", mew=2.0,
+                    label="fora da banda")
+        labels = _fmt_safras(bt["safra"])
+        step = max(1, len(bt) // 18)
+        ax.set_xticks(x[::step])
+        ax.set_xticklabels(labels[::step], rotation=45, ha="right", fontsize=8)
+        ax.set_xlabel("safra")
+        ax.set_ylabel("PD" if self.task_type == "classification" else "alvo médio")
+        _pct_axis(ax, "y")                                  # unidade do alvo, em %
+        ax.set_title(f"Backtest · previsto × realizado por safra · "
+                     f"{sample or 'todas as amostras'}", fontsize=11,
+                     fontweight="bold", color="#15324a")
+        ax.grid(alpha=0.15)
+        ax.legend(fontsize=8, loc="best", framealpha=0.9)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
 
     # ------------------------------------------------------------------
     # Export / predict / persistência

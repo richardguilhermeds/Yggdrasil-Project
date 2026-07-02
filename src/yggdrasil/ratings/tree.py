@@ -12,9 +12,14 @@ from typing import Dict
 
 import numpy as np
 import pandas as pd
-from sklearn.tree import DecisionTreeRegressor
 
 from .base import RatingStrategy
+
+# NOTA DE DESEMPENHO: sklearn.tree é importado **lazy** (dentro de _fit_binner),
+# não no topo — este módulo é puxado por `import yggdrasil` (via ratings) e o
+# import no topo anulava o padrão lazy documentado em metrics/classification.py.
+# (A anotação `DecisionTreeRegressor | None` não é avaliada em runtime graças ao
+# `from __future__ import annotations`.)
 
 
 class TreeRating(RatingStrategy):
@@ -37,6 +42,8 @@ class TreeRating(RatingStrategy):
         self.leaf_to_rank_: Dict[int, int] = {}
 
     def _fit_binner(self, scores_dev: np.ndarray, target_dev: np.ndarray) -> None:
+        from sklearn.tree import DecisionTreeRegressor
+
         min_leaf = max(
             int(len(scores_dev) * self.min_samples_leaf_frac),
             self.min_samples_leaf_abs,

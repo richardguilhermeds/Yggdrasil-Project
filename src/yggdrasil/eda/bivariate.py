@@ -46,9 +46,9 @@ def _wilson_ci(p: float, n: int, z: float = 1.96):
 
 def _iv_from_binned(bins, y) -> float:
     t = pd.DataFrame({"bin": np.asarray(bins), "y": np.asarray(y, dtype=float)})
-    g = t.groupby("bin", observed=True)["y"]
-    maus = g.apply(lambda s: float((s == 1).sum()))
-    bons = g.apply(lambda s: float((s == 0).sum()))
+    # Contagens vetorizadas (o apply por bin era uma passada Python por grupo).
+    maus = (t["y"] == 1).groupby(t["bin"], observed=True).sum().astype(float)
+    bons = (t["y"] == 0).groupby(t["bin"], observed=True).sum().astype(float)
     dm = maus / max(maus.sum(), _EPS)
     db = bons / max(bons.sum(), _EPS)
     woe = np.log((db + _EPS) / (dm + _EPS))

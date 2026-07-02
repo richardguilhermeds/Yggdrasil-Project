@@ -10,7 +10,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from ..reporting.style import COR_NEUTRA, COR_PRIMARIA, COR_SECUNDARIA, colormap, gradient
+from ..reporting.style import (COR_NEUTRA, COR_PRIMARIA, COR_SECUNDARIA, colormap,
+                               colormap_divergente, gradient)
 
 
 def _figure(figsize):
@@ -130,11 +131,20 @@ def plot_corr_heatmap(matrix: pd.DataFrame, title: str = "Correlação"):
     if matrix is None or matrix.empty:
         _empty(ax, "sem features suficientes")
         return fig
-    im = ax.imshow(matrix.values, cmap=colormap(), vmin=-1, vmax=1)
+    # Divergente centrado no branco: correlação 0 fica neutra (o sequencial
+    # mapeava 0 num tom intermediário sem significado).
+    im = ax.imshow(matrix.values, cmap=colormap_divergente(), vmin=-1, vmax=1)
     ax.set_xticks(range(n))
     ax.set_xticklabels(matrix.columns, rotation=45, ha="right", fontsize=8)
     ax.set_yticks(range(n))
     ax.set_yticklabels(matrix.index, fontsize=8)
+    if n <= 15:  # anota os valores quando a matriz é legível
+        for i in range(n):
+            for j in range(n):
+                v = matrix.values[i, j]
+                if np.isfinite(v):
+                    ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=7,
+                            color="white" if abs(v) > 0.6 else "#333333")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     ax.set_title(title, fontsize=11, fontweight="bold")
     return fig

@@ -72,7 +72,7 @@ Algoritmos disponíveis (registry extensível em `ALGORITHMS`):
 
 > Também aceita um modelo já treinado via `set_model(...)`. LightGBM e XGBoost vêm no core; o CatBoost é importado sob demanda e, sem ele, o erro orienta a instalar o extra `[catboost]`.
 
-**Tuning bayesiano (Optuna):** `seg.tune_optuna(algorithm="lightgbm", n_trials=40)` busca os hiperparâmetros que maximizam AUC (clf) ou R² (reg) no OOT e re-treina com os melhores. Na UI há um slider de *trials* e o botão Tunar com Optuna (com barra de progresso) na aba Modelo. Requer o extra `[optuna]`.
+**Tuning bayesiano (Optuna):** `seg.tune_optuna(algorithm="lightgbm", n_trials=40)` busca os hiperparâmetros que maximizam AUC (clf) ou R² (reg) no OOT e re-treina com os melhores. Na UI há um slider de *trials* e o botão Tunar com Optuna (com barra de progresso) na aba Modelo. O Optuna já vem no core (o extra `[optuna]` existe só por compatibilidade).
 
 Mais na UI e no segmentador: ratings em decis/quantil/árvore/optbin, e também manuais (`manual_score` por cortes de score, `manual_percentil` por lista de percentis); na regressão logística, a tabela da fórmula traz o p-valor (Wald) e estrelas de significância por coeficiente; relatório PDF do modelo (`report_pdf`) e tema escuro (toggle).
 
@@ -100,7 +100,6 @@ pip install -e ".[dev]"          # núcleo + ferramentas de teste/notebook
 pip install -e ".[ui]"           # opcional: UIs interativas (ipywidgets)
 pip install -e ".[spark]"        # opcional: geração/aplicação de régua em PySpark (fora do Databricks)
 pip install -e ".[catboost]"     # opcional: CatBoost (LightGBM e XGBoost já vêm no core)
-pip install -e ".[optuna]"       # opcional: tuning bayesiano (ModelSegmenter.tune_optuna)
 pip install -e ".[pycaret]"      # opcional: treino automatizado via PyCaret
 ```
 
