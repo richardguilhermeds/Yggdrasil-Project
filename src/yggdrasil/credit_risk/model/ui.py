@@ -781,7 +781,11 @@ class ModelSegmenterUI:
         self.btn_clear_bins.on_click(self._on_clear_bins)
         self.btn_create_cat.on_click(self._on_create_cat)
         self.tg_binmode.observe(lambda c: self._sync_binmode(), names="value")
-        self.dd_var2.observe(lambda c: self._sync_bin_controls(), names="value")
+        # trocar a variável re-sincroniza os controles de bin E re-renderiza a
+        # análise (tabela/gráficos/cards). Antes só sincronizava os bins, então os
+        # painéis ficavam presos na variável anterior até clicar em "Analisar".
+        self.dd_var2.observe(
+            lambda c: (self._sync_bin_controls(), self._on_analyze(None)), names="value")
         self.out_an_cards = W.HTML()
         self.out_an_distbad = W.HTML()    # distribuição + % de maus (gráfico único)
         self.out_an_table = W.HTML()
@@ -1575,6 +1579,11 @@ class ModelSegmenterUI:
 
     # ------------------------------------------------------------------ Aba 2 handlers
     def _on_analyze(self, b):
+        # o observer de dd_var2 pode chamar isto durante a construção/refresh —
+        # antes dos painéis existirem ou sem variável selecionada: no-op seguro.
+        if (getattr(self, "dd_var2", None) is None or self.dd_var2.value is None
+                or not hasattr(self, "out_an_table")):
+            return
         feat = self.dd_var2.value
         sample = None if self.dd_sample2.value == "(referência)" else self.dd_sample2.value
         tcol = self.tx_time2.value.strip() or None
