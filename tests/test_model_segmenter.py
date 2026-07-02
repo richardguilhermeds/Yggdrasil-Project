@@ -1337,3 +1337,101 @@ def test_tune_optuna_progress_callback(task):
                     progress_callback=lambda d, t, b: calls.append((d, t)))
     assert len(calls) == 4                       # um callback por trial
     assert calls[-1] == (4, 4)                   # último reporta conclusão
+
+
+# ----------------------------------------------------------------------
+# Two-Stage (hurdle de LGD): classificação P(y≥t) + regressão em y≥t
+# ----------------------------------------------------------------------
+def _synthetic_lgd(n=2500, seed=3):
+    """Regressão com massa em 0 (curados) — cenário típico de LGD hurdle."""
+    df = _synthetic("regression", n=n, seed=seed)
+    zero = df.sample(frac=0.4, random_state=seed).index
+    df.loc[zero, "target"] = 0.0
+    return df
+
+
+def test_two_stage_fit_metrics_e_rating():
+    df = _synthetic_lgd()
+    seg = ModelSegmenter(df, target="target", task_type="regression", sample_col="amostra",
+                         ref_sample="DES", date_col="dt_ref", verbose=False)
+    seg.fit_two_stage(threshold=0.2, clf_algorithm="logistica", reg_algorithm="linear")
+    assert seg.two_stage and abs(seg.two_stage_threshold - 0.2) < 1e-9
+    assert seg.score_ is not None and bool(seg.score_.notna().all())
+    # a resposta combinada respeita a âncora do grupo abaixo do threshold
+    assert float(seg.score_.min()) >= -1e-6
+    # três visões de métricas: classificador, regressão (grupo ≥ t), combinado
+    mc, mr, mm = seg.metrics_classifier(), seg.metrics_regressor(), seg.metrics()
+    assert {"amostra", "n", "taxa_1", "auc", "ks"} <= set(mc.columns)
+    assert {"amostra", "n", "rmse", "r2"} <= set(mr.columns)
+    assert {"amostra", "n", "rmse", "r2"} <= set(mm.columns)
+    # a 2ª etapa só conta o grupo ≥ t (n menor que o total da amostra)
+    n_des_reg = int(mr.loc[mr["amostra"] == "DES", "n"].iloc[0])
+    n_des_tot = int(mm.loc[mm["amostra"] == "DES", "n"].iloc[0])
+    assert 0 < n_des_reg < n_des_tot
+    # rating construído sobre a resposta combinada
+    seg.build_ratings(method="quantil", n_ratings=6)
+    assert len(seg.rating_labels_) >= 2
+
+
+def test_two_stage_gating():
+    df = _synthetic("regression", n=800, seed=4)
+    seg = ModelSegmenter(df, target="target", task_type="regression", sample_col="amostra",
+                         ref_sample="DES", verbose=False)
+    with pytest.raises(ValueError):                 # threshold acima do máximo → 1 classe
+        seg.fit_two_stage(threshold=float(df["target"].max()) + 1.0)
+    with pytest.raises(RuntimeError):               # métricas exigem o modo two-stage
+        seg.metrics_classifier()
+    dfc = _synthetic("classification", n=800, seed=4)
+    segc = ModelSegmenter(dfc, target="target", task_type="classification",
+                          sample_col="amostra", ref_sample="DES", verbose=False)
+    with pytest.raises(ValueError):                 # classificação não tem two-stage
+        segc.fit_two_stage(threshold=0.5)
+
+
+def test_two_stage_persistencia(tmp_path):
+    df = _synthetic_lgd(n=1500, seed=5)
+    seg = ModelSegmenter(df, target="target", task_type="regression", sample_col="amostra",
+                         ref_sample="DES", date_col="dt_ref", verbose=False)
+    seg.fit_two_stage(threshold=0.25)
+    p = str(tmp_path / "ts.json")
+    seg.save(p)
+    seg2 = ModelSegmenter(df, target="target", task_type="regression", sample_col="amostra",
+                          ref_sample="DES", date_col="dt_ref", verbose=False).load(p)
+    assert seg2.two_stage and abs(seg2.two_stage_threshold - 0.25) < 1e-9
+    assert np.allclose(seg.score_.to_numpy(), seg2.score_.to_numpy(), equal_nan=True)
+
+
+def test_ui_two_stage_regressao():
+    pytest.importorskip("ipywidgets")
+    import contextlib
+    import io
+    import matplotlib
+    matplotlib.use("Agg")
+    from yggdrasil.credit_risk.model import ModelSegmenterUI
+    df = _synthetic_lgd(n=1800, seed=6)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui = ModelSegmenterUI(df, target="target", task_type="regression",
+                              sample_col="amostra", ref_sample="DES", date_col="dt_ref")
+        assert ui.row_twostage.layout.display != "none"     # a opção existe em regressão
+        ui.cb_twostage.value = True
+        ui.sl_ts_threshold.value = 0.2
+        ui._on_fit(None)
+    assert ui.seg.two_stage
+    assert ui.box_twostage.layout.display == ""
+    assert ui.row_algo.layout.display == "none"             # modelo único fica escondido
+    assert "① Classificador" in ui.out_metrics.value
+    assert "③ Resposta combinada" in ui.out_metrics.value
+    assert ui.seg.rating_labels_                            # rating trazido automaticamente
+    assert bool(ui.out_rating_table.value)
+
+
+def test_ui_two_stage_oculto_em_classificacao():
+    pytest.importorskip("ipywidgets")
+    import contextlib
+    import io
+    from yggdrasil.credit_risk.model import ModelSegmenterUI
+    df = _synthetic("classification", n=800, seed=6)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui = ModelSegmenterUI(df, target="target", task_type="classification",
+                              sample_col="amostra", ref_sample="DES")
+    assert ui.row_twostage.layout.display == "none"         # sem two-stage em classificação

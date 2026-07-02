@@ -965,9 +965,66 @@ class ModelSegmenterUI:
         self.dd_algo.observe(lambda c: self._sync_algo_visibility(), names="value")
         self.cb_max_depth.observe(lambda c: self._sync_algo_visibility(), names="value")
 
+        # --- Two-Stage (hurdle de LGD): opção só para regressão -------------
+        _tgt = pd.to_numeric(self.df[self.seg.target], errors="coerce")
+        if _tgt.notna().any():
+            _tmin, _tmax = float(np.nanmin(_tgt.to_numpy())), float(np.nanmax(_tgt.to_numpy()))
+            _tmed = float(np.nanmedian(_tgt.to_numpy()))
+        else:
+            _tmin, _tmax, _tmed = 0.0, 1.0, 0.5
+        if not (_tmax > _tmin):                       # alvo constante → evita slider inválido
+            _tmax = _tmin + 1.0
+        _tmed = min(max(_tmed, _tmin), _tmax)
+        _tstep = round((_tmax - _tmin) / 100.0, 6) or 0.01
+        self.cb_twostage = W.Checkbox(value=False, indent=False,
+                                      description="Two-Stage (hurdle de LGD)")
+        self.cb_twostage.tooltip = ("Modela a regressão em DUAS etapas: um classificador para "
+                                    "P(y ≥ threshold) e uma regressão no grupo acima; a resposta "
+                                    "final é E[y] combinando os dois. O rating usa essa resposta.")
+        self.sl_ts_threshold = W.FloatSlider(
+            value=round(_tmed, 6), min=round(_tmin, 6), max=round(_tmax, 6), step=_tstep,
+            description="threshold da resposta:", readout_format=".3f",
+            style={"description_width": "initial"}, layout=W.Layout(width="420px"))
+        self.sl_ts_threshold.tooltip = ("Acima do threshold → 1 (classe de perda, modelada pela "
+                                        "regressão); abaixo → 0 (âncora).")
+        _clf_algos = [(ALGORITHMS[a]["label"], a) for a in ALGORITHMS
+                      if "classification" in ALGORITHMS[a]["tasks"]]
+        _reg_algos = [(ALGORITHMS[a]["label"], a) for a in ALGORITHMS
+                      if "regression" in ALGORITHMS[a]["tasks"]]
+        self.dd_ts_clf = W.Dropdown(options=_clf_algos, value="logistica",
+                                    description="Classificador (etapa 1):",
+                                    style={"description_width": "initial"})
+        self.dd_ts_reg = W.Dropdown(options=_reg_algos, value="linear",
+                                    description="Regressão (etapa 2):",
+                                    style={"description_width": "initial"})
+        self.box_twostage = W.VBox([
+            W.HTML("<div class='mseg-legend'>Etapa 1 classifica <b>P(y ≥ threshold)</b>; etapa 2 "
+                   "regride <b>y</b> no grupo acima; a resposta final é <b>E[y] = P(≥t)·reg(x) + "
+                   "(1−P)·âncora</b> (âncora = média abaixo do threshold). O rating é construído "
+                   "sobre essa resposta combinada. Usa os valores crus (sem WoE).</div>"),
+            self.sl_ts_threshold,
+            W.HBox([self.dd_ts_clf, self.dd_ts_reg]),
+        ])
+        self.cb_twostage.observe(lambda c: (self._sync_algo_visibility(), self._mark_dirty()),
+                                 names="value")
+        self.row_twostage = W.HBox([self.cb_twostage])
+        self.row_algo = W.HBox([self.dd_algo, self.cb_woe])
+        self.box_tune = W.VBox([
+            W.HTML("<div class='mseg-legend'>Tuning bayesiano (Optuna): busca os melhores "
+                   "hiperparâmetros do algoritmo selecionado e treina com eles.</div>"),
+            W.HBox([self.sl_trials, self.btn_tune]),
+            W.HBox([self.cb_tune_mlflow]),
+            self.pb_tune,
+            self.out_tune,
+        ])
+        if self.task_type != "regression":           # Two-Stage só existe em regressão
+            self.row_twostage.layout.display = "none"
+            self.box_twostage.layout.display = "none"
+
         train_card = W.VBox([
             W.HTML("<div class='mseg-h'>Treinar (ou usar modelo pré-ajustado via set_model)</div>"),
-            W.HBox([self.dd_algo, self.cb_woe]),
+            self.row_algo,
+            self.row_twostage, self.box_twostage,
             self.box_logit, self.box_ensemble, self.box_lr, self.box_adv,
             self.box_tuning_space,
             self.out_algo_help,
@@ -975,12 +1032,7 @@ class ModelSegmenterUI:
             W.HBox([self.btn_fit, self.btn_shap]),
             self.pb_fit,
             self.out_fit_status,
-            W.HTML("<div class='mseg-legend'>Tuning bayesiano (Optuna): busca os melhores "
-                   "hiperparâmetros do algoritmo selecionado e treina com eles.</div>"),
-            W.HBox([self.sl_trials, self.btn_tune]),
-            W.HBox([self.cb_tune_mlflow]),
-            self.pb_tune,
-            self.out_tune,
+            self.box_tune,
         ])
         train_card.add_class("mseg-card")
         self.formula_card = W.VBox([
@@ -1759,7 +1811,24 @@ class ModelSegmenterUI:
 
     def _sync_algo_visibility(self):
         """Mostra só os hiperparâmetros do algoritmo escolhido: C (logística),
-        n_estimators/max_depth (random forest · gradient boosting), nada (linear)."""
+        n_estimators/max_depth (random forest · gradient boosting), nada (linear).
+
+        No modo **Two-Stage** (regressão), esconde os controles de modelo único e
+        o tuning e revela a caixa de duas etapas (threshold + dois algoritmos)."""
+        two = (self.task_type == "regression"
+               and getattr(self, "cb_twostage", None) is not None
+               and self.cb_twostage.value)
+        self.box_twostage.layout.display = "" if two else "none"
+        if two:
+            self.row_algo.layout.display = "none"
+            for _bx in (self.box_logit, self.box_ensemble, self.box_lr, self.box_adv,
+                        self.box_tuning_space, self.box_tune, self.formula_card):
+                _bx.layout.display = "none"
+            self.out_algo_help.value = ""
+            self.out_woe_help.value = ""
+            return
+        self.row_algo.layout.display = ""
+        self.box_tune.layout.display = ""
         algo = self.dd_algo.value
         ensemble = algo not in ("logistica", "linear")
         self.box_logit.layout.display = "" if algo == "logistica" else "none"
@@ -2038,33 +2107,52 @@ class ModelSegmenterUI:
             self.out_woe_help.value = ""
 
     def _on_fit(self, b):
+        two = self.task_type == "regression" and self.cb_twostage.value
         algo = self.dd_algo.value
         transform = "woe" if self.cb_woe.value else "raw"
         # barra "ocupada" enquanto o fit (síncrono) roda
         self.btn_fit.disabled = True
         self.pb_fit.bar_style = "info"
         self.pb_fit.value = self.pb_fit.max
-        self.pb_fit.description = "treinando…"
+        self.pb_fit.description = "treinando (2 etapas)…" if two else "treinando…"
         self.pb_fit.layout.visibility = "visible"
-        self.out_fit_status.value = (f"<div class='mseg-legend'><i>ajustando o modelo "
-                                     f"({algo})… pode levar alguns segundos.</i></div>")
+        if two:
+            self.out_fit_status.value = ("<div class='mseg-legend'><i>ajustando o Two-Stage "
+                                         "(classificação + regressão)… pode levar alguns "
+                                         "segundos.</i></div>")
+        else:
+            self.out_fit_status.value = (f"<div class='mseg-legend'><i>ajustando o modelo "
+                                         f"({algo})… pode levar alguns segundos.</i></div>")
         try:
-            self.seg.fit(algo, hyperparams=self._collect_hyperparams(algo), transform=transform)
-            modo = "WoE/bins" if transform == "woe" else "valores crus"
-            self._log(f"[fit] {algo} treinado com {len(self.seg.model_features)} "
-                      f"variáveis ({modo}).")
+            if two:
+                thr = float(self.sl_ts_threshold.value)
+                self.seg.fit_two_stage(threshold=thr, clf_algorithm=self.dd_ts_clf.value,
+                                       reg_algorithm=self.dd_ts_reg.value)
+                self._log(f"[fit] Two-Stage treinado (threshold={thr:.4f}; "
+                          f"clf={self.dd_ts_clf.value}, reg={self.dd_ts_reg.value}).")
+                self.out_fit_status.value = (
+                    f"<div class='mseg-legend'><span style='color:#157a52;font-weight:600'>"
+                    f"✓ Two-Stage treinado (threshold={thr:.4f}) · "
+                    f"{len(self.seg.model_features)} variáveis.</span></div>")
+            else:
+                self.seg.fit(algo, hyperparams=self._collect_hyperparams(algo), transform=transform)
+                modo = "WoE/bins" if transform == "woe" else "valores crus"
+                self._log(f"[fit] {algo} treinado com {len(self.seg.model_features)} "
+                          f"variáveis ({modo}).")
+                self.out_fit_status.value = (
+                    f"<div class='mseg-legend'><span style='color:#157a52;font-weight:600'>"
+                    f"✓ {algo} treinado com {len(self.seg.model_features)} variáveis "
+                    f"({modo}).</span></div>")
             self.pb_fit.bar_style = "success"
             self.pb_fit.description = "concluído ✓"
-            self.out_fit_status.value = (
-                f"<div class='mseg-legend'><span style='color:#157a52;font-weight:600'>"
-                f"✓ {algo} treinado com {len(self.seg.model_features)} variáveis "
-                f"({modo}).</span></div>")
             self._render_metrics()
             self._render_model_plots()
             self._render_formula()
             self._clear_dirty()               # modelo recém-treinado ⇒ em dia
             self._clear_adv_outputs()         # descarta gráficos do modelo antigo
             self._refresh_bar()
+            if two:                           # já traz o rating sobre a resposta combinada
+                self._auto_build_rating()
         except Exception as e:
             self.pb_fit.bar_style = "danger"
             self.pb_fit.description = "erro"
@@ -2136,9 +2224,12 @@ class ModelSegmenterUI:
         self._refresh_bar()
 
     def _render_metrics(self):
-        m = self.seg.metrics().round(4)
-        self.out_metrics.value = (self._metrics_table_html(m)
-                                  + self._metrics_guide_html(list(m.columns)))
+        if getattr(self.seg, "two_stage", False):
+            self._render_metrics_twostage()
+        else:
+            m = self.seg.metrics().round(4)
+            self.out_metrics.value = (self._metrics_table_html(m)
+                                      + self._metrics_guide_html(list(m.columns)))
         # shift DES→OOT das principais métricas (só quando há OOT para comparar).
         # O título vem do layout (row_shift_dist); aqui vai só a figura, ampliada
         # e esticada p/ preencher a coluna ao lado da distribuição do score.
@@ -2151,6 +2242,45 @@ class ModelSegmenterUI:
         else:
             self.out_metric_shift.value = ("<div class='mseg-legend'>Sem amostra OOT "
                                            "para comparar.</div>")
+
+    def _render_metrics_twostage(self):
+        """Três visões do Two-Stage: classificador (etapa 1), regressão (etapa 2,
+        no grupo y≥t) e resposta combinada E[y] (base do rating)."""
+        t = self.seg.two_stage_threshold or 0.0
+        anchor = getattr(self.seg.model, "anchor0", 0.0)
+        clf = self.seg.metrics_classifier().round(4)
+        reg = self.seg.metrics_regressor().round(4)
+        comb = self.seg.metrics().round(4)
+        self.out_metrics.value = (
+            f"<div class='mseg-legend'><b>Two-Stage (hurdle)</b> · threshold da resposta = "
+            f"<b>{t:.4f}</b>. Etapa 1 classifica P(y ≥ t); etapa 2 regride y no grupo ≥ t; a "
+            f"resposta final é <b>E[y] = P(≥t)·reg(x) + (1−P)·âncora</b> "
+            f"(âncora = {anchor:.4f}).</div>"
+            "<div class='mseg-h'>① Classificador · P(y ≥ threshold)</div>"
+            + self._df_html(clf, center=True)
+            + "<div class='mseg-h'>② Regressão · restrita ao grupo y ≥ threshold</div>"
+            + self._df_html(reg, center=True)
+            + "<div class='mseg-h'>③ Resposta combinada E[y] — base do rating</div>"
+            + self._df_html(comb, center=True))
+
+    def _auto_build_rating(self):
+        """Best-effort: constrói e renderiza o rating sobre a resposta atual do
+        modelo — chamado logo após o fit Two-Stage para já trazer o rating da
+        resposta combinada. Métodos manuais (que exigem cortes) são deixados para
+        a aba Ratings & Score."""
+        method = self.dd_method.value
+        if method in ("manual_score", "manual_percentil"):
+            self._log("[ratings] método manual selecionado — gere o rating na aba "
+                      "Ratings & Score informando os cortes.")
+            return
+        try:
+            self.seg.build_ratings(method=method, n_ratings=int(self.sl_nratings.value),
+                                   monotonic_fusion=self.cb_fusion.value)
+            self._render_ratings()
+            self._log(f"[ratings] gerado sobre a resposta combinada "
+                      f"({len(self.seg.rating_labels_)} faixas) — ver a aba Ratings & Score.")
+        except Exception as e:
+            self._log(f"[ratings] não foi possível gerar automaticamente: {e}")
 
     def _metrics_table_html(self, m):
         """Tabela de métricas centralizada e com identificador visual: cada célula
@@ -2583,6 +2713,7 @@ class ModelSegmenterUI:
         if algo in valid and self.dd_algo.value != algo:
             self.dd_algo.value = algo          # dispara _sync_algo_visibility
         self._sync_hyperparam_widgets()        # controles refletem o modelo carregado
+        self._sync_twostage_widgets()          # reflete o modo Two-Stage carregado
         self._clear_dirty()                    # modelo carregado está "em dia"
         self._clear_adv_outputs()
         self._refresh_bar(); self._refresh_vars(force=True); self._sync_sel()
@@ -2627,6 +2758,30 @@ class ModelSegmenterUI:
         l2 = _l2_param_for(self.dd_algo.value)   # nome do L2 varia por algoritmo
         if l2:
             _set(self.fl_l2, l2, float, self.cb_l2)
+
+    def _sync_twostage_widgets(self):
+        """Reflete o estado Two-Stage do modelo (após load/set_model) nos controles:
+        checkbox, threshold e algoritmos das duas etapas."""
+        if self.task_type != "regression" or not hasattr(self, "cb_twostage"):
+            return
+        two = bool(getattr(self.seg, "two_stage", False))
+        if self.cb_twostage.value != two:
+            self.cb_twostage.value = two       # observer sincroniza a visibilidade
+        if two:
+            t = self.seg.two_stage_threshold
+            if t is not None:
+                try:
+                    self.sl_ts_threshold.value = min(max(float(t), self.sl_ts_threshold.min),
+                                                     self.sl_ts_threshold.max)
+                except Exception:              # noqa: BLE001 - fora de range ⇒ ignora
+                    pass
+            hp = getattr(self.seg, "hyperparams", {}) or {}
+            ca, ra = hp.get("clf_algorithm"), hp.get("reg_algorithm")
+            if ca in [v for _, v in self.dd_ts_clf.options]:
+                self.dd_ts_clf.value = ca
+            if ra in [v for _, v in self.dd_ts_reg.options]:
+                self.dd_ts_reg.value = ra
+        self._sync_algo_visibility()
 
     def _on_mlflow(self, b):
         # validações antes de rodar (mesmo espírito da TreeSegmenterUI): exige

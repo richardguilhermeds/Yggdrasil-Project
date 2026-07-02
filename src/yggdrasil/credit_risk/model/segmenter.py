@@ -556,6 +556,42 @@ class WoeBinEncoder(BaseEstimator, TransformerMixin):
         return out
 
 
+class _TwoStageModel:
+    """Modelo *hurdle* de duas etapas para regressão (típico de LGD).
+
+    Combina um **classificador** que estima ``P(y ≥ threshold)`` com uma
+    **regressão** treinada apenas no grupo ``y ≥ threshold``; a resposta final é
+    o valor esperado
+
+        E[y | x] = P(≥t|x)·reg(x) + (1 − P(≥t|x))·âncora₀,
+
+    onde ``âncora₀`` é a média observada do grupo abaixo do threshold (≈ 0 em
+    LGD). Expõe ``predict`` (a resposta combinada) para se comportar como
+    qualquer estimador de regressão no restante do pipeline (``score_``, ratings,
+    backtest, escoragem). Definido no nível do módulo para ser *picklable*
+    (joblib) junto dos dois sub-pipelines em :meth:`ModelSegmenter.save`."""
+
+    def __init__(self, clf, reg, threshold: float, anchor0: float):
+        self.clf = clf
+        self.reg = reg
+        self.threshold = float(threshold)
+        self.anchor0 = float(anchor0)
+
+    def proba(self, X) -> np.ndarray:
+        """P(y ≥ threshold | x) da etapa de classificação."""
+        p = np.asarray(self.clf.predict_proba(X))
+        return p[:, 1] if p.ndim == 2 and p.shape[1] >= 2 else np.ravel(p)
+
+    def reg_predict(self, X) -> np.ndarray:
+        """Previsão crua da etapa de regressão (treinada em y ≥ threshold)."""
+        return np.ravel(self.reg.predict(X))
+
+    def predict(self, X) -> np.ndarray:
+        """Resposta combinada E[y|x] = p·reg(x) + (1−p)·âncora₀."""
+        p = self.proba(X)
+        return p * self.reg_predict(X) + (1.0 - p) * self.anchor0
+
+
 # ======================================================================
 # Classe principal
 # ======================================================================
@@ -654,6 +690,10 @@ class ModelSegmenter:
         self.hyperparams: dict = {}
         self.feature_transform: str = "raw"   # "raw" | "woe" (binagem + WoE/risco do bin)
         self.model_features: list = []
+        # modelo Two-Stage (hurdle de LGD): classificação P(y≥t) + regressão em
+        # y≥t, combinadas em E[y]. Desligado por padrão; ligado por fit_two_stage.
+        self.two_stage: bool = False
+        self.two_stage_threshold: float | None = None
         # escala de negócio do score: o modelo produz uma predição crua (prob. em
         # [0,1] na classificação; alvo previsto na regressão) guardada em ``score_``
         # — usada pelas MÉTRICAS, calibração e ratings (fidelidade numérica). O que
@@ -2028,16 +2068,20 @@ class ModelSegmenter:
             fallback = float(mean_global) if np.isfinite(mean_global) else 0.0
         return {"kind": kind, "bins": enc_bins, "fallback": fallback}
 
-    def _build_pipeline(self, features, algorithm, hyperparams, transform="raw"):
+    def _build_pipeline(self, features, algorithm, hyperparams, transform="raw", task=None):
         from sklearn.compose import ColumnTransformer
         from sklearn.impute import SimpleImputer
         from sklearn.pipeline import Pipeline
 
-        est = _build_estimator(algorithm, self.task_type, hyperparams)
+        # ``task`` permite forçar classificação/regressão (usado pelo Two-Stage,
+        # que constrói um classificador e uma regressão a partir de um segmenter
+        # de regressão); por padrão segue o task_type do segmenter.
+        task = task or self.task_type
+        est = _build_estimator(algorithm, task, hyperparams)
         if transform == "woe":
             # variáveis transformadas no estilo scorecard (binagem + WoE/risco do bin)
             encodings = {f: self._bin_encoding(f) for f in features}
-            prefix = "WoE" if self.task_type == "classification" else "bin"
+            prefix = "WoE" if task == "classification" else "bin"
             pre = WoeBinEncoder(encodings=encodings, features=list(features),
                                 name_prefix=prefix)
             return Pipeline([("pre", pre), ("est", est)])
@@ -2073,6 +2117,8 @@ class ModelSegmenter:
         self.algorithm = algorithm
         self.hyperparams = dict(hyperparams or {})
         self.feature_transform = transform
+        self.two_stage = False                 # fit "normal" desliga o modo hurdle
+        self.two_stage_threshold = None
 
         fit_df = self._frame(self.ref_sample)
         fit_df = fit_df[fit_df[self.target].notna()]
@@ -2085,6 +2131,121 @@ class ModelSegmenter:
         self.score_ = self._compute_score(self.df)
         self._shap_cache = {}
         return self
+
+    def fit_two_stage(self, threshold, clf_algorithm="logistica", reg_algorithm="linear",
+                      clf_hyperparams=None, reg_hyperparams=None, features=None,
+                      transform="raw"):
+        """Ajusta um modelo **Two-Stage (hurdle)** para regressão (LGD): binariza o
+        alvo em ``y ≥ threshold`` e treina, na referência (DES):
+
+        * **etapa 1 — classificação**: ``P(y ≥ threshold)`` (``clf_algorithm``);
+        * **etapa 2 — regressão**: prevê ``y`` no grupo ``y ≥ threshold``
+          (``reg_algorithm``).
+
+        A resposta final combina as duas — ``E[y] = P(≥t)·reg(x) + (1−P)·âncora₀``,
+        com ``âncora₀`` = média do grupo abaixo do threshold — e alimenta
+        ``score_``, as métricas combinadas e os ratings, exatamente como um modelo
+        de regressão comum (ver :class:`_TwoStageModel`). Métricas de cada etapa
+        ficam em :meth:`metrics_classifier` e :meth:`metrics_regressor`; a resposta
+        combinada, em :meth:`metrics`.
+
+        Só se aplica a ``task_type='regression'``. ``transform='raw'`` (o Two-Stage
+        usa os valores originais das variáveis; o WoE por etapa não é suportado)."""
+        if self.task_type != "regression":
+            raise ValueError("Two-Stage é exclusivo de problemas de regressão "
+                             "(task_type='regression').")
+        if transform != "raw":
+            raise ValueError("Two-Stage suporta apenas transform='raw'.")
+        feats = list(features) if features is not None else self.selected_features()
+        if not feats:
+            feats = list(self.candidates)
+        t = float(threshold)
+
+        fit_df = self._frame(self.ref_sample)
+        fit_df = fit_df[fit_df[self.target].notna()]
+        X = fit_df[feats]
+        y = fit_df[self.target].astype(float)
+        ybin = (y >= t).astype(int)
+        if ybin.nunique() < 2:
+            lado = "≥" if int(ybin.iloc[0]) == 1 else "<"
+            raise ValueError(f"O threshold {t:g} deixa uma única classe (todos "
+                             f"{lado} t) na referência. Ajuste o threshold.")
+        mask1 = ybin == 1
+        if int(mask1.sum()) < 10:
+            raise ValueError(f"Poucas observações acima do threshold ({int(mask1.sum())}) "
+                             "para treinar a regressão da 2ª etapa (mínimo 10). "
+                             "Reduza o threshold.")
+
+        clf = self._build_pipeline(feats, clf_algorithm, clf_hyperparams,
+                                   transform="raw", task="classification")
+        clf.fit(X, ybin)
+        reg = self._build_pipeline(feats, reg_algorithm, reg_hyperparams,
+                                   transform="raw", task="regression")
+        reg.fit(X[mask1], y[mask1])
+        anchor0 = float(y[~mask1].mean()) if bool((~mask1).any()) else 0.0
+
+        self.model = _TwoStageModel(clf, reg, t, anchor0)
+        self.model_features = feats
+        self.two_stage = True
+        self.two_stage_threshold = t
+        self.algorithm = f"two_stage:{clf_algorithm}+{reg_algorithm}"
+        self.hyperparams = {"threshold": t, "clf_algorithm": clf_algorithm,
+                            "reg_algorithm": reg_algorithm,
+                            "clf_hyperparams": dict(clf_hyperparams or {}),
+                            "reg_hyperparams": dict(reg_hyperparams or {}),
+                            "anchor0": anchor0}
+        self.feature_transform = "raw"
+        self.score_ = self._compute_score(self.df)
+        self._shap_cache = {}
+        self._metrics_cache = None
+        return self
+
+    def _two_stage_sample_mask(self, a):
+        """Máscara booleana da amostra ``a`` (all-True sem sample_col)."""
+        return (pd.Series(True, index=self.df.index) if self.sample_col is None
+                else self._frame_mask(a))
+
+    def metrics_classifier(self) -> pd.DataFrame:
+        """(Two-Stage) Métricas de classificação da 1ª etapa por amostra —
+        ``y ≥ threshold`` (real) vs. ``P(≥t)`` prevista: taxa_1, auc, ks, gini…"""
+        if not self.two_stage:
+            raise RuntimeError("Disponível apenas no modo Two-Stage (fit_two_stage).")
+        t = self.model.threshold
+        rows = []
+        for a in self._samples():
+            mask = self._two_stage_sample_mask(a)
+            sub = self.df.loc[mask]
+            y = sub[self.target].to_numpy(dtype="float64")
+            ok = ~np.isnan(y)
+            if not ok.any():
+                continue
+            Xa = sub.loc[ok, self.model_features]
+            ybin = (y[ok] >= t).astype(int)
+            p = self.model.proba(Xa)
+            row = {"amostra": a, "n": int(ybin.size), "taxa_1": round(float(ybin.mean()), 6)}
+            if len(np.unique(ybin)) == 2:
+                row.update(classification_metrics(ybin, p))
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    def metrics_regressor(self) -> pd.DataFrame:
+        """(Two-Stage) Métricas de regressão da 2ª etapa por amostra, restritas ao
+        grupo ``y ≥ threshold`` — ``y`` real vs. ``reg(x)``: rmse, mae, r2…"""
+        if not self.two_stage:
+            raise RuntimeError("Disponível apenas no modo Two-Stage (fit_two_stage).")
+        t = self.model.threshold
+        rows = []
+        for a in self._samples():
+            mask = self._two_stage_sample_mask(a)
+            sub = self.df.loc[mask]
+            y = sub[self.target].to_numpy(dtype="float64")
+            ok = ~np.isnan(y) & (y >= t)
+            row = {"amostra": a, "n": int(ok.sum())}
+            if int(ok.sum()) >= 2:
+                Xa = sub.loc[ok, self.model_features]
+                row.update(regression_metrics(y[ok], self.model.reg_predict(Xa)))
+            rows.append(row)
+        return pd.DataFrame(rows)
 
     def tune_optuna(self, algorithm=None, n_trials=30, transform="raw", features=None,
                     timeout=None, random_state=42, fit_best=True, verbose=False,
@@ -2390,6 +2551,9 @@ class ModelSegmenter:
         colunas de entrada (default: as selecionadas). Calcula ``score_``."""
         self.model = model
         self.algorithm = self.algorithm or "externo"
+        # um _TwoStageModel injetado por fora também ativa o modo hurdle
+        self.two_stage = isinstance(model, _TwoStageModel)
+        self.two_stage_threshold = model.threshold if self.two_stage else None
         self.model_features = (list(features) if features is not None
                                else (self.model_features or self.selected_features()
                                      or list(self.candidates)))
@@ -4107,6 +4271,8 @@ class ModelSegmenter:
             "hyperparams": self.hyperparams,
             "model_features": list(self.model_features),
             "rating_config": self.rating_config,
+            "two_stage": self.two_stage,
+            "two_stage_threshold": self.two_stage_threshold,
         }
 
     def save(self, path: str):
@@ -4136,6 +4302,8 @@ class ModelSegmenter:
         seg.hyperparams = data.get("hyperparams", {})
         seg.model_features = data.get("model_features", [])
         seg.rating_config = data.get("rating_config", {})
+        seg.two_stage = bool(data.get("two_stage", False))
+        seg.two_stage_threshold = data.get("two_stage_threshold")
         seg._rebuild_derived()      # recria colunas categóricas derivadas no df
         return seg
 
@@ -4174,6 +4342,9 @@ class ModelSegmenter:
             blob = joblib.load(path + ".model.joblib")
             seg.model = blob.get("model")
             seg.rating_strategy = blob.get("rating_strategy")
+            if isinstance(seg.model, _TwoStageModel):   # robustez p/ JSONs sem a flag
+                seg.two_stage = True
+                seg.two_stage_threshold = seg.model.threshold
         except Exception as e:  # pragma: no cover
             print(f"[load] modelo não carregado: {e}")
         if seg.model is not None and seg.model_features:
