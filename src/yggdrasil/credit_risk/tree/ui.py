@@ -744,13 +744,10 @@ class TreeSegmenterUI:
                                    "sitemap")
         self.btn_tree_preview_hide = mk("Ocultar", "", "Oculta a imagem da árvore", "eye-slash")
         # --- barra de ações do preview INTERATIVO (aparece ao clicar num nó da imagem) ---
-        self.btn_img_split = mk("Dividir…", "primary",
-                                "Mostra/oculta o painel de divisão sob a imagem (variável, "
-                                "cortes, preview e criar segmento) já apontando para a folha "
-                                "clicada", "scissors")
-        self.btn_img_suggest = mk("Sugerir quebra", "info",
+        self.btn_img_suggest = mk("Sugerir quebra", "primary",
                                   "Sugere a melhor variável para dividir a folha clicada e abre "
-                                  "o painel de divisão com ela pré-selecionada", "lightbulb-o")
+                                  "o painel de divisão com ela pré-selecionada (variável, cortes, "
+                                  "preview e criar segmento)", "lightbulb-o")
         self.btn_img_merge_l = mk("Fundir ← irmã", "warning",
                                   "Funde a folha clicada com a irmã adjacente à ESQUERDA", "compress")
         self.btn_img_merge_r = mk("Fundir irmã →", "warning",
@@ -774,12 +771,14 @@ class TreeSegmenterUI:
                                   "(folha selecionada ≠ raiz: cresce só aquela folha; raiz: "
                                   "reconstrói tudo)", "magic")
         self.btn_img_reset = mk("Resetar", "", "Recomeça a árvore do zero", "refresh")
+        # fecha o painel de divisão (fica no cabeçalho do próprio painel)
+        self.btn_img_split_close = mk("Fechar", "", "Fecha o painel de divisão", "times")
         W.dlink((self.btn_undo, "disabled"), (self.btn_img_undo, "disabled"))
         W.dlink((self.btn_redo, "disabled"), (self.btn_img_redo, "disabled"))
-        for _b in (self.btn_img_split, self.btn_img_suggest, self.btn_img_merge_l,
+        for _b in (self.btn_img_suggest, self.btn_img_merge_l,
                    self.btn_img_merge_r, self.btn_img_merge_na, self.btn_img_collapse,
                    self.btn_img_lock, self.btn_img_undo, self.btn_img_redo,
-                   self.btn_img_autofit, self.btn_img_reset):
+                   self.btn_img_autofit, self.btn_img_reset, self.btn_img_split_close):
             _b.layout.width = "auto"
             _b.layout.margin = "2px 8px 2px 0"     # respiro horizontal entre botões
         # pequena espaçada entre os GRUPOS: fundir-irmãs · fundir-missing · recolher
@@ -846,8 +845,8 @@ class TreeSegmenterUI:
         self.btn_var_analyze.on_click(self._on_var_analyze)
         self.btn_tree_preview.on_click(self._on_tree_preview)
         self.btn_tree_preview_hide.on_click(self._on_tree_preview_hide)
-        self.btn_img_split.on_click(self._on_img_split)
         self.btn_img_suggest.on_click(self._on_img_suggest)
+        self.btn_img_split_close.on_click(self._on_split_panel_close)
         self.btn_img_merge_l.on_click(lambda _: self._on_merge("left"))
         self.btn_img_merge_r.on_click(lambda _: self._on_merge("right"))
         self.btn_img_merge_na.on_click(self._on_merge_missing)
@@ -914,7 +913,7 @@ class TreeSegmenterUI:
         _vsep = lambda: W.HTML("<div class='treeui-vsep'></div>")  # noqa: E731
         _row_lay = W.Layout(flex_flow="row wrap", align_items="center", width="100%")
         self.tree_img_bar = W.VBox([
-            W.HBox([self.tree_img_info, self.btn_img_split, self.btn_img_suggest,
+            W.HBox([self.tree_img_info, self.btn_img_suggest,
                     self.btn_img_lock], layout=_row_lay),
             W.HBox([self.btn_img_merge_l, self.btn_img_merge_r, self.btn_img_merge_na,
                     self.btn_img_collapse, _vsep(), self.btn_img_undo,
@@ -1108,8 +1107,10 @@ class TreeSegmenterUI:
         # card_split acima (2ª view sincronizada — variável/modo/cortes/preview
         # idênticos nos dois lugares), sem os cards de detalhe/gráficos.
         self.tree_img_split.children = (
-            W.HTML("<div class='treeui-h' style='margin-bottom:4px'>✂️ Dividir a folha "
-                   "selecionada</div>"),
+            W.HBox([W.HTML("<div class='treeui-h' style='margin:0;flex:1'>✂️ Dividir a "
+                           "folha selecionada</div>"),
+                    self.btn_img_split_close],
+                   layout=W.Layout(align_items="center", width="100%")),
             W.HTML("<div class='treeui-legend'>Os mesmos controles do card "
                    "'Dividir a folha' da aba — tudo sincronizado. Clique noutra folha "
                    "da imagem para trocar o alvo.</div>"),
@@ -4316,9 +4317,9 @@ class TreeSegmenterUI:
         lock_txt = "🔒 " if sid in self.locked else ""
         self.tree_img_info.value = (f"<span class='treeui-imgchip'>{icone} {lock_txt}{head} · "
                                     f"{_html.escape(desc)} · {self._risk_label} {v_txt}</span>")
-        for b in (self.btn_img_split, self.btn_img_suggest, self.btn_img_merge_l,
+        for b in (self.btn_img_suggest, self.btn_img_merge_l,
                   self.btn_img_merge_r, self.btn_img_merge_na, self.btn_img_lock):
-            b.disabled = not is_leaf           # dividir/fundir/travar só em folha
+            b.disabled = not is_leaf           # sugerir/fundir/travar só em folha
         self.btn_img_collapse.disabled = is_root
         self.btn_img_collapse.description = ("Recolher quebra (pai)" if is_leaf
                                              else "Recolher ramo")
@@ -4351,11 +4352,9 @@ class TreeSegmenterUI:
         if sid in folhas:
             self.dd_leaf.value = sid           # o ramo recolhido virou a folha ativa
 
-    def _on_img_split(self, _):
-        """'Dividir…' na barra do preview: mostra/oculta o painel compacto de
-        divisão sob a imagem — já apontando para a folha clicada (dd_leaf)."""
-        aberto = self.tree_img_split.layout.display != "none"
-        self.tree_img_split.layout.display = "none" if aberto else "flex"
+    def _on_split_panel_close(self, _):
+        """Fecha o painel compacto de divisão do preview."""
+        self.tree_img_split.layout.display = "none"
 
     def _on_img_suggest(self, _):
         """'Sugerir quebra' na barra do preview: abre o painel de divisão e roda

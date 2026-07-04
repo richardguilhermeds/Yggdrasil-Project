@@ -250,11 +250,11 @@ def test_ui_tree_img_clique_seleciona_e_barra(task):
     assert ui.dd_leaf.value == outra         # painel Detalhe segue o clique
     assert ui.tree_img_bar.layout.display == "flex"
     assert not ui.btn_img_merge_l.disabled and not ui.btn_img_collapse.disabled
-    assert not ui.btn_img_split.disabled and not ui.btn_img_lock.disabled
+    assert not ui.btn_img_suggest.disabled and not ui.btn_img_lock.disabled
     w.selected = "root"                      # raiz: só o chip; nada de agir
     assert ui.dd_leaf.value == outra         # nó interno não muda a folha ativa
     assert ui.btn_img_merge_l.disabled and ui.btn_img_collapse.disabled
-    assert ui.btn_img_split.disabled and ui.btn_img_lock.disabled
+    assert ui.btn_img_suggest.disabled and ui.btn_img_lock.disabled
     w.selected = ""                          # clique fora dos nós esconde a barra
     assert ui.tree_img_bar.layout.display == "none"
 
@@ -294,21 +294,23 @@ def _widgets_de(container):
 
 
 def test_ui_split_panel_espelha_card_da_aba(task):
-    """O painel 'Dividir…' do preview contém as MESMAS instâncias do card
-    'Dividir a folha' da aba (2ª view sincronizada) e a barra traz desfazer/
-    refazer/auto-fit/resetar compartilhados. Independe do anywidget."""
+    """O painel de divisão do preview contém as MESMAS instâncias do card
+    'Dividir a folha' da aba (2ª view sincronizada) e a barra traz os clones de
+    desfazer/refazer/auto-fit/resetar. Independe do anywidget."""
     ui = _build(task)
     painel = _widgets_de(ui.tree_img_split)
     for wdg in (ui.dd_leaf, ui.dd_feature, ui.tg_mode, ui.sl_bins,
                 ui.dd_split_criterion, ui.tx_cuts, ui.cat_box, ui.btn_sugcuts,
-                ui.btn_preview, ui.btn_split, ui.out_preview_seg):
+                ui.btn_preview, ui.btn_split, ui.out_preview_seg,
+                ui.btn_img_split_close):
         assert wdg in painel, f"widget ausente do painel de divisão: {wdg!r}"
     barra = _widgets_de(ui.tree_img_bar)
-    for wdg in (ui.btn_img_split, ui.btn_img_suggest, ui.btn_img_lock,
+    for wdg in (ui.btn_img_suggest, ui.btn_img_lock,
                 ui.btn_img_merge_l, ui.btn_img_merge_r, ui.btn_img_merge_na,
                 ui.btn_img_collapse, ui.btn_img_undo, ui.btn_img_redo,
                 ui.btn_img_autofit, ui.btn_img_reset):
         assert wdg in barra, f"widget ausente da barra do preview: {wdg!r}"
+    assert not any(getattr(w, "description", "") == "Dividir…" for w in barra)
     # clones compactos (lado a lado): largura auto, sem o width 98% dos cards
     for wdg in (ui.btn_img_undo, ui.btn_img_redo, ui.btn_img_autofit, ui.btn_img_reset):
         assert wdg.layout.width == "auto"
@@ -317,22 +319,23 @@ def test_ui_split_panel_espelha_card_da_aba(task):
     # respiro entre os grupos fundir-irmãs · fundir-missing · recolher
     assert ui.btn_img_merge_na.layout.margin.endswith("18px")
     assert ui.btn_img_collapse.layout.margin.endswith("18px")
-    # fechado por padrão; 'Dividir…' alterna mostrar/ocultar
+    # fechado por padrão; 'Sugerir quebra' abre, o 'Fechar' do painel fecha
     assert ui.tree_img_split.layout.display == "none"
-    ui._on_img_split(None)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_img_suggest(None)
     assert ui.tree_img_split.layout.display == "flex"
-    ui._on_img_split(None)
+    ui._on_split_panel_close(None)
     assert ui.tree_img_split.layout.display == "none"
 
 
 def test_ui_grow_pelo_preview(task):
-    """Crescer a árvore A PARTIR do preview: 'Dividir…' abre o painel compacto e
-    o fluxo variável→cortes→preview→criar segmento funciona idêntico ao da aba
-    (mesmos modelos de widget). Funciona com e sem anywidget."""
+    """Crescer a árvore A PARTIR do preview: 'Sugerir quebra' abre o painel
+    compacto e o fluxo variável→cortes→preview→criar segmento funciona idêntico
+    ao da aba (mesmos modelos de widget). Funciona com e sem anywidget."""
     ui = _build(task)
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_tree_preview(None)            # abre o preview (interativo ou estático)
-        ui._on_img_split(None)               # 'Dividir…' abre o painel
+        ui._on_img_suggest(None)             # sugere quebra e abre o painel
         assert ui.tree_img_split.layout.display == "flex"
         ui.dd_leaf.value = "root"
         ui.dd_feature.value = "score"
