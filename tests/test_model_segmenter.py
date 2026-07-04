@@ -928,6 +928,50 @@ def test_ui_layout_abas(task):
     assert all(not t[:1] in "①②③④⑤⑥" for t in titulos)
 
 
+def test_ui_bins_categoria_caixas(task):
+    """Aba Análise: variável CATEGÓRICA no modo Manual mostra uma caixa (Dropdown de
+    grupo) por categoria; alocar categorias ao mesmo grupo define os bins manuais
+    (como no TreeSegmenter). Numérica segue no campo de cortes."""
+    pytest.importorskip("ipywidgets")
+    import contextlib
+    import io
+    import ipywidgets as W
+    from yggdrasil.credit_risk.model import ModelSegmenterUI
+
+    df = _synthetic(task, com_cat=True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui = ModelSegmenterUI(df, target="target", task_type=task,
+                              sample_col="amostra", ref_sample="DES", date_col="dt_ref")
+    # categórica no modo Manual → caixas visíveis, campo de cortes oculto
+    ui.dd_var2.value = "feat_cat"
+    ui.tg_binmode.value = "Manual"
+    assert ui.an_cat_box.layout.display == "" and ui.tx_cuts.layout.display == "none"
+    assert set(ui._an_cat_widgets) == {"A", "B", "C", "D"}
+    assert all(isinstance(dd, W.Dropdown) for dd in ui._an_cat_widgets.values())
+    # aloca A,B -> grupo 1 e C,D -> grupo 2, aplica e confere os bins manuais
+    for c, g in {"A": 1, "B": 1, "C": 2, "D": 2}.items():
+        ui._an_cat_widgets[c].value = g
+    ui._on_apply_bins(None)
+    grupos = ui.seg.manual_bins("feat_cat")
+    assert sorted(sorted(g) for g in grupos) == [["A", "B"], ["C", "D"]]
+    # numérica no Manual → campo de cortes visível, caixas ocultas
+    ui.dd_var2.value = "feat_00"
+    ui.tg_binmode.value = "Manual"
+    assert ui.tx_cuts.layout.display == "" and ui.an_cat_box.layout.display == "none"
+    # volta à categórica: as caixas remontam com o MESMO particionamento salvo
+    ui.dd_var2.value = "feat_cat"
+    ui.tg_binmode.value = "Manual"
+    vals = {c: ui._an_cat_widgets[c].value for c in ui._an_cat_widgets}
+    part = sorted(sorted(c for c in vals if vals[c] == g) for g in set(vals.values()))
+    assert part == [["A", "B"], ["C", "D"]]
+    # limpar volta ao ótimo e reseta as caixas (cada categoria no seu grupo)
+    ui._on_clear_bins(None)
+    assert ui.seg.manual_bins("feat_cat") is None
+    ui.tg_binmode.value = "Manual"
+    v2 = {c: ui._an_cat_widgets[c].value for c in ui._an_cat_widgets}
+    assert len(set(v2.values())) == len(v2)
+
+
 def test_ui_save_overwrite_confirma(task, tmp_path):
     """Salvar o modelo (.json) num caminho que já existe não grava direto: o gate
     executa do_save só quando não há conflito e aguarda confirmação se já existir."""
