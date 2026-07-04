@@ -151,8 +151,148 @@ _CSS = """
 .treeui.dark textarea { background:#0e1521 !important; color:#e7ebf2 !important;
   border-color:#2c3a55 !important; }
 .treeui.dark .widget-label, .treeui.dark .jupyter-widgets label { color:#c4cdde !important; }
+/* chip do nó selecionado na barra de ações do preview interativo da árvore */
+.treeui-imgchip { display:inline-block; font-size:11px; font-weight:600; color:#27324a;
+  background:#eef1f5; border:1px solid #cdd5e0; border-radius:999px; padding:3px 11px;
+  margin-right:6px; max-width:420px; white-space:nowrap; overflow:hidden;
+  text-overflow:ellipsis; vertical-align:middle; }
+.treeui.dark .treeui-imgchip { background:#243049; border-color:#3a4a6a; color:#e7ebf2; }
 </style>
 """
+
+
+# ======================================================================
+# Preview INTERATIVO da árvore (anywidget): o PNG do plot_tree ganha uma
+# camada de "hotspots" (um por nó, posicionados em % — seguem o redimensio-
+# namento responsivo da imagem). Clicar num nó sincroniza o trait `selected`
+# com o kernel; hover mostra um tooltip com as métricas do nó (montado no
+# Python — nenhum cálculo no front). anywidget entrega o JS via o próprio
+# comm do widget (traits `_esm`/`_css`), sem labextension pré-instalada —
+# por isso funciona em Jupyter, VS Code, Colab e Databricks (DBR recente),
+# ao contrário de pontes como ipyevents/ipympl.
+# ======================================================================
+_TREE_IMG_ESM = """
+function render({ model, el }) {
+  const wrap = document.createElement("div");
+  wrap.className = "ygg-treeimg-wrap";
+  const img = document.createElement("img");
+  img.className = "ygg-treeimg-img";
+  img.draggable = false;
+  const layer = document.createElement("div");     // hotspots (um por nó)
+  layer.className = "ygg-treeimg-layer";
+  const hov = document.createElement("div");       // contorno do nó sob o mouse
+  hov.className = "ygg-treeimg-hov";
+  const sel = document.createElement("div");       // contorno do nó selecionado
+  sel.className = "ygg-treeimg-sel";
+  const tip = document.createElement("div");       // tooltip com métricas do nó
+  tip.className = "ygg-treeimg-tip";
+  wrap.append(img, layer, hov, sel, tip);
+  el.replaceChildren(wrap);
+
+  // clique fora de qualquer nó: limpa a seleção (o Python esconde a barra)
+  wrap.addEventListener("click", () => { model.set("selected", ""); model.save_changes(); });
+
+  const place = (box, n, W, H) => {                // posiciona em % da imagem
+    box.style.left = (100 * n.x0 / W) + "%";
+    box.style.top = (100 * n.y0 / H) + "%";
+    box.style.width = (100 * (n.x1 - n.x0) / W) + "%";
+    box.style.height = (100 * (n.y1 - n.y0) / H) + "%";
+  };
+
+  function syncSel() {
+    const W = model.get("width"), H = model.get("height");
+    const n = (model.get("nodes") || []).find(n => n.sid === model.get("selected"));
+    if (n) { place(sel, n, W, H); sel.style.display = "block"; }
+    else sel.style.display = "none";
+  }
+
+  function rebuild() {
+    const W = model.get("width"), H = model.get("height");
+    img.src = model.get("src");
+    wrap.style.maxWidth = W + "px";                // nunca amplia além do tamanho natural
+    hov.style.display = "none"; tip.style.display = "none";
+    layer.replaceChildren();
+    for (const n of (model.get("nodes") || [])) {
+      const hs = document.createElement("div");
+      hs.className = "ygg-treeimg-hot";
+      place(hs, n, W, H);
+      hs.addEventListener("click", (ev) => {
+        ev.stopPropagation();                      // não deixa o wrap deselecionar
+        model.set("selected", n.sid); model.save_changes();
+      });
+      hs.addEventListener("mouseenter", () => {
+        place(hov, n, W, H); hov.style.display = "block";
+        if (!n.tooltip) return;
+        tip.innerHTML = n.tooltip;                 // montado (e escapado) no Python
+        // acima do nó; perto do topo da imagem, abre para baixo
+        if (100 * n.y0 / H < 22) { tip.style.top = (100 * n.y1 / H) + "%"; tip.style.bottom = "auto"; }
+        else { tip.style.bottom = (100 * (H - n.y0) / H) + "%"; tip.style.top = "auto"; }
+        tip.style.left = Math.max(4, Math.min(96, 100 * (n.x0 + n.x1) / 2 / W)) + "%";
+        tip.style.display = "block";
+      });
+      hs.addEventListener("mouseleave", () => { hov.style.display = "none"; tip.style.display = "none"; });
+      layer.appendChild(hs);
+    }
+    syncSel();
+  }
+
+  // um refresh do Python altera src+nodes+width+height de uma vez — o rAF
+  // agrupa os 4 eventos de change num único rebuild
+  let raf = 0;
+  const schedule = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(rebuild); };
+  const evs = ["change:src", "change:width", "change:height", "change:nodes"];
+  evs.forEach(ev => model.on(ev, schedule));
+  model.on("change:selected", syncSel);
+  rebuild();
+  return () => { evs.forEach(ev => model.off(ev, schedule)); model.off("change:selected", syncSel); };
+}
+export default { render };
+"""
+
+_TREE_IMG_CSS = """
+.ygg-treeimg-wrap { position:relative; width:100%; }
+.ygg-treeimg-img { width:100%; height:auto; display:block;
+  border:1px solid #e6e8eb; border-radius:6px; box-sizing:border-box; }
+.ygg-treeimg-hot { position:absolute; cursor:pointer; z-index:3; }
+.ygg-treeimg-hov, .ygg-treeimg-sel { position:absolute; display:none;
+  border-radius:7px; pointer-events:none; box-sizing:border-box; z-index:2; }
+.ygg-treeimg-hov { border:2px solid #2f6fb2; }
+.ygg-treeimg-sel { border:3px solid #e8870b; box-shadow:0 0 0 3px rgba(245,166,35,.28); }
+.ygg-treeimg-tip { position:absolute; display:none; transform:translateX(-50%);
+  background:#1d2733; color:#fff; font-size:11px; line-height:1.5; text-align:left;
+  padding:7px 10px; border-radius:7px; max-width:300px; width:max-content;
+  white-space:normal; pointer-events:none; z-index:4; margin:4px 0;
+  box-shadow:0 4px 14px rgba(0,0,0,.28); }
+"""
+
+_TREE_IMG_WIDGET_CLS = None
+
+
+def _tree_image_widget_cls():
+    """Classe do widget de árvore clicável — criada 1× e cacheada.
+
+    Devolve ``None`` quando o anywidget não está instalado (ou falhou ao
+    importar): a UI então cai no PNG estático, comportamento anterior."""
+    global _TREE_IMG_WIDGET_CLS
+    if _TREE_IMG_WIDGET_CLS is not None:
+        return _TREE_IMG_WIDGET_CLS
+    try:
+        import anywidget
+        import traitlets
+    except Exception:                     # sem anywidget → fallback estático
+        return None
+
+    class _TreeImageWidget(anywidget.AnyWidget):
+        _esm = _TREE_IMG_ESM
+        _css = _TREE_IMG_CSS
+        src = traitlets.Unicode("").tag(sync=True)        # PNG em data-URL
+        width = traitlets.Int(1).tag(sync=True)           # px naturais do PNG
+        height = traitlets.Int(1).tag(sync=True)
+        nodes = traitlets.List(traitlets.Dict()).tag(sync=True)   # hitboxes + tooltips
+        selected = traitlets.Unicode("").tag(sync=True)   # sid clicado ("" = nenhum)
+
+    _TREE_IMG_WIDGET_CLS = _TreeImageWidget
+    return _TREE_IMG_WIDGET_CLS
 
 
 class TreeSegmenterUI:
@@ -593,9 +733,27 @@ class TreeSegmenterUI:
                                   "search")
         # --- preview da árvore como imagem, no fim do Construir (sem exportar) ---
         self.btn_tree_preview = mk("Ver árvore (imagem)", "info",
-                                   "Renderiza a árvore como imagem aqui mesmo — sem exportar/salvar",
+                                   "Renderiza a árvore como imagem aqui mesmo — sem exportar/salvar. "
+                                   "Com o anywidget instalado a imagem é CLICÁVEL: selecionar folha, "
+                                   "fundir irmãs e recolher ramos direto nos nós",
                                    "sitemap")
         self.btn_tree_preview_hide = mk("Ocultar", "", "Oculta a imagem da árvore", "eye-slash")
+        # --- barra de ações do preview INTERATIVO (aparece ao clicar num nó da imagem) ---
+        self.btn_img_suggest = mk("Sugerir quebra", "primary",
+                                  "Sugere a melhor variável para dividir a folha clicada e a deixa "
+                                  "pré-selecionada no card 'Dividir a folha'", "lightbulb-o")
+        self.btn_img_merge_l = mk("Fundir ← irmã", "warning",
+                                  "Funde a folha clicada com a irmã adjacente à ESQUERDA", "compress")
+        self.btn_img_merge_r = mk("Fundir irmã →", "warning",
+                                  "Funde a folha clicada com a irmã adjacente à DIREITA", "compress")
+        self.btn_img_merge_na = mk("Fundir missing", "",
+                                   "Funde a folha-irmã de FALTANTES na folha clicada", "compress")
+        self.btn_img_collapse = mk("Recolher", "danger",
+                                   "Desfaz a quebra: numa FOLHA, recolhe o pai (a quebra que a criou); "
+                                   "num RAMO, recolhe o ramo inteiro numa folha só", "level-up")
+        for _b in (self.btn_img_suggest, self.btn_img_merge_l, self.btn_img_merge_r,
+                   self.btn_img_merge_na, self.btn_img_collapse):
+            _b.layout.width = "auto"
 
         self.btn_preview.on_click(self._on_preview)
         self.btn_sugcuts.on_click(self._on_suggest_cuts)
@@ -656,7 +814,12 @@ class TreeSegmenterUI:
         self.btn_spark_apply.on_click(self._on_spark_apply)
         self.btn_var_analyze.on_click(self._on_var_analyze)
         self.btn_tree_preview.on_click(self._on_tree_preview)
-        self.btn_tree_preview_hide.on_click(lambda _: setattr(self.out_tree_img, "value", ""))
+        self.btn_tree_preview_hide.on_click(self._on_tree_preview_hide)
+        self.btn_img_suggest.on_click(self._on_suggest)
+        self.btn_img_merge_l.on_click(lambda _: self._on_merge("left"))
+        self.btn_img_merge_r.on_click(lambda _: self._on_merge("right"))
+        self.btn_img_merge_na.on_click(self._on_merge_missing)
+        self.btn_img_collapse.on_click(self._on_img_collapse)
         self.tg_mode.observe(self._on_mode_change, names="value")
         self.dd_feature.observe(self._on_feature_change, names="value")
         self.cb_minbin.observe(lambda _: self._sync_optbin_visibility(), names="value")
@@ -701,7 +864,18 @@ class TreeSegmenterUI:
         self.out_var_psi = W.HTML()
         self.out_var_table = W.HTML()
         self.out_var_cards = W.HTML()
-        self.out_tree_img = W.HTML()                      # preview da árvore
+        self.out_tree_img = W.HTML()                      # preview da árvore (estático/erros)
+        # preview INTERATIVO da árvore: widget clicável (anywidget, lazy) + barra
+        # de ações contextual. Sem anywidget, out_tree_img segue com o PNG estático.
+        self._tree_img_widget = None       # instância do widget (criada no 1º preview)
+        self._img_selected = None          # sid do nó clicado na imagem (folha OU ramo)
+        self.tree_img_info = W.HTML()      # chip com o resumo do nó clicado
+        self.tree_img_bar = W.HBox(
+            [self.tree_img_info, self.btn_img_suggest, self.btn_img_merge_l,
+             self.btn_img_merge_r, self.btn_img_merge_na, self.btn_img_collapse],
+            layout=W.Layout(display="none", flex_flow="row wrap",
+                            align_items="center", margin="0 0 6px 0"))
+        self.box_tree_img = W.VBox([self.tree_img_bar, self.out_tree_img])
         self.cat_box = W.VBox([], layout=W.Layout(width="98%", display="none",
                                                   border="1px solid #eef1f4",
                                                   padding="6px 8px", margin="2px 0"))
@@ -880,7 +1054,7 @@ class TreeSegmenterUI:
                            "(imagem)</div>"),
                     self.btn_tree_preview, self.btn_tree_preview_hide],
                    layout=W.Layout(align_items="center", width="100%")),
-            self.out_tree_img,
+            self.box_tree_img,
         ], layout=W.Layout(width="100%")); card_tree_img.add_class("treeui-card")
 
         tab_build = W.VBox([sep_top, self.leaf_chips, top_cols,
@@ -2106,6 +2280,10 @@ class TreeSegmenterUI:
                                   "clique em <b>Curva ROC</b> ou <b>Curva KS</b> para renderizar.</div>")
         self.out_plot.value = ("<div style='font-size:12px;color:#889'>Árvore alterada — "
                                "clique em <b>Ver / salvar árvore (imagem)</b> para renderizar.</div>")
+        # preview interativo aberto: re-renderiza imagem + hit-map (a árvore mudou);
+        # fechado, nada a fazer — o próximo "Ver árvore" já desenha o estado novo
+        if self._tree_img_visible():
+            self._refresh_tree_widget()
 
     # ==================================================================
     # Entrada / handlers
@@ -2566,6 +2744,7 @@ class TreeSegmenterUI:
         self._set_html(self.leaf_chips, "chips", self._leaf_chips_html())
         self._refresh_iv()
         self._refresh_leaf_hist()
+        self._sync_img_selection()      # espelha a folha no preview interativo (contorno+barra)
         self._on_feature_change(None)   # nova folha: limpa o preview e recompõe os grupos
 
     def _on_tab_change(self, change):
@@ -3924,15 +4103,175 @@ class TreeSegmenterUI:
     def _on_plot_hide(self, _):
         self.out_plot.value = ""          # recolhe (esvazia) a imagem
 
+    # ==================================================================
+    # Preview da árvore — interativo (anywidget) com fallback estático
+    # ==================================================================
     def _on_tree_preview(self, _):
-        """Preview da árvore como imagem, na própria aba Construir (sem exportar).
-        Sem realce da folha selecionada — a imagem mostra a árvore "neutra"."""
+        """Preview da árvore na aba Construir. Com anywidget instalado a imagem
+        é CLICÁVEL: clicar num nó seleciona a folha (painel Detalhe acompanha),
+        hover mostra as métricas e a barra contextual funde/recolhe. Sem
+        anywidget, PNG estático (comportamento anterior)."""
         try:
-            self.out_tree_img.value = self._fig_html(
-                self.seg.plot_tree(), border=True)
+            if self._ensure_tree_widget():
+                self.out_tree_img.value = ""
+                self._refresh_tree_widget()
+            else:
+                hint = ("<div style='font-size:11px;color:#8894a5;margin-top:4px'>💡 instale "
+                        "<code>anywidget</code> (<code>pip install anywidget</code>) para uma "
+                        "árvore CLICÁVEL: selecionar a folha, fundir irmãs e recolher ramos "
+                        "direto na imagem, com métricas no hover.</div>")
+                self.out_tree_img.value = self._fig_html(self.seg.plot_tree(),
+                                                         border=True) + hint
         except Exception as e:
             self.out_tree_img.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao "
                                        f"desenhar a árvore: {type(e).__name__}: {e}</div>")
+
+    def _on_tree_preview_hide(self, _):
+        """Oculta o preview (estático ou interativo) e a barra de ações."""
+        self.out_tree_img.value = ""
+        self.tree_img_bar.layout.display = "none"
+        if self._tree_img_visible():
+            self.box_tree_img.children = (self.tree_img_bar, self.out_tree_img)
+
+    def _tree_img_visible(self):
+        w = self._tree_img_widget
+        return w is not None and w in getattr(self.box_tree_img, "children", ())
+
+    def _ensure_tree_widget(self):
+        """Garante o widget interativo montado no card (instancia 1× e reusa).
+        Devolve False quando o anywidget não está disponível (fallback PNG)."""
+        if self._tree_img_widget is None:
+            cls = _tree_image_widget_cls()
+            if cls is None:
+                return False
+            self._tree_img_widget = cls()
+            self._tree_img_widget.observe(self._on_tree_img_select, names="selected")
+        if not self._tree_img_visible():
+            self.box_tree_img.children = (self.tree_img_bar, self._tree_img_widget,
+                                          self.out_tree_img)
+        return True
+
+    def _refresh_tree_widget(self):
+        """(Re)renderiza o preview interativo: PNG + hit-map + tooltips + seleção."""
+        w = self._tree_img_widget
+        if w is None:
+            return
+        import base64
+        data = self.seg.plot_tree_hitmap(dpi=110)
+        nodes = [dict(sid=sid, tooltip=self._tree_node_tooltip(sid), **box)
+                 for sid, box in data["nodes"].items()]
+        sel = self._img_selected if self._img_selected in data["nodes"] else self.dd_leaf.value
+        sel = sel if sel in data["nodes"] else ""
+        self._img_selected = sel or None
+        with w.hold_sync():                    # 1 mensagem só pelo comm
+            w.src = "data:image/png;base64," + base64.b64encode(data["png"]).decode("ascii")
+            w.width, w.height = data["width"], data["height"]
+            w.nodes = nodes
+            w.selected = sel
+        self._refresh_img_bar()
+
+    def _tree_node_tooltip(self, sid):
+        """HTML curto com as métricas do nó (hover do preview interativo)."""
+        import html as _html
+        s = self.seg.segments[sid]
+        nota_map, _ = self.seg._grade_map()
+        n = int(s["mask"].sum())
+        rep = 100 * n / len(self.df) if len(self.df) else 0.0
+        ref = self.ref_sample if self.sample_col is not None else None
+        v = self._node_value(sid, ref)
+        desc = ("TODA A CARTEIRA" if s["parent"] is None
+                else self.seg._descrever(s["conditions"]))     # caminho completo
+        head = (f"folha {nota_map.get(sid, '?')}" if s["is_leaf"]
+                else ("raiz" if s["parent"] is None else "ramo"))
+        v_txt = "—" if pd.isna(v) else f"{v * 100:.2f}%"
+        linhas = [f"<b>{_html.escape(desc)}</b>",
+                  f"{head} · n {f'{n:,}'.replace(',', '.')} · repr. {rep:.1f}%",
+                  f"{self._risk_label}{' (' + str(ref) + ')' if ref else ''}: {v_txt}"]
+        if self.sample_col is not None:
+            partes = []
+            for a in [self.ref_sample] + list(getattr(self, "_pd_nonref", [])):
+                va = self._node_value(sid, a)
+                if not pd.isna(va):
+                    partes.append(f"{_html.escape(str(a))} {va * 100:.2f}%")
+            if partes:
+                linhas.append(" · ".join(partes))
+        linhas.append("<span style='color:#9fb0c6'>clique para selecionar</span>")
+        return "<br/>".join(linhas)
+
+    def _on_tree_img_select(self, change):
+        """Clique num nó da imagem (via trait ``selected`` do widget)."""
+        sid = change.get("new") or None
+        if sid is None or sid not in self.seg.segments:
+            self._img_selected = None          # clique fora dos nós: limpa a barra
+            self._refresh_img_bar()
+            return
+        self._img_selected = sid
+        if self.seg.segments[sid]["is_leaf"] and self.dd_leaf.value != sid:
+            if sid in [s for _, s in self.dd_leaf.options]:
+                self.dd_leaf.value = sid       # dispara o painel Detalhe (folha ativa)
+        self._refresh_img_bar()
+
+    def _sync_img_selection(self):
+        """Espelha a folha ativa (dropdown) no preview interativo, se aberto."""
+        w = self._tree_img_widget
+        sid = self.dd_leaf.value
+        if w is None or sid is None or sid not in self.seg.segments:
+            return
+        self._img_selected = sid
+        if w.selected != sid:
+            w.selected = sid
+        self._refresh_img_bar()
+
+    def _refresh_img_bar(self):
+        """Barra contextual do preview: chip do nó clicado + ações válidas."""
+        import html as _html
+        sid = self._img_selected
+        if (self._tree_img_widget is None or sid is None
+                or sid not in self.seg.segments or not self._tree_img_visible()):
+            self.tree_img_bar.layout.display = "none"
+            return
+        s = self.seg.segments[sid]
+        is_leaf, is_root = bool(s["is_leaf"]), s["parent"] is None
+        nota_map, _ = self.seg._grade_map()
+        desc = ("TODA A CARTEIRA" if is_root
+                else self.seg._descrever([s["conditions"][-1]]))
+        v = self._node_value(sid, self.ref_sample if self.sample_col is not None else None)
+        v_txt = "—" if pd.isna(v) else f"{v * 100:.2f}%"
+        icone = "🍃" if is_leaf else ("🌳" if is_root else "🌿")
+        head = (f"folha {nota_map.get(sid, '?')}" if is_leaf
+                else ("raiz" if is_root else "ramo"))
+        self.tree_img_info.value = (f"<span class='treeui-imgchip'>{icone} {head} · "
+                                    f"{_html.escape(desc)} · {self._risk_label} {v_txt}</span>")
+        for b in (self.btn_img_suggest, self.btn_img_merge_l,
+                  self.btn_img_merge_r, self.btn_img_merge_na):
+            b.disabled = not is_leaf           # fusões/sugestão só fazem sentido em folha
+        self.btn_img_collapse.disabled = is_root
+        self.btn_img_collapse.description = ("Recolher quebra (pai)" if is_leaf
+                                             else "Recolher ramo")
+        self.tree_img_bar.layout.display = "flex"
+
+    def _on_img_collapse(self, _):
+        """Recolher a partir do nó clicado na imagem: folha → recolhe o PAI
+        (fluxo padrão); ramo → recolhe o próprio ramo numa folha só."""
+        sid = self._img_selected
+        if sid is None or sid not in self.seg.segments:
+            return
+        if self.seg.segments[sid]["is_leaf"]:
+            self._on_collapse(None)            # opera na folha ativa (dd_leaf)
+            return
+        with self.out_log:
+            self.out_log.clear_output(wait=True)
+            if self.seg.segments[sid]["parent"] is None:
+                print("A raiz não pode ser recolhida — use Resetar para zerar a árvore.")
+                return
+            self._checkpoint()
+            self.seg.collapse(sid)
+        self.locked &= set(self.seg.segments)
+        self._pending = None
+        self._refresh()
+        folhas = [s for s, seg in self.seg.segments.items() if seg["is_leaf"]]
+        if sid in folhas:
+            self.dd_leaf.value = sid           # o ramo recolhido virou a folha ativa
 
     def _ipython_display_(self):
         display(self.panel)

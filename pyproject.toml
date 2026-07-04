@@ -39,7 +39,11 @@ dependencies = [
 pycaret = ["pycaret>=3.0"]
 # Interface interativa do segmentador de LGD (LGDSegmenterUI, ipywidgets) —
 # usada dentro do Jupyter/Databricks. O núcleo funciona sem ela.
-ui = ["ipywidgets>=8.0", "ipython>=8.0"]
+# anywidget: preview CLICÁVEL da árvore na TreeSegmenterUI (selecionar/fundir/
+# recolher direto na imagem). Entrega o JS pelo próprio comm do widget, por
+# isso funciona também no Databricks (runtimes recentes); sem ele a UI cai no
+# PNG estático.
+ui = ["ipywidgets>=8.0", "ipython>=8.0", "anywidget>=0.9"]
 # Geração/aplicação da régua de LGD em PySpark (no Databricks o pyspark já vem
 # no cluster; instale só fora dele).
 spark = ["pyspark>=3.4"]
@@ -63,6 +67,7 @@ dev = [
     "ipykernel>=6.0",
     "ipywidgets>=8.0",
     "ipython>=8.0",
+    "anywidget>=0.9",
 ]
 
 [tool.setuptools.packages.find]

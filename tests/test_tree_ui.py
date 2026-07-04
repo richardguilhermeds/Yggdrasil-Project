@@ -195,12 +195,90 @@ def test_ui_merge_missing(task):
                    for v in ui.seg.segments.values())
 
 
+def _has_anywidget():
+    try:
+        import anywidget  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 def test_ui_plot_tree(task):
+    """Preview da árvore: com anywidget vira o widget CLICÁVEL (hit-map completo);
+    sem, cai no PNG estático com a dica de instalação."""
     ui = _build(task)
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_autofit(None)
         ui._on_tree_preview(None)
-    assert ui.out_tree_img.value and "img" in ui.out_tree_img.value.lower()
+    if _has_anywidget():
+        w = ui._tree_img_widget
+        assert w is not None and ui._tree_img_visible()
+        assert w.src.startswith("data:image/png;base64,")
+        assert w.width > 0 and w.height > 0
+        assert {n["sid"] for n in w.nodes} == set(ui.seg.segments)
+        assert all(n["tooltip"] for n in w.nodes)
+    else:
+        assert ui.out_tree_img.value and "img" in ui.out_tree_img.value.lower()
+        assert "anywidget" in ui.out_tree_img.value
+
+
+def test_ui_plot_tree_fallback_sem_anywidget(task, monkeypatch):
+    """Sem anywidget o preview mantém o comportamento anterior (PNG estático)."""
+    from yggdrasil.credit_risk.tree import ui as ui_mod
+    monkeypatch.setattr(ui_mod, "_tree_image_widget_cls", lambda: None)
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        ui._on_tree_preview(None)
+    assert not ui._tree_img_visible()
+    assert "img" in ui.out_tree_img.value.lower()
+    assert "anywidget" in ui.out_tree_img.value          # dica de instalação
+
+
+@pytest.mark.skipif(not _has_anywidget(), reason="requer anywidget")
+def test_ui_tree_img_clique_seleciona_e_barra(task):
+    """Clicar num nó da imagem (trait ``selected``) sincroniza a folha ativa e a
+    barra contextual; nó interno desabilita fusões; raiz desabilita recolher."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        ui._on_tree_preview(None)
+    w = ui._tree_img_widget
+    folhas = [n["sid"] for n in w.nodes if n["is_leaf"]]
+    outra = next(s for s in folhas if s != ui.dd_leaf.value)
+    w.selected = outra                       # simula o clique do front
+    assert ui.dd_leaf.value == outra         # painel Detalhe segue o clique
+    assert ui.tree_img_bar.layout.display == "flex"
+    assert not ui.btn_img_merge_l.disabled and not ui.btn_img_collapse.disabled
+    w.selected = "root"                      # raiz: só o chip; nada de fundir/recolher
+    assert ui.dd_leaf.value == outra         # nó interno não muda a folha ativa
+    assert ui.btn_img_merge_l.disabled and ui.btn_img_collapse.disabled
+    w.selected = ""                          # clique fora dos nós esconde a barra
+    assert ui.tree_img_bar.layout.display == "none"
+
+
+@pytest.mark.skipif(not _has_anywidget(), reason="requer anywidget")
+def test_ui_tree_img_acoes_e_refresh(task):
+    """As ações da barra mutam a árvore e o preview interativo re-renderiza
+    sozinho (hit-map novo); dropdown → imagem também sincroniza a seleção."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        ui._on_tree_preview(None)
+    w = ui._tree_img_widget
+    n_antes = _nleaf(ui)
+    assert n_antes >= 2
+    w.selected = next(n["sid"] for n in w.nodes if n["is_leaf"])
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_img_collapse(None)            # folha → recolhe a quebra do pai
+    assert _nleaf(ui) < n_antes
+    assert {n["sid"] for n in w.nodes} == set(ui.seg.segments)   # re-render pós-mutação
+    # sincronismo inverso: trocar a folha no dropdown move o contorno da imagem
+    if _nleaf(ui) >= 2:
+        alvo = next(s for _, s in ui.dd_leaf.options if s != ui.dd_leaf.value)
+        with contextlib.redirect_stdout(io.StringIO()):
+            ui.dd_leaf.value = alvo
+        assert w.selected == alvo
 
 
 def test_ui_diag_teste_des_oot(task):

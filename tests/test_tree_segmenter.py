@@ -329,6 +329,27 @@ def test_plot_tree_gera_imagem(seg):
     assert fig is not None
 
 
+def test_plot_tree_hitmap(seg):
+    """PNG + caixa clicável por nó (origem no canto superior esquerdo), base do
+    preview interativo da UI: todo segmento tem caixa, dentro da imagem, com o
+    flag de folha correto; folhas não se sobrepõem no eixo x (layout X_GAP)."""
+    pytest.importorskip("matplotlib")
+    seg.fit_auto(max_depth=2, verbose=False)
+    out = seg.plot_tree_hitmap(dpi=96)
+    assert out["png"][:8] == b"\x89PNG\r\n\x1a\n"      # PNG válido
+    assert out["width"] > 0 and out["height"] > 0
+    assert set(out["nodes"]) == set(seg.segments)      # 1 caixa por segmento
+    for sid, b in out["nodes"].items():
+        assert 0 <= b["x0"] < b["x1"] <= out["width"]
+        assert 0 <= b["y0"] < b["y1"] <= out["height"]
+        assert b["is_leaf"] == seg.segments[sid]["is_leaf"]
+    folhas = sorted((b for b in out["nodes"].values() if b["is_leaf"]),
+                    key=lambda b: b["x0"])
+    assert len(folhas) >= 2
+    for a, b in zip(folhas, folhas[1:]):
+        assert a["x1"] <= b["x0"]                      # sem sobreposição horizontal
+
+
 def test_plots_especificos_classificacao():
     pytest.importorskip("matplotlib")
     seg = _mk("classification", com_oot=True, n=4000, seed=3)

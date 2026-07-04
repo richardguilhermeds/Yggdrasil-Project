@@ -1626,12 +1626,14 @@ class TreeSegmenter:
                     (x - bw - 0.06, y - bh - 0.06), 2 * bw + 0.12, 2 * bh + 0.12,
                     boxstyle="round,pad=0.02,rounding_size=0.16",
                     linewidth=0, facecolor="#f5a623", alpha=0.30, zorder=1.5))
+            # gid=sid identifica a caixa do nó no canvas — é o que permite ao
+            # plot_tree_hitmap devolver a região clicável de cada segmento.
             ax.add_patch(FancyBboxPatch(
                 (x - bw, y - bh), 2 * bw, 2 * bh,
                 boxstyle="round,pad=0.02,rounding_size=0.14",
                 linewidth=(3.2 if selecionada else 1.3),
                 edgecolor=("#e8870b" if selecionada else "#33424f"),
-                facecolor=color, zorder=2))
+                facecolor=color, zorder=2, gid=sid))
             # 1) QUEBRA (condição do nó) em NEGRITO, no topo da caixa
             cab = "\n".join(textwrap.wrap(rotulo(sid), 18)[:3])
             t_split = ax.text(x, y + 0.34 * bh, cab, ha="center", va="center",
@@ -1701,6 +1703,45 @@ class TreeSegmenter:
                 continue
             scale = min(box_w / max(ext.width, 1e-6), box_h / max(ext.height, 1e-6))
             t.set_fontsize(max(min_fs, t.get_fontsize() * scale))
+
+    # ------------------------------------------------------------------
+    # PLOT_TREE_HITMAP: PNG da árvore + "mapa de cliques" (caixa de cada nó
+    #   em pixels) — base do preview INTERATIVO da TreeSegmenterUI.
+    # ------------------------------------------------------------------
+    def plot_tree_hitmap(self, dpi: int = 110, ascending: bool = True,
+                         cmap: str = "RdYlGn_r", show_samples: bool = False,
+                         title: str | None = "auto") -> dict:
+        """Renderiza a árvore em PNG e devolve as regiões clicáveis por nó.
+
+        Devolve ``{"png": bytes, "width": int, "height": int, "nodes": dict}``,
+        onde ``nodes`` mapeia ``sid → {x0, y0, x1, y1, is_leaf}`` em PIXELS do
+        PNG com origem no canto SUPERIOR esquerdo (convenção HTML/CSS — o eixo
+        y do matplotlib é invertido aqui). O PNG é salvo SEM ``bbox_inches=
+        'tight'``: o recorte mudaria a geometria e desalinharia as caixas.
+        """
+        import io as _io
+        fig = self.plot_tree(ascending=ascending, cmap=cmap,
+                             show_samples=show_samples, title=title, dpi=dpi)
+        canvas = fig.canvas
+        canvas.draw()
+        renderer = canvas.get_renderer()
+        width, height = canvas.get_width_height()
+        ax = fig.axes[0]                      # eixo principal (axes[1] é a colorbar)
+        nodes: dict = {}
+        for p in ax.patches:
+            sid = p.get_gid()
+            if not sid or sid not in self.segments:
+                continue                      # ignora patches sem gid (ex.: glow do realce)
+            ext = p.get_window_extent(renderer)
+            nodes[sid] = {
+                "x0": round(float(ext.x0), 2), "y0": round(float(height - ext.y1), 2),
+                "x1": round(float(ext.x1), 2), "y1": round(float(height - ext.y0), 2),
+                "is_leaf": bool(self.segments[sid]["is_leaf"]),
+            }
+        buf = _io.BytesIO()
+        fig.savefig(buf, format="png", dpi=fig.dpi)
+        return {"png": buf.getvalue(), "width": int(width), "height": int(height),
+                "nodes": nodes}
 
     # ------------------------------------------------------------------
     # PSI: estabilidade populacional, segmentos-folha como bins
