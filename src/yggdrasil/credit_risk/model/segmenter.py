@@ -29,6 +29,7 @@ Reaproveita :mod:`yggdrasil.metrics`, :mod:`yggdrasil.ratings` e
 from __future__ import annotations
 
 import json
+import threading
 import warnings
 
 import numpy as np
@@ -707,6 +708,10 @@ class ModelSegmenter:
         self.rating_labels_: list = []
         self.rating_config: dict = {}
         self._shap_cache: dict = {}
+        # sinalizador de cancelamento do tuning (Optuna): setado por
+        # :meth:`cancel_tuning` e observado por um callback do estudo, que chama
+        # ``study.stop()`` para interromper após o trial em andamento.
+        self._tuning_cancel = threading.Event()
 
     # ------------------------------------------------------------------
     # Colunas / kinds / amostras
@@ -2346,26 +2351,48 @@ class ModelSegmenter:
 
         if not verbose:
             optuna.logging.set_verbosity(optuna.logging.WARNING)
+        # NÃO limpamos a flag de cancelamento aqui: quando o tuning roda numa thread
+        # de fundo (UI), a preparação acima leva tempo e o botão "Cancelar" já está
+        # ativo — um clear aqui apagaria um cancelamento pedido nessa janela. O
+        # chamador (UI) limpa a flag na main thread ANTES de habilitar o botão; e
+        # este método a deixa limpa NO FIM (para o próximo tuning).
         study = optuna.create_study(direction="maximize",
                                     sampler=optuna.samplers.TPESampler(seed=random_state))
         callbacks = []
+
+        def _cancel_cb(study, trial):           # cancelamento pedido pela UI/usuário
+            if self._tuning_cancel.is_set():
+                study.stop()                      # para após o trial em andamento
+        callbacks.append(_cancel_cb)
+
         if progress_callback is not None:
             def _progress_cb(study, trial):     # chamado após cada trial
                 try:
-                    progress_callback(len(study.trials), n_trials, float(study.best_value))
+                    best = float(study.best_value) if study.best_trial else float("nan")
+                    progress_callback(len(study.trials), n_trials, best)
                 except Exception:
                     pass                          # progresso é cosmético; nunca derruba o tuning
             callbacks.append(_progress_cb)
 
+        def _n_complete():
+            return sum(1 for t in study.trials
+                       if t.state == optuna.trial.TrialState.COMPLETE)
+
         def _finish_best():
             """Fecha o estudo: grava ``study_``/``tuning_`` e, com ``fit_best``,
-            reajusta o modelo com os melhores hiperparâmetros."""
+            reajusta o modelo com os melhores hiperparâmetros. Se o tuning foi
+            **cancelado**, preserva o modelo vigente (não reajusta) — "cancelar"
+            significa "não altere meu modelo"."""
             self.study_ = study
+            cancelled = self._tuning_cancel.is_set()
+            n_ok = _n_complete()
             self.tuning_ = {"algorithm": algorithm, "metric": "auc" if is_clf else "r2",
-                            "n_trials": len(study.trials),
-                            "best_value": round(float(study.best_value), 6),
-                            "best_params": dict(study.best_params)}
-            if fit_best:
+                            "n_trials": n_ok,
+                            "best_value": (round(float(study.best_value), 6)
+                                           if n_ok else float("nan")),
+                            "best_params": (dict(study.best_params) if n_ok else {}),
+                            "cancelled": cancelled}
+            if fit_best and n_ok and not cancelled:
                 self.fit(algorithm=algorithm, hyperparams=study.best_params,
                          features=feats, transform=transform)
 
@@ -2380,17 +2407,29 @@ class ModelSegmenter:
                     self._log_optuna_trial(mlflow, trial, algorithm, transform)
                 study.optimize(objective, n_trials=n_trials, timeout=timeout,
                                callbacks=callbacks + [_mlflow_cb])
-                self._log_optuna_parent(mlflow, study, algorithm, transform, is_clf, feats)
+                if _n_complete():                # cancelamento cedo pode não ter trial concluído
+                    self._log_optuna_parent(mlflow, study, algorithm, transform, is_clf, feats)
                 # re-treina o melhor modelo DENTRO do run-pai e o registra junto
                 # dos trials (evita colisão de nome no Model Registry).
                 _finish_best()
-                if register_model and fit_best:
+                if register_model and fit_best and not self._tuning_cancel.is_set() and _n_complete():
                     self._log_fitted_model(mlflow, registered_model_name=mlflow_model_name,
                                            verbose=verbose)
         else:
             study.optimize(objective, n_trials=n_trials, timeout=timeout, callbacks=callbacks)
             _finish_best()
+        # deixa a flag limpa para o PRÓXIMO tuning (já foi lida em _finish_best).
+        self._tuning_cancel.clear()
         return self.tuning_
+
+    def cancel_tuning(self):
+        """Sinaliza o **cancelamento** de um :meth:`tune_optuna` em andamento. O
+        estudo Optuna para após o trial atual (via ``study.stop()``) e o modelo
+        vigente é **preservado** (não é reajustado com os melhores hiperparâmetros).
+        No-op se não houver tuning rodando — a flag é limpa no início do próximo
+        tuning. Pensado para ser chamado de outra thread (ex.: um botão "Cancelar"
+        na UI enquanto o tuning roda numa thread de fundo)."""
+        self._tuning_cancel.set()
 
     @staticmethod
     def _unique_registered_model_name(base: str) -> str:
@@ -2765,6 +2804,142 @@ class ModelSegmenter:
 
         return {c: round(float(m.loc[oot, c] - m.loc[self.ref_sample, c]), 6)
                 for c in cols if _num(m.loc[oot, c]) and _num(m.loc[self.ref_sample, c])}
+
+    def backward_elimination(self, sample=None, min_features=1, algorithm=None,
+                             transform=None, hyperparams=None, n_repeats=3,
+                             importance_sample_size=5000, random_state=42,
+                             progress_callback=None) -> pd.DataFrame:
+        """**Backward elimination** por importância: reajusta o modelo removendo, a
+        cada passo, a variável **menos importante** e mede as métricas do modelo com
+        o conjunto restante. Começa com ``model_features`` (ou as selecionadas),
+        treina na referência (DES) e avalia na amostra ``sample`` (OOT quando
+        existir, senão DES). A importância de cada variável vem de **permutation
+        importance** (agnóstica ao algoritmo) sobre o modelo do passo.
+
+        **Não altera o modelo vigente** (``self.model``/``score_``/rating): treina
+        modelos temporários. Devolve um DataFrame — uma linha por passo, do conjunto
+        cheio ao mínimo — com ``n_variaveis``, ``removida`` (a menos importante do
+        passo, retirada no passo seguinte), ``importancia`` (dela) e TODAS as
+        métricas na amostra de avaliação (classificação: auc, gini, ks, ks_cutoff,
+        …; regressão: rmse, mae, mape, smape, medae, r2, mean_bias). Em
+        ``.attrs`` guarda ``eval_sample`` e ``algorithm``.
+
+        ``progress_callback(done, total, n_variaveis)`` (opcional) — barra de
+        progresso na UI. ``n_repeats``/``importance_sample_size`` controlam o custo
+        da permutação."""
+        from sklearn.inspection import permutation_importance
+        if self.task_type == "classification":
+            algorithm = algorithm or self.algorithm or "logistica"
+        else:
+            algorithm = algorithm or self.algorithm or "linear"
+        transform = transform if transform is not None else (self.feature_transform or "raw")
+        hyperparams = dict(hyperparams if hyperparams is not None else (self.hyperparams or {}))
+        feats = list(self.model_features or self.selected_features() or self.candidates)
+        if len(feats) < 2:
+            raise ValueError("Backward elimination requer ao menos 2 variáveis no modelo.")
+        min_features = max(1, int(min_features))
+        is_clf = self.task_type == "classification"
+
+        eval_sample = sample or self._oot_sample()
+        tr = self._frame(self.ref_sample); tr = tr[tr[self.target].notna()]
+        ev = self._frame(eval_sample); ev = ev[ev[self.target].notna()]
+        if len(ev) < 20:                          # avaliação insuficiente → usa a própria DES
+            ev, eval_sample = tr, self.ref_sample
+        ytr = tr[self.target].astype(int) if is_clf else tr[self.target].astype("float64")
+        yev = ev[self.target].astype(int) if is_clf else ev[self.target].astype("float64")
+        scoring = "roc_auc" if is_clf else "r2"
+        # subamostra para a permutação (limita o custo em bases grandes)
+        if importance_sample_size and len(ev) > importance_sample_size:
+            ev_imp = ev.sample(importance_sample_size, random_state=random_state)
+        else:
+            ev_imp = ev
+        yev_imp = (ev_imp[self.target].astype(int) if is_clf
+                   else ev_imp[self.target].astype("float64"))
+
+        def _r(v):
+            try:
+                v = float(v)
+            except Exception:
+                return v
+            return round(v, 6) if np.isfinite(v) else np.nan
+
+        cur = list(feats)
+        total = len(feats) - min_features + 1
+        rows, done = [], 0
+        while len(cur) >= min_features:
+            pipe = self._build_pipeline(cur, algorithm, hyperparams, transform=transform)
+            pipe.fit(tr[cur], ytr)
+            s_ev = self._predict_score_array(pipe, ev[cur])
+            met = (classification_metrics(yev.to_numpy(dtype="float64"), s_ev) if is_clf
+                   else regression_metrics(yev.to_numpy(dtype="float64"), s_ev))
+            removida, imp_val = "—", float("nan")
+            if len(cur) > min_features:
+                try:
+                    pi = permutation_importance(pipe, ev_imp[cur], yev_imp, scoring=scoring,
+                                                n_repeats=n_repeats, random_state=random_state)
+                    j = int(np.argsort(pi.importances_mean)[0])     # menos importante
+                    removida, imp_val = cur[j], float(pi.importances_mean[j])
+                except Exception:
+                    removida = cur[-1]                              # fallback determinístico
+            rows.append({"n_variaveis": len(cur), "removida": removida,
+                         "importancia": _r(imp_val), **{k: _r(v) for k, v in met.items()}})
+            done += 1
+            if progress_callback is not None:
+                try:
+                    progress_callback(done, total, len(cur))
+                except Exception:
+                    pass
+            if len(cur) <= min_features:
+                break
+            cur = [f for f in cur if f != removida]
+        out = pd.DataFrame(rows)
+        out.attrs["eval_sample"] = eval_sample
+        out.attrs["algorithm"] = algorithm
+        return out
+
+    def plot_backward_elimination(self, result, metrics=None, figsize=(9.4, 4.6),
+                                  dpi=150, save_path=None, ax=None):
+        """Curva das **métricas vs nº de variáveis** da :meth:`backward_elimination`
+        (o modelo encolhendo à medida que a variável menos importante sai). ``result``
+        é o DataFrame devolvido por ela; ``metrics`` escolhe quais métricas plotar
+        (default: KS+AUC na classificação, RMSE+MAE na regressão). A 1ª métrica vai
+        no eixo esquerdo e as demais no direito (escalas diferentes)."""
+        if metrics is None:
+            metrics = (["ks", "auc"] if self.task_type == "classification"
+                       else ["rmse", "mae"])
+        metrics = [m for m in metrics if m in getattr(result, "columns", [])]
+        fig, ax = _new_ax(figsize, dpi, ax)
+        if result is None or len(result) == 0 or not metrics:
+            ax.text(0.5, 0.5, "sem resultado de backward elimination", ha="center",
+                    va="center", transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout()
+            if save_path:
+                fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+            return fig
+        x = result["n_variaveis"].to_numpy()
+        palette = ["#15324a", "#b23a2a", "#157a52", "#9a6f12", "#6b46c1"]
+        ln = ax.plot(x, result[metrics[0]].to_numpy(dtype="float64"), color=palette[0],
+                     lw=2.0, marker="o", ms=4, label=metrics[0].upper())
+        ax.set_ylabel(metrics[0].upper(), color=palette[0])
+        ax.set_xlabel("nº de variáveis no modelo")
+        ax.invert_xaxis()                    # cheio (esq.) → mínimo (dir.)
+        ax.grid(axis="both", alpha=0.12)
+        handles = list(ln)
+        if len(metrics) > 1:
+            ax2 = ax.twinx()
+            for i, mt in enumerate(metrics[1:], start=1):
+                handles += ax2.plot(x, result[mt].to_numpy(dtype="float64"),
+                                    color=palette[i % len(palette)], lw=1.8,
+                                    marker="s", ms=3, label=mt.upper())
+            ax2.set_ylabel(" · ".join(m.upper() for m in metrics[1:]))
+        ax.legend(handles, [h.get_label() for h in handles], fontsize=8, loc="best",
+                  framealpha=0.9)
+        ax.set_title("Backward elimination — métricas × nº de variáveis", fontsize=11,
+                     fontweight="bold", color="#15324a")
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
 
     # ---- plots do modelo ----
     def _sample_scores(self, sample=None):
@@ -3299,6 +3474,81 @@ class ModelSegmenter:
         from ...interpretability.shap_explain import shap_feature_importance
         sv, Xs = self.shap_values(sample, sample_size)
         return shap_feature_importance(sv, Xs.columns)
+
+    def _original_feature_of(self, name: str) -> str:
+        """Mapeia UM nome de coluna transformada (``num__idade``, ``cat__uf_SP``,
+        ``WoE(x)``) de volta para a variável ORIGINAL do modelo (``idade``, ``uf``,
+        ``x``). Casa pelo prefixo mais longo em ``model_features`` — desambigua
+        nomes de variáveis que contêm ``_`` (ex.: ``uf`` vs ``uf_regiao``)."""
+        raw = str(name)
+        for p in ("num__", "cat__"):
+            if raw.startswith(p):
+                raw = raw[len(p):]
+                break
+        for w in ("WoE", "bin"):
+            if raw.startswith(f"{w}(") and raw.endswith(")"):
+                raw = raw[len(w) + 1:-1]
+                break
+        feats = list(self.model_features or [])
+        if raw in feats:                         # numérica / WoE (1:1)
+            return raw
+        cand = [f for f in feats if raw == f or raw.startswith(f + "_")]
+        if cand:
+            return max(cand, key=len)            # dummy de categórica → variável de origem
+        return raw
+
+    def shap_importance_grouped(self, sample=None, sample_size=2000) -> pd.DataFrame:
+        """Importância SHAP **agregada por variável original**: soma a
+        ``média(|SHAP|)`` de todas as colunas geradas por cada variável — as
+        *dummies* de uma categórica entram numa **única** barra. Devolve
+        ``[variavel, variavel_label, importancia, pct]`` ordenado do maior para o
+        menor; ``pct`` é a importância RELATIVA (0–100%). Ver :meth:`shap_importance`
+        (por coluna transformada) e :meth:`plot_shap_importance_relative`."""
+        imp = self.shap_importance(sample, sample_size)     # feature, mean_abs_shap
+        grp: dict = {}
+        for _, r in imp.iterrows():
+            orig = self._original_feature_of(r["feature"])
+            grp[orig] = grp.get(orig, 0.0) + float(r["mean_abs_shap"])
+        out = (pd.DataFrame({"variavel": list(grp.keys()),
+                             "importancia": list(grp.values())})
+               .sort_values("importancia", ascending=False).reset_index(drop=True))
+        total = float(out["importancia"].sum())
+        out["pct"] = (100.0 * out["importancia"] / total) if total > 0 else 0.0
+        out["variavel_label"] = out["variavel"].map(self.label)
+        return out[["variavel", "variavel_label", "importancia", "pct"]]
+
+    def plot_shap_importance_relative(self, sample=None, sample_size=2000, max_display=20,
+                                      figsize=(7.8, 4.8), dpi=150, save_path=None, ax=None):
+        """Barras horizontais da importância **relativa (%)** de TODAS as variáveis
+        que entraram no modelo — com as *dummies* de cada categórica somadas numa
+        única barra (ver :meth:`shap_importance_grouped`). Complementa o beeswarm e a
+        importância global (por coluna) com uma leitura por VARIÁVEL."""
+        imp = self.shap_importance_grouped(sample, sample_size)
+        fig, ax = _new_ax(figsize, dpi, ax)
+        if imp.empty:
+            ax.text(0.5, 0.5, "sem importância SHAP", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout()
+            if save_path:
+                fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+            return fig
+        imp = imp.head(max_display).iloc[::-1]           # maior no topo do barh
+        labels = [self._truncate_label(s) for s in imp["variavel_label"]]
+        y = list(range(len(imp)))
+        pct = imp["pct"].to_numpy()
+        ax.barh(y, pct, color="#3b6ea5", alpha=0.9, edgecolor="#27324a", linewidth=0.4)
+        for yi, p in zip(y, pct):
+            ax.text(p, yi, f" {p:.1f}%", va="center", ha="left", fontsize=8, color="#333")
+        ax.set_yticks(y); ax.set_yticklabels(labels, fontsize=8)
+        ax.set_xlabel("importância relativa (%)")
+        ax.set_xlim(0, min(100.0, float(np.nanmax(pct)) * 1.18 + 3))
+        ax.grid(axis="x", alpha=0.12)
+        ax.set_title("SHAP — importância relativa por variável (categóricas agregadas)",
+                     fontsize=11, fontweight="bold", color="#15324a")
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
 
     @staticmethod
     def _truncate_label(s, n=28) -> str:
@@ -3891,6 +4141,49 @@ class ModelSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
+    def plot_rating_psi_by_sample(self, figsize=(9.6, 4.2), dpi=150, save_path=None, ax=None):
+        """PSI da distribuição de RATINGS por **amostra** vs a referência (DES) —
+        barras coloridas (DES × OOT, ESTABILIDADE, …). É a leitura de estabilidade
+        da régua ENTRE AMOSTRAS; complementa :meth:`plot_rating_psi_by_safra` (ao
+        longo do tempo). Reaproveita :meth:`psi` (que já usa DES como base e devolve
+        uma linha por amostra de comparação)."""
+        fig, ax = _new_ax(figsize, dpi, ax)
+        try:
+            ps = self.psi()
+        except Exception:
+            ps = None
+        if ps is None or ps.empty:
+            ax.text(0.5, 0.5, "sem PSI por amostra (requer amostras além da DES)",
+                    ha="center", va="center", transform=ax.transAxes, color="#889")
+            ax.axis("off"); fig.tight_layout()
+            if save_path:
+                fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+            return fig
+        # ordena OOT/ESTABILIDADE (e demais) na ordem em que aparecem na base
+        order = {a: i for i, a in enumerate(self._nonref_samples())}
+        ps = (ps.assign(_o=ps["amostra"].map(lambda a: order.get(a, 999)))
+                .sort_values("_o").reset_index(drop=True))
+        x = list(range(len(ps)))
+        cor = ["#1aa64b" if p < 0.10 else "#caa000" if p < 0.25 else "#d6453e"
+               for p in ps["psi"]]
+        ax.bar(x, ps["psi"], color=cor, alpha=0.92, width=0.6)
+        for x0, p in zip(x, ps["psi"]):
+            ax.text(x0, p, f"{p:.3f}", ha="center", va="bottom", fontsize=8, color="#555")
+        ax.axhline(0.10, color="#caa000", lw=1.2, ls="--", label="alerta (0,10)")
+        ax.axhline(0.25, color="#d6453e", lw=1.2, ls="--", label="crítico (0,25)")
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(a) for a in ps["amostra"]], fontsize=9)
+        ax.set_xlim(-0.7, len(ps) - 0.3)
+        ax.set_ylim(0, max(float(np.nanmax(ps["psi"])) * 1.18 + 0.02, 0.28))
+        ax.set_ylabel("PSI")
+        ax.legend(fontsize=7.5, loc="upper right", framealpha=0.9)
+        ax.set_title(f"PSI dos ratings por amostra vs {self.ref_sample}", fontsize=11,
+                     fontweight="bold", color="#15324a")
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
     def monotonicity_report(self) -> pd.DataFrame:
         """Verifica se o risco médio é monotônico ao longo dos ratings, por amostra.
 
@@ -4027,6 +4320,11 @@ class ModelSegmenter:
 
         Devolve um DataFrame ordenado pelos rótulos, com ``col_rating``, ``n`` e
         ``col_value``."""
+        # régua pré-computada e injetada (escoragem distribuída em executores Spark,
+        # onde ``self.df`` foi esvaziado): devolve-a direto, sem tocar no df.
+        override = getattr(self, "_ruler_override", None)
+        if override is not None:
+            return override
         rating = self._rating_series()
         sample = sample or self.ref_sample
         if self.sample_col is None:
@@ -4200,17 +4498,142 @@ class ModelSegmenter:
                            f"{cats.shape[1]} coluna(s)")
         return out
 
+    def _detached_scorer(self, col_rating="rating", col_value=None, ruler_sample=None,
+                         recreate=False):
+        """Cópia LEVE e serializável do segmenter, pronta para **broadcast** aos
+        executores Spark: mantém o modelo/estratégia/bins, mas **descarta o
+        DataFrame de treino** e os caches por-linha (que referenciam todas as
+        linhas). Pré-computa no DRIVER — onde ``self.df`` ainda existe — a régua
+        ``rating→valor`` (:meth:`rating_ruler`) e os bins de ``recreate_categories``
+        (via ``_bins_cache``), de modo que escorar uma partição nos executores
+        **não toque em ``df``**. Ver :meth:`_apply_spark_distributed`."""
+        import copy
+        if recreate:                              # pré-aquece o cache de bins (usa df)
+            for f in (self.model_features or []):
+                if f in self.df.columns and not self.var_meta.get(f, {}).get("derived_from"):
+                    try:
+                        self._resolve_bins(f, sample=self.ref_sample)
+                    except Exception:
+                        pass
+        ruler_df = None
+        if col_value is not None:                 # pré-computa a régua (usa df)
+            ruler_df = self.rating_ruler(sample=ruler_sample, col_rating=col_rating,
+                                         col_value=col_value)
+        s = copy.copy(self)                       # rasa: compartilha model/var_meta/bins
+        s.df = self.df.iloc[0:0].copy()           # só o schema (sem as linhas de treino)
+        s._mask_cache = {}
+        s._samples_cache = None
+        s._rank_cache = {}
+        s._metrics_cache = None
+        s._shap_cache = {}
+        s.score_ = None
+        s.rating_ = None
+        s._tuning_cancel = None                   # Event tem lock → não é picklável (broadcast)
+        # o estudo/resumo do Optuna não são usados na escoragem: descarta-os para não
+        # inflar o broadcast (um estudo com muitos trials seria enviado a cada executor).
+        s.study_ = None
+        s.tuning_ = None
+        s._ruler_override = ruler_df
+        return s
+
+    def _apply_spark_distributed(self, sdf, col_score, col_rating, col_value, ruler_sample,
+                                 recreate, cat_suffix, n_partitions=None,
+                                 progress_callback=None):
+        """Escoragem **distribuída** de um Spark DataFrame via ``mapInPandas``: cada
+        partição é escorada NO EXECUTOR (o modelo/estratégia/régua vão por broadcast),
+        sem coletar a tabela no driver (``toPandas``) — o que evita OOM do driver e a
+        queda do cluster em tabelas grandes. Devolve um Spark DataFrame LAZY (a
+        computação ocorre na ação seguinte: ``saveAsTable`` / preview)."""
+        from pyspark.sql import SparkSession
+        from pyspark.sql.types import (BooleanType, DoubleType, LongType, StringType,
+                                        StructField, StructType)
+        spark = SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
+        _emit_progress(progress_callback, "prepare",
+                       "Preparar escoragem distribuída (broadcast do modelo)", "run")
+        scorer = self._detached_scorer(col_rating=col_rating, col_value=col_value,
+                                       ruler_sample=ruler_sample, recreate=recreate)
+        # deriva o schema de saída escorando uma amostra pequena NO DRIVER (também
+        # valida a ponta-a-ponta antes de despachar aos executores).
+        sample_pdf = sdf.limit(50).toPandas()
+        out_sample = scorer._score_pandas(sample_pdf, col_score, col_rating, col_value,
+                                          ruler_sample, recreate, cat_suffix)
+        out_cols = list(out_sample.columns)
+        in_types = {f.name: f.dataType for f in sdf.schema.fields}
+
+        # colunas que a escoragem SEMPRE (sobre)escreve — precedem o passthrough
+        # (o tipo de saída vence o da coluna de mesmo nome que já exista na tabela,
+        # ex.: re-escorar uma base que já tem 'score'/'rating' de uma rodada anterior).
+        written_str = {col_rating}
+        written_str |= {c for c in out_cols if c.endswith(cat_suffix) and c not in in_types}
+        written_dbl = {col_score} | ({col_value} if col_value is not None else set())
+
+        def _spark_type(colname):
+            if colname in written_dbl:
+                return DoubleType()                # score/valor: sempre double
+            if colname in written_str:
+                return StringType()                # rating/faixas recriadas: sempre texto
+            if colname in in_types:                # passthrough: preserva o tipo de origem
+                return in_types[colname]
+            dt = out_sample[colname].dtype
+            if pd.api.types.is_bool_dtype(dt):
+                return BooleanType()
+            if pd.api.types.is_integer_dtype(dt):
+                return LongType()
+            if pd.api.types.is_float_dtype(dt):
+                return DoubleType()
+            return StringType()                    # derivadas / demais texto
+
+        out_schema = StructType([StructField(c, _spark_type(c), True) for c in out_cols])
+        _emit_progress(progress_callback, "prepare",
+                       "Preparar escoragem distribuída (broadcast do modelo)", "ok",
+                       f"{len(out_cols)} colunas de saída")
+        bc = spark.sparkContext.broadcast(scorer)
+        _cs, _cr, _cv, _rs, _rec, _suf = (col_score, col_rating, col_value, ruler_sample,
+                                          recreate, cat_suffix)
+
+        def _score_iter(it):
+            sc = bc.value
+            for part in it:
+                res = sc._score_pandas(part, _cs, _cr, _cv, _rs, _rec, _suf)
+                for c in out_cols:                 # garante todas as colunas do schema
+                    if c not in res.columns:
+                        res[c] = None
+                yield res[out_cols]                # e a MESMA ordem do schema
+
+        if n_partitions:
+            sdf = sdf.repartition(int(n_partitions))
+        _emit_progress(progress_callback, "score",
+                       "Escorar por partição (distribuído, sem coletar no driver)", "ok",
+                       "plano distribuído montado")
+        return sdf.mapInPandas(_score_iter, schema=out_schema)
+
     def apply_spark(self, sdf, col_score="score", col_rating="rating", col_value=None,
                     ruler_sample=None, recreate_categories=None, cat_suffix="_faixa",
-                    progress_callback=None):
+                    progress_callback=None, distributed=None, n_partitions=None,
+                    probe=True):
         """Escora um **Spark DataFrame** (ex.: tabela do Databricks/Unity Catalog) e
         devolve um Spark DataFrame com ``score`` + ``rating`` (+ valor previsto) e,
         quando o modelo usou variáveis categorizadas (WoE/bins), as faixas recriadas.
         A tabela só precisa ter as variáveis originais do modelo (``model_features``);
         a binagem/WoE é refeita internamente.
 
-        Aplica o modelo sklearn coletando a tabela no driver (``toPandas``); para
-        tabelas muito grandes, filtre/particione antes de escorar."""
+        Por padrão escora de forma **distribuída** (``mapInPandas``): cada partição é
+        escorada no executor, sem coletar a tabela no driver — evita OOM do driver e
+        a queda do cluster em tabelas grandes. ``distributed=False`` força o caminho
+        **legado** (``toPandas`` no driver, para bases pequenas ou fora do cluster).
+        ``n_partitions`` reparticiona antes de escorar (paralelismo).
+
+        Robustez: com ``probe=True`` (padrão) uma linha é escorada nos executores já
+        na montagem — se o caminho distribuído falhar (erro na montagem **ou** no
+        executor, ex.: a lib ``yggdrasil`` não instalada no cluster), **cai
+        automaticamente no legado** em vez de quebrar depois, na ação. ``probe=False``
+        pula essa sonda (retorna o DataFrame 100% lazy; erros de executor só
+        aparecerão na ação, sem fallback).
+
+        Requisito do caminho distribuído: o pacote ``yggdrasil`` deve estar
+        **instalado nos executores** (biblioteca do cluster) — o normal no Databricks
+        — pois o modelo/estratégia de rating são desserializados lá. Sem isso (com
+        ``probe=True``) a escoragem cai no legado automaticamente."""
         if self.model is None:
             raise RuntimeError("Ajuste/defina o modelo antes (fit / set_model).")
         try:
@@ -4223,6 +4646,32 @@ class ModelSegmenter:
             raise ValueError(
                 f"Colunas ausentes no Spark DataFrame: {missing}. A tabela precisa ter "
                 f"as variáveis do modelo: {list(self.model_features)}.")
+        if recreate_categories is None:
+            recreate_categories = (self.feature_transform == "woe")
+        recreate_categories = bool(recreate_categories)
+        if distributed is None:
+            distributed = True
+        if distributed:
+            try:
+                sout = self._apply_spark_distributed(
+                    sdf, col_score, col_rating, col_value, ruler_sample,
+                    recreate_categories, cat_suffix, n_partitions=n_partitions,
+                    progress_callback=progress_callback)
+                if probe:
+                    # SONDA: força a execução de 1 linha nos executores AGORA, dentro
+                    # do try. Como ``mapInPandas`` é lazy, erros que só aparecem no
+                    # executor (ex.: a lib yggdrasil não instalada no cluster, ou um
+                    # erro de escoragem) surgiriam apenas na AÇÃO (saveAsTable) — fora
+                    # deste try. A sonda os antecipa para cá e permite cair no legado.
+                    sout.take(1)
+                return sout
+            except Exception as e:                # robustez: cai no legado sem derrubar
+                warnings.warn(f"Escoragem distribuída indisponível ({type(e).__name__}: "
+                              f"{e}); usando o caminho legado (toPandas no driver).")
+                _emit_progress(progress_callback, "prepare",
+                               "Escoragem distribuída indisponível — caminho legado", "ok",
+                               type(e).__name__)
+        # --- legado: coleta a tabela no driver (bases pequenas / fora do cluster) ---
         _emit_progress(progress_callback, "collect", "Coletar no driver (toPandas)", "run")
         pdf = sdf.toPandas()
         _emit_progress(progress_callback, "collect", "Coletar no driver (toPandas)", "ok",
@@ -4239,7 +4688,8 @@ class ModelSegmenter:
     def score_table(self, data, col_score="score", col_rating="rating", col_value=None,
                     ruler_sample=None, recreate_categories=None, cat_suffix="_faixa",
                     output_table=None, mode="overwrite", spark=None,
-                    progress_callback=None):
+                    progress_callback=None, distributed=None, n_partitions=None,
+                    probe=True):
         """Escora uma tabela e devolve as **notas (score)** e os **ratings**.
 
         ``data`` pode ser o **nome** de uma tabela do Databricks (``catalog.schema.
@@ -4248,7 +4698,9 @@ class ModelSegmenter:
         categorizada (faixas/grupos via WoE), a categoria é recriada na saída.
 
         - nome de tabela ou Spark DataFrame → devolve um **Spark DataFrame** (e grava
-          em ``output_table`` quando informado);
+          em ``output_table`` quando informado). Escora **distribuído** por padrão
+          (ver :meth:`apply_spark`); ``distributed=False`` força o caminho legado e
+          ``n_partitions`` controla o paralelismo;
         - pandas DataFrame → devolve **pandas**.
 
         ``progress_callback`` (opcional): ``cb(key, label, status, detail)`` chamado
@@ -4266,7 +4718,9 @@ class ModelSegmenter:
             out = self.apply_spark(data, col_score=col_score, col_rating=col_rating,
                                    col_value=col_value, ruler_sample=ruler_sample,
                                    recreate_categories=recreate_categories,
-                                   cat_suffix=cat_suffix, progress_callback=progress_callback)
+                                   cat_suffix=cat_suffix, progress_callback=progress_callback,
+                                   distributed=distributed, n_partitions=n_partitions,
+                                   probe=probe)
             if output_table:
                 _emit_progress(progress_callback, "save", f"Salvar em '{output_table}'", "run")
                 # mergeSchema: evolui o schema (colunas novas: score/rating/valor) ao

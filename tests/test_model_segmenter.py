@@ -918,9 +918,10 @@ def test_ui_layout_abas(task):
     ch = list(ui.panel.children)
     tabs = next(c for c in ch if isinstance(c, W.Tab))
     titulos = [tabs.get_title(i) for i in range(len(tabs.children))]
-    assert len(titulos) == 6
+    assert len(titulos) == 7
     assert any("Variáveis" in t or "variáveis" in t for t in titulos)
     assert any("Modelo" in t for t in titulos)
+    assert any("Backward" in t for t in titulos)
     assert any("Rating" in t for t in titulos)
     assert any("Avançado" in t for t in titulos)
     # abas sem numeração (①–⑥), alinhado às UIs lgd/pd
@@ -1188,12 +1189,17 @@ def test_ui_tune_optuna(task):
         ui.dd_algo.value = "random_forest"
         ui.sl_trials.value = 5
         ui._on_tune(None)
+        # o tuning roda numa thread de fundo (para o botão "Cancelar" responder);
+        # aguarda a conclusão antes de checar o resultado.
+        assert ui._tune_thread is not None
+        ui._tune_thread.join(timeout=180)
     assert "Optuna" in ui.out_tune.value and "Erro" not in ui.out_tune.value
     assert ui.seg.score_ is not None
     assert "<table" in ui.out_metrics.value
     # barra de progresso preenchida até o fim e marcada como concluída
     assert ui.pb_tune.max == 5 and ui.pb_tune.value == 5
     assert ui.pb_tune.bar_style == "success" and ui.btn_tune.disabled is False
+    assert ui.btn_cancel_tune.disabled is True
 
 
 def test_ratings_manuais(task):
