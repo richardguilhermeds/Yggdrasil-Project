@@ -178,6 +178,8 @@ _CSS = """
 # ======================================================================
 _TREE_IMG_ESM = """
 function render({ model, el }) {
+  const scroller = document.createElement("div"); // rolagem horizontal p/ árvores largas
+  scroller.className = "ygg-treeimg-scroll";
   const wrap = document.createElement("div");
   wrap.className = "ygg-treeimg-wrap";
   const img = document.createElement("img");
@@ -192,7 +194,8 @@ function render({ model, el }) {
   const tip = document.createElement("div");       // tooltip com métricas do nó
   tip.className = "ygg-treeimg-tip";
   wrap.append(img, layer, hov, sel, tip);
-  el.replaceChildren(wrap);
+  scroller.appendChild(wrap);
+  el.replaceChildren(scroller);
 
   // clique fora de qualquer nó: limpa a seleção (o Python esconde a barra)
   wrap.addEventListener("click", () => { model.set("selected", ""); model.save_changes(); });
@@ -211,10 +214,20 @@ function render({ model, el }) {
     else sel.style.display = "none";
   }
 
+  // tamanho de exibição: preenche a largura do card; se a árvore for LARGA a
+  // ponto de ficar baixa demais, garante min_height (a largura excede e o
+  // scroller rola). Nunca amplia além do tamanho natural do PNG (borraria).
+  function fit() {
+    const W = model.get("width"), H = model.get("height");
+    const minH = model.get("min_height") || 560;
+    const avail = scroller.clientWidth || W;
+    const s = Math.min(1, Math.max(avail / W, minH / H));
+    img.style.width = Math.round(W * s) + "px";
+  }
+
   function rebuild() {
     const W = model.get("width"), H = model.get("height");
     img.src = model.get("src");
-    wrap.style.maxWidth = W + "px";                // nunca amplia além do tamanho natural
     hov.style.display = "none"; tip.style.display = "none";
     layer.replaceChildren();
     for (const n of (model.get("nodes") || [])) {
@@ -238,6 +251,7 @@ function render({ model, el }) {
       hs.addEventListener("mouseleave", () => { hov.style.display = "none"; tip.style.display = "none"; });
       layer.appendChild(hs);
     }
+    fit();
     syncSel();
   }
 
@@ -248,15 +262,24 @@ function render({ model, el }) {
   const evs = ["change:src", "change:width", "change:height", "change:nodes"];
   evs.forEach(ev => model.on(ev, schedule));
   model.on("change:selected", syncSel);
+  model.on("change:min_height", fit);
+  const ro = new ResizeObserver(() => fit());      // card redimensionado → reajusta
+  ro.observe(scroller);
   rebuild();
-  return () => { evs.forEach(ev => model.off(ev, schedule)); model.off("change:selected", syncSel); };
+  return () => {
+    ro.disconnect();
+    evs.forEach(ev => model.off(ev, schedule));
+    model.off("change:selected", syncSel);
+    model.off("change:min_height", fit);
+  };
 }
 export default { render };
 """
 
 _TREE_IMG_CSS = """
-.ygg-treeimg-wrap { position:relative; width:100%; }
-.ygg-treeimg-img { width:100%; height:auto; display:block;
+.ygg-treeimg-scroll { width:100%; overflow-x:auto; overflow-y:hidden; }
+.ygg-treeimg-wrap { position:relative; display:inline-block; }
+.ygg-treeimg-img { display:block; height:auto;
   border:1px solid #e6e8eb; border-radius:6px; box-sizing:border-box; }
 .ygg-treeimg-hot { position:absolute; cursor:pointer; z-index:3; }
 .ygg-treeimg-hov, .ygg-treeimg-sel { position:absolute; display:none;
@@ -295,6 +318,9 @@ def _tree_image_widget_cls():
         height = traitlets.Int(1).tag(sync=True)
         nodes = traitlets.List(traitlets.Dict()).tag(sync=True)   # hitboxes + tooltips
         selected = traitlets.Unicode("").tag(sync=True)   # sid clicado ("" = nenhum)
+        # altura MÍNIMA de exibição (px): árvores largas não encolhem além
+        # disso — a largura excede o card e rola na horizontal
+        min_height = traitlets.Int(560).tag(sync=True)
 
     _TREE_IMG_WIDGET_CLS = _TreeImageWidget
     return _TREE_IMG_WIDGET_CLS
@@ -4231,7 +4257,10 @@ class TreeSegmenterUI:
         if w is None:
             return
         import base64
-        data = self.seg.plot_tree_hitmap(dpi=110)
+        # dpi 150 (não os 110 das prévias estáticas): o PNG natural maior deixa
+        # o preview MAIS ALTO — o front garante min_height e nunca amplia além
+        # do natural, então mais pixels = exibição maior e ainda nítida
+        data = self.seg.plot_tree_hitmap(dpi=150)
         nodes = [dict(sid=sid, tooltip=self._tree_node_tooltip(sid), **box)
                  for sid, box in data["nodes"].items()]
         sel = self._img_selected if self._img_selected in data["nodes"] else self.dd_leaf.value

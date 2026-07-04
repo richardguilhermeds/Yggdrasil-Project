@@ -215,6 +215,7 @@ def test_ui_plot_tree(task):
         assert w is not None and ui._tree_img_visible()
         assert w.src.startswith("data:image/png;base64,")
         assert w.width > 0 and w.height > 0
+        assert w.min_height >= 400          # exibição alta (o front garante o mínimo)
         assert {n["sid"] for n in w.nodes} == set(ui.seg.segments)
         assert all(n["tooltip"] for n in w.nodes)
     else:
