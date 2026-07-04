@@ -777,6 +777,13 @@ class ModelSegmenterUI:
                                                "variável categórica, candidata ao modelo e recriada "
                                                "ao escorar. Junte categorias na mão como na árvore.")
         self.out_bin_hint = W.HTML()
+        # categóricas no modo Manual: uma "caixa" (Dropdown de grupo) por categoria,
+        # para alocar cada categoria a um grupo — como no TreeSegmenter. As numéricas
+        # seguem no campo de cortes (tx_cuts). Preenchida por _rebuild_an_cat_box.
+        self.an_cat_box = W.VBox(layout=W.Layout(display="none", margin="4px 0 0 0",
+                                                 max_height="320px", overflow="auto"))
+        self._an_cat_widgets: dict = {}     # categoria -> Dropdown de grupo
+        self._an_cat_ctx = None             # variável para a qual a caixa foi montada
         self.btn_apply_bins.on_click(self._on_apply_bins)
         self.btn_clear_bins.on_click(self._on_clear_bins)
         self.btn_create_cat.on_click(self._on_create_cat)
@@ -799,6 +806,7 @@ class ModelSegmenterUI:
         bin_card = W.VBox([
             W.HTML("<div class='mseg-h'>Categorizar a variável na mão (bins manuais)</div>"),
             W.HBox([self.tg_binmode, self.tx_cuts, self.btn_apply_bins, self.btn_clear_bins]),
+            self.an_cat_box,          # caixas de grupo por categoria (categóricas, modo Manual)
             self.out_bin_hint,
             W.HBox([self.tx_new_cat, self.btn_create_cat]),
         ])
@@ -1765,40 +1773,118 @@ class ModelSegmenterUI:
 
     # ---- bins manuais (categorizar "na mão") ----
     def _sync_binmode(self):
-        """Mostra o campo de cortes/grupos só no modo Manual."""
+        """Mostra os controles de bin só no modo Manual: campo de cortes para
+        NUMÉRICAS, caixas de grupo por categoria para CATEGÓRICAS."""
         manual = self.tg_binmode.value == "Manual"
-        self.tx_cuts.layout.display = "" if manual else "none"
+        feat = self.dd_var2.value
+        is_cat = (feat is not None and self.seg._detect_kind(feat) == "cat")
+        # numérica → campo de cortes; categórica → caixas de grupo (uma por categoria)
+        self.tx_cuts.layout.display = "" if (manual and not is_cat) else "none"
+        self.an_cat_box.layout.display = "" if (manual and is_cat) else "none"
         self.btn_apply_bins.layout.display = "" if manual else "none"
-        kind = self.seg._detect_kind(self.dd_var2.value)
-        self.tx_cuts.placeholder = ("cortes, ex.: 0.7, 0.9" if kind == "num"
-                                    else "grupos, ex.: A,B; C,D")
+        self.tx_cuts.placeholder = "cortes, ex.: 0.7, 0.9"
+        if manual and is_cat:
+            self._rebuild_an_cat_box()
+
+    def _rebuild_an_cat_box(self, force=False):
+        """Monta uma "caixa" (Dropdown de grupo) por categoria da variável — como no
+        TreeSegmenter. As categorias vêm da amostra de referência, ordenadas por
+        risco; o grupo inicial de cada uma reflete os bins manuais atuais (senão cada
+        categoria começa no seu próprio grupo). Só reconstrói quando a variável muda
+        (preserva as escolhas do usuário entre sincronizações)."""
+        feat = self.dd_var2.value
+        if feat is None or self.seg._detect_kind(feat) != "cat":
+            self.an_cat_box.children = (); self._an_cat_widgets = {}; self._an_cat_ctx = None
+            return
+        if not force and self._an_cat_ctx == feat and self._an_cat_widgets:
+            return
+        ref = self.seg._frame(self.seg.ref_sample)
+        col = ref[feat]
+        valid = ref[col.notna()]
+        self._an_cat_widgets = {}
+        self._an_cat_ctx = feat
+        if len(valid) == 0:
+            self.an_cat_box.children = (W.HTML(
+                "<div class='mseg-legend'>Sem categorias na amostra de referência.</div>"),)
+            return
+        risco = (valid.assign(_c=valid[feat].astype(str))
+                 .groupby("_c")[self.seg.target].mean().sort_values())
+        order = list(risco.index)
+        n = len(order)
+        # grupo inicial: a partir dos grupos manuais atuais (se houver), senão 1..n
+        cat_group = {}
+        splits = self.seg.manual_bins(feat)
+        if splits and isinstance(splits[0], (list, tuple)):
+            for gi, grp in enumerate(splits, 1):
+                for c in grp:
+                    cat_group[str(c)] = gi
+        risco_h = "% de maus" if self.task_type == "classification" else "alvo médio"
+        rows = [W.HTML("<div class='mseg-legend'>Aloque cada categoria a um <b>grupo</b> — "
+                       "categorias no <b>mesmo grupo</b> viram uma única faixa. Ordenadas por "
+                       f"{risco_h} (referência). Faltantes (NaN) viram uma faixa própria."
+                       "</div>")]
+        for k, c in enumerate(order, 1):
+            val = min(max(int(cat_group.get(c, k)), 1), n)
+            dd = W.Dropdown(options=[(f"grupo {g}", g) for g in range(1, n + 1)], value=val,
+                            layout=W.Layout(width="120px"),
+                            style={"description_width": "initial"})
+            self._an_cat_widgets[c] = dd
+            lab = W.HTML(f"<span style='font-size:12px'><b>{c}</b>"
+                         f"<span style='color:#889'> · {risco_h} {risco[c]:.3f}</span></span>")
+            rows.append(W.HBox([dd, lab], layout=W.Layout(align_items="center", gap="8px")))
+        na_n = int(col.isna().sum())
+        if na_n:
+            rows.append(W.HTML(f"<div class='mseg-legend' style='color:#9a6b00'>+ "
+                               f"<b>(faltante)</b>: {na_n} linhas → faixa própria automática</div>"))
+        self.an_cat_box.children = tuple(rows)
+
+    def _an_cat_groups(self):
+        """Grupos de categorias a partir das caixas: ``[[A,B],[C,D]]`` (ou ``None``)."""
+        if not self._an_cat_widgets:
+            return None
+        grupos: dict = {}
+        for c, dd in self._an_cat_widgets.items():
+            grupos.setdefault(dd.value, []).append(c)
+        return [grupos[g] for g in sorted(grupos)] or None
 
     def _sync_bin_controls(self):
-        """Sincroniza o modo/campo com os bins manuais da variável selecionada."""
+        """Sincroniza o modo/campos com os bins manuais da variável selecionada."""
         feat = self.dd_var2.value
-        spec = self.seg.manual_bins_spec(feat)
-        self.tx_cuts.value = spec
-        self.tg_binmode.value = "Manual" if spec else "Ótimo"
+        is_cat = (feat is not None and self.seg._detect_kind(feat) == "cat")
+        # numéricas mostram o texto dos cortes; categóricas usam as caixas de grupo
+        self.tx_cuts.value = "" if is_cat else self.seg.manual_bins_spec(feat)
+        self.tg_binmode.value = "Manual" if self.seg.manual_bins(feat) else "Ótimo"
+        self._an_cat_ctx = None                 # força remontar as caixas p/ a nova variável
         self._sync_binmode()
         self._render_bin_hint(feat)
 
     def _render_bin_hint(self, feat):
+        is_cat = (feat is not None and self.seg._detect_kind(feat) == "cat")
         if self.seg.manual_bins(feat):
             self.out_bin_hint.value = (
                 "<div class='mseg-legend'>✎ Bins <b>manuais</b> ativos nesta variável — "
                 "aplicados à tabela, IV, logodds/WoE, PSI e inversão.</div>")
+        elif is_cat:
+            self.out_bin_hint.value = (
+                "<div class='mseg-legend'>Binning <b>ótimo</b> (optbinning). No modo "
+                "<b>Manual</b>, aloque cada categoria a um <b>grupo</b> nas caixas acima e "
+                "clique em <i>Aplicar bins</i>.</div>")
         else:
             self.out_bin_hint.value = (
-                "<div class='mseg-legend'>Binning <b>ótimo</b> (optbinning). "
-                "Numérica: cortes separados por vírgula. Categórica: grupos por "
-                "<code>;</code> e categorias por <code>,</code>.</div>")
+                "<div class='mseg-legend'>Binning <b>ótimo</b> (optbinning). No modo "
+                "<b>Manual</b>, informe os cortes separados por vírgula (ex.: "
+                "<code>0.7, 0.9</code>).</div>")
 
     def _on_apply_bins(self, b):
         feat = self.dd_var2.value
+        is_cat = (feat is not None and self.seg._detect_kind(feat) == "cat")
         try:
-            self.seg.set_manual_bins(feat, self.tx_cuts.value)
+            # categórica → grupos das caixas (lista de listas, robusto a vírgulas no
+            # nome); numérica → cortes do campo de texto.
+            spec = self._an_cat_groups() if is_cat else self.tx_cuts.value
+            self.seg.set_manual_bins(feat, spec)
             if not self.seg.manual_bins(feat):
-                self._log(f"[bins] '{self.seg.label(feat)}': nada para aplicar (campo vazio).")
+                self._log(f"[bins] '{self.seg.label(feat)}': nada para aplicar.")
             else:
                 self._log(f"[bins] '{self.seg.label(feat)}': bins manuais aplicados.")
             self._render_bin_hint(feat)
@@ -1813,6 +1899,7 @@ class ModelSegmenterUI:
         self.seg.clear_manual_bins(feat)
         self.tx_cuts.value = ""
         self.tg_binmode.value = "Ótimo"
+        self._rebuild_an_cat_box(force=True)     # reseta as caixas (cada categoria no seu grupo)
         self._render_bin_hint(feat)
         self._mark_dirty()
         self._log(f"[bins] '{self.seg.label(feat)}': voltou ao binning ótimo.")
