@@ -283,9 +283,9 @@ def test_ui_tree_img_acoes_e_refresh(task):
         assert w.selected == alvo
 
 
-def _widgets_da_bancada(ui):
-    """Percorre a árvore de widgets da bancada e devolve o conjunto de instâncias."""
-    achados, fila = set(), list(ui.tree_img_bench.children)
+def _widgets_de(container):
+    """Percorre a árvore de widgets de um container e devolve as instâncias."""
+    achados, fila = set(), list(container.children)
     while fila:
         wdg = fila.pop()
         achados.add(wdg)
@@ -293,36 +293,39 @@ def _widgets_da_bancada(ui):
     return achados
 
 
-def test_ui_workbench_espelha_construir(task):
-    """A bancada sob o preview contém os MESMOS widgets da aba Construir (segunda
-    view do mesmo modelo — sincronizada): dividir, ações, auto-fit e gráficos.
-    Independe do anywidget (funciona também com o preview estático)."""
+def test_ui_split_panel_espelha_card_da_aba(task):
+    """O painel 'Dividir…' do preview contém as MESMAS instâncias do card
+    'Dividir a folha' da aba (2ª view sincronizada) e a barra traz desfazer/
+    refazer/auto-fit/resetar compartilhados. Independe do anywidget."""
     ui = _build(task)
-    dentro = _widgets_da_bancada(ui)
-    for wdg in (ui.dd_leaf, ui.dd_feature, ui.tg_mode, ui.tx_cuts, ui.cat_box,
-                ui.btn_preview, ui.btn_split, ui.btn_suggest, ui.btn_sugcuts,
-                ui.btn_lock, ui.btn_unlock, ui.btn_collapse, ui.btn_merge_l,
-                ui.btn_merge_r, ui.btn_merge_na, ui.btn_undo, ui.btn_redo,
-                ui.btn_autofit, ui.btn_reset, ui.out_preview_seg,
-                ui.out_preview_chart, ui.out_leaf_hist, ui.leaf_header):
-        assert wdg in dentro, f"widget ausente da bancada: {wdg!r}"
-    # recolhida por padrão; o toggle do cabeçalho mostra/oculta
-    assert ui.tree_img_bench.layout.display == "none"
-    ui.tg_workbench.value = True
-    assert ui.tree_img_bench.layout.display == "flex"
-    ui.tg_workbench.value = False
-    assert ui.tree_img_bench.layout.display == "none"
+    painel = _widgets_de(ui.tree_img_split)
+    for wdg in (ui.dd_leaf, ui.dd_feature, ui.tg_mode, ui.sl_bins,
+                ui.dd_split_criterion, ui.tx_cuts, ui.cat_box, ui.btn_sugcuts,
+                ui.btn_preview, ui.btn_split, ui.out_preview_seg):
+        assert wdg in painel, f"widget ausente do painel de divisão: {wdg!r}"
+    barra = _widgets_de(ui.tree_img_bar)
+    for wdg in (ui.btn_img_split, ui.btn_img_suggest, ui.btn_img_lock,
+                ui.btn_img_merge_l, ui.btn_img_merge_r, ui.btn_img_merge_na,
+                ui.btn_img_collapse, ui.btn_undo, ui.btn_redo,
+                ui.btn_autofit, ui.btn_reset):
+        assert wdg in barra, f"widget ausente da barra do preview: {wdg!r}"
+    # fechado por padrão; 'Dividir…' alterna mostrar/ocultar
+    assert ui.tree_img_split.layout.display == "none"
+    ui._on_img_split(None)
+    assert ui.tree_img_split.layout.display == "flex"
+    ui._on_img_split(None)
+    assert ui.tree_img_split.layout.display == "none"
 
 
-def test_ui_workbench_grow_pelo_preview(task):
-    """Crescer a árvore A PARTIR do preview: os controles espelhados na bancada
-    são os mesmos modelos — o fluxo variável→cortes→preview→dividir funciona
-    identicamente ao da aba (aqui exercitado após abrir a bancada)."""
+def test_ui_grow_pelo_preview(task):
+    """Crescer a árvore A PARTIR do preview: 'Dividir…' abre o painel compacto e
+    o fluxo variável→cortes→preview→criar segmento funciona idêntico ao da aba
+    (mesmos modelos de widget). Funciona com e sem anywidget."""
     ui = _build(task)
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_tree_preview(None)            # abre o preview (interativo ou estático)
-        ui._on_img_split(None)               # 'Dividir…' abre a bancada
-        assert ui.tg_workbench.value and ui.tree_img_bench.layout.display == "flex"
+        ui._on_img_split(None)               # 'Dividir…' abre o painel
+        assert ui.tree_img_split.layout.display == "flex"
         ui.dd_leaf.value = "root"
         ui.dd_feature.value = "score"
         ui.tg_mode.value = "Manual"
@@ -353,8 +356,8 @@ def test_ui_tree_img_lock_e_suggest(task):
     assert folha not in ui.locked
     assert ui.btn_img_lock.description == "Travar"
     with contextlib.redirect_stdout(io.StringIO()):
-        ui._on_img_suggest(None)             # sugere variável e abre a bancada
-    assert ui.tg_workbench.value
+        ui._on_img_suggest(None)             # sugere variável e abre o painel
+    assert ui.tree_img_split.layout.display == "flex"
 
 
 def test_ui_diag_teste_des_oot(task):
