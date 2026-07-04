@@ -739,9 +739,13 @@ class TreeSegmenterUI:
                                    "sitemap")
         self.btn_tree_preview_hide = mk("Ocultar", "", "Oculta a imagem da árvore", "eye-slash")
         # --- barra de ações do preview INTERATIVO (aparece ao clicar num nó da imagem) ---
-        self.btn_img_suggest = mk("Sugerir quebra", "primary",
-                                  "Sugere a melhor variável para dividir a folha clicada e a deixa "
-                                  "pré-selecionada no card 'Dividir a folha'", "lightbulb-o")
+        self.btn_img_split = mk("Dividir…", "primary",
+                                "Abre a bancada de construção abaixo da imagem, com o card "
+                                "'Dividir a folha' já apontando para a folha clicada", "scissors")
+        self.btn_img_suggest = mk("Sugerir quebra", "info",
+                                  "Sugere a melhor variável para dividir a folha clicada, deixa-a "
+                                  "pré-selecionada no card 'Dividir a folha' e abre a bancada",
+                                  "lightbulb-o")
         self.btn_img_merge_l = mk("Fundir ← irmã", "warning",
                                   "Funde a folha clicada com a irmã adjacente à ESQUERDA", "compress")
         self.btn_img_merge_r = mk("Fundir irmã →", "warning",
@@ -751,9 +755,22 @@ class TreeSegmenterUI:
         self.btn_img_collapse = mk("Recolher", "danger",
                                    "Desfaz a quebra: numa FOLHA, recolhe o pai (a quebra que a criou); "
                                    "num RAMO, recolhe o ramo inteiro numa folha só", "level-up")
-        for _b in (self.btn_img_suggest, self.btn_img_merge_l, self.btn_img_merge_r,
-                   self.btn_img_merge_na, self.btn_img_collapse):
+        self.btn_img_lock = mk("Travar", "",
+                               "Trava/destrava a folha clicada como final (🔒 fica protegida da "
+                               "poda e do auto-merge)", "lock")
+        for _b in (self.btn_img_split, self.btn_img_suggest, self.btn_img_merge_l,
+                   self.btn_img_merge_r, self.btn_img_merge_na, self.btn_img_collapse,
+                   self.btn_img_lock):
             _b.layout.width = "auto"
+        # bancada de construção do preview: espelha abaixo da imagem os MESMOS
+        # widgets da aba Construir (várias views de um mesmo modelo ipywidgets
+        # ficam sincronizadas) — dividir, ações, auto-fit e gráficos sem sair
+        # da imagem. Montada em _build (precisa de det_row/det_bottom prontos).
+        self.tg_workbench = W.ToggleButton(
+            value=False, description="Bancada de construção", icon="wrench",
+            tooltip="Mostra/oculta abaixo da imagem os mesmos controles da aba "
+                    "Construir: dividir a folha, ações da folha, auto-fit e gráficos",
+            layout=W.Layout(width="auto"))
 
         self.btn_preview.on_click(self._on_preview)
         self.btn_sugcuts.on_click(self._on_suggest_cuts)
@@ -815,11 +832,14 @@ class TreeSegmenterUI:
         self.btn_var_analyze.on_click(self._on_var_analyze)
         self.btn_tree_preview.on_click(self._on_tree_preview)
         self.btn_tree_preview_hide.on_click(self._on_tree_preview_hide)
-        self.btn_img_suggest.on_click(self._on_suggest)
+        self.btn_img_split.on_click(self._on_img_split)
+        self.btn_img_suggest.on_click(self._on_img_suggest)
         self.btn_img_merge_l.on_click(lambda _: self._on_merge("left"))
         self.btn_img_merge_r.on_click(lambda _: self._on_merge("right"))
         self.btn_img_merge_na.on_click(self._on_merge_missing)
         self.btn_img_collapse.on_click(self._on_img_collapse)
+        self.btn_img_lock.on_click(self._on_img_lock)
+        self.tg_workbench.observe(self._on_workbench_toggle, names="value")
         self.tg_mode.observe(self._on_mode_change, names="value")
         self.dd_feature.observe(self._on_feature_change, names="value")
         self.cb_minbin.observe(lambda _: self._sync_optbin_visibility(), names="value")
@@ -871,11 +891,16 @@ class TreeSegmenterUI:
         self._img_selected = None          # sid do nó clicado na imagem (folha OU ramo)
         self.tree_img_info = W.HTML()      # chip com o resumo do nó clicado
         self.tree_img_bar = W.HBox(
-            [self.tree_img_info, self.btn_img_suggest, self.btn_img_merge_l,
-             self.btn_img_merge_r, self.btn_img_merge_na, self.btn_img_collapse],
+            [self.tree_img_info, self.btn_img_split, self.btn_img_suggest,
+             self.btn_img_merge_l, self.btn_img_merge_r, self.btn_img_merge_na,
+             self.btn_img_collapse, self.btn_img_lock],
             layout=W.Layout(display="none", flex_flow="row wrap",
                             align_items="center", margin="0 0 6px 0"))
-        self.box_tree_img = W.VBox([self.tree_img_bar, self.out_tree_img])
+        # bancada (children definidos adiante em _build, com det_row/det_bottom prontos)
+        self.tree_img_bench = W.VBox([], layout=W.Layout(display="none", width="100%",
+                                                         margin="8px 0 0 0"))
+        self.box_tree_img = W.VBox([self.tree_img_bar, self.out_tree_img,
+                                    self.tree_img_bench])
         self.cat_box = W.VBox([], layout=W.Layout(width="98%", display="none",
                                                   border="1px solid #eef1f4",
                                                   padding="6px 8px", margin="2px 0"))
@@ -1049,10 +1074,20 @@ class TreeSegmenterUI:
                          "imagem em largura total</div>")
         self.btn_tree_preview.layout.width = "auto"
         self.btn_tree_preview_hide.layout.width = "auto"
+        self.tg_workbench.layout.width = "auto"
+        # bancada = as MESMAS linhas de cards da aba (det_row/det_bottom) como
+        # segunda view, sincronizadas com as do topo — dividir/ações/auto-fit/
+        # gráficos operáveis ao lado da imagem, sem duplicar estado nem handlers.
+        self.tree_img_bench.children = (
+            W.HTML("<div class='treeui-legend' style='margin:2px 0 6px'>🛠️ bancada de "
+                   "construção — os mesmos controles do topo da aba, espelhados aqui "
+                   "(tudo fica sincronizado); clique num nó da imagem e divida, funda, "
+                   "trave ou rode o auto-fit sem sair do preview.</div>"),
+            det_row, det_bottom)
         card_tree_img = W.VBox([
             W.HBox([W.HTML("<div class='treeui-h' style='margin:0;flex:1'>Preview da árvore "
                            "(imagem)</div>"),
-                    self.btn_tree_preview, self.btn_tree_preview_hide],
+                    self.tg_workbench, self.btn_tree_preview, self.btn_tree_preview_hide],
                    layout=W.Layout(align_items="center", width="100%")),
             self.box_tree_img,
         ], layout=W.Layout(width="100%")); card_tree_img.add_class("treeui-card")
@@ -4127,11 +4162,13 @@ class TreeSegmenterUI:
                                        f"desenhar a árvore: {type(e).__name__}: {e}</div>")
 
     def _on_tree_preview_hide(self, _):
-        """Oculta o preview (estático ou interativo) e a barra de ações."""
+        """Oculta o preview (estático ou interativo), a barra de ações e a bancada."""
         self.out_tree_img.value = ""
         self.tree_img_bar.layout.display = "none"
+        self.tg_workbench.value = False        # observer esconde a bancada
         if self._tree_img_visible():
-            self.box_tree_img.children = (self.tree_img_bar, self.out_tree_img)
+            self.box_tree_img.children = (self.tree_img_bar, self.out_tree_img,
+                                          self.tree_img_bench)
 
     def _tree_img_visible(self):
         w = self._tree_img_widget
@@ -4148,7 +4185,7 @@ class TreeSegmenterUI:
             self._tree_img_widget.observe(self._on_tree_img_select, names="selected")
         if not self._tree_img_visible():
             self.box_tree_img.children = (self.tree_img_bar, self._tree_img_widget,
-                                          self.out_tree_img)
+                                          self.out_tree_img, self.tree_img_bench)
         return True
 
     def _refresh_tree_widget(self):
@@ -4240,14 +4277,19 @@ class TreeSegmenterUI:
         icone = "🍃" if is_leaf else ("🌳" if is_root else "🌿")
         head = (f"folha {nota_map.get(sid, '?')}" if is_leaf
                 else ("raiz" if is_root else "ramo"))
-        self.tree_img_info.value = (f"<span class='treeui-imgchip'>{icone} {head} · "
+        lock_txt = "🔒 " if sid in self.locked else ""
+        self.tree_img_info.value = (f"<span class='treeui-imgchip'>{icone} {lock_txt}{head} · "
                                     f"{_html.escape(desc)} · {self._risk_label} {v_txt}</span>")
-        for b in (self.btn_img_suggest, self.btn_img_merge_l,
-                  self.btn_img_merge_r, self.btn_img_merge_na):
-            b.disabled = not is_leaf           # fusões/sugestão só fazem sentido em folha
+        for b in (self.btn_img_split, self.btn_img_suggest, self.btn_img_merge_l,
+                  self.btn_img_merge_r, self.btn_img_merge_na, self.btn_img_lock):
+            b.disabled = not is_leaf           # dividir/fundir/travar só em folha
         self.btn_img_collapse.disabled = is_root
         self.btn_img_collapse.description = ("Recolher quebra (pai)" if is_leaf
                                              else "Recolher ramo")
+        if sid in self.locked:
+            self.btn_img_lock.description, self.btn_img_lock.icon = "Destravar", "unlock"
+        else:
+            self.btn_img_lock.description, self.btn_img_lock.icon = "Travar", "lock"
         self.tree_img_bar.layout.display = "flex"
 
     def _on_img_collapse(self, _):
@@ -4272,6 +4314,33 @@ class TreeSegmenterUI:
         folhas = [s for s, seg in self.seg.segments.items() if seg["is_leaf"]]
         if sid in folhas:
             self.dd_leaf.value = sid           # o ramo recolhido virou a folha ativa
+
+    def _on_workbench_toggle(self, change):
+        """Mostra/oculta a bancada de construção sob o preview da árvore."""
+        self.tree_img_bench.layout.display = "flex" if change["new"] else "none"
+
+    def _on_img_split(self, _):
+        """'Dividir…' na barra do preview: abre a bancada — o card 'Dividir a
+        folha' já aponta para a folha clicada (dd_leaf sincronizado)."""
+        self.tg_workbench.value = True
+
+    def _on_img_suggest(self, _):
+        """'Sugerir quebra' na barra do preview: abre a bancada e roda a
+        sugestão de variável para a folha clicada (preenche o card de split)."""
+        self.tg_workbench.value = True
+        self._on_suggest(None)
+
+    def _on_img_lock(self, _):
+        """Trava/destrava a folha clicada como final (alterna 🔒/🔓)."""
+        sid = self._img_selected
+        if sid is None or sid not in self.seg.segments \
+                or not self.seg.segments[sid]["is_leaf"]:
+            return
+        if sid in self.locked:
+            self._on_unlock(None)              # operam na folha ativa (dd_leaf),
+        else:                                  # sincronizada com o clique na imagem
+            self._on_lock(None)
+        self._refresh_img_bar()                # atualiza rótulo Travar/Destravar + chip
 
     def _ipython_display_(self):
         display(self.panel)

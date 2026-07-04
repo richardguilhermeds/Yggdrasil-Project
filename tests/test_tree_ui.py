@@ -250,9 +250,11 @@ def test_ui_tree_img_clique_seleciona_e_barra(task):
     assert ui.dd_leaf.value == outra         # painel Detalhe segue o clique
     assert ui.tree_img_bar.layout.display == "flex"
     assert not ui.btn_img_merge_l.disabled and not ui.btn_img_collapse.disabled
-    w.selected = "root"                      # raiz: só o chip; nada de fundir/recolher
+    assert not ui.btn_img_split.disabled and not ui.btn_img_lock.disabled
+    w.selected = "root"                      # raiz: só o chip; nada de agir
     assert ui.dd_leaf.value == outra         # nó interno não muda a folha ativa
     assert ui.btn_img_merge_l.disabled and ui.btn_img_collapse.disabled
+    assert ui.btn_img_split.disabled and ui.btn_img_lock.disabled
     w.selected = ""                          # clique fora dos nós esconde a barra
     assert ui.tree_img_bar.layout.display == "none"
 
@@ -279,6 +281,80 @@ def test_ui_tree_img_acoes_e_refresh(task):
         with contextlib.redirect_stdout(io.StringIO()):
             ui.dd_leaf.value = alvo
         assert w.selected == alvo
+
+
+def _widgets_da_bancada(ui):
+    """Percorre a árvore de widgets da bancada e devolve o conjunto de instâncias."""
+    achados, fila = set(), list(ui.tree_img_bench.children)
+    while fila:
+        wdg = fila.pop()
+        achados.add(wdg)
+        fila.extend(getattr(wdg, "children", ()))
+    return achados
+
+
+def test_ui_workbench_espelha_construir(task):
+    """A bancada sob o preview contém os MESMOS widgets da aba Construir (segunda
+    view do mesmo modelo — sincronizada): dividir, ações, auto-fit e gráficos.
+    Independe do anywidget (funciona também com o preview estático)."""
+    ui = _build(task)
+    dentro = _widgets_da_bancada(ui)
+    for wdg in (ui.dd_leaf, ui.dd_feature, ui.tg_mode, ui.tx_cuts, ui.cat_box,
+                ui.btn_preview, ui.btn_split, ui.btn_suggest, ui.btn_sugcuts,
+                ui.btn_lock, ui.btn_unlock, ui.btn_collapse, ui.btn_merge_l,
+                ui.btn_merge_r, ui.btn_merge_na, ui.btn_undo, ui.btn_redo,
+                ui.btn_autofit, ui.btn_reset, ui.out_preview_seg,
+                ui.out_preview_chart, ui.out_leaf_hist, ui.leaf_header):
+        assert wdg in dentro, f"widget ausente da bancada: {wdg!r}"
+    # recolhida por padrão; o toggle do cabeçalho mostra/oculta
+    assert ui.tree_img_bench.layout.display == "none"
+    ui.tg_workbench.value = True
+    assert ui.tree_img_bench.layout.display == "flex"
+    ui.tg_workbench.value = False
+    assert ui.tree_img_bench.layout.display == "none"
+
+
+def test_ui_workbench_grow_pelo_preview(task):
+    """Crescer a árvore A PARTIR do preview: os controles espelhados na bancada
+    são os mesmos modelos — o fluxo variável→cortes→preview→dividir funciona
+    identicamente ao da aba (aqui exercitado após abrir a bancada)."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_tree_preview(None)            # abre o preview (interativo ou estático)
+        ui._on_img_split(None)               # 'Dividir…' abre a bancada
+        assert ui.tg_workbench.value and ui.tree_img_bench.layout.display == "flex"
+        ui.dd_leaf.value = "root"
+        ui.dd_feature.value = "score"
+        ui.tg_mode.value = "Manual"
+        ui.tx_cuts.value = "0.8"
+        ui._on_preview(None); ui._on_split(None)
+    assert _nleaf(ui) >= 2
+    if _has_anywidget():                     # imagem re-renderizada com a árvore nova
+        assert {n["sid"] for n in ui._tree_img_widget.nodes} == set(ui.seg.segments)
+
+
+@pytest.mark.skipif(not _has_anywidget(), reason="requer anywidget")
+def test_ui_tree_img_lock_e_suggest(task):
+    """Travar/destravar e sugerir quebra direto da barra do preview."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        ui._on_tree_preview(None)
+    w = ui._tree_img_widget
+    folha = next(n["sid"] for n in w.nodes if n["is_leaf"])
+    w.selected = folha
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_img_lock(None)                # trava
+    assert folha in ui.locked
+    assert ui.btn_img_lock.description == "Destravar"
+    assert "🔒" in ui.tree_img_info.value    # chip reflete o cadeado
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_img_lock(None)                # destrava
+    assert folha not in ui.locked
+    assert ui.btn_img_lock.description == "Travar"
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_img_suggest(None)             # sugere variável e abre a bancada
+    assert ui.tg_workbench.value
 
 
 def test_ui_diag_teste_des_oot(task):
