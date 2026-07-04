@@ -306,9 +306,17 @@ def test_ui_split_panel_espelha_card_da_aba(task):
     barra = _widgets_de(ui.tree_img_bar)
     for wdg in (ui.btn_img_split, ui.btn_img_suggest, ui.btn_img_lock,
                 ui.btn_img_merge_l, ui.btn_img_merge_r, ui.btn_img_merge_na,
-                ui.btn_img_collapse, ui.btn_undo, ui.btn_redo,
-                ui.btn_autofit, ui.btn_reset):
+                ui.btn_img_collapse, ui.btn_img_undo, ui.btn_img_redo,
+                ui.btn_img_autofit, ui.btn_img_reset):
         assert wdg in barra, f"widget ausente da barra do preview: {wdg!r}"
+    # clones compactos (lado a lado): largura auto, sem o width 98% dos cards
+    for wdg in (ui.btn_img_undo, ui.btn_img_redo, ui.btn_img_autofit, ui.btn_img_reset):
+        assert wdg.layout.width == "auto"
+    # habilitação de desfazer/refazer espelhada dos originais (dlink)
+    assert ui.btn_img_undo.disabled and ui.btn_img_redo.disabled   # sem histórico
+    # respiro entre os grupos fundir-irmãs · fundir-missing · recolher
+    assert ui.btn_img_merge_na.layout.margin.endswith("18px")
+    assert ui.btn_img_collapse.layout.margin.endswith("18px")
     # fechado por padrão; 'Dividir…' alterna mostrar/ocultar
     assert ui.tree_img_split.layout.display == "none"
     ui._on_img_split(None)
@@ -332,6 +340,7 @@ def test_ui_grow_pelo_preview(task):
         ui.tx_cuts.value = "0.8"
         ui._on_preview(None); ui._on_split(None)
     assert _nleaf(ui) >= 2
+    assert not ui.btn_img_undo.disabled      # split criou histórico → clone habilita
     if _has_anywidget():                     # imagem re-renderizada com a árvore nova
         assert {n["sid"] for n in ui._tree_img_widget.nodes} == set(ui.seg.segments)
 

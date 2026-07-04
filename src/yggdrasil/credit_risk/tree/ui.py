@@ -157,8 +157,8 @@ _CSS = """
   margin-right:6px; max-width:420px; white-space:nowrap; overflow:hidden;
   text-overflow:ellipsis; vertical-align:middle; }
 .treeui.dark .treeui-imgchip { background:#243049; border-color:#3a4a6a; color:#e7ebf2; }
-/* barra de ações do preview: respiro entre os botões + separador entre grupos */
-.treeui-imgbar .jupyter-button { margin:2px 8px 2px 0; }
+/* barra de ações do preview: separador vertical entre grupos (o respiro entre
+   botões é margem inline — o mk() já define margin, que venceria o CSS) */
 .treeui-imgbar .treeui-vsep { display:inline-block; width:1px; height:24px;
   background:#dde3ea; margin:4px 12px 4px 4px; }
 .treeui.dark .treeui-imgbar .treeui-vsep { background:#2c3a55; }
@@ -763,10 +763,28 @@ class TreeSegmenterUI:
         self.btn_img_lock = mk("Travar", "",
                                "Trava/destrava a folha clicada como final (🔒 fica protegida da "
                                "poda e do auto-merge)", "lock")
+        # clones de desfazer/refazer/auto-fit/reset para a barra: as instâncias
+        # dos cards têm width 98% inline (uma por linha aqui); os clones ficam
+        # compactos, lado a lado. Habilitação do desfazer/refazer espelhada por
+        # dlink; auto-fit/reset usam os mesmos handlers (sem estado próprio).
+        self.btn_img_undo = mk("◀ Desfazer", "", "Desfaz a última alteração na árvore", "undo")
+        self.btn_img_redo = mk("Refazer ▶", "", "Refaz a alteração desfeita", "repeat")
+        self.btn_img_autofit = mk("Auto-fit", "info",
+                                  "Constrói a árvore gulosa por IV até a profundidade escolhida "
+                                  "(folha selecionada ≠ raiz: cresce só aquela folha; raiz: "
+                                  "reconstrói tudo)", "magic")
+        self.btn_img_reset = mk("Resetar", "", "Recomeça a árvore do zero", "refresh")
+        W.dlink((self.btn_undo, "disabled"), (self.btn_img_undo, "disabled"))
+        W.dlink((self.btn_redo, "disabled"), (self.btn_img_redo, "disabled"))
         for _b in (self.btn_img_split, self.btn_img_suggest, self.btn_img_merge_l,
                    self.btn_img_merge_r, self.btn_img_merge_na, self.btn_img_collapse,
-                   self.btn_img_lock):
+                   self.btn_img_lock, self.btn_img_undo, self.btn_img_redo,
+                   self.btn_img_autofit, self.btn_img_reset):
             _b.layout.width = "auto"
+            _b.layout.margin = "2px 8px 2px 0"     # respiro horizontal entre botões
+        # pequena espaçada entre os GRUPOS: fundir-irmãs · fundir-missing · recolher
+        self.btn_img_merge_na.layout.margin = "2px 8px 2px 18px"
+        self.btn_img_collapse.layout.margin = "2px 8px 2px 18px"
 
         self.btn_preview.on_click(self._on_preview)
         self.btn_sugcuts.on_click(self._on_suggest_cuts)
@@ -835,6 +853,10 @@ class TreeSegmenterUI:
         self.btn_img_merge_na.on_click(self._on_merge_missing)
         self.btn_img_collapse.on_click(self._on_img_collapse)
         self.btn_img_lock.on_click(self._on_img_lock)
+        self.btn_img_undo.on_click(self._on_undo)
+        self.btn_img_redo.on_click(self._on_redo)
+        self.btn_img_autofit.on_click(self._on_autofit)
+        self.btn_img_reset.on_click(self._on_reset)
         self.tg_mode.observe(self._on_mode_change, names="value")
         self.dd_feature.observe(self._on_feature_change, names="value")
         self.cb_minbin.observe(lambda _: self._sync_optbin_visibility(), names="value")
@@ -895,8 +917,9 @@ class TreeSegmenterUI:
             W.HBox([self.tree_img_info, self.btn_img_split, self.btn_img_suggest,
                     self.btn_img_lock], layout=_row_lay),
             W.HBox([self.btn_img_merge_l, self.btn_img_merge_r, self.btn_img_merge_na,
-                    self.btn_img_collapse, _vsep(), self.btn_undo, self.btn_redo,
-                    _vsep(), self.btn_autofit, self.btn_reset], layout=_row_lay),
+                    self.btn_img_collapse, _vsep(), self.btn_img_undo,
+                    self.btn_img_redo, self.btn_img_autofit, self.btn_img_reset],
+                   layout=_row_lay),
         ], layout=W.Layout(display="none", margin="0 0 6px 0"))
         self.tree_img_bar.add_class("treeui-imgbar")
         # painel COMPACTO "Dividir a folha" do preview (aberto pelo 'Dividir…'):
