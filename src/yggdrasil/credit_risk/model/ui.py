@@ -931,6 +931,15 @@ class ModelSegmenterUI:
                                  "do algoritmo selecionado maximizando AUC (classificação) / "
                                  "R² (regressão) no OOT, e treina com os melhores. Os trials "
                                  "podem ser registrados no MLflow.")
+        # botão para CANCELAR o tuning em andamento (o tuning roda numa thread de
+        # fundo para a UI seguir responsiva; ver _on_tune/_on_cancel_tune).
+        self.btn_cancel_tune = W.Button(description="Cancelar", button_style="danger",
+                                        icon="times", disabled=True,
+                                        layout=W.Layout(width="auto"))
+        self.btn_cancel_tune.tooltip = ("Interrompe o tuning bayesiano em andamento "
+                                        "(para após o trial atual). O modelo vigente é "
+                                        "preservado — não é reajustado.")
+        self._tune_thread = None            # thread do tuning em andamento (ou None)
         self.out_tune = W.HTML()
         # barra de progresso do tuning (escondida até começar)
         self.pb_tune = W.IntProgress(value=0, min=0, max=100, description="0/0",
@@ -944,6 +953,7 @@ class ModelSegmenterUI:
                                     style={"description_width": "initial"})
         self.out_fit_status = W.HTML()     # status do fit (treinando / concluído / erro)
         self.btn_tune.on_click(self._on_tune)
+        self.btn_cancel_tune.on_click(self._on_cancel_tune)
         self.cb_woe = W.Checkbox(value=False, indent=False,
                                  description="Transformar variáveis (WoE por bins)")
         self.cb_woe.tooltip = (
@@ -964,6 +974,7 @@ class ModelSegmenterUI:
         self.out_model_c = W.HTML()
         self.out_shap = W.HTML()
         self.out_shap_bar = W.HTML()
+        self.out_shap_rel = W.HTML()       # importância relativa por variável (categóricas agregadas)
         self.btn_fit.on_click(self._on_fit)
         self.btn_shap.on_click(self._on_shap)
         self.dd_algo.observe(lambda c: self._sync_algo_visibility(), names="value")
@@ -1016,7 +1027,7 @@ class ModelSegmenterUI:
         self.box_tune = W.VBox([
             W.HTML("<div class='mseg-legend'>Tuning bayesiano (Optuna): busca os melhores "
                    "hiperparâmetros do algoritmo selecionado e treina com eles.</div>"),
-            W.HBox([self.sl_trials, self.btn_tune]),
+            W.HBox([self.sl_trials, self.btn_tune, self.btn_cancel_tune]),
             W.HBox([self.cb_tune_mlflow]),
             self.pb_tune,
             self.out_tune,
@@ -1081,6 +1092,13 @@ class ModelSegmenterUI:
                            layout=W.Layout(width="55%")),
                     W.VBox([W.HTML("<div class='mseg-h'>SHAP — importância</div>"), self.out_shap_bar],
                            layout=W.Layout(width="45%"))]),
+            W.VBox([W.HTML("<div class='mseg-h'>SHAP — importância relativa por variável</div>"),
+                    W.HTML("<div class='mseg-legend'>Importância relativa (%) de <b>todas</b> as "
+                           "variáveis que entraram no modelo, com as <i>dummies</i> de cada "
+                           "variável categórica somadas numa única barra (uma linha por variável "
+                           "original). Complementa os gráficos acima, que mostram cada coluna "
+                           "codificada em separado.</div>"),
+                    self.out_shap_rel]),
         ], layout=W.Layout(padding="2px"))
         self._sync_algo_visibility()
 
@@ -1116,6 +1134,7 @@ class ModelSegmenterUI:
         self.out_rating_inv_s = W.HTML()
         self.out_rating_inv_t = W.HTML()
         self.out_rating_psi_safra = W.HTML()   # PSI dos ratings ao longo do tempo (por safra)
+        self.out_rating_psi_sample = W.HTML()  # PSI dos ratings por amostra (DES × OOT/ESTABILIDADE)
         self.out_rating_mono = W.HTML()
         self.btn_build_ratings.on_click(self._on_build_ratings)
 
@@ -1140,6 +1159,13 @@ class ModelSegmenterUI:
                             self.out_rating_inv_s], layout=W.Layout(width="50%")),
                     W.VBox([W.HTML("<div class='mseg-h'>Inversão entre ratings · safras</div>"),
                             self.out_rating_inv_t], layout=W.Layout(width="50%"))]),
+            W.VBox([W.HTML("<div class='mseg-h'>PSI dos ratings por amostra · DES × OOT e "
+                           "ESTABILIDADE</div>"),
+                    W.HTML("<div class='mseg-legend'>Estabilidade da régua entre amostras: PSI da "
+                           "distribuição dos ratings de cada amostra vs a referência (DES). "
+                           "Verde &lt; 0,10 (estável) · amarelo &lt; 0,25 (atenção) · vermelho "
+                           "≥ 0,25 (instável).</div>"),
+                    self.out_rating_psi_sample]),
             W.VBox([W.HTML("<div class='mseg-h'>PSI dos ratings ao longo do tempo · por safra "
                            "vs DES</div>"),
                     W.HTML("<div class='mseg-legend'>Estabilidade da régua no tempo: PSI da "
@@ -1211,7 +1237,7 @@ class ModelSegmenterUI:
                                    placeholder="catalog.schema.saida",
                                    style={"description_width": "150px"},
                                    layout=W.Layout(width="46%"))
-        self.cb_recreate = W.Checkbox(value=True, indent=False,
+        self.cb_recreate = W.Checkbox(value=False, indent=False,
                                       description="recriar categorias/faixas das variáveis")
         self.btn_ruler = W.Button(description="Ver régua (rating → valor)", icon="list-ol")
         self.btn_score = W.Button(description="Escorar base", button_style="primary",
@@ -1303,6 +1329,39 @@ class ModelSegmenterUI:
         self.btn_lift.on_click(self._on_adv_lift)
         card_adv_disc = W.VBox([
             W.HTML("<div class='mseg-h'>Poder discriminante · CAP e Lift/Gains</div>"),
+            W.HTML(
+                "<div class='mseg-help'><div class='ttl'>📈 Curva CAP "
+                "(<i>Cumulative Accuracy Profile</i> / Lorenz)</div>"
+                "Ordena toda a carteira do <b>pior score ao melhor</b> (do maior risco "
+                "previsto ao menor) e traça, no eixo X, o <b>% acumulado da carteira</b> e, no "
+                "eixo Y, o <b>% acumulado dos eventos</b> (ex.: <i>defaults</i>) já capturados. "
+                "Responde: <i>“ao pegar os X% de pior score, que fração de todos os maus eu já "
+                "peguei?”</i>."
+                "<br>• A <b>diagonal</b> pontilhada é o <b>modelo aleatório</b> — X% da carteira "
+                "⇒ X% dos maus."
+                "<br>• A curva do <b>modelo perfeito</b> sobe quase na vertical: concentra 100% "
+                "dos maus já nos piores scores."
+                "<br>• Quanto mais a curva <b>abaúla para cima</b> da diagonal, maior o poder de "
+                "discriminação."
+                "<br>O <b>AR</b> (<i>Accuracy Ratio</i>) na legenda resume isso: é a área entre a "
+                "curva e a diagonal, normalizada pela do modelo perfeito — <b>1 = perfeito, "
+                "0 = aleatório</b>. Ele é igual ao <b>Gini</b> "
+                "(<code>AR = Gini = 2·AUC − 1</code>).</div>"
+                "<div class='mseg-help'><div class='ttl'>📊 Lift &amp; Gains por decil de "
+                "score</div>"
+                "A carteira é dividida em <b>10 decis por score</b>, do <b>decil 1 = piores "
+                "scores</b> (maior risco) ao decil 10 (melhores)."
+                "<br>• <b>Lift do decil</b> (barras) = <code>taxa de evento no decil ÷ taxa média "
+                "da carteira</code>. Lift <b>&gt; 1</b> num decil significa concentração de "
+                "eventos <b>acima da média</b>; a linha tracejada em <b>lift = 1</b> é o modelo "
+                "aleatório. Ex.: lift 3,0 no decil 1 ⇒ o pior decil tem <b>3×</b> a taxa média de "
+                "maus (o modelo separa bem)."
+                "<br>• <b>Gains acumulado</b> (linha, eixo direito) = <b>% de todos os eventos já "
+                "capturados</b> ao varrer do pior decil para o melhor. Ex.: <i>“os 20% de pior "
+                "score concentram 55% dos maus”</i>."
+                "<br>É a leitura <b>operacional</b> do poder de separação — apoia políticas de "
+                "corte por faixa de score (aprovar/negar, priorizar cobrança). "
+                "<b>CAP e Lift/Gains exigem alvo binário (só classificação).</b></div>"),
             W.HBox([self.dd_sample_adv, self.btn_cap, self.btn_lift]),
             W.HBox([W.VBox([self.out_adv_cap], layout=W.Layout(width="49.5%")),
                     W.VBox([self.out_adv_lift], layout=W.Layout(width="49.5%"))],
@@ -1347,10 +1406,69 @@ class ModelSegmenterUI:
         tab_adv = W.VBox([card_adv_disc, card_adv_safra, card_adv_bt],
                          layout=W.Layout(padding="2px"))
 
-        self.tabs = W.Tab(children=[tab_vars, tab_an, tab_model, tab_rating, tab_export,
-                                    tab_adv])
+        # ---------- Aba: Importância (Backward Elimination) ----------
+        _samples = list(dict.fromkeys(self.seg._samples()))
+        self.dd_backelim_sample = W.Dropdown(
+            options=_samples, value=self.seg._oot_sample(),
+            description="Amostra de avaliação:", style={"description_width": "initial"})
+        _n_feats0 = len(self.seg.model_features or self.seg.selected_features()
+                        or self.seg.candidates)
+        self.sl_backelim_min = W.IntSlider(
+            value=1, min=1, max=max(2, _n_feats0 - 1), description="mín. variáveis",
+            style={"description_width": "initial"})
+        if self.task_type == "classification":
+            _mopts = ["ks", "auc", "gini", "accuracy", "f1", "precision", "recall",
+                      "brier", "logloss"]
+            _mdef = ("ks", "auc")
+        else:
+            _mopts = ["rmse", "mae", "mape", "smape", "medae", "r2", "mean_bias"]
+            _mdef = ("rmse", "mae")
+        self.sm_backelim_metrics = W.SelectMultiple(
+            options=_mopts, value=_mdef, rows=5, description="métricas (gráfico):",
+            style={"description_width": "initial"})
+        self.btn_backelim = W.Button(description="Rodar backward elimination",
+                                     button_style="primary", icon="filter")
+        self.btn_backelim.tooltip = (
+            "Reajusta o modelo removendo a cada passo a variável menos importante "
+            "(permutation importance) e registra as métricas do conjunto restante. "
+            "Não altera o modelo vigente.")
+        self.pb_backelim = W.IntProgress(
+            value=0, min=0, max=1, description="0/0", bar_style="info",
+            layout=W.Layout(width="60%", visibility="hidden"),
+            style={"description_width": "initial"})
+        self.out_backelim_status = W.HTML()
+        self.out_backelim_table = W.HTML()
+        self.out_backelim_plot = W.HTML()
+        self._backelim_thread = None
+        self._backelim_result = None
+        self.btn_backelim.on_click(self._on_backelim)
+        self.sm_backelim_metrics.observe(lambda c: self._render_backelim_plot(), names="value")
+
+        card_backelim = W.VBox([
+            W.HTML("<div class='mseg-h'>Backward elimination — impacto de remover variáveis</div>"),
+            W.HTML("<div class='mseg-legend'>Treina o modelo removendo, a cada passo, a "
+                   "variável <b>menos importante</b> (permutation importance) e mede as "
+                   "métricas do conjunto restante, na amostra de avaliação escolhida. O modelo "
+                   "vigente <b>não</b> é alterado (treina modelos temporários). Métricas: "
+                   "classificação (KS, ROC-AUC, Gini, …) · regressão (RMSE, MAE, MAPE, …).</div>"),
+            W.HBox([self.dd_backelim_sample, self.sl_backelim_min]),
+            W.HBox([self.sm_backelim_metrics, self.btn_backelim]),
+            self.pb_backelim,
+            self.out_backelim_status,
+        ]); card_backelim.add_class("mseg-card")
+        tab_backelim = W.VBox([
+            card_backelim,
+            W.VBox([W.HTML("<div class='mseg-h'>Métricas × nº de variáveis</div>"),
+                    self.out_backelim_plot]),
+            W.VBox([W.HTML("<div class='mseg-h'>Tabela — variável removida a cada passo e "
+                           "métricas</div>"), self.out_backelim_table]),
+        ], layout=W.Layout(padding="2px"))
+
+        self.tabs = W.Tab(children=[tab_vars, tab_an, tab_model, tab_backelim, tab_rating,
+                                    tab_export, tab_adv])
         for i, t in enumerate(["Variáveis", "Análise de variáveis", "Modelo",
-                               "Ratings & Score", "Validar & Exportar", "Avançado"]):
+                               "Backward Elim.", "Ratings & Score", "Validar & Exportar",
+                               "Avançado"]):
             self.tabs.set_title(i, t)
         self.tabs.add_class("mseg-tabs")
 
@@ -2172,6 +2290,10 @@ class ModelSegmenterUI:
             self.btn_fit.disabled = False
 
     def _on_tune(self, b):
+        import threading
+        if self._tune_thread is not None and self._tune_thread.is_alive():
+            self._log("[tune] já há um tuning em andamento.")
+            return
         algo = self.dd_algo.value
         transform = "woe" if self.cb_woe.value else "raw"
         n_trials = int(self.sl_trials.value)
@@ -2182,36 +2304,78 @@ class ModelSegmenterUI:
         self.pb_tune.description = f"0/{n_trials}"
         self.pb_tune.layout.visibility = "visible"
         self.btn_tune.disabled = True
+        self.btn_fit.disabled = True                    # evita treino concorrente no mesmo seg
+        # limpa a flag de cancelamento AQUI (main thread), ANTES de habilitar o botão
+        # "Cancelar" e de iniciar a thread — assim um clique em Cancelar nunca é
+        # apagado por um clear tardio na thread de fundo (o tune_optuna não limpa no
+        # início justamente por isso).
+        self.seg._tuning_cancel.clear()
+        self.btn_cancel_tune.disabled = False           # habilita o "Cancelar"
         self.out_tune.value = "<i>Rodando otimização bayesiana (Optuna)…</i>"
 
         def _progress(done, total, best):
             self.pb_tune.value = done
             self.pb_tune.description = f"{done}/{total}"
+            best_txt = f"{best:.4f}" if best == best else "—"   # NaN-safe (best!=best se NaN)
             self.out_tune.value = (f"<div class='mseg-legend'>Optuna · trial {done}/{total} · "
-                                   f"melhor até agora = <b>{best:.4f}</b></div>")
+                                   f"melhor até agora = <b>{best_txt}</b></div>")
 
         log_mlflow = self.cb_tune_mlflow.value
         search_space = self._collect_search_space(algo)     # limites escolhidos na gaveta
-        try:
-            res = self.seg.tune_optuna(algorithm=algo, n_trials=n_trials,
-                                       transform=transform, fit_best=True,
-                                       progress_callback=_progress,
-                                       log_mlflow=log_mlflow,
-                                       mlflow_experiment=(self.tx_experiment.value or None),
-                                       search_space=search_space,
-                                       register_model=log_mlflow,
-                                       mlflow_model_name=(self.tx_model.value or None))
-        except Exception as e:
+        experiment = self.tx_experiment.value or None
+        model_name = self.tx_model.value or None
+
+        # O tuning roda numa thread de FUNDO para a UI seguir responsiva — assim o
+        # botão "Cancelar" (que chama seg.cancel_tuning()) é processado enquanto o
+        # estudo roda. As atualizações de widget a partir da thread são propagadas
+        # pelo canal de comm do ipywidgets.
+        def _worker():
+            try:
+                res = self.seg.tune_optuna(algorithm=algo, n_trials=n_trials,
+                                           transform=transform, fit_best=True,
+                                           progress_callback=_progress,
+                                           log_mlflow=log_mlflow,
+                                           mlflow_experiment=experiment,
+                                           search_space=search_space,
+                                           register_model=log_mlflow,
+                                           mlflow_model_name=model_name)
+            except Exception as e:
+                self.pb_tune.bar_style = "danger"
+                self.out_tune.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
+                                       f"tuning: {type(e).__name__}: {e}</div>")
+                self._log(f"[tune] erro: {e}")
+                return
+            finally:
+                self.btn_tune.disabled = False
+                self.btn_fit.disabled = False
+                self.btn_cancel_tune.disabled = True
+            self._finish_tune(res, algo, log_mlflow)
+
+        self._tune_thread = threading.Thread(target=_worker, daemon=True)
+        self._tune_thread.start()
+
+    def _finish_tune(self, res, algo, log_mlflow):
+        """Atualiza a UI ao término do tuning (chamado pela thread de fundo). Trata o
+        caso de **cancelamento** (modelo preservado, sem re-render)."""
+        if res.get("cancelled"):
+            self.pb_tune.bar_style = "warning"
+            self.pb_tune.description = f"cancelado ({res['n_trials']} trials)"
+            self.out_tune.value = (
+                "<div style='color:#9a6f12;font-size:12px'><b>Tuning cancelado.</b> "
+                f"{res['n_trials']} trials concluídos. O modelo vigente foi preservado "
+                "(não reajustado).</div>")
+            self._log(f"[tune] cancelado pelo usuário após {res['n_trials']} trials; "
+                      "modelo preservado.")
+            return
+        if not res.get("n_trials"):
             self.pb_tune.bar_style = "danger"
-            self.btn_tune.disabled = False
-            self.out_tune.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no tuning: "
-                                   f"{type(e).__name__}: {e}</div>")
-            self._log(f"[tune] erro: {e}")
+            self.out_tune.value = ("<div style='color:#b3261e;font-size:12px'>Nenhum trial "
+                                   "concluído — nada a aplicar.</div>")
+            self._log("[tune] nenhum trial concluído.")
             return
         self.pb_tune.value = self.pb_tune.max
         self.pb_tune.bar_style = "success"
         self.pb_tune.description = f"{res['n_trials']}/{res['n_trials']} ✓"
-        self.btn_tune.disabled = False
         bp = "<br>".join(f"<code>{k}</code> = {v}" for k, v in res["best_params"].items())
         self.out_tune.value = (
             f"<div class='mseg-legend'><b>Optuna</b> · {res['n_trials']} trials · melhor "
@@ -2231,6 +2395,19 @@ class ModelSegmenterUI:
         self._clear_dirty()                   # modelo re-treinado no tuning ⇒ em dia
         self._clear_adv_outputs()
         self._refresh_bar()
+
+    def _on_cancel_tune(self, b):
+        """Sinaliza o cancelamento do tuning em andamento (a thread de fundo termina
+        após o trial atual). No-op se não houver tuning rodando."""
+        if self._tune_thread is None or not self._tune_thread.is_alive():
+            self._log("[tune] não há tuning em andamento para cancelar.")
+            return
+        self.btn_cancel_tune.disabled = True
+        self.pb_tune.bar_style = "warning"
+        self.out_tune.value = ("<div style='color:#9a6f12;font-size:12px'><i>Cancelando… "
+                               "aguardando o trial atual terminar.</i></div>")
+        self.seg.cancel_tuning()
+        self._log("[tune] cancelamento solicitado.")
 
     def _render_metrics(self):
         if getattr(self.seg, "two_stage", False):
@@ -2365,10 +2542,88 @@ class ModelSegmenterUI:
         try:
             self.out_shap.value = self._fig_html(self.seg.plot_shap_beeswarm(sample_size=800))
             self.out_shap_bar.value = self._fig_html(self.seg.plot_shap_bar(sample_size=800))
+            # tamanho natural (menor), não esticado à largura do painel como antes
+            self.out_shap_rel.value = self._fig_html(
+                self.seg.plot_shap_importance_relative(sample_size=800, figsize=(6.0, 3.4)))
             self._log("[shap] gráficos gerados.")
         except Exception as e:
             self.out_shap.value = f"<i>SHAP indisponível: {e}</i>"
             self._log(f"[shap] erro: {e}")
+
+    # ------------------------------------------------------ Aba Backward Elimination
+    def _on_backelim(self, b):
+        import threading
+        if self._backelim_thread is not None and self._backelim_thread.is_alive():
+            self._log("[backward] já há uma execução em andamento.")
+            return
+        feats0 = (self.seg.model_features or self.seg.selected_features()
+                  or self.seg.candidates)
+        if len(feats0) < 2:
+            self.out_backelim_status.value = ("<i>Selecione ao menos 2 variáveis (aba "
+                                              "Variáveis) ou treine o modelo primeiro.</i>")
+            self._log("[backward] menos de 2 variáveis disponíveis.")
+            return
+        sample = self.dd_backelim_sample.value
+        min_features = int(self.sl_backelim_min.value)
+        total = max(1, len(feats0) - min_features + 1)
+        self.pb_backelim.max = total
+        self.pb_backelim.value = 0
+        self.pb_backelim.description = f"0/{total}"
+        self.pb_backelim.bar_style = "info"
+        self.pb_backelim.layout.visibility = "visible"
+        self.btn_backelim.disabled = True
+        self.out_backelim_status.value = "<i>Rodando backward elimination…</i>"
+
+        def _progress(done, total_, nvar):
+            self.pb_backelim.value = done
+            self.pb_backelim.description = f"{done}/{total_}"
+            self.out_backelim_status.value = (
+                f"<div class='mseg-legend'>Passo {done}/{total_} · avaliando com "
+                f"{nvar} variáveis…</div>")
+
+        def _worker():
+            try:
+                res = self.seg.backward_elimination(sample=sample, min_features=min_features,
+                                                    progress_callback=_progress)
+            except Exception as e:
+                self.pb_backelim.bar_style = "danger"
+                self.out_backelim_status.value = (
+                    f"<div style='color:#b3261e;font-size:12px'>Erro: "
+                    f"{type(e).__name__}: {e}</div>")
+                self._log(f"[backward] erro: {e}")
+                return
+            finally:
+                self.btn_backelim.disabled = False
+            self._backelim_result = res
+            self.pb_backelim.value = self.pb_backelim.max
+            self.pb_backelim.bar_style = "success"
+            self.pb_backelim.description = "concluído ✓"
+            self.out_backelim_status.value = (
+                f"<div class='mseg-legend'>Concluído · {len(res)} passos · avaliação em "
+                f"<b>{res.attrs.get('eval_sample')}</b> (algoritmo "
+                f"<code>{res.attrs.get('algorithm')}</code>).</div>")
+            self._render_backelim_plot()
+            self.out_backelim_table.value = self._df_html(
+                res.round(4), center=True, max_height="380px")
+            self._log(f"[backward] concluído: {len(res)} passos (avaliação em "
+                      f"{res.attrs.get('eval_sample')}).")
+
+        self._backelim_thread = threading.Thread(target=_worker, daemon=True)
+        self._backelim_thread.start()
+
+    def _render_backelim_plot(self):
+        """(Re)desenha o gráfico de métricas × nº de variáveis com as métricas
+        escolhidas em ``sm_backelim_metrics`` (observer). No-op sem resultado."""
+        res = self._backelim_result
+        if res is None or len(res) == 0:
+            return
+        metrics = list(self.sm_backelim_metrics.value) or None
+        try:
+            self.out_backelim_plot.value = self._fig_html(
+                self.seg.plot_backward_elimination(res, metrics=metrics, figsize=(9.6, 4.6)),
+                stretch=True)
+        except Exception as e:
+            self.out_backelim_plot.value = f"<i>{e}</i>"
 
     # ------------------------------------------------------------------ Aba 4 handlers
     def _on_suggest_n(self, b):
@@ -2468,6 +2723,11 @@ class ModelSegmenterUI:
         except Exception as e:
             self.out_rating_inv_t.value = f"<i>{e}</i>"
         try:
+            self.out_rating_psi_sample.value = self._fig_html(
+                self.seg.plot_rating_psi_by_sample(figsize=(9.6, 4.2)), stretch=True)
+        except Exception as e:
+            self.out_rating_psi_sample.value = f"<i>{e}</i>"
+        try:
             self.out_rating_psi_safra.value = self._fig_html(
                 self.seg.plot_rating_psi_by_safra(figsize=(9.6, 4.2)), stretch=True)
         except Exception as e:
@@ -2529,6 +2789,7 @@ class ModelSegmenterUI:
         out_tbl = self.tx_out_table.value.strip() or None
         self._score_steps = []                            # zera a tabela de progresso
         self._render_score_progress()
+        self.out_score.value = ""                         # limpa a saída anterior
         self.btn_score.disabled = True
         cb = self._score_progress_cb
         try:
@@ -2536,16 +2797,16 @@ class ModelSegmenterUI:
                 sout = self.seg.score_table(in_tbl, col_value=col_value,
                                             recreate_categories=recreate,
                                             output_table=out_tbl, progress_callback=cb)
-                self.result = sout                       # Spark DataFrame
-                prev = sout.limit(10).toPandas()
-                ncols = len(sout.columns)
+                self.result = sout                       # Spark DataFrame (lazy)
+                ncols = len(sout.columns)                # só o schema — não dispara compute
+                # sem PRÉVIA da base na interface (não damos display do escorado): evita
+                # também o toPandas() extra que reexecutava a escoragem no driver.
                 gravou = (f" Gravado em <code>{out_tbl}</code>." if out_tbl
-                          else " Spark DataFrame em <code>ui.result</code>.")
+                          else " Spark DataFrame (lazy) em <code>ui.result</code>.")
                 self.out_score.value = (
-                    f"<div class='mseg-legend'>Tabela Databricks <code>{in_tbl}</code> "
-                    f"escorada ({ncols} colunas).{gravou} Prévia (10 linhas):</div>"
-                    + self._df_html(prev.round(6), max_height="320px"))
-                self._log(f"[escorar] tabela '{in_tbl}' escorada"
+                    f"<div class='mseg-legend'>✓ Tabela Databricks <code>{in_tbl}</code> "
+                    f"escorada ({ncols} colunas).{gravou}</div>")
+                self._log(f"[escorar] tabela '{in_tbl}' escorada ({ncols} colunas)"
                           + (f" e gravada em '{out_tbl}'." if out_tbl else " (ui.result)."))
                 return
             # em memória (pandas): base carregada ou ui.score_df
@@ -2556,22 +2817,25 @@ class ModelSegmenterUI:
             self.result = out
             novas = [c for c in out.columns if c not in base.columns]
             cols = ", ".join(f"<code>{c}</code>" for c in novas)
+            # sem prévia da base na interface — só a confirmação; os dados ficam em ui.result
             self.out_score.value = (
-                f"<div class='mseg-legend'>Base escorada ({origem}): "
+                f"<div class='mseg-legend'>✓ Base escorada ({origem}): "
                 f"{out.shape[0]} linhas × {out.shape[1]} colunas, em <code>ui.result</code>. "
-                f"Colunas adicionadas: {cols}.</div>"
-                + self._df_html(out.head(10).round(6), max_height="320px"))
+                f"Colunas adicionadas: {cols}.</div>")
             self._log(f"[escorar] {origem} escorada em ui.result ({out.shape[0]} linhas).")
         except Exception as e:
-            # marca como erro a última etapa em andamento (fica visível na tabela)
+            # o erro vai para o CONSOLE (log), não fica na área da base escorada: a
+            # interface só mostra um aviso curto apontando o Console.
             for row in reversed(self._score_steps):
                 if row["status"] == "run":
                     row["status"] = "err"
-                    row["detail"] = f"{type(e).__name__}: {e}"
+                    row["detail"] = type(e).__name__       # detalhe completo só no Console
                     break
             self._render_score_progress()
-            self.out_score.value = f"<i>{e}</i>"
-            self._log(f"[escorar] erro: {e}")
+            self.out_score.value = ("<div class='mseg-legend' style='color:#b23a2a'>✗ Falha na "
+                                    "escoragem — veja o <b>Console</b> (rodapé) para o detalhe."
+                                    "</div>")
+            self._log(f"[escorar] ERRO: {type(e).__name__}: {e}")
         finally:
             self.btn_score.disabled = False
 
