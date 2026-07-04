@@ -2,6 +2,11 @@
 notebooks/rascunhos
 notebooks/testes/
 
+# Claude Code — estado local da máquina (worktrees de sessões paralelas e
+# configurações pessoais); nada disso pertence ao repositório
+.claude/worktrees/
+.claude/settings.local.json
+
 # Dados
 data/
 
