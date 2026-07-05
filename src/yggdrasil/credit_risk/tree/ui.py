@@ -39,6 +39,22 @@ _CSS = """
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 .treeui { --ac:#3b4a63; --ac-deep:#27324a; --ac-soft:#eef1f5; --ac-border:#cdd5e0;
   --ink:#1f2733; --muted:#6b7480; --line:#e7e9ee;
+  /* tokens semânticos (status, tabelas, realces): o HTML gerado no Python usa
+     var(--...) em vez de hex — o tema escuro só redefine os tokens aqui */
+  --ok-ink:#157a52; --ok-bg:#e7f5ee; --ok-tx:#137a3e;
+  --warn-ink:#9a6f12; --warn-bg:#fbf3e0; --warn-tx:#9a6b00;
+  --bad-ink:#b23a2a; --bad-bg:#fbe7e4; --bad-tx:#b3261e;
+  --sus-tx:#6b3fa0;
+  --risk-lo:#1aa64b; --risk-mid:#caa000; --risk-hi:#d6453e;
+  --gauge-ok:#2bb673; --gauge-warn:#e6b800; --gauge-bad:#e0584f; --gauge-track:#eceff3;
+  --strong-ink:#15324a; --body-ink:#3a4250; --sub-ink:#8a93a3; --tree-meta:#7c8893;
+  --faint-ink:#aab4be; --hair:#eef0f3; --tile-bg:#f7f8fa;
+  --sel-bg:#fff5e6; --sel-ac:#e8870b;
+  --tbl-line:#e1e5ec; --tbl-line-strong:#cdd5e0; --tbl-head-bg:#eef1f5;
+  --tbl-head-ink:#27324a; --tbl-head-line:#b9c2d0; --tbl-zebra:#fafbfc;
+  --tbl-hover:#eef3f8; --tbl-sticky:#f4f6f9;
+  --ci-bar:#9bb7c9; --ci-ref:#0f3d57;
+  --notice-bg:#fff8e6; --notice-border:#f0c36d; --notice-ink:#664d03;
   font-family:'IBM Plex Sans', -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
   color:var(--ink); }
 .treeui .mono { font-family:'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas,
@@ -60,7 +76,7 @@ _CSS = """
 /* rótulos das faixas (cockpit/diagnóstico) e chips da folha ativa */
 .treeui-band { font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.08em;
   color:var(--ac); margin:6px 2px 4px; }
-.treeui-band-muted { color:#9aa2b1; margin-top:14px; }
+.treeui-band-muted { color:var(--sub-ink); margin-top:14px; }
 .treeui-chips { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:0 2px 4px; }
 .treeui-chips .lab { font-size:11px; color:var(--muted); margin-right:2px; }
 .treeui-chips .chip { font-size:11px; font-family:'IBM Plex Mono', ui-monospace, monospace;
@@ -71,9 +87,9 @@ _CSS = """
 .pill { display:inline-block; padding:3px 10px; border-radius:999px; font-size:11.5px;
   font-weight:600; margin:2px 4px 2px 0; }
 .pill-muted  { background:var(--ac-soft); color:var(--ac-deep); }
-.pill-green  { background:#e7f5ee; color:#157a52; }
-.pill-yellow { background:#fbf3e0; color:#9a6f12; }
-.pill-red    { background:#fbe7e4; color:#b23a2a; }
+.pill-green  { background:var(--ok-bg); color:var(--ok-ink); }
+.pill-yellow { background:var(--warn-bg); color:var(--warn-ink); }
+.pill-red    { background:var(--bad-bg); color:var(--bad-ink); }
 .treeui-legend { font-size:11px; color:var(--muted); margin:6px 0 2px; line-height:1.55; }
 .treeui-tree { line-height:1.55; }
 /* abas do workbench — estilo "segmented control" (pílulas) */
@@ -120,10 +136,10 @@ _CSS = """
    para preencher toda a largura (linhas com menos chips ficam mais largas) */
 .treeui-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(92px,1fr));
   gap:6px; }
-.treeui-metric { background:#f7f8fa; border:1px solid #eef0f3; border-radius:9px;
+.treeui-metric { background:var(--tile-bg); border:1px solid var(--hair); border-radius:9px;
   padding:7px 10px; overflow:hidden; }
 .treeui-metric .k { font-size:10px; text-transform:uppercase; letter-spacing:.04em;
-  color:#8a93a3; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  color:var(--sub-ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .treeui-metric .v { font-size:16px; font-weight:600; color:var(--ink); margin-top:2px;
   white-space:nowrap; }
 /* botões: cantos mais suaves, alinhados ao mockup */
@@ -133,35 +149,63 @@ _CSS = """
    horizontal que aparecia embaixo dos cards na aba Construir */
 .treeui .jupyter-widgets { min-width:0 !important; }
 .treeui-card { overflow-x:clip; }
-/* ===== TEMA ESCURO (classe .dark no painel raiz) ===== */
-.treeui.dark { --ink:#e7ebf2; --muted:#9aa6ba; --line:#2c3a55; --ac-soft:#243049;
-  --ac-border:#3a4a6a; --ac-deep:#d6deec; --ac:#6076a0; background:#0e1521;
-  padding:8px; border-radius:12px; }
+/* ===== TEMA ESCURO (classe .dark no painel raiz) =====
+   Paleta alinhada ao dark mode do Databricks (design system DuBois):
+   fundo grey800 #11171C, superfícies grey700 #1F272D, bordas grey650 #37444F,
+   texto #E8ECF0/#92A4B3, ação primária blue500 #4299E0 com texto escuro. */
+.treeui.dark { --ink:#E8ECF0; --muted:#92A4B3; --line:#37444F; --ac-soft:#37444F;
+  --ac-border:#5F7281; --ac-deep:#E8ECF0; --ac:#4299E0;
+  --ok-ink:#3BA65E; --ok-bg:rgba(39,124,67,.16); --ok-tx:#3BA65E;
+  --warn-ink:#DE7921; --warn-bg:rgba(190,80,30,.16); --warn-tx:#DE7921;
+  --bad-ink:#E65B77; --bad-bg:rgba(200,45,76,.16); --bad-tx:#E65B77;
+  --sus-tx:#B592E5;
+  --risk-lo:#3BA65E; --risk-mid:#DE7921; --risk-hi:#E65B77;
+  --gauge-ok:#3BA65E; --gauge-warn:#DE7921; --gauge-bad:#E65B77; --gauge-track:#37444F;
+  --strong-ink:#E8ECF0; --body-ink:#C0CDD8; --sub-ink:#8396A5; --tree-meta:#92A4B3;
+  --faint-ink:#5F7281; --hair:#37444F; --tile-bg:#11171C;
+  --sel-bg:rgba(232,135,11,.15); --sel-ac:#F0A24A;
+  --tbl-line:#37444F; --tbl-line-strong:#445461; --tbl-head-bg:#11171C;
+  --tbl-head-ink:#E8ECF0; --tbl-head-line:#445461; --tbl-zebra:rgba(189,205,219,.04);
+  --tbl-hover:rgba(189,205,219,.08); --tbl-sticky:#11171C;
+  --ci-bar:#5F7281; --ci-ref:#8ACAFF;
+  --notice-bg:rgba(190,80,30,.16); --notice-border:#DE7921; --notice-ink:#E8ECF0;
+  background:#11171C; padding:8px; border-radius:12px; }
 .treeui.dark .treeui-banner, .treeui.dark .treeui-card, .treeui.dark .treeui-bar,
-.treeui.dark .treeui-chips .chip { background:#16202f !important; border-color:#27344c !important; }
-.treeui.dark .treeui-banner .t, .treeui.dark .treeui-band { color:#e7ebf2; }
-.treeui.dark .treeui-band { background:#1c283a; }
+.treeui.dark .treeui-chips .chip { background:#1F272D !important;
+  border-color:#37444F !important; box-shadow:none !important; }
+.treeui.dark .treeui-banner .t { color:#E8ECF0; }
+/* ação primária DuBois: azul com texto ESCURO (não branco) */
+.treeui.dark .treeui-banner .logo { color:#11171C; }
+.treeui.dark .treeui-band { color:#8ACAFF; }
 .treeui.dark .treeui-tabs .p-TabBar-tab,
-.treeui.dark .treeui-tabs .lm-TabBar-tab { background:#16202f !important; color:#9aa6ba !important;
-  border-color:#27344c !important; }
+.treeui.dark .treeui-tabs .lm-TabBar-tab { background:#1F272D !important;
+  color:#92A4B3 !important; border-color:#37444F !important; }
+.treeui.dark .treeui-tabs .p-TabBar-tab:hover,
+.treeui.dark .treeui-tabs .lm-TabBar-tab:hover { background:rgba(138,202,255,.08) !important;
+  color:#8ACAFF !important; border-color:#8ACAFF !important; }
 .treeui.dark .treeui-tabs .p-TabBar-tab.p-mod-current,
-.treeui.dark .treeui-tabs .lm-TabBar-tab.lm-mod-current { background:#243049 !important;
-  color:#e7ebf2 !important; }
+.treeui.dark .treeui-tabs .lm-TabBar-tab.lm-mod-current { background:#4299E0 !important;
+  color:#11171C !important; border-color:#4299E0 !important; }
+.treeui.dark .treeui-tabs .p-TabBar-tab.p-mod-current:hover,
+.treeui.dark .treeui-tabs .lm-TabBar-tab.lm-mod-current:hover {
+  background:#8ACAFF !important; color:#11171C !important; border-color:#8ACAFF !important; }
 .treeui.dark .widget-text input, .treeui.dark .widget-dropdown select,
-.treeui.dark textarea { background:#0e1521 !important; color:#e7ebf2 !important;
-  border-color:#2c3a55 !important; }
-.treeui.dark .widget-label, .treeui.dark .jupyter-widgets label { color:#c4cdde !important; }
+.treeui.dark textarea { background:#11171C !important; color:#E8ECF0 !important;
+  border-color:#37444F !important; }
+.treeui.dark .widget-label, .treeui.dark .jupyter-widgets label { color:#D1D9E1 !important; }
+/* botões ipywidgets sem button_style: seguem a superfície DuBois */
+.treeui.dark .jupyter-button:not(.mod-primary):not(.mod-success):not(.mod-info):not(.mod-warning):not(.mod-danger) { background:#37444F !important; color:#E8ECF0 !important; }
+.treeui.dark .jupyter-button.mod-active { background:#4299E0 !important; color:#11171C !important; }
 /* chip do nó selecionado na barra de ações do preview interativo da árvore */
-.treeui-imgchip { display:inline-block; font-size:11px; font-weight:600; color:#27324a;
-  background:#eef1f5; border:1px solid #cdd5e0; border-radius:999px; padding:3px 11px;
+.treeui-imgchip { display:inline-block; font-size:11px; font-weight:600; color:var(--ac-deep);
+  background:var(--ac-soft); border:1px solid var(--ac-border); border-radius:999px; padding:3px 11px;
   margin-right:6px; max-width:420px; white-space:nowrap; overflow:hidden;
   text-overflow:ellipsis; vertical-align:middle; }
-.treeui.dark .treeui-imgchip { background:#243049; border-color:#3a4a6a; color:#e7ebf2; }
+.treeui.dark .treeui-imgchip { background:#37444F; border-color:#5F7281; color:#E8ECF0; }
 /* barra de ações do preview: separador vertical entre grupos (o respiro entre
    botões é margem inline — o mk() já define margin, que venceria o CSS) */
 .treeui-imgbar .treeui-vsep { display:inline-block; width:1px; height:24px;
-  background:#dde3ea; margin:4px 12px 4px 4px; }
-.treeui.dark .treeui-imgbar .treeui-vsep { background:#2c3a55; }
+  background:var(--line); margin:4px 12px 4px 4px; }
 </style>
 """
 
@@ -280,7 +324,7 @@ _TREE_IMG_CSS = """
 .ygg-treeimg-scroll { width:100%; overflow-x:auto; overflow-y:hidden; }
 .ygg-treeimg-wrap { position:relative; display:inline-block; }
 .ygg-treeimg-img { display:block; height:auto;
-  border:1px solid #e6e8eb; border-radius:6px; box-sizing:border-box; }
+  border:1px solid var(--line, #e6e8eb); border-radius:6px; box-sizing:border-box; }
 .ygg-treeimg-hot { position:absolute; cursor:pointer; z-index:3; }
 .ygg-treeimg-hov, .ygg-treeimg-sel { position:absolute; display:none;
   border-radius:7px; pointer-events:none; box-sizing:border-box; z-index:2; }
@@ -333,22 +377,26 @@ class TreeSegmenterUI:
 
     # estilo das tabelas (Styler): bordas em cada célula p/ a divisão de colunas
     # ficar nítida, cabeçalho grafite fixo no topo e linhas com zebra leve.
+    # cores via var(--tbl-*): o CSS do Styler é injetado dentro do painel
+    # .treeui, então os tokens resolvem no tema ativo (claro ou escuro) sem
+    # precisar re-renderizar a tabela quando o usuário alterna o tema.
     _TABLE_STYLES = [
         {"selector": "", "props": [("border-collapse", "collapse"),
-                                   ("border", "1px solid #cdd5e0"),
+                                   ("border", "1px solid var(--tbl-line-strong)"),
                                    ("width", "100%")]},
-        {"selector": "th, td", "props": [("border", "1px solid #e1e5ec"),
+        {"selector": "th, td", "props": [("border", "1px solid var(--tbl-line)"),
                                          ("padding", "4px 9px"),
                                          ("text-align", "right"),
                                          ("white-space", "nowrap")]},
-        {"selector": "thead th", "props": [("background-color", "#eef1f5"),
-                                           ("color", "#27324a"),
+        {"selector": "thead th", "props": [("background-color", "var(--tbl-head-bg)"),
+                                           ("color", "var(--tbl-head-ink)"),
                                            ("font-weight", "600"),
-                                           ("border-bottom", "2px solid #b9c2d0"),
+                                           ("border-bottom", "2px solid var(--tbl-head-line)"),
                                            ("position", "sticky"),
                                            ("top", "0"), ("z-index", "1")]},
-        {"selector": "tbody tr:nth-child(even) td", "props": [("background-color", "#fafbfc")]},
-        {"selector": "tbody tr:hover td", "props": [("background-color", "#eef3f8")]},
+        {"selector": "tbody tr:nth-child(even) td",
+         "props": [("background-color", "var(--tbl-zebra)")]},
+        {"selector": "tbody tr:hover td", "props": [("background-color", "var(--tbl-hover)")]},
     ]
 
     # Camada de estilo das tabelas "Detalhe por safra": cabeçalho claro (via
@@ -359,19 +407,19 @@ class TreeSegmenterUI:
         {"selector": "tbody td:first-child", "props": [
             ("text-align", "left"),
             ("font-family", "'IBM Plex Sans',sans-serif"),
-            ("font-weight", "600"), ("color", "#27324a"),
+            ("font-weight", "600"), ("color", "var(--tbl-head-ink)"),
             ("position", "sticky"), ("left", "0"), ("z-index", "2"),
-            ("background-color", "#f4f6f9"),
-            ("border-right", "1px solid #cdd5e0")]},
+            ("background-color", "var(--tbl-sticky)"),
+            ("border-right", "1px solid var(--tbl-line-strong)")]},
         {"selector": "thead th:first-child", "props": [
             ("text-align", "left"), ("position", "sticky"),
             ("left", "0"), ("z-index", "3")]},
         {"selector": "tbody tr:nth-child(odd) td:first-child", "props": [
-            ("background-color", "#f4f6f9")]},
+            ("background-color", "var(--tbl-sticky)")]},
         {"selector": "tbody tr:nth-child(even) td:first-child", "props": [
-            ("background-color", "#eef1f5")]},
+            ("background-color", "var(--tbl-head-bg)")]},
         {"selector": "tbody tr:hover td:first-child", "props": [
-            ("background-color", "#eef3f8")]},
+            ("background-color", "var(--tbl-hover)")]},
     ]
 
     @staticmethod
@@ -393,7 +441,7 @@ class TreeSegmenterUI:
         """Rampa branco → accent #3b4a63 interpolada à mão (tons pálidos).
         Fallback do heatmap categórico quando background_gradient falha."""
         if v is None or pd.isna(v):
-            return "background-color:%s;color:#6b7480" % na
+            return "background-color:%s;color:var(--muted)" % na
         span = (vmax - vmin)
         t = 0.0 if span <= 0 else (float(v) - vmin) / span
         t = min(max(t, 0.0), 1.0) * ceiling
@@ -957,7 +1005,7 @@ class TreeSegmenterUI:
         self.box_tree_img = W.VBox([self.tree_img_bar, self.out_tree_img,
                                     self.tree_img_split])
         self.cat_box = W.VBox([], layout=W.Layout(width="98%", display="none",
-                                                  border="1px solid #eef1f4",
+                                                  border="1px solid var(--hair)",
                                                   padding="6px 8px", margin="2px 0"))
         self.leaf_header = W.HTML()   # resumo da folha selecionada (faixa de detalhe)
         self.leaf_chips = W.HTML()    # resumo curto da folha ativa (régua do topo)
@@ -987,29 +1035,29 @@ class TreeSegmenterUI:
         _rl = "PD" if self._is_clf else "LGD"
         tree_legend = W.HTML(
             f"<div class='treeui-legend'>cor do quadrado = {_rl} "
-            "(<span style='color:#1aa64b'>baixo</span> &rarr; "
-            "<span style='color:#caa000'>médio</span> &rarr; "
-            "<span style='color:#d6453e'>alto</span>) · 🔒 folha fechada</div>")
+            "(<span style='color:var(--risk-lo)'>baixo</span> &rarr; "
+            "<span style='color:var(--risk-mid)'>médio</span> &rarr; "
+            "<span style='color:var(--risk-hi)'>alto</span>) · 🔒 folha fechada</div>")
         if self._is_clf:
             _iv_intro = "<b>IV</b> (optbinning · WoE binário) = poder de"
-            _iv_faixas = ("Faixas (Siddiqi): <span style='color:#137a3e'>forte (0,3–0,5)</span> · "
-                          "<span style='color:#9a6b00'>médio (0,1–0,3)</span> · fraco/inútil (&lt;0,1) · "
-                          "<span style='color:#6b3fa0'>suspeito (&ge;0,5)</span> (alto demais, verifique vazamento).")
+            _iv_faixas = ("Faixas (Siddiqi): <span style='color:var(--ok-tx)'>forte (0,3–0,5)</span> · "
+                          "<span style='color:var(--warn-tx)'>médio (0,1–0,3)</span> · fraco/inútil (&lt;0,1) · "
+                          "<span style='color:var(--sus-tx)'>suspeito (&ge;0,5)</span> (alto demais, verifique vazamento).")
         else:
             _iv_intro = "<b>IV</b> (optbinning · contínuo) = poder de"
-            _iv_faixas = ("Faixas: <span style='color:#137a3e'>forte (0,1–0,35)</span> · "
-                          "<span style='color:#9a6b00'>médio (0,03–0,1)</span> · fraco/inútil (&lt;0,03) · "
-                          "<span style='color:#6b3fa0'>suspeito (&ge;0,35)</span>.")
+            _iv_faixas = ("Faixas: <span style='color:var(--ok-tx)'>forte (0,1–0,35)</span> · "
+                          "<span style='color:var(--warn-tx)'>médio (0,03–0,1)</span> · fraco/inútil (&lt;0,03) · "
+                          "<span style='color:var(--sus-tx)'>suspeito (&ge;0,35)</span>.")
         iv_legend = W.HTML(
             f"<div class='treeui-legend'>{_iv_intro} "
             f"separação da variável na <b>folha selecionada</b> (★ = maior). {_iv_faixas} "
             "<b>bins</b> = nº de faixas ideais do binning ótimo na folha.</div>"
             "<div class='treeui-legend' style='margin-top:6px;padding-top:6px;"
-            f"border-top:1px solid #eef1f4'><b>PSI</b> = estabilidade da variável "
+            f"border-top:1px solid var(--hair)'><b>PSI</b> = estabilidade da variável "
             f"({self.ref_sample} × demais amostras), calculado <b>nos mesmos bins do IV</b>, pior caso: "
-            "<span style='color:#137a3e'>&lt;0.10 estável</span> · "
-            "<span style='color:#9a6b00'>0.10–0.25 atenção</span> · "
-            "<span style='color:#b3261e'>&ge;0.25 instável</span>.</div>")
+            "<span style='color:var(--ok-tx)'>&lt;0.10 estável</span> · "
+            "<span style='color:var(--warn-tx)'>0.10–0.25 atenção</span> · "
+            "<span style='color:var(--bad-tx)'>&ge;0.25 instável</span>.</div>")
 
         # ================================================================
         # ABA ① CONSTRUIR — "Cockpit em T"
@@ -1165,24 +1213,24 @@ class TreeSegmenterUI:
         tbl_legend = W.HTML(
             "<div class='treeui-legend'>"
             f"<b>PSI por amostra</b> (estabilidade da folha entre {_ref} e a amostra): "
-            "<span style='background:#e6f6ec;padding:1px 5px;border-radius:3px'>&lt;0.10 estável</span> "
-            "<span style='background:#fdf3da;padding:1px 5px;border-radius:3px'>0.10–0.25 atenção</span> "
-            "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>&ge;0.25 instável</span>"
+            "<span style='background:var(--ok-bg);padding:1px 5px;border-radius:3px'>&lt;0.10 estável</span> "
+            "<span style='background:var(--warn-bg);padding:1px 5px;border-radius:3px'>0.10–0.25 atenção</span> "
+            "<span style='background:var(--bad-bg);padding:1px 5px;border-radius:3px'>&ge;0.25 instável</span>"
             "<br><b>p (irmãs)</b> = p-valor de um <b>teste de hipótese</b> que compara a "
             f"<b>distribuição do alvo ({'default' if self._is_clf else 'LGD'})</b> da folha com a da <b>irmã adjacente</b> (mesmo "
             f"pai, na amostra de referência {_ref}). H₀: as duas irmãs têm {'a mesma PD' if self._is_clf else 'o mesmo LGD'}. "
             "O teste é o <b>Mann-Whitney U</b> (não-paramétrico, padrão) ou o <b>t de Welch</b> "
             "(médias, variâncias desiguais) — escolha no seletor <b>Teste</b>. "
-            "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>p alto (&gt;0,05, em vermelho)</span> "
+            "<span style='background:var(--bad-bg);padding:1px 5px;border-radius:3px'>p alto (&gt;0,05, em vermelho)</span> "
             "⇒ <b>não</b> dá para distinguir as irmãs ⇒ candidatas a fusão; "
-            "<span style='color:#137a3e'>p baixo</span> ⇒ folhas bem separadas. "
+            "<span style='color:var(--ok-tx)'>p baixo</span> ⇒ folhas bem separadas. "
             "Só <b>irmãs</b> são comparadas (a última de cada grupo e o nó de faltantes ficam em branco)."
             f"<br><b>p ({_ref}×OOT)</b> = p-valor de um teste de hipótese da <b>aderência da "
             f"estimativa</b>: compara a <b>distribuição do alvo ({'default' if self._is_clf else 'LGD'})</b> da "
             f"MESMA folha entre <b>{_ref}</b> e <b>OOT</b> (mesmo teste do seletor). H₀: a folha "
             f"tem {'a mesma PD' if self._is_clf else 'o mesmo LGD'} em {_ref} e OOT. Semântica <b>inversa</b> à do p (irmãs): "
-            "<span style='color:#137a3e'>p alto (&gt;0,05)</span> ⇒ estimativa <b>estável</b> entre as amostras; "
-            "<span style='background:#fde7e7;padding:1px 5px;border-radius:3px'>p baixo (em vermelho)</span> "
+            "<span style='color:var(--ok-tx)'>p alto (&gt;0,05)</span> ⇒ estimativa <b>estável</b> entre as amostras; "
+            "<span style='background:var(--bad-bg);padding:1px 5px;border-radius:3px'>p baixo (em vermelho)</span> "
             f"⇒ a estimativa <b>deslocou</b> de {_ref} para OOT (folha pouco aderente).</div>")
         table_scroll = W.Box([self.out_table],
                              layout=W.Layout(overflow="auto", width="100%",
@@ -1206,9 +1254,9 @@ class TreeSegmenterUI:
             f"O gráfico da esquerda mostra o {_rl} por <b>amostra</b> ({_ref}, OOT, …) e o da "
             "direita por <b>safra</b> ao longo do tempo (faixas vermelhas = safras com "
             "inversão). O <b>indicador</b> resume: "
-            "<span style='background:#e7f5ee;padding:1px 5px;border-radius:3px'>verde sem inversão</span> "
-            "<span style='background:#fbf3e0;padding:1px 5px;border-radius:3px'>amarelo inverte em algumas safras</span> "
-            "<span style='background:#fbe7e4;padding:1px 5px;border-radius:3px'>vermelho inverte entre amostras ou em muitas safras</span>.</div>")
+            "<span style='background:var(--ok-bg);padding:1px 5px;border-radius:3px'>verde sem inversão</span> "
+            "<span style='background:var(--warn-bg);padding:1px 5px;border-radius:3px'>amarelo inverte em algumas safras</span> "
+            "<span style='background:var(--bad-bg);padding:1px 5px;border-radius:3px'>vermelho inverte entre amostras ou em muitas safras</span>.</div>")
         card_sib = W.VBox([
             W.HTML("<div class='treeui-h'>Folhas-irmãs · inversão entre amostras &amp; safras</div>"),
             sib_legend,
@@ -1265,15 +1313,15 @@ class TreeSegmenterUI:
             boot_legend = W.HTML(
                 "<div class='treeui-legend'>IC da PD (taxa de default) por folha via bootstrap na "
                 f"referência ({_ref}). Se houver OOT, mostra a PD de OOT e verifica a "
-                "<b>aderência</b>: <span style='color:#137a3e'>dentro</span> do IC = estável; "
-                "<span style='color:#b3261e'>acima/abaixo</span> = PD deslocou além da incerteza "
+                "<b>aderência</b>: <span style='color:var(--ok-tx)'>dentro</span> do IC = estável; "
+                "<span style='color:var(--bad-tx)'>acima/abaixo</span> = PD deslocou além da incerteza "
                 "amostral. Calcule quando a árvore estiver fechada.</div>")
         else:
             boot_legend = W.HTML(
                 "<div class='treeui-legend'>IC do alvo (LGD) por folha via bootstrap na "
                 f"referência ({_ref}). Se houver OOT, mostra o LGD de OOT e verifica a "
-                "<b>aderência</b>: <span style='color:#137a3e'>dentro</span> do IC = estável; "
-                "<span style='color:#b3261e'>acima/abaixo</span> = LGD deslocou além da incerteza "
+                "<b>aderência</b>: <span style='color:var(--ok-tx)'>dentro</span> do IC = estável; "
+                "<span style='color:var(--bad-tx)'>acima/abaixo</span> = LGD deslocou além da incerteza "
                 "amostral. Calcule quando a árvore estiver fechada.</div>")
         card_boot = W.VBox([
             W.HTML("<div class='treeui-h'>Intervalos de confiança (bootstrap) &amp; aderência OOT</div>"),
@@ -1685,19 +1733,19 @@ class TreeSegmenterUI:
         n_folhas = sum(s["is_leaf"] for s in seg.segments.values())
         prof = max(s["depth"] for s in seg.segments.values())
         n_lock = len(self.locked & {sid for sid, s in seg.segments.items() if s["is_leaf"]})
-        hexc = {"green": "#157a52", "yellow": "#9a6f12", "red": "#b23a2a"}
-        bgc = {"green": "#e7f5ee", "yellow": "#fbf3e0", "red": "#fbe7e4"}
+        hexc = {"green": "var(--ok-ink)", "yellow": "var(--warn-ink)", "red": "var(--bad-ink)"}
+        bgc = {"green": "var(--ok-bg)", "yellow": "var(--warn-bg)", "red": "var(--bad-bg)"}
 
-        def cell(label, value, color="#1f2733", badge=None, cls=None):
+        def cell(label, value, color="var(--ink)", badge=None, cls=None):
             bh = ""
             if badge and cls:
                 bh = (f"<span style='font-size:10px;font-weight:600;color:{hexc[cls]};"
                       f"background:{bgc[cls]};border-radius:20px;padding:2px 8px;"
                       f"margin-left:7px'>{badge}</span>")
             return (f"<div style='flex:1;min-width:86px;padding:8px 14px;"
-                    f"border-right:1px solid #eef0f3'>"
+                    f"border-right:1px solid var(--hair)'>"
                     f"<div style='font-size:10px;font-weight:600;letter-spacing:.07em;"
-                    f"text-transform:uppercase;color:#8a93a3;white-space:nowrap'>{label}</div>"
+                    f"text-transform:uppercase;color:var(--sub-ink);white-space:nowrap'>{label}</div>"
                     f"<div style='display:flex;align-items:center;margin-top:2px'>"
                     f"<span class='mono' style='font-size:19px;font-weight:600;color:{color}'>"
                     f"{value}</span>{bh}</div></div>")
@@ -1717,21 +1765,21 @@ class TreeSegmenterUI:
                 if self._is_clf:
                     ks, auc = r["KS"], r["AUC"]
                     if pd.isna(ks):
-                        cells.append(cell(f"KS {r['amostra']}", "—", color="#8a93a3"))
+                        cells.append(cell(f"KS {r['amostra']}", "—", color="var(--sub-ink)"))
                     else:
                         c = "green" if ks >= 0.30 else "yellow" if ks >= 0.20 else "red"
                         badge = "bom" if c == "green" else "atenção" if c == "yellow" else "fraco"
                         cells.append(cell(f"KS {r['amostra']}", f"{ks:.1%}", color=hexc[c],
                                           badge=badge, cls=c))
                     if pd.isna(auc):
-                        cells.append(cell(f"AUC {r['amostra']}", "—", color="#8a93a3"))
+                        cells.append(cell(f"AUC {r['amostra']}", "—", color="var(--sub-ink)"))
                     else:
                         c = "green" if auc >= 0.70 else "yellow" if auc >= 0.60 else "red"
                         cells.append(cell(f"AUC {r['amostra']}", f"{auc:.1%}", color=hexc[c]))
                 else:
                     r2 = r["R2"]
                     if pd.isna(r2):
-                        cells.append(cell(f"R² {r['amostra']}", "—", color="#8a93a3"))
+                        cells.append(cell(f"R² {r['amostra']}", "—", color="var(--sub-ink)"))
                     else:
                         c = "green" if r2 >= 0.5 else "yellow" if r2 >= 0.2 else "red"
                         cells.append(cell(f"R² {r['amostra']}", f"{r2:.1%}", color=hexc[c]))
@@ -1779,10 +1827,10 @@ class TreeSegmenterUI:
                 return self._risk_label + " " + " ".join(parts)
             return f"{self._risk_label} {self._node_value(sid) * 100:.2f}%"
 
-        psi_hex = {"green": "#1aa64b", "yellow": "#caa000", "red": "#d6453e"}
+        psi_hex = {"green": "var(--risk-lo)", "yellow": "var(--risk-mid)", "red": "var(--risk-hi)"}
         # "barrinha" vertical que separa o bloco PD do bloco PSI na linha da folha
         sep_bar = ("<span style='display:inline-block;width:0;border-left:1px solid "
-                   "#aab4be;height:11px;margin:0 8px;vertical-align:middle'></span>")
+                   "var(--faint-ink);height:11px;margin:0 8px;vertical-align:middle'></span>")
 
         def psi_str(sid):
             if self.sample_col is None or not self._nonref:
@@ -1826,11 +1874,11 @@ class TreeSegmenterUI:
             psi_html = psi_str(sid) if s["is_leaf"] else ""
             # linha 1 — rótulo (condição do nó) + nº da folha
             linha1 = (f"<div style='{mono};font-size:12px;padding:1px 2px 0'>"
-                      f"{prefix}{conn}{sw}<b class='tlname' style='color:#15324a'>"
+                      f"{prefix}{conn}{sw}<b class='tlname' style='color:var(--strong-ink)'>"
                       f"{rotulo(sid)}</b>{tags}{sel_marker}</div>")
             # linha 2 — métricas EMBAIXO: volumetria, representatividade, PD e PSI
             vol = f"{n:,}".replace(",", ".")        # separador de milhar pt-BR
-            linha2 = (f"<div style='{mono};font-size:11px;color:#7c8893;padding:0 2px 3px'>"
+            linha2 = (f"<div style='{mono};font-size:11px;color:var(--tree-meta);padding:0 2px 3px'>"
                       f"{cont}    vol {vol} · repr. {rep:.1f}%{sep_bar}{value_str(sid)}{psi_html}</div>")
             data_attr = f' data-leaf="{nota_map.get(sid)}"' if s["is_leaf"] else ""
             rows.append(f"<div class='tnode'{data_attr}>{linha1}{linha2}</div>")
@@ -1855,11 +1903,11 @@ class TreeSegmenterUI:
             return ""
         return (
             "<style>"
-            f'.tnode[data-leaf="{n}"]{{background:#fff5e6;border-radius:5px;'
-            "box-shadow:inset 3px 0 0 #e8870b;}"
-            f'.tnode[data-leaf="{n}"] .tlname{{color:#e8870b !important;}}'
+            f'.tnode[data-leaf="{n}"]{{background:var(--sel-bg);border-radius:5px;'
+            "box-shadow:inset 3px 0 0 var(--sel-ac);}"
+            f'.tnode[data-leaf="{n}"] .tlname{{color:var(--sel-ac) !important;}}'
             f'.tnode[data-leaf="{n}"] .tsel::after{{content:" ◀ selecionada";'
-            "color:#e8870b;font-weight:700;}"
+            "color:var(--sel-ac);font-weight:700;}"
             "</style>")
 
     def _style_leaves(self, lv):
@@ -1869,20 +1917,21 @@ class TreeSegmenterUI:
             if pd.isna(v):
                 return ""
             a = abs(v)
-            c = "#e6f6ec" if a < 0.10 else "#fdf3da" if a < 0.25 else "#fde7e7"
+            c = ("var(--ok-bg)" if a < 0.10
+                 else "var(--warn-bg)" if a < 0.25 else "var(--bad-bg)")
             return f"background-color:{c}"
 
         def p_bg(v):
             if pd.isna(v):
-                return "color:#aab"
-            return "background-color:#fde7e7;font-weight:600" if v > 0.05 else "color:#137a3e"
+                return "color:var(--faint-ink)"
+            return "background-color:var(--bad-bg);font-weight:600" if v > 0.05 else "color:var(--ok-tx)"
 
         def p_stab_bg(v):
             # aderência DES×OOT (H₀: mesma estimativa): semântica INVERSA à das irmãs —
             # p alto = estável (verde); p baixo = a estimativa deslocou (alerta).
             if pd.isna(v):
-                return "color:#aab"
-            return "color:#137a3e" if v > 0.05 else "background-color:#fde7e7;font-weight:600"
+                return "color:var(--faint-ink)"
+            return "color:var(--ok-tx)" if v > 0.05 else "background-color:var(--bad-bg);font-weight:600"
 
         sty = lv.style
         for c in psi_cols:
@@ -1928,7 +1977,7 @@ class TreeSegmenterUI:
         barrinha verde/amarelo/vermelho."""
         sid = self.dd_leaf.value
         if sid is None or sid not in self.seg.segments:
-            return ("<div style='font-size:12px;color:#889'>Nenhuma folha selecionada — "
+            return ("<div style='font-size:12px;color:var(--sub-ink)'>Nenhuma folha selecionada — "
                     "crie um split ou rode o Auto-fit na coluna do centro.</div>")
         s = self.seg.segments[sid]
         leaf = s["mask"]
@@ -1948,7 +1997,7 @@ class TreeSegmenterUI:
         # selo: esta folha recebe os faltantes (NaN) no scoring (include_na) —
         # atribuição conservadora à folha-irmã de pior risco quando o split não
         # gerou nó de faltantes próprio
-        na_badge = ("<span class='pill' style='background:#fbe7e4;color:#b23a2a' "
+        na_badge = ("<span class='pill' style='background:var(--bad-bg);color:var(--bad-ink)' "
                     "title='Recebe os faltantes (NaN) no scoring — atribuição "
                     "conservadora à folha-irmã de pior risco'>+ faltantes</span>"
                     if any(c.get("include_na") for c in s["conditions"]) else "")
@@ -1959,7 +2008,7 @@ class TreeSegmenterUI:
         def chip(k, v, c=None, sub=None):
             sty = f" style='color:{c}'" if c else ""
             sub_html = (f"<div style='font-size:10.5px;margin-top:1px;white-space:nowrap;"
-                        f"color:#8a93a3'>{sub}</div>") if sub else ""
+                        f"color:var(--sub-ink)'>{sub}</div>") if sub else ""
             return (f"<div class='treeui-metric'><div class='k'>{k}</div>"
                     f"<div class='v mono'{sty}>{v}</div>{sub_html}</div>")
 
@@ -1968,7 +2017,7 @@ class TreeSegmenterUI:
             "flex-wrap:wrap'>"
             f"<span style='width:13px;height:13px;border-radius:4px;background:{color};"
             "flex:none'></span>"
-            f"<span style='font-size:15px;font-weight:600;color:#15324a'>{label}</span>"
+            f"<span style='font-size:15px;font-weight:600;color:var(--strong-ink)'>{label}</span>"
             f"{badge}{na_badge}<span class='pill pill-muted'>folha {nota}</span></div>")
 
         sec_h = ("<div class='treeui-h' style='margin-top:11px'>{}</div>").format
@@ -2003,7 +2052,7 @@ class TreeSegmenterUI:
                 continue
             d = (v - pd_ref) * 100      # incremento em pontos percentuais
             sig = "+" if d >= 0 else "−"
-            dcol = "#b3261e" if d > 0 else "#137a3e"   # PD subindo = pior (vermelho)
+            dcol = "var(--bad-tx)" if d > 0 else "var(--ok-tx)"   # PD subindo = pior (vermelho)
             sub = f"<span style='color:{dcol}'>Δ vs DES {sig}{abs(d):.2f} p.p.</span>"
             sec2 += chip(f"{self._risk_label} {ab(a)}", f"{v * 100:.2f}%", sub=sub)
 
@@ -2021,10 +2070,10 @@ class TreeSegmenterUI:
                            "(p≤0,05)</span>")
             test_rows += (
                 "<div style='display:flex;align-items:center;gap:7px;flex-wrap:wrap;"
-                "font-size:12px;color:#3a4250;margin:3px 0'>"
+                "font-size:12px;color:var(--body-ink);margin:3px 0'>"
                 f"<b>DES → {ab(a)}</b>"
-                f"<span style='color:#6b7480'>teste:</span><b>{name}</b>"
-                f"<span style='color:#6b7480'>p-valor:</span>"
+                f"<span style='color:var(--muted)'>teste:</span><b>{name}</b>"
+                f"<span style='color:var(--muted)'>p-valor:</span>"
                 f"<b class='mono'>{pv}</b>{verdict}</div>")
 
         # 4) Distinção vs folha-irmã adjacente (mesmo pai)
@@ -2042,52 +2091,53 @@ class TreeSegmenterUI:
             d = desc if len(desc) <= 40 else desc[:37] + "…"
             sib_rows += (
                 "<div style='display:flex;align-items:center;gap:7px;flex-wrap:wrap;"
-                "font-size:12px;color:#3a4250;margin:3px 0'>"
+                "font-size:12px;color:var(--body-ink);margin:3px 0'>"
                 f"<b>{lado} {d}</b>"
-                f"<span style='color:#6b7480'>teste:</span><b>{sib_name}</b>"
-                f"<span style='color:#6b7480'>p-valor:</span>"
+                f"<span style='color:var(--muted)'>teste:</span><b>{sib_name}</b>"
+                f"<span style='color:var(--muted)'>p-valor:</span>"
                 f"<b class='mono'>{pv}</b>{verdict}</div>")
 
         # 5) Estabilidade · PSI por amostra com barrinha verde/amarelo/vermelho
-        psi_hex = {"green": "#137a3e", "yellow": "#9a6b00", "red": "#b3261e"}
+        psi_hex = {"green": "var(--ok-tx)", "yellow": "var(--warn-tx)", "red": "var(--bad-tx)"}
 
         def gauge(p):
             if pd.isna(p):
                 return ("<div style='flex:1;height:9px;border-radius:5px;"
-                        "background:#eceff3'></div>")
+                        "background:var(--gauge-track)'></div>")
             pos = min(max(p, 0.0) / 0.50, 1.0) * 100
             return (
                 "<div style='position:relative;flex:1;height:9px;border-radius:5px;"
-                "background:linear-gradient(to right,#2bb673 0%,#2bb673 20%,"
-                "#e6b800 20%,#e6b800 50%,#e0584f 50%,#e0584f 100%)'>"
+                "background:linear-gradient(to right,var(--gauge-ok) 0%,var(--gauge-ok) 20%,"
+                "var(--gauge-warn) 20%,var(--gauge-warn) 50%,"
+                "var(--gauge-bad) 50%,var(--gauge-bad) 100%)'>"
                 f"<div style='position:absolute;left:calc({pos:.1f}% - 1px);top:-2px;"
-                "width:2px;height:13px;background:#15324a;border-radius:1px'></div></div>")
+                "width:2px;height:13px;background:var(--strong-ink);border-radius:1px'></div></div>")
 
         psi_rows = ""
         for a in ordered_nonref:      # DES é a referência (PSI ≡ 0), por isso fica de fora
             p = self._leaf_psi(sid, a)
             if pd.isna(p):
-                pv, pcol = "—", "#8a93a3"
+                pv, pcol = "—", "var(--sub-ink)"
             else:
                 pv, pcol = f"{p:.3f}", psi_hex[self._psi_class(p)]
             psi_rows += (
                 "<div style='display:flex;align-items:center;gap:9px;margin:5px 0'>"
-                f"<div style='width:78px;font-size:11px;color:#6b7480;white-space:nowrap'>"
+                f"<div style='width:78px;font-size:11px;color:var(--muted);white-space:nowrap'>"
                 f"PSI {ab(a)}</div>"
                 f"<div class='mono' style='width:48px;font-size:12.5px;font-weight:600;"
                 f"color:{pcol}'>{pv}</div>{gauge(p)}</div>")
         psi_legend = (
-            "<div style='font-size:10px;color:#8a93a3;margin-top:5px'>"
-            "<span style='color:#2bb673'>■</span> &lt;0,10 estável &nbsp; "
-            "<span style='color:#e6b800'>■</span> 0,10–0,25 atenção &nbsp; "
-            "<span style='color:#e0584f'>■</span> &gt;0,25 crítico</div>")
+            "<div style='font-size:10px;color:var(--sub-ink);margin-top:5px'>"
+            "<span style='color:var(--gauge-ok)'>■</span> &lt;0,10 estável &nbsp; "
+            "<span style='color:var(--gauge-warn)'>■</span> 0,10–0,25 atenção &nbsp; "
+            "<span style='color:var(--gauge-bad)'>■</span> &gt;0,25 crítico</div>")
 
         out = (head
                + sec_h("Volumetria &amp; representatividade")
                + f"<div class='treeui-metrics'>{sec1}</div>"
                + sec_h(f"{self._risk_mean} &amp; incremento vs DES")
                + f"<div class='treeui-metrics'>{sec2}</div>")
-        h0_css = "font-size:10.5px;color:#8a93a3;margin:1px 0 6px;line-height:1.5"
+        h0_css = "font-size:10.5px;color:var(--sub-ink);margin:1px 0 6px;line-height:1.5"
         if test_rows:
             out += (sec_h("Aderência DES → amostra (teste de hipótese)")
                     + f"<div style='{h0_css}'><b>H₀:</b> a folha tem a <b>mesma "
@@ -2224,20 +2274,23 @@ class TreeSegmenterUI:
 
         def ks_bg(v):
             if pd.isna(v):
-                return "color:#aab"
-            c = "#e6f6ec" if v >= 0.30 else "#fdf3da" if v >= 0.20 else "#fde7e7"
+                return "color:var(--faint-ink)"
+            c = ("var(--ok-bg)" if v >= 0.30
+                 else "var(--warn-bg)" if v >= 0.20 else "var(--bad-bg)")
             return f"background-color:{c};font-weight:600"
 
         def auc_bg(v):
             if pd.isna(v):
-                return "color:#aab"
-            c = "#e6f6ec" if v >= 0.70 else "#fdf3da" if v >= 0.60 else "#fde7e7"
+                return "color:var(--faint-ink)"
+            c = ("var(--ok-bg)" if v >= 0.70
+                 else "var(--warn-bg)" if v >= 0.60 else "var(--bad-bg)")
             return f"background-color:{c};font-weight:600"
 
         def r2_bg(v):
             if pd.isna(v):
-                return "color:#aab"
-            c = "#e6f6ec" if v >= 0.5 else "#fdf3da" if v >= 0.2 else "#fde7e7"
+                return "color:var(--faint-ink)"
+            c = ("var(--ok-bg)" if v >= 0.5
+                 else "var(--warn-bg)" if v >= 0.2 else "var(--bad-bg)")
             return f"background-color:{c};font-weight:600"
 
         if self._is_clf:
@@ -2372,11 +2425,11 @@ class TreeSegmenterUI:
         self._refresh_metrics()
         self._refresh_table()
         # o IC bootstrap, a discriminação e a imagem ficam obsoletos após mudanças
-        self.out_boot.value = ("<div style='font-size:12px;color:#889'>Árvore alterada — "
+        self.out_boot.value = ("<div style='font-size:12px;color:var(--sub-ink)'>Árvore alterada — "
                                "clique em <b>Calcular IC bootstrap</b> para (re)calcular.</div>")
-        self.out_discrim.value = ("<div style='font-size:12px;color:#889'>Árvore alterada — "
+        self.out_discrim.value = ("<div style='font-size:12px;color:var(--sub-ink)'>Árvore alterada — "
                                   "clique em <b>Curva ROC</b> ou <b>Curva KS</b> para renderizar.</div>")
-        self.out_plot.value = ("<div style='font-size:12px;color:#889'>Árvore alterada — "
+        self.out_plot.value = ("<div style='font-size:12px;color:var(--sub-ink)'>Árvore alterada — "
                                "clique em <b>Ver / salvar árvore (imagem)</b> para renderizar.</div>")
         # preview interativo aberto: re-renderiza imagem + hit-map (a árvore mudou);
         # fechado, nada a fazer — o próximo "Ver árvore" já desenha o estado novo
@@ -2469,13 +2522,13 @@ class TreeSegmenterUI:
         valid = sub[s.notna()]
         if len(valid) == 0:
             self.cat_box.children = (W.HTML(
-                "<div style='font-size:11px;color:#889'>Sem categorias nesta folha.</div>"),)
+                "<div style='font-size:11px;color:var(--sub-ink)'>Sem categorias nesta folha.</div>"),)
             return
         means = (valid.assign(_c=valid[feat].astype(str))
                  .groupby("_c")[self.target].mean().sort_values())
         order = means.index.tolist()
         n = len(order)
-        rows = [W.HTML("<div style='font-size:11px;color:#667;margin-bottom:4px'>"
+        rows = [W.HTML("<div style='font-size:11px;color:var(--muted);margin-bottom:4px'>"
                        f"Categorias no <b>mesmo grupo</b> viram um nó. Ordenadas por {self._risk_label}. "
                        "Faltantes (NaN) já viram um nó próprio.</div>")]
         for k, c in enumerate(order, 1):
@@ -2483,11 +2536,11 @@ class TreeSegmenterUI:
                             layout=W.Layout(width="110px"))
             self._cat_widgets[c] = dd
             lab = W.HTML(f"<span style='font-size:12px'><b>{c}</b>"
-                         f"<span style='color:#889'> · {self._risk_label} {means[c]:.3f}</span></span>")
+                         f"<span style='color:var(--sub-ink)'> · {self._risk_label} {means[c]:.3f}</span></span>")
             rows.append(W.HBox([dd, lab], layout=W.Layout(align_items="center")))
         na_n = int(s.isna().sum())
         if na_n:
-            rows.append(W.HTML(f"<div style='font-size:11px;color:#9a6b00;margin-top:3px'>"
+            rows.append(W.HTML(f"<div style='font-size:11px;color:var(--warn-tx);margin-top:3px'>"
                                f"+ <b>(faltante)</b>: {na_n} linhas → nó próprio automático</div>"))
         self.cat_box.children = tuple(rows)
 
@@ -2590,7 +2643,7 @@ class TreeSegmenterUI:
             try:
                 sug = self.seg.suggest_splits(sid, top=5)
             except Exception as e:
-                self.out_suggest.value = (f"<div style='color:#b3261e;font-size:12px'>Erro: "
+                self.out_suggest.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro: "
                                           f"{type(e).__name__}: {e}</div>")
                 return
             if sug.empty:
@@ -2609,7 +2662,7 @@ class TreeSegmenterUI:
             try:
                 fi = self.seg.feature_importance()
             except Exception as e:
-                self.out_importance.value = (f"<div style='color:#b3261e;font-size:12px'>Erro: "
+                self.out_importance.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro: "
                                              f"{type(e).__name__}: {e}</div>")
                 self.out_importance_chart.value = ""; self.out_importance_legend.value = ""
                 return
@@ -2641,7 +2694,7 @@ class TreeSegmenterUI:
             try:
                 chart = self._fig_html(self.seg.plot_importance_bar())
             except Exception as e:
-                chart = (f"<div style='color:#b3261e;font-size:12px'>Erro no gráfico: "
+                chart = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro no gráfico: "
                          f"{type(e).__name__}: {e}</div>")
             dic = (
                 "<div class='treeui-legend' style='margin-top:8px'>"
@@ -2681,7 +2734,7 @@ class TreeSegmenterUI:
                 other = TreeSegmenter.load(path, self.df)
                 d = self.seg.diff_trees(other)
             except Exception as e:
-                self.out_diff.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao "
+                self.out_diff.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro ao "
                                        f"comparar: {type(e).__name__}: {e}</div>")
                 return
             mig = d["migracao"].copy()
@@ -2859,7 +2912,7 @@ class TreeSegmenterUI:
                 self.tabs.selected_index != self._iv_tab_index:
             self._iv_dirty = True
             self._set_html(self.out_iv, "iv",
-                           "<div style='font-size:12px;color:#889'>Clique em "
+                           "<div style='font-size:12px;color:var(--sub-ink)'>Clique em "
                            "<b>Atualizar</b> (acima) para calcular o IV/PSI por variável "
                            "da folha selecionada — ou abra a aba <b>Análise de variáveis</b>.</div>")
             return
@@ -2911,51 +2964,52 @@ class TreeSegmenterUI:
                                        ("min-width", "max-content")]},
             {"selector": "th, td", "props": [("padding", "7px 12px"),
                                              ("border", "none"),
-                                             ("border-bottom", "1px solid #eef1f4"),
+                                             ("border-bottom", "1px solid var(--hair)"),
                                              ("white-space", "nowrap"),
                                              ("text-align", "right")]},
             {"selector": "thead th", "props": [("text-transform", "uppercase"),
                                                ("font-size", "10px"),
                                                ("letter-spacing", ".06em"),
-                                               ("color", "#8a93a3"),
+                                               ("color", "var(--sub-ink)"),
                                                ("font-weight", "600"),
                                                ("padding-bottom", "6px"),
-                                               ("border-bottom", "1.5px solid #d7dde6")]},
+                                               ("border-bottom", "1.5px solid var(--tbl-head-line)")]},
             {"selector": "thead th:first-child", "props": [("text-align", "left")]},
             {"selector": "tbody td:first-child", "props": [("text-align", "left")]},
-            {"selector": "tbody tr:hover td", "props": [("background-color", "#f7f9fc")]},
+            {"selector": "tbody tr:hover td", "props": [("background-color", "var(--tbl-hover)")]},
             {"selector": "tbody tr:last-child td", "props": [("border-bottom", "none")]},
         ]
 
         def forca_txt(v):
             return {
-                "forte": "color:#137a3e;font-weight:600",
-                "médio": "color:#9a6b00;font-weight:600",
-                "suspeito": "color:#6b3fa0;font-weight:600",
-            }.get(v, "color:#9aa2b1")
+                "forte": "color:var(--ok-tx);font-weight:600",
+                "médio": "color:var(--warn-tx);font-weight:600",
+                "suspeito": "color:var(--sus-tx);font-weight:600",
+            }.get(v, "color:var(--sub-ink)")
 
         def psi_txt(v):
             if pd.isna(v):
-                return "color:#9aa2b1"
+                return "color:var(--sub-ink)"
             a = abs(v)
-            c = "#137a3e" if a < 0.10 else "#9a6b00" if a < 0.25 else "#b3261e"
+            c = ("var(--ok-tx)" if a < 0.10
+                 else "var(--warn-tx)" if a < 0.25 else "var(--bad-tx)")
             return f"color:{c};font-weight:600"
 
         def estab_txt(v):
             return {
-                "estável": "color:#137a3e",
-                "atenção": "color:#9a6b00;font-weight:600",
-                "instável": "color:#b3261e;font-weight:600",
-            }.get(v, "color:#9aa2b1")
+                "estável": "color:var(--ok-tx)",
+                "atenção": "color:var(--warn-tx);font-weight:600",
+                "instável": "color:var(--bad-tx);font-weight:600",
+            }.get(v, "color:var(--sub-ink)")
 
         def reco_row(r):
             # variável recomendada (★, maior IV): filete de acento + negrito,
             # tint quase imperceptível — destaque discreto, sem realce pesado.
             if r.name != 0:
                 return [""] * len(r)
-            css = ["background-color:#fafbfd"] * len(r)
-            css[0] = ("background-color:#fafbfd;border-left:3px solid #3b4a63;"
-                      "font-weight:600;color:#27324a")
+            css = ["background-color:var(--tbl-zebra)"] * len(r)
+            css[0] = ("background-color:var(--tbl-zebra);border-left:3px solid var(--ac);"
+                      "font-weight:600;color:var(--ac-deep)")
             return css
 
         fmt = {"iv": "{:.4f}",
@@ -2966,7 +3020,7 @@ class TreeSegmenterUI:
         sty = (disp.style.format(fmt, na_rep="—")
                .hide(axis="index")
                .set_table_styles(iv_styles)
-               .set_properties(**{"font-size": "12px", "color": "#3a4250"}))
+               .set_properties(**{"font-size": "12px", "color": "var(--body-ink)"}))
         if num_cols:
             sty = sty.set_properties(subset=num_cols, **{
                 "font-family": "'IBM Plex Mono', ui-monospace, monospace",
@@ -2980,7 +3034,7 @@ class TreeSegmenterUI:
             sty = sty.map(estab_txt, subset=["estab."])
         qual = "TODA A CARTEIRA" if (sid in (None, "root")) else self._leaf_label(sid)
         _iv_kind = "binário" if self._is_clf else "contínuo"
-        hint = (f"<div style='font-size:11px;color:#667;margin-bottom:4px'>folha: "
+        hint = (f"<div style='font-size:11px;color:var(--muted);margin-bottom:4px'>folha: "
                 f"<b>{qual}</b> · {self._risk_mean} (DES) = {pd_med} · IV {_iv_kind} (optbinning)"
                 + (" · PSI por amostra de validação (OOT, ESTAB, …) e pior caso, "
                    "nos mesmos bins do IV (DES × amostra)" if has_psi else "")
@@ -2993,7 +3047,7 @@ class TreeSegmenterUI:
         sid = self.dd_leaf.value
         if sid is None or sid not in self.seg.segments:
             self._set_html(self.out_leaf_hist, "leaf_hist",
-                           "<div style='font-size:11px;color:#889'>—</div>")
+                           "<div style='font-size:11px;color:var(--sub-ink)'>—</div>")
             return
         # cache do PNG por (sid, versão da árvore): revisitar a mesma folha (ou um
         # _refresh após lock/seleção que não mudou a massa da folha) reusa o blob
@@ -3006,7 +3060,7 @@ class TreeSegmenterUI:
                         else self.seg.plot_leaf_value_hist)
                 html = self._fig_html(plot(sid, figsize=self._PREVIEW_FIGSIZE))
             except Exception as e:
-                html = (f"<div style='font-size:11px;color:#b3261e'>"
+                html = (f"<div style='font-size:11px;color:var(--bad-tx)'>"
                         f"(gráfico não gerado: {type(e).__name__})</div>")
             if len(self._leaf_hist_cache) > 256:      # backstop de memória
                 self._leaf_hist_cache.clear()
@@ -3017,12 +3071,12 @@ class TreeSegmenterUI:
     # Aba "Análise de variáveis"
     # ==================================================================
     def _var_cards_html(self, s, trend):
-        psi_hex = {"green": "#137a3e", "yellow": "#9a6b00", "red": "#b3261e"}
+        psi_hex = {"green": "var(--ok-tx)", "yellow": "var(--warn-tx)", "red": "var(--bad-tx)"}
         tipo = s.get("tipo")
 
         def chip(k, v, sub="", vcolor=None):
             sty = f" style='color:{vcolor}'" if vcolor else ""
-            subh = (f"<div style='font-size:10px;color:#8a93a3;margin-top:2px;"
+            subh = (f"<div style='font-size:10px;color:var(--sub-ink);margin-top:2px;"
                     f"line-height:1.35'>{sub}</div>" if sub else "")
             return (f"<div class='treeui-metric' style='padding:9px 11px'>"
                     f"<div class='k'>{k}</div><div class='v mono'{sty}>{v}</div>{subh}</div>")
@@ -3055,7 +3109,7 @@ class TreeSegmenterUI:
         elif tipo == "cat" and s.get("top_categorias"):
             linhas = "".join(
                 f"<div style='display:flex;justify-content:space-between;font-size:12px;"
-                f"padding:3px 0;border-top:1px solid #f1f3f6'><span>{c}</span>"
+                f"padding:3px 0;border-top:1px solid var(--hair)'><span>{c}</span>"
                 f"<span class='mono'>{p:.1f}%</span></div>"
                 for c, p in s["top_categorias"][:8])
             html += ("<div class='treeui-metric' style='margin-top:6px;padding:8px 11px'>"
@@ -3066,39 +3120,40 @@ class TreeSegmenterUI:
             def gauge(p):
                 pos = min(max(p, 0.0) / 0.50, 1.0) * 100
                 return ("<div style='position:relative;flex:1;height:8px;border-radius:5px;"
-                        "background:linear-gradient(to right,#2bb673 0%,#2bb673 20%,"
-                        "#e6b800 20%,#e6b800 50%,#e0584f 50%,#e0584f 100%)'>"
+                        "background:linear-gradient(to right,var(--gauge-ok) 0%,var(--gauge-ok) 20%,"
+                        "var(--gauge-warn) 20%,var(--gauge-warn) 50%,"
+                        "var(--gauge-bad) 50%,var(--gauge-bad) 100%)'>"
                         f"<div style='position:absolute;left:calc({pos:.1f}% - 1px);top:-2px;"
-                        "width:2px;height:12px;background:#15324a;border-radius:1px'></div></div>")
+                        "width:2px;height:12px;background:var(--strong-ink);border-radius:1px'></div></div>")
             rows = ""
             for a, v in psi.items():
                 ab = "ESTAB" if a == "ESTABILIDADE" else a
                 cls = self._psi_class(v)
                 txt = {"green": "estável", "yellow": "atenção", "red": "instável"}[cls]
                 rows += ("<div style='display:flex;align-items:center;gap:9px;margin:6px 0'>"
-                         f"<div style='width:74px;font-size:11.5px;color:#6b7480;"
+                         f"<div style='width:74px;font-size:11.5px;color:var(--muted);"
                          f"white-space:nowrap'>PSI {ab}</div>"
                          f"<div class='mono' style='width:50px;font-size:13px;font-weight:600;"
                          f"color:{psi_hex[cls]}'>{v:.3f}</div>{gauge(v)}"
                          f"<div style='width:54px;text-align:right;font-size:10.5px;"
                          f"color:{psi_hex[cls]}'>{txt}</div></div>")
-            legend = ("<div style='font-size:10px;color:#8a93a3;margin-top:4px'>"
-                      "<span style='color:#2bb673'>■</span> &lt;0,10 estável &nbsp;"
-                      "<span style='color:#e6b800'>■</span> 0,10–0,25 atenção &nbsp;"
-                      "<span style='color:#e0584f'>■</span> &gt;0,25 instável</div>")
+            legend = ("<div style='font-size:10px;color:var(--sub-ink);margin-top:4px'>"
+                      "<span style='color:var(--gauge-ok)'>■</span> &lt;0,10 estável &nbsp;"
+                      "<span style='color:var(--gauge-warn)'>■</span> 0,10–0,25 atenção &nbsp;"
+                      "<span style='color:var(--gauge-bad)'>■</span> &gt;0,25 instável</div>")
             html += ("<div class='treeui-h' style='margin-top:13px'>Estabilidade · PSI por "
                      "amostra (vs. DES)</div>" + rows + legend)
 
         if trend:
             arrow = "↑" if trend["pct"] >= 0 else "↓"
-            tc = ("#b3261e" if abs(trend["pct"]) >= 10
-                  else "#9a6b00" if abs(trend["pct"]) >= 3 else "#137a3e")
+            tc = ("var(--bad-tx)" if abs(trend["pct"]) >= 10
+                  else "var(--warn-tx)" if abs(trend["pct"]) >= 3 else "var(--ok-tx)")
             html += ("<div style='display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;"
                      "font-size:11.5px;margin-top:12px;padding-top:8px;"
-                     "border-top:1px solid #eef1f4'>"
-                     "<span style='color:#6b7480'>Tendência da média</span>"
+                     "border-top:1px solid var(--hair)'>"
+                     "<span style='color:var(--muted)'>Tendência da média</span>"
                      f"<b style='color:{tc};font-size:13px'>{arrow} {trend['pct']:+.0f}%</b>"
-                     f"<span style='color:#8a93a3'>{trend['de']:.2f} → {trend['para']:.2f} · "
+                     f"<span style='color:var(--sub-ink)'>{trend['de']:.2f} → {trend['para']:.2f} · "
                      f"{trend['n_safras']} safras ({trend['ini']} → {trend['fim']})</span></div>")
         return html
 
@@ -3131,23 +3186,23 @@ class TreeSegmenterUI:
         if "media" in cols:
             sty = sty.set_properties(
                 subset=["media"],
-                **{"font-weight": "700", "color": "#27324a",
-                   "background-color": "#eef1f5",
-                   "border-left": "1px solid #cdd5e0",
-                   "border-right": "1px solid #cdd5e0"})
+                **{"font-weight": "700", "color": "var(--tbl-head-ink)",
+                   "background-color": "var(--tbl-head-bg)",
+                   "border-left": "1px solid var(--tbl-line-strong)",
+                   "border-right": "1px solid var(--tbl-line-strong)"})
 
         if "pct_missing" in cols:
             def _sev(s):
                 out = []
                 for v in s:
                     if pd.isna(v):
-                        out.append("color:#6b7480")
+                        out.append("color:var(--muted)")
                     elif v >= 20:
-                        out.append("color:#b3261e;font-weight:600")
+                        out.append("color:var(--bad-tx);font-weight:600")
                     elif v > 0:
-                        out.append("color:#9a6b00;font-weight:600")
+                        out.append("color:var(--warn-tx);font-weight:600")
                     else:
-                        out.append("color:#137a3e")
+                        out.append("color:var(--ok-tx)")
                 return out
             sty = sty.apply(_sev, axis=0, subset=["pct_missing"])
 
@@ -3193,7 +3248,7 @@ class TreeSegmenterUI:
                     out = []
                     for v in s:
                         if pd.isna(v):
-                            out.append("color:#6b7480")
+                            out.append("color:var(--muted)")
                         elif v >= 70:
                             out.append("color:#ffffff")
                         else:
@@ -3208,7 +3263,7 @@ class TreeSegmenterUI:
 
         for special in ("outras", "(faltante)"):
             if special in cat_cols:
-                sty = sty.set_properties(subset=[special], **{"color": "#6b7480"})
+                sty = sty.set_properties(subset=[special], **{"color": "var(--muted)"})
 
         extra = list(self._TABLE_STYLES) + list(self._SAFRA_HEADER_STYLES)
         extra.append({"selector": "th, td", "props": [("padding", "5px 10px")]})
@@ -3226,7 +3281,7 @@ class TreeSegmenterUI:
         self.out_var_cards.value = ""
 
         def err(what, e):
-            return (f"<div style='font-size:11px;color:#b3261e'>({what} não gerada: "
+            return (f"<div style='font-size:11px;color:var(--bad-tx)'>({what} não gerada: "
                     f"{type(e).__name__})</div>")
         bs, trend = None, None
         with self.out_log:
@@ -3281,12 +3336,12 @@ class TreeSegmenterUI:
                     self.out_var_psi.value = self._fig_html(
                         self.seg.plot_variable_psi_by_safra(feat, tcol, sid=sid))
                 else:
-                    self.out_var_psi.value = ("<div style='font-size:12px;color:#889'>PSI por "
+                    self.out_var_psi.value = ("<div style='font-size:12px;color:var(--sub-ink)'>PSI por "
                                               "safra requer amostras (DES/OOT).</div>")
             except Exception as e:
                 self.out_var_psi.value = err("PSI por safra", e)
         else:
-            self.out_var_time.value = ("<div style='font-size:12px;color:#889'>Informe a "
+            self.out_var_time.value = ("<div style='font-size:12px;color:var(--sub-ink)'>Informe a "
                                        "<b>coluna de safra</b> (ex.: dt_ref) acima para ver o "
                                        "comportamento ao longo do tempo, os percentis por safra "
                                        "e o PSI por safra.</div>")
@@ -3372,7 +3427,7 @@ class TreeSegmenterUI:
                 p["feature"], sid=sid, splits=splits, max_n_bins=mnb,
                 min_bin_size=mbs, max_bin_size=xbs, min_mean_diff=mmd))
         except Exception as e:
-            self.out_preview_seg.value = (f"<div style='color:#b3261e;font-size:11px'>"
+            self.out_preview_seg.value = (f"<div style='color:var(--bad-tx);font-size:11px'>"
                                           f"(segmentação não gerada: {type(e).__name__})</div>")
         # DISTRIBUIÇÃO DA VARIÁVEL + cortes sugeridos — ao lado do histograma.
         if self._feature_kind() == "num":
@@ -3382,11 +3437,11 @@ class TreeSegmenterUI:
                     min_bin_size=mbs, max_bin_size=xbs, min_mean_diff=mmd,
                     figsize=self._PREVIEW_FIGSIZE))
             except Exception as e:
-                self.out_preview_chart.value = (f"<div style='color:#b3261e;font-size:11px'>"
+                self.out_preview_chart.value = (f"<div style='color:var(--bad-tx);font-size:11px'>"
                                                 f"(distribuição não gerada: {type(e).__name__})</div>")
         else:
             self.out_preview_chart.value = (
-                "<div style='font-size:11px;color:#889'>variável categórica — sem histograma "
+                "<div style='font-size:11px;color:var(--sub-ink)'>variável categórica — sem histograma "
                 "de distribuição; veja a segmentação no card <b>Dividir a folha</b>.</div>")
 
     def _on_split(self, _):
@@ -3463,7 +3518,7 @@ class TreeSegmenterUI:
                 if c in bc and not pd.isna(r[c]):
                     vals.append(r[c])
         if not vals:
-            return "<div style='color:#889'>sem dados para o gráfico</div>"
+            return "<div style='color:var(--sub-ink)'>sem dados para o gráfico</div>"
         xmin, xmax = min(vals), max(vals)
         pad = (xmax - xmin) * 0.08 or 0.02
         xmin, xmax = max(0, xmin - pad), min(1, xmax + pad)
@@ -3478,31 +3533,31 @@ class TreeSegmenterUI:
                 continue
             x0, x1, xp = pos(r[lo_col]), pos(r[hi_col]), pos(r[ref_col])
             bar = (f"<div style='position:absolute;left:{x0:.1f}%;width:{max(0.5,x1-x0):.1f}%;"
-                   f"top:8px;height:4px;background:#9bb7c9;border-radius:2px'></div>"
+                   f"top:8px;height:4px;background:var(--ci-bar);border-radius:2px'></div>"
                    f"<div style='position:absolute;left:{xp:.1f}%;top:4px;width:2px;height:12px;"
-                   f"background:#0f3d57' title='DES'></div>")
+                   f"background:var(--ci-ref)' title='DES'></div>")
             ootmark = ""
             if chk and not pd.isna(r.get(f"valor_{chk}", float("nan"))):
                 xo = pos(r[f"valor_{chk}"])
                 inside = r.get("aderente")
-                col = "#1aa64b" if inside else "#d6453e"
+                col = "var(--risk-lo)" if inside else "var(--risk-hi)"
                 ootmark = (f"<div style='position:absolute;left:{xo:.1f}%;top:3px;width:10px;"
-                           f"height:10px;background:{col};border:1.5px solid #fff;border-radius:50%;"
+                           f"height:10px;background:{col};border:1.5px solid var(--tile-bg);border-radius:50%;"
                            f"transform:translateX(-4px)' title='{chk}'></div>")
             label = (r["descricao"][:40] + "…") if len(r["descricao"]) > 40 else r["descricao"]
             rows.append(
                 f"<div style='display:flex;align-items:center;margin:3px 0'>"
-                f"<div style='width:34px;color:#555'>[{r['nota']}]</div>"
-                f"<div style='width:300px;color:#333;white-space:nowrap;overflow:hidden;"
+                f"<div style='width:34px;color:var(--body-ink)'>[{r['nota']}]</div>"
+                f"<div style='width:300px;color:var(--ink);white-space:nowrap;overflow:hidden;"
                 f"text-overflow:ellipsis'>{label}</div>"
-                f"<div style='position:relative;flex:1;height:20px;background:#f3f6f9;"
+                f"<div style='position:relative;flex:1;height:20px;background:var(--gauge-track);"
                 f"border-radius:3px'>{bar}{ootmark}</div></div>")
-        leg = (f"<div style='font-size:10.5px;color:#778;margin-top:5px'>"
+        leg = (f"<div style='font-size:10.5px;color:var(--muted);margin-top:5px'>"
                f"barra cinza = IC {int(bc.attrs.get('ci',0.95)*100)}% (DES) · "
                f"traço azul = {self._risk_label} {ref} · ")
         if chk:
-            leg += (f"círculo = {self._risk_label} {chk} (<span style='color:#1aa64b'>verde dentro</span> / "
-                    f"<span style='color:#d6453e'>vermelho fora</span>)")
+            leg += (f"círculo = {self._risk_label} {chk} (<span style='color:var(--risk-lo)'>verde dentro</span> / "
+                    f"<span style='color:var(--risk-hi)'>vermelho fora</span>)")
         leg += "</div>"
         rows.append(leg + "</div>")
         return "".join(rows)
@@ -3511,16 +3566,16 @@ class TreeSegmenterUI:
         try:
             bc = self.seg.bootstrap_ci(n_boot=int(self.sl_boot.value))
         except Exception as e:
-            self.out_boot.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
+            self.out_boot.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro no "
                                    f"bootstrap: {type(e).__name__}: {e}</div>")
             return
 
         def status_bg(v):
             if v == "dentro":
-                return "background-color:#e6f6ec;color:#137a3e;font-weight:600"
+                return "background-color:var(--ok-bg);color:var(--ok-tx);font-weight:600"
             if v in ("acima", "abaixo"):
-                return "background-color:#fde7e7;color:#b3261e;font-weight:600"
-            return "color:#aab"
+                return "background-color:var(--bad-bg);color:var(--bad-tx);font-weight:600"
+            return "color:var(--faint-ink)"
         fmt = {c: "{:.4f}" for c in bc.columns if c.startswith("pd_")}
         fmt.update({"ic_low": "{:.4f}", "ic_high": "{:.4f}", "amplitude": "{:.4f}"})
         sty = bc.style.format(fmt, na_rep="—").hide(axis="index").set_properties(
@@ -3532,7 +3587,7 @@ class TreeSegmenterUI:
             n_ok = int((bc["aderente"] == True).sum())
             n_tot = int(bc["aderente"].notna().sum())
             chk = bc.attrs.get("check_sample")
-            resumo = (f"<div style='font-size:12px;color:#15324a;margin:6px 0'>Aderência "
+            resumo = (f"<div style='font-size:12px;color:var(--strong-ink);margin:6px 0'>Aderência "
                       f"<b>{chk}</b>: {n_ok}/{n_tot} folhas com {self._risk_label} dentro do IC bootstrap "
                       f"(n_boot={bc.attrs.get('n_boot')}).</div>")
         self.out_boot.value = self._boot_forest_html(bc) + resumo + self._styler_html(sty)
@@ -3546,7 +3601,7 @@ class TreeSegmenterUI:
             try:
                 html = self._diag_scorecard_html()
             except Exception as e:
-                self.out_diag.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao "
+                self.out_diag.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro ao "
                                        f"avaliar o modelo: {type(e).__name__}: {e}</div>")
                 print("Erro no placar:", type(e).__name__, e); return
             print("Placar de saúde do modelo calculado.")
@@ -3559,8 +3614,8 @@ class TreeSegmenterUI:
         """Placar de 4 vereditos (Discriminação · Estabilidade · Calibração ·
         Estrutura) + evidência estatística — reúne os testes das outras abas.
         No PD a discriminação usa AUC/Gini/KS (alvo binário)."""
-        psi_hex = {"green": "#137a3e", "yellow": "#9a6b00", "red": "#b3261e"}
-        bgc = {"green": "#e7f5ee", "yellow": "#fbf3e0", "red": "#fbe7e4"}
+        psi_hex = {"green": "var(--ok-tx)", "yellow": "var(--warn-tx)", "red": "var(--bad-tx)"}
+        bgc = {"green": "var(--ok-bg)", "yellow": "var(--warn-bg)", "red": "var(--bad-bg)"}
         words = {"green": "OK", "yellow": "ATENÇÃO", "red": "CRÍTICO"}
 
         # --- discriminação em DES: AUC/Gini (clf) ou R² (reg) ---
@@ -3646,7 +3701,7 @@ class TreeSegmenterUI:
                     f"{psi_hex[c]};background:{bgc[c]}'>"
                     f"<div class='k' style='color:{psi_hex[c]}'>{dim} · {words[c]}</div>"
                     f"<div class='v mono' style='color:{psi_hex[c]};font-size:15px'>{val}</div>"
-                    f"<div style='font-size:10px;color:#6b7480;margin-top:3px'>{q}</div></div>")
+                    f"<div style='font-size:10px;color:var(--muted);margin-top:3px'>{q}</div></div>")
         scorecard = ("<div class='treeui-metrics' style='grid-template-columns:"
                      "repeat(4,minmax(0,1fr))'>"
                      + "".join(light(*d) for d in dims) + "</div>")
@@ -3662,9 +3717,9 @@ class TreeSegmenterUI:
             f"o {_rl} previsto (na {_ref}) com o <b>{_obs}</b> na amostra de aferição "
             f"(<b>{_chk}</b>). O <b>gap</b> = previsto − realizado por folha; o placar usa o "
             "<b>máx |gap|</b> entre as folhas: "
-            "<span style='color:#137a3e'>&le;0,02 OK</span> · "
-            "<span style='color:#9a6b00'>0,02–0,05 atenção</span> · "
-            "<span style='color:#b3261e'>&gt;0,05 crítico</span>. "
+            "<span style='color:var(--ok-tx)'>&le;0,02 OK</span> · "
+            "<span style='color:var(--warn-tx)'>0,02–0,05 atenção</span> · "
+            "<span style='color:var(--bad-tx)'>&gt;0,05 crítico</span>. "
             "Gap alto = a folha promete um risco que não se realiza (régua "
             "des-calibrada) — veja o gráfico de calibração e o backtest na aba "
             "<b>Validar &amp; Exportar</b>.</div>")
@@ -3674,16 +3729,17 @@ class TreeSegmenterUI:
             def bar(p):
                 pos = min(max(p, 0.0) / 0.50, 1.0) * 100
                 return ("<div style='position:relative;flex:1;height:8px;border-radius:5px;"
-                        "background:linear-gradient(to right,#2bb673 0%,#2bb673 20%,#e6b800 20%,"
-                        "#e6b800 50%,#e0584f 50%,#e0584f 100%)'>"
+                        "background:linear-gradient(to right,var(--gauge-ok) 0%,var(--gauge-ok) 20%,"
+                        "var(--gauge-warn) 20%,var(--gauge-warn) 50%,"
+                        "var(--gauge-bad) 50%,var(--gauge-bad) 100%)'>"
                         f"<div style='position:absolute;left:calc({pos:.1f}% - 1px);top:-2px;"
-                        "width:2px;height:12px;background:#15324a;border-radius:1px'></div></div>")
+                        "width:2px;height:12px;background:var(--strong-ink);border-radius:1px'></div></div>")
             rows = ""
             for _, r in psi_df.iterrows():
                 a = r["amostra"]; ab = "ESTAB" if a == "ESTABILIDADE" else a
                 p = float(r["psi"]); cls = self._psi_class(p)
                 rows += ("<div style='display:flex;align-items:center;gap:9px;margin:5px 0'>"
-                         f"<div style='width:80px;font-size:11px;color:#6b7480'>PSI {ab}</div>"
+                         f"<div style='width:80px;font-size:11px;color:var(--muted)'>PSI {ab}</div>"
                          f"<div class='mono' style='width:52px;font-size:12.5px;font-weight:600;"
                          f"color:{psi_hex[cls]}'>{p:.1%}</div>{bar(p)}"
                          f"<div style='width:62px;text-align:right;font-size:10.5px;"
@@ -3728,7 +3784,7 @@ class TreeSegmenterUI:
                          + "</div>")
             parts.append(self._df_html(mr[["amostra", "monotonico", "n_inversoes"]]))
         except Exception as e:
-            parts.append(f"<div style='color:#b3261e;font-size:12px'>Erro na monotonicidade: "
+            parts.append(f"<div style='color:var(--bad-tx);font-size:12px'>Erro na monotonicidade: "
                          f"{type(e).__name__}</div>")
         if self.sample_col is not None:
             try:
@@ -3739,14 +3795,14 @@ class TreeSegmenterUI:
                 parts.append(self._df_html(ct[["folha", "n", "valor_previsto",
                                                "valor_realizado", "gap"]]))
             except Exception as e:
-                parts.append(f"<div style='color:#b3261e;font-size:12px'>Erro na calibração: "
+                parts.append(f"<div style='color:var(--bad-tx);font-size:12px'>Erro na calibração: "
                              f"{type(e).__name__}</div>")
         tcol = self.tx_time_col.value.strip()
         if not tcol:
-            parts.append("<div style='font-size:12px;color:#889'>(informe a coluna de tempo "
+            parts.append("<div style='font-size:12px;color:var(--sub-ink)'>(informe a coluna de tempo "
                          "para o backtest)</div>")
         elif tcol not in self.df.columns:
-            parts.append(f"<div style='font-size:12px;color:#889'>(coluna de tempo '{tcol}' "
+            parts.append(f"<div style='font-size:12px;color:var(--sub-ink)'>(coluna de tempo '{tcol}' "
                          f"não existe no DataFrame — backtest pulado)</div>")
         else:
             try:
@@ -3754,7 +3810,7 @@ class TreeSegmenterUI:
                              f"'{tcol}'</div>")
                 parts.append(self._df_html(self.seg.backtest(tcol), max_height="300px"))
             except Exception as e:
-                parts.append(f"<div style='color:#b3261e;font-size:12px'>Erro no backtest: "
+                parts.append(f"<div style='color:var(--bad-tx);font-size:12px'>Erro no backtest: "
                              f"{type(e).__name__}</div>")
         self.out_validate.value = "".join(parts)
 
@@ -3797,7 +3853,7 @@ class TreeSegmenterUI:
         _plt.close(fig)
         style = ("width:100%;height:auto" if full_width else "max-width:100%;height:auto")
         if border:
-            style += ";border:1px solid #e6e8eb;border-radius:6px"
+            style += ";border:1px solid var(--line);border-radius:6px"
         return f"<img src='data:image/png;base64,{b64}' style='{style}'/>"
 
     @staticmethod
@@ -3810,27 +3866,28 @@ class TreeSegmenterUI:
 
     @staticmethod
     def _css_forca(v):                       # força do IV (forte/médio/suspeito)
-        return {"forte": "color:#137a3e;font-weight:600",
-                "médio": "color:#9a6b00;font-weight:600",
-                "suspeito": "color:#6b3fa0;font-weight:600"}.get(v, "color:#9aa2b1")
+        return {"forte": "color:var(--ok-tx);font-weight:600",
+                "médio": "color:var(--warn-tx);font-weight:600",
+                "suspeito": "color:var(--sus-tx);font-weight:600"}.get(v, "color:var(--sub-ink)")
 
     @staticmethod
     def _css_estab(v):                       # estabilidade (estável/atenção/instável)
-        return {"estável": "color:#137a3e",
-                "atenção": "color:#9a6b00;font-weight:600",
-                "instável": "color:#b3261e;font-weight:600"}.get(v, "color:#9aa2b1")
+        return {"estável": "color:var(--ok-tx)",
+                "atenção": "color:var(--warn-tx);font-weight:600",
+                "instável": "color:var(--bad-tx);font-weight:600"}.get(v, "color:var(--sub-ink)")
 
     @staticmethod
     def _css_psi(v):                         # PSI numérico (verde<0.10<amarelo<0.25<vermelho)
         if pd.isna(v):
-            return "color:#9aa2b1"
+            return "color:var(--sub-ink)"
         a = abs(v)
-        c = "#137a3e" if a < 0.10 else "#9a6b00" if a < 0.25 else "#b3261e"
+        c = ("var(--ok-tx)" if a < 0.10
+             else "var(--warn-tx)" if a < 0.25 else "var(--bad-tx)")
         return f"color:{c};font-weight:600"
 
     @staticmethod
     def _css_passa(v):                       # passa no teste de hipótese (✅)
-        return "color:#137a3e;font-weight:600" if str(v).strip() == "✅" else "color:#9aa2b1"
+        return "color:var(--ok-tx);font-weight:600" if str(v).strip() == "✅" else "color:var(--sub-ink)"
 
     def _df_html(self, df, max_height=None, center=False, color=False):
         """HTML de um DataFrame cru (sem índice), p/ atribuir a um widget HTML.
@@ -3869,14 +3926,14 @@ class TreeSegmenterUI:
         try:
             self.out_discrim.value = self._fig_html(self.seg.plot_roc())
         except Exception as e:
-            self.out_discrim.value = (f"<div style='color:#b3261e;font-size:12px'>Erro na "
+            self.out_discrim.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro na "
                                       f"curva ROC: {type(e).__name__}: {e}</div>")
 
     def _on_ks(self, _):
         try:
             self.out_discrim.value = self._fig_html(self.seg.plot_ks())
         except Exception as e:
-            self.out_discrim.value = (f"<div style='color:#b3261e;font-size:12px'>Erro na "
+            self.out_discrim.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro na "
                                       f"curva KS: {type(e).__name__}: {e}</div>")
 
     # plots de REGRESSÃO (alvo contínuo): dispersão e distribuição do alvo —
@@ -3885,14 +3942,14 @@ class TreeSegmenterUI:
         try:
             self.out_discrim.value = self._fig_html(self.seg.plot_leaf_boxplots(), full_width=True)
         except Exception as e:
-            self.out_discrim.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
+            self.out_discrim.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro no "
                                       f"boxplot: {type(e).__name__}: {e}</div>")
 
     def _on_hist(self, _):
         try:
             self.out_discrim.value = self._fig_html(self.seg.plot_target_hist(color="steelblue"), full_width=True)
         except Exception as e:
-            self.out_discrim.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
+            self.out_discrim.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro no "
                                       f"histograma: {type(e).__name__}: {e}</div>")
 
     # ==================================================================
@@ -3912,34 +3969,34 @@ class TreeSegmenterUI:
         if ams_inv:
             am_txt = "; ".join(f"{r['amostra']}: {r['n_inv']}/{r['n_pares']} pares" for r in ams_inv)
             am_line = (f"<b>Entre amostras:</b> "
-                       f"<span style='color:#b3261e'>{am_txt}</span>")
+                       f"<span style='color:var(--bad-tx)'>{am_txt}</span>")
         else:
-            am_line = "<b>Entre amostras:</b> <span style='color:#137a3e'>nenhuma inversão</span>"
+            am_line = "<b>Entre amostras:</b> <span style='color:var(--ok-tx)'>nenhuma inversão</span>"
         if s.get("safra_err"):
-            sf_line = (f"<b>Entre safras:</b> <span style='color:#889'>não avaliado "
+            sf_line = (f"<b>Entre safras:</b> <span style='color:var(--sub-ink)'>não avaliado "
                        f"({s['safra_err']})</span>")
         elif s["n_safras"]:
             pct = 100 * s["safra_rate"]
-            cor = "#b3261e" if s["safras_inv"] else "#137a3e"
+            cor = "var(--bad-tx)" if s["safras_inv"] else "var(--ok-tx)"
             sf_line = (f"<b>Entre safras:</b> <span style='color:{cor}'>"
                        f"{s['safras_inv']}/{s['n_safras']} safras com inversão "
                        f"({pct:.0f}%)</span>")
             piores = [r for r in s["safras"] if r["n_inv"] > 0][:8]
             if piores:
                 chips = " ".join(
-                    f"<span style='background:#fbe7e4;color:#b23a2a;border-radius:3px;"
+                    f"<span style='background:var(--bad-bg);color:var(--bad-ink);border-radius:3px;"
                     f"padding:1px 5px;font-size:10.5px' class='mono'>{r['safra']} "
                     f"({r['n_inv']})</span>" for r in piores)
                 sf_line += f"<div style='margin-top:4px'>{chips}</div>"
         else:
-            sf_line = "<b>Entre safras:</b> <span style='color:#889'>sem safras avaliáveis</span>"
+            sf_line = "<b>Entre safras:</b> <span style='color:var(--sub-ink)'>sem safras avaliáveis</span>"
         return (
             "<div class='treeui-card' style='margin:6px 0'>"
             f"<div style='margin-bottom:6px'><span class='pill {pill}'>● {rotulo}</span>"
-            f"<span style='color:#6b7480;font-size:11.5px;margin-left:8px'>"
+            f"<span style='color:var(--muted);font-size:11.5px;margin-left:8px'>"
             f"{s['n_pairs']} par(es) de irmãs comparados</span></div>"
             f"<div style='font-size:12px;line-height:1.7'>{am_line}<br>{sf_line}</div>"
-            f"<div style='font-size:11px;color:#6b7480;margin-top:6px'>"
+            f"<div style='font-size:11px;color:var(--muted);margin-top:6px'>"
             f"Ordem de referência ({self._risk_label} na {s['ref_sample']}): {ordem}</div>"
             "</div>")
 
@@ -3947,7 +4004,7 @@ class TreeSegmenterUI:
         key = self.dd_sib_group.value
         g = getattr(self, "_sib_group_map", {}).get(key) if key is not None else None
         if not g:
-            self.out_sib.value = ("<div style='font-size:12px;color:#889'>Nenhum grupo de "
+            self.out_sib.value = ("<div style='font-size:12px;color:var(--sub-ink)'>Nenhum grupo de "
                                   "folhas-irmãs adjacentes — faça ao menos um split que deixe "
                                   "≥2 folhas terminais contíguas sob o mesmo pai.</div>")
             return
@@ -3957,7 +4014,7 @@ class TreeSegmenterUI:
         samp = None if samp in (None, "__all__") else samp
 
         def err(what, e):
-            return (f"<div style='font-size:11px;color:#b3261e'>({what} não gerado: "
+            return (f"<div style='font-size:11px;color:var(--bad-tx)'>({what} não gerado: "
                     f"{type(e).__name__}: {e})</div>")
 
         try:
@@ -4077,7 +4134,7 @@ class TreeSegmenterUI:
                 tcol = self.date_col if (self.date_col and self.date_col in self.df.columns) else None
                 self.seg.report_pdf(path, time_col=tcol)
             except Exception as e:
-                self.out_pdf.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao gerar "
+                self.out_pdf.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro ao gerar "
                                       f"PDF: {type(e).__name__}: {e}</div>")
                 print(f"[pdf] erro: {e}"); return
             self.out_pdf.value = (f"<div class='treeui-legend'>✅ Relatório salvo em "
@@ -4098,8 +4155,9 @@ class TreeSegmenterUI:
             do_save(); return
         self._confirm_pending = {"path": path, "do_save": do_save}
         self.html_confirm.value = (
-            "<div style='border:1px solid #f0c36d;background:#fff8e6;border-radius:10px;"
-            "padding:10px 12px;font-size:12.5px;color:#664d03;line-height:1.5'>"
+            "<div style='border:1px solid var(--notice-border);background:var(--notice-bg);"
+            "border-radius:10px;"
+            "padding:10px 12px;font-size:12.5px;color:var(--notice-ink);line-height:1.5'>"
             "<b>⚠️ O arquivo já existe</b><br>"
             f"<code>{_html.escape(path)}</code><br>Deseja sobrescrever?</div>")
         self.box_confirm.layout.display = ""      # revela o diálogo inline
@@ -4190,7 +4248,7 @@ class TreeSegmenterUI:
             fig = self.seg.plot_tree(save_path=path)    # repr. % + alvo (DES)
             self.out_plot.value = self._fig_html(fig, border=True)
         except Exception as e:
-            self.out_plot.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao "
+            self.out_plot.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro ao "
                                    f"desenhar a árvore: {type(e).__name__}: {e}</div>")
             return
         if path:
@@ -4214,14 +4272,14 @@ class TreeSegmenterUI:
                 self.out_tree_img.value = ""
                 self._refresh_tree_widget()
             else:
-                hint = ("<div style='font-size:11px;color:#8894a5;margin-top:4px'>💡 instale "
+                hint = ("<div style='font-size:11px;color:var(--sub-ink)4a5;margin-top:4px'>💡 instale "
                         "<code>anywidget</code> (<code>pip install anywidget</code>) para uma "
                         "árvore CLICÁVEL: selecionar a folha, fundir irmãs e recolher ramos "
                         "direto na imagem, com métricas no hover.</div>")
                 self.out_tree_img.value = self._fig_html(self.seg.plot_tree(),
                                                          border=True) + hint
         except Exception as e:
-            self.out_tree_img.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao "
+            self.out_tree_img.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro ao "
                                        f"desenhar a árvore: {type(e).__name__}: {e}</div>")
 
     def _on_tree_preview_hide(self, _):

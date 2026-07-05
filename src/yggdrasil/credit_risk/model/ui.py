@@ -73,6 +73,22 @@ _CSS = """
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 .mseg { --ac:#3b4a63; --ac-deep:#27324a; --ac-soft:#eef1f5; --ac-border:#cdd5e0;
   --ink:#1f2733; --muted:#6b7480; --line:#e7e9ee;
+  /* tokens semânticos (status, tabelas, realces): o HTML gerado no Python usa
+     var(--...) em vez de hex — o tema escuro só redefine os tokens aqui */
+  --ok-ink:#157a52; --ok-bg:#e7f5ee; --ok-tx:#137a3e;
+  --warn-ink:#9a6f12; --warn-bg:#fbf3e0; --warn-tx:#9a6b00;
+  --bad-ink:#b23a2a; --bad-bg:#fbe7e4; --bad-tx:#b3261e;
+  --info-ink:#1f5fa8; --info-bg:#e7eef8; --sus-ink:#6b46c1; --sus-bg:#efe9fb;
+  --code-ink:#0b63ce; --code-bg:#e7eef8;
+  --gauge-ok:#2ea06b; --gauge-bad:#d64545; --gauge-track:#eef0f3;
+  --strong-ink:#15324a; --body-ink:#3a4658; --sub-ink:#8a93a3;
+  --faint-ink:#9aa3ad; --hair:#eef0f3; --tile-bg:#f7f8fa; --rule-bg:#fff;
+  --help-bg:#f5f8fc; --help-line:#dbe5f1; --neutral-bg:#f1f3f5;
+  --formula-bg:#0f1620;
+  --tbl-line:#e1e5ec; --tbl-line-strong:#cdd5e0; --tbl-head-bg:#eef1f5;
+  --tbl-head-ink:#27324a; --tbl-head-line:#b9c2d0; --tbl-zebra:#fafbfc;
+  --tbl-hover:#eef3f8;
+  --notice-bg:#fff8e6; --notice-border:#f0c36d; --notice-ink:#664d03;
   font-family:'IBM Plex Sans', -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
   color:var(--ink); }
 .mseg .mono { font-family:'IBM Plex Mono', ui-monospace, Menlo, Consolas, monospace;
@@ -95,33 +111,34 @@ _CSS = """
 .pill { display:inline-block; padding:3px 10px; border-radius:999px; font-size:11.5px;
   font-weight:600; margin:2px 4px 2px 0; }
 .pill-muted  { background:var(--ac-soft); color:var(--ac-deep); }
-.pill-green  { background:#e7f5ee; color:#157a52; }
-.pill-yellow { background:#fbf3e0; color:#9a6f12; }
-.pill-red    { background:#fbe7e4; color:#b23a2a; }
+.pill-green  { background:var(--ok-bg); color:var(--ok-ink); }
+.pill-yellow { background:var(--warn-bg); color:var(--warn-ink); }
+.pill-red    { background:var(--bad-bg); color:var(--bad-ink); }
 .mseg-legend { font-size:11px; color:var(--muted); margin:6px 0 2px; line-height:1.55; }
 /* caixa de tutorial (algoritmo/parâmetros) e legenda de categorias */
-.mseg-help { background:#f5f8fc; border:1px solid #dbe5f1; border-left:3px solid var(--ac);
-  border-radius:9px; padding:11px 14px; font-size:11.5px; color:#3a4658; line-height:1.62;
-  margin-top:8px; }
+.mseg-help { background:var(--help-bg); border:1px solid var(--help-line);
+  border-left:3px solid var(--ac);
+  border-radius:9px; padding:11px 14px; font-size:11.5px; color:var(--body-ink);
+  line-height:1.62; margin-top:8px; }
 .mseg-help .ttl { font-size:12px; font-weight:600; color:var(--ink); margin-bottom:5px; }
 .mseg-help ul { margin:5px 0 0; padding-left:6px; list-style:none; }
 .mseg-help li { margin:4px 0; }
 .mseg-help .pname { font-family:'IBM Plex Mono', ui-monospace, monospace; font-weight:600;
-  color:#0b63ce; background:#e7eef8; padding:1px 6px; border-radius:5px; }
+  color:var(--code-ink); background:var(--code-bg); padding:1px 6px; border-radius:5px; }
 .mseg-help .none { color:var(--muted); font-style:italic; }
 .mseg-cat { display:inline-block; padding:2px 9px; border-radius:999px; font-size:11px;
   font-weight:600; }
-.mseg-cat-keep { background:#e7f5ee; color:#157a52; }
-.mseg-cat-rev  { background:#fbf3e0; color:#9a6f12; }
-.mseg-cat-drop { background:#fbe7e4; color:#b23a2a; }
-.mseg-rule { margin-top:8px; padding:11px 13px; background:#fff; border:1px solid #e3e9f1;
-  border-radius:8px; font-size:11px; }
+.mseg-cat-keep { background:var(--ok-bg); color:var(--ok-ink); }
+.mseg-cat-rev  { background:var(--warn-bg); color:var(--warn-ink); }
+.mseg-cat-drop { background:var(--bad-bg); color:var(--bad-ink); }
+.mseg-rule { margin-top:8px; padding:11px 13px; background:var(--rule-bg);
+  border:1px solid var(--line); border-radius:8px; font-size:11px; }
 .mseg-rule .rt { font-weight:600; color:var(--ink); margin-bottom:8px;
   font-family:'IBM Plex Mono', ui-monospace, monospace; }
 .mseg-rule .rr { display:flex; align-items:baseline; gap:9px; margin:7px 0; line-height:1.65; }
 .mseg-rule .rr .mseg-cat { flex:0 0 72px; text-align:center; }
-.mseg-rule .rx { flex:1; color:#3a4658; }
-.mseg-rule i { color:#6b7480; }
+.mseg-rule .rx { flex:1; color:var(--body-ink); }
+.mseg-rule i { color:var(--muted); }
 /* dicionário/guia de bolso das métricas (bloco recolhível) */
 .mseg-guide { margin-top:10px; font-size:11.5px; }
 .mseg-guide > summary { cursor:pointer; font-weight:600; color:var(--ac-deep);
@@ -135,8 +152,10 @@ _CSS = """
 .mseg-guide table td { text-align:left !important; vertical-align:top; }
 .mseg-guide .mseg-cat { font-size:10px; }
 .mseg-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(96px,1fr)); gap:6px; }
-.mseg-metric { background:#f7f8fa; border:1px solid #eef0f3; border-radius:9px; padding:7px 10px; }
-.mseg-metric .k { font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:#8a93a3; }
+.mseg-metric { background:var(--tile-bg); border:1px solid var(--hair); border-radius:9px;
+  padding:7px 10px; }
+.mseg-metric .k { font-size:10px; text-transform:uppercase; letter-spacing:.04em;
+  color:var(--sub-ink); }
 .mseg-metric .v { font-size:16px; font-weight:600; color:var(--ink); margin-top:2px; }
 /* abas — estilo "segmented control" (pílulas), alinhado às UIs lgd/pd */
 .mseg-tabs { margin-top:10px; border:none !important; box-shadow:none !important; }
@@ -179,7 +198,7 @@ _CSS = """
   background:var(--ac-deep) !important; color:#fff !important;
   border-color:var(--ac-deep) !important; }
 /* fórmula do modelo — preditor linear z como termos que quebram linha */
-.mseg-formula { background:#0f1620; color:#e8edf4; border-radius:10px; padding:13px 15px;
+.mseg-formula { background:var(--formula-bg); color:#e8edf4; border-radius:10px; padding:13px 15px;
   font-family:'IBM Plex Mono', ui-monospace, Menlo, Consolas, monospace; font-size:12.5px;
   line-height:1.9; }
 .mseg-zlead { color:#8aa0b6; font-weight:600; margin-right:4px; }
@@ -195,53 +214,93 @@ _CSS = """
   font-family:'IBM Plex Mono', ui-monospace, monospace; }
 /* tabela de coeficientes — sinal colorido + barra de magnitude + leitura */
 .mseg-coef { border-collapse:collapse; width:100%; font-size:12px; margin-top:4px; }
-.mseg-coef th { background:#eef1f5; color:#27324a; font-weight:600; text-align:right;
-  padding:6px 10px; border-bottom:2px solid #b9c2d0; white-space:nowrap; }
-.mseg-coef td { padding:5px 10px; border-bottom:1px solid #eef0f3; text-align:right;
+.mseg-coef th { background:var(--tbl-head-bg); color:var(--tbl-head-ink); font-weight:600;
+  text-align:right;
+  padding:6px 10px; border-bottom:2px solid var(--tbl-head-line); white-space:nowrap; }
+.mseg-coef td { padding:5px 10px; border-bottom:1px solid var(--hair); text-align:right;
   white-space:nowrap; }
 .mseg-coef th.term, .mseg-coef td.term { text-align:left; font-weight:500; }
 .mseg-coef td.read, .mseg-coef th.read { text-align:left; }
 .mseg-coef td.num { font-variant-numeric:tabular-nums; font-weight:600; }
-.mseg-coef tbody tr:hover td { background:#f5f8fb; }
-.mseg-coef tr.base td { background:#fbfcfe; color:var(--muted); font-style:italic; }
+.mseg-coef tbody tr:hover td { background:var(--tbl-hover); }
+.mseg-coef tr.base td { background:var(--tbl-zebra); color:var(--muted); font-style:italic; }
 .mseg-barcell { width:150px; }
-.mseg-barwrap { background:#eef0f3; border-radius:5px; height:9px; width:100%; overflow:hidden; }
-.mseg-bar-pos { background:#2ea06b; height:100%; } .mseg-bar-neg { background:#d64545; height:100%; }
-.mseg-pos-tx { color:#157a52; } .mseg-neg-tx { color:#b23a2a; }
+.mseg-barwrap { background:var(--gauge-track); border-radius:5px; height:9px; width:100%;
+  overflow:hidden; }
+.mseg-bar-pos { background:var(--gauge-ok); height:100%; }
+.mseg-bar-neg { background:var(--gauge-bad); height:100%; }
+.mseg-pos-tx { color:var(--ok-ink); } .mseg-neg-tx { color:var(--bad-ink); }
 .mseg .jupyter-button { border-radius:8px; font-family:inherit; }
 .mseg .jupyter-widgets { min-width:0 !important; }
-/* ===== TEMA ESCURO (classe .dark no painel raiz) ===== */
-.mseg.dark { --ink:#e7ebf2; --muted:#9aa6ba; --line:#2c3a55; --ac-soft:#243049;
-  --ac-border:#3a4a6a; --ac-deep:#d6deec; --ac:#6076a0; background:#0e1521;
-  padding:8px; border-radius:12px; }
-.mseg.dark .mseg-banner, .mseg.dark .mseg-card, .mseg.dark .mseg-bar { background:#16202f !important;
-  border-color:#27344c !important; }
-.mseg.dark .mseg-banner .t { color:#e7ebf2; }
-.mseg.dark .mseg-help { background:#1a2740 !important; border-color:#2c3a55 !important; }
+/* ===== TEMA ESCURO (classe .dark no painel raiz) =====
+   Paleta alinhada ao dark mode do Databricks (design system DuBois):
+   fundo grey800 #11171C, superfícies grey700 #1F272D, bordas grey650 #37444F,
+   texto #E8ECF0/#92A4B3, ação primária blue500 #4299E0 com texto escuro. */
+.mseg.dark { --ink:#E8ECF0; --muted:#92A4B3; --line:#37444F; --ac-soft:#37444F;
+  --ac-border:#5F7281; --ac-deep:#E8ECF0; --ac:#4299E0;
+  --ok-ink:#3BA65E; --ok-bg:rgba(39,124,67,.16); --ok-tx:#3BA65E;
+  --warn-ink:#DE7921; --warn-bg:rgba(190,80,30,.16); --warn-tx:#DE7921;
+  --bad-ink:#E65B77; --bad-bg:rgba(200,45,76,.16); --bad-tx:#E65B77;
+  --info-ink:#8ACAFF; --info-bg:rgba(138,202,255,.16);
+  --sus-ink:#B592E5; --sus-bg:rgba(138,99,191,.24);
+  --code-ink:#8ACAFF; --code-bg:rgba(138,202,255,.16);
+  --gauge-ok:#3BA65E; --gauge-bad:#E65B77; --gauge-track:#37444F;
+  --strong-ink:#E8ECF0; --body-ink:#C0CDD8; --sub-ink:#8396A5;
+  --faint-ink:#5F7281; --hair:#37444F; --tile-bg:#11171C; --rule-bg:#11171C;
+  --help-bg:#11171C; --help-line:#37444F; --neutral-bg:rgba(144,164,181,.16);
+  --formula-bg:#11171C;
+  --tbl-line:#37444F; --tbl-line-strong:#445461; --tbl-head-bg:#11171C;
+  --tbl-head-ink:#E8ECF0; --tbl-head-line:#445461; --tbl-zebra:rgba(189,205,219,.04);
+  --tbl-hover:rgba(189,205,219,.08);
+  --notice-bg:rgba(190,80,30,.16); --notice-border:#DE7921; --notice-ink:#E8ECF0;
+  background:#11171C; padding:8px; border-radius:12px; }
+.mseg.dark .mseg-banner, .mseg.dark .mseg-card, .mseg.dark .mseg-bar {
+  background:#1F272D !important; border-color:#37444F !important;
+  box-shadow:none !important; }
+.mseg.dark .mseg-banner .t { color:#E8ECF0; }
+/* ação primária DuBois: azul com texto ESCURO (não branco) */
+.mseg.dark .mseg-banner .logo { color:#11171C; }
+.mseg.dark .mseg-guide > summary:hover { background:#445461; }
 .mseg.dark .mseg-tabs .p-TabBar-tab, .mseg.dark .mseg-tabs .lm-TabBar-tab {
-  background:#16202f !important; color:#9aa6ba !important; border-color:#27344c !important; }
+  background:#1F272D !important; color:#92A4B3 !important; border-color:#37444F !important; }
+.mseg.dark .mseg-tabs .p-TabBar-tab:hover,
+.mseg.dark .mseg-tabs .lm-TabBar-tab:hover { background:rgba(138,202,255,.08) !important;
+  color:#8ACAFF !important; border-color:#8ACAFF !important; }
 .mseg.dark .mseg-tabs .p-TabBar-tab.p-mod-current,
-.mseg.dark .mseg-tabs .lm-TabBar-tab.lm-mod-current { background:#243049 !important; color:#e7ebf2 !important; }
+.mseg.dark .mseg-tabs .lm-TabBar-tab.lm-mod-current { background:#4299E0 !important;
+  color:#11171C !important; border-color:#4299E0 !important; }
+.mseg.dark .mseg-tabs .p-TabBar-tab.p-mod-current:hover,
+.mseg.dark .mseg-tabs .lm-TabBar-tab.lm-mod-current:hover {
+  background:#8ACAFF !important; color:#11171C !important; border-color:#8ACAFF !important; }
 .mseg.dark .widget-text input, .mseg.dark .widget-dropdown select, .mseg.dark textarea {
-  background:#0e1521 !important; color:#e7ebf2 !important; border-color:#2c3a55 !important; }
-.mseg.dark .widget-label, .mseg.dark .jupyter-widgets label { color:#c4cdde !important; }
+  background:#11171C !important; color:#E8ECF0 !important; border-color:#37444F !important; }
+.mseg.dark .widget-label, .mseg.dark .jupyter-widgets label { color:#D1D9E1 !important; }
+/* botões ipywidgets sem button_style: seguem a superfície DuBois */
+.mseg.dark .jupyter-button:not(.mod-primary):not(.mod-success):not(.mod-info):not(.mod-warning):not(.mod-danger) { background:#37444F !important; color:#E8ECF0 !important; }
+.mseg.dark .jupyter-button.mod-active { background:#4299E0 !important; color:#11171C !important; }
 </style>
 """
 
 
 class ModelSegmenterUI:
+    # cores via var(--tbl-*): o CSS do Styler é injetado dentro do painel
+    # .mseg, então os tokens resolvem no tema ativo (claro ou escuro) sem
+    # precisar re-renderizar a tabela quando o usuário alterna o tema.
     _TABLE_STYLES = [
         {"selector": "", "props": [("border-collapse", "collapse"),
-                                   ("border", "1px solid #cdd5e0"), ("width", "100%")]},
-        {"selector": "th, td", "props": [("border", "1px solid #e1e5ec"),
+                                   ("border", "1px solid var(--tbl-line-strong)"),
+                                   ("width", "100%")]},
+        {"selector": "th, td", "props": [("border", "1px solid var(--tbl-line)"),
                                          ("padding", "4px 9px"), ("text-align", "right"),
                                          ("white-space", "nowrap")]},
-        {"selector": "thead th", "props": [("background-color", "#eef1f5"),
-                                           ("color", "#27324a"), ("font-weight", "600"),
-                                           ("border-bottom", "2px solid #b9c2d0"),
+        {"selector": "thead th", "props": [("background-color", "var(--tbl-head-bg)"),
+                                           ("color", "var(--tbl-head-ink)"),
+                                           ("font-weight", "600"),
+                                           ("border-bottom", "2px solid var(--tbl-head-line)"),
                                            ("position", "sticky"), ("top", "0"), ("z-index", "1")]},
-        {"selector": "tbody tr:nth-child(even) td", "props": [("background-color", "#fafbfc")]},
-        {"selector": "tbody tr:hover td", "props": [("background-color", "#eef3f8")]},
+        {"selector": "tbody tr:nth-child(even) td",
+         "props": [("background-color", "var(--tbl-zebra)")]},
+        {"selector": "tbody tr:hover td", "props": [("background-color", "var(--tbl-hover)")]},
     ]
 
     def __init__(self, df, target="target", task_type="classification", sample_col=None,
@@ -296,28 +355,31 @@ class ModelSegmenterUI:
         # lado); senão fica no tamanho natural, limitada a 100% do contêiner.
         style = "width:100%;height:auto" if stretch else "max-width:100%;height:auto"
         if border:
-            style += ";border:1px solid #e6e8eb;border-radius:6px"
+            style += ";border:1px solid var(--line);border-radius:6px"
         return f"<img src='data:image/png;base64,{b64}' style='{style}'/>"
 
-    _CAT_COLORS = {"manter": ("#157a52", "#e7f5ee"), "revisar": ("#9a6f12", "#fbf3e0"),
-                   "descartar": ("#b23a2a", "#fbe7e4")}
+    _CAT_COLORS = {"manter": ("var(--ok-ink)", "var(--ok-bg)"),
+                   "revisar": ("var(--warn-ink)", "var(--warn-bg)"),
+                   "descartar": ("var(--bad-ink)", "var(--bad-bg)")}
 
     # cores da força do IV (forte→verde, médio→azul, fraco→amarelo, inútil→vermelho,
     # suspeito→roxo = IV alto demais, possível vazamento)
-    _FORCA_COLORS = {"forte": ("#157a52", "#e7f5ee"), "médio": ("#1f5fa8", "#e7eef8"),
-                     "fraco": ("#9a6f12", "#fbf3e0"), "inútil": ("#b23a2a", "#fbe7e4"),
-                     "suspeito": ("#6b46c1", "#efe9fb")}
+    _FORCA_COLORS = {"forte": ("var(--ok-ink)", "var(--ok-bg)"),
+                     "médio": ("var(--info-ink)", "var(--info-bg)"),
+                     "fraco": ("var(--warn-ink)", "var(--warn-bg)"),
+                     "inútil": ("var(--bad-ink)", "var(--bad-bg)"),
+                     "suspeito": ("var(--sus-ink)", "var(--sus-bg)")}
 
     # cores da estabilidade (PSI): estável→verde · atenção→amarelo · instável→vermelho
-    _ESTABILIDADE_COLORS = {"estável": ("#157a52", "#e7f5ee"),
-                            "atenção": ("#9a6f12", "#fbf3e0"),
-                            "instável": ("#b23a2a", "#fbe7e4")}
+    _ESTABILIDADE_COLORS = {"estável": ("var(--ok-ink)", "var(--ok-bg)"),
+                            "atenção": ("var(--warn-ink)", "var(--warn-bg)"),
+                            "instável": ("var(--bad-ink)", "var(--bad-bg)")}
 
     # CSS por nível de qualidade de uma métrica (identificador visual da tabela)
     _LEVEL_CSS = {
-        "bom":     "background-color:#e7f5ee;color:#157a52;font-weight:600",
-        "atencao": "background-color:#fbf3e0;color:#9a6f12;font-weight:600",
-        "ruim":    "background-color:#fbe7e4;color:#b23a2a;font-weight:600"}
+        "bom":     "background-color:var(--ok-bg);color:var(--ok-ink);font-weight:600",
+        "atencao": "background-color:var(--warn-bg);color:var(--warn-ink);font-weight:600",
+        "ruim":    "background-color:var(--bad-bg);color:var(--bad-ink);font-weight:600"}
 
     # Dicionário + guia de bolso das métricas. ``dir``: 'up' = maior melhor,
     # 'down' = menor melhor, 'zero' = perto de 0 melhor, 'info' = sem julgamento.
@@ -428,10 +490,10 @@ class ModelSegmenterUI:
             def _tend_css(v):                       # crescente=verde · decrescente=vermelho · senão cinza
                 s = str(v)
                 if "decrescente" in s:              # antes de 'crescente' (substring!)
-                    return "color:#b3261e;background-color:#fdecea;font-weight:600"
+                    return "color:var(--bad-tx);background-color:var(--bad-bg);font-weight:600"
                 if "crescente" in s:
-                    return "color:#137a3e;background-color:#e9f6ee;font-weight:600"
-                return "color:#6b7480;background-color:#f1f3f5;font-weight:600"
+                    return "color:var(--ok-tx);background-color:var(--ok-bg);font-weight:600"
+                return "color:var(--muted);background-color:var(--neutral-bg);font-weight:600"
             sty = sty.map(_tend_css, subset=["tendencia"])
         if color_estabilidade and "estabilidade" in df.columns:
             def _estab_css(v):
@@ -442,9 +504,9 @@ class ModelSegmenterUI:
             # backtest/PSI dos ratings: status (ok/alerta), gap, psi e classificacao
             if "status" in df.columns:
                 def _status_css(v):
-                    return ("color:#137a3e;background-color:#e9f6ee;font-weight:600"
+                    return ("color:var(--ok-tx);background-color:var(--ok-bg);font-weight:600"
                             if str(v).strip().lower() == "ok"
-                            else "color:#b3261e;background-color:#fdecea;font-weight:600")
+                            else "color:var(--bad-tx);background-color:var(--bad-bg);font-weight:600")
                 sty = sty.map(_status_css, subset=["status"])
             if "classificacao" in df.columns:
                 def _clf_css(v):
@@ -456,7 +518,8 @@ class ModelSegmenterUI:
                     if pd.isna(v):
                         return ""
                     a = abs(float(v))
-                    c = "#137a3e" if a < 0.10 else "#9a6b00" if a < 0.25 else "#b3261e"
+                    c = ("var(--ok-tx)" if a < 0.10
+                         else "var(--warn-tx)" if a < 0.25 else "var(--bad-tx)")
                     return f"color:{c};font-weight:600"
                 sty = sty.map(_psi_css, subset=["psi"])
             if "gap" in df.columns and pd.api.types.is_numeric_dtype(df["gap"]):
@@ -464,7 +527,8 @@ class ModelSegmenterUI:
                     if pd.isna(v):
                         return ""
                     a = abs(float(v))
-                    c = "#137a3e" if a <= 0.05 else "#9a6b00" if a <= 0.10 else "#b3261e"
+                    c = ("var(--ok-tx)" if a <= 0.05
+                         else "var(--warn-tx)" if a <= 0.10 else "var(--bad-tx)")
                     return f"color:{c};font-weight:600"
                 sty = sty.map(_gap_css, subset=["gap"])
         if pct_cols:
@@ -562,8 +626,9 @@ class ModelSegmenterUI:
             return
         self._dirty_since_fit = True
         self.out_dirty_warn.value = (
-            "<div style='border:1px solid #f0c36d;background:#fff8e6;border-radius:10px;"
-            "padding:9px 12px;font-size:12px;color:#664d03;margin-bottom:8px'>"
+            "<div style='border:1px solid var(--notice-border);background:var(--notice-bg);"
+            "border-radius:10px;"
+            "padding:9px 12px;font-size:12px;color:var(--notice-ink);margin-bottom:8px'>"
             "⚠️ <b>Modelo desatualizado</b> — variáveis/bins/WoE mudaram depois do "
             "treino; as métricas e gráficos abaixo refletem o modelo ANTIGO. "
             "Re-treine na aba Modelo.</div>")
@@ -626,7 +691,7 @@ class ModelSegmenterUI:
             "precisa de uma segunda olhada (IV baixo, inversão, PSI etc.) antes de decidir.</li>"
             "<li><span class='mseg-cat mseg-cat-drop'>✕ descartar</span> &nbsp;não deve ser "
             "usada (instável, sem poder, redundante…).</li>"
-            "<li><span class='mseg-cat' style='background:#eef1f5;color:#6b7480'>— sem categoria</span> "
+            "<li><span class='mseg-cat' style='background:var(--ac-soft);color:var(--muted)'>— sem categoria</span> "
             "&nbsp;ainda não avaliada (limpa o rótulo).</li>"
             "</ul>"
             "<b>Manual:</b> escolha a variável, selecione a categoria e clique em "
@@ -657,7 +722,7 @@ class ModelSegmenterUI:
                                              layout=W.Layout(width="155px"))
         self.cb_require_mono = W.Checkbox(value=False, description="exigir monotonia")
         self.out_mono_hint = W.HTML(
-            "<div style='font-size:11.5px;color:#6b7480;margin:2px 0 0 2px;line-height:1.5'>"
+            "<div style='font-size:11.5px;color:var(--muted);margin:2px 0 0 2px;line-height:1.5'>"
             "<b>exigir monotonia</b>: no <i>Auto-selecionar</i> / <i>Auto-categorizar</i>, "
             "só mantém a variável quando o risco (PD na classificação · alvo médio na "
             "regressão) é <b>monotônico</b> entre as faixas do binning — sobe ou desce de "
@@ -1572,7 +1637,7 @@ class ModelSegmenterUI:
         primeiro cálculo, as chamadas seguintes atualizam normalmente."""
         if not force and not self._vars_ready:
             self.out_vars.value = (
-                "<div style='font-size:12px;color:#8891a0;padding:10px 6px;"
+                "<div style='font-size:12px;color:var(--sub-ink);padding:10px 6px;"
                 "line-height:1.6'>Ranking pendente — clique em <b>⟳ Recalcular</b> "
                 "para ranquear as variáveis (IV/força/inversão/PSI de todas as "
                 "candidatas; pode levar alguns segundos).</div>")
@@ -1830,11 +1895,11 @@ class ModelSegmenterUI:
                             style={"description_width": "initial"})
             self._an_cat_widgets[c] = dd
             lab = W.HTML(f"<span style='font-size:12px'><b>{c}</b>"
-                         f"<span style='color:#889'> · {risco_h} {risco[c]:.3f}</span></span>")
+                         f"<span style='color:var(--sub-ink)'> · {risco_h} {risco[c]:.3f}</span></span>")
             rows.append(W.HBox([dd, lab], layout=W.Layout(align_items="center", gap="8px")))
         na_n = int(col.isna().sum())
         if na_n:
-            rows.append(W.HTML(f"<div class='mseg-legend' style='color:#9a6b00'>+ "
+            rows.append(W.HTML(f"<div class='mseg-legend' style='color:var(--warn-tx)'>+ "
                                f"<b>(faltante)</b>: {na_n} linhas → faixa própria automática</div>"))
         self.an_cat_box.children = tuple(rows)
 
@@ -2205,10 +2270,10 @@ class ModelSegmenterUI:
         for _, r in coef.iterrows():
             c = float(r["coef"]); cls = "pos" if c >= 0 else "neg"
             parts.append(
-                f" <span style='color:#9aa3ad'>{'+' if c >= 0 else '−'}</span> "
+                f" <span style='color:var(--faint-ink)'>{'+' if c >= 0 else '−'}</span> "
                 f"<span class='mseg-{cls}-tx'>{abs(c):.4f}</span>"
-                f"<span style='color:#9aa3ad'>·</span>{r['termo']}")
-        z_html = "<span style='color:#6b7480;font-weight:600'>z =</span> " + "".join(parts)
+                f"<span style='color:var(--faint-ink)'>·</span>{r['termo']}")
+        z_html = "<span style='color:var(--muted);font-weight:600'>z =</span> " + "".join(parts)
 
         # tabela de coeficientes com barra de magnitude (|coef|) e leitura do efeito
         cmax = float(coef["coef"].abs().max()) or 1.0
@@ -2230,7 +2295,7 @@ class ModelSegmenterUI:
             if has_p:                              # p-valor + estrelas (verde = significativo)
                 pv = r["p_valor"]; sg = r.get("signif", "")
                 sig_ok = sg not in ("", "n.s.", ".")
-                cor = "#137a3e" if sig_ok else "#9aa3ad"
+                cor = "var(--ok-tx)" if sig_ok else "var(--faint-ink)"
                 pv_txt = "—" if (pv is None or (isinstance(pv, float) and np.isnan(pv))) else f"{pv:.4f}"
                 extra += f"<td class='num' style='color:{cor}'>{pv_txt} {sg}</td>"
             rows.append(
@@ -2345,7 +2410,7 @@ class ModelSegmenterUI:
                 self._log(f"[fit] Two-Stage treinado (threshold={thr:.4f}; "
                           f"clf={self.dd_ts_clf.value}, reg={self.dd_ts_reg.value}).")
                 self.out_fit_status.value = (
-                    f"<div class='mseg-legend'><span style='color:#157a52;font-weight:600'>"
+                    f"<div class='mseg-legend'><span style='color:var(--ok-ink);font-weight:600'>"
                     f"✓ Two-Stage treinado (threshold={thr:.4f}) · "
                     f"{len(self.seg.model_features)} variáveis.</span></div>")
             else:
@@ -2354,7 +2419,7 @@ class ModelSegmenterUI:
                 self._log(f"[fit] {algo} treinado com {len(self.seg.model_features)} "
                           f"variáveis ({modo}).")
                 self.out_fit_status.value = (
-                    f"<div class='mseg-legend'><span style='color:#157a52;font-weight:600'>"
+                    f"<div class='mseg-legend'><span style='color:var(--ok-ink);font-weight:600'>"
                     f"✓ {algo} treinado com {len(self.seg.model_features)} variáveis "
                     f"({modo}).</span></div>")
             self.pb_fit.bar_style = "success"
@@ -2370,7 +2435,7 @@ class ModelSegmenterUI:
         except Exception as e:
             self.pb_fit.bar_style = "danger"
             self.pb_fit.description = "erro"
-            self.out_fit_status.value = (f"<div style='color:#b23a2a;font-size:12px'>"
+            self.out_fit_status.value = (f"<div style='color:var(--bad-ink);font-size:12px'>"
                                          f"<b>Erro no fit:</b> {type(e).__name__}: {e}</div>")
             self._log(f"[fit] erro: {e}")
         finally:
@@ -2428,7 +2493,7 @@ class ModelSegmenterUI:
                                            mlflow_model_name=model_name)
             except Exception as e:
                 self.pb_tune.bar_style = "danger"
-                self.out_tune.value = (f"<div style='color:#b3261e;font-size:12px'>Erro no "
+                self.out_tune.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro no "
                                        f"tuning: {type(e).__name__}: {e}</div>")
                 self._log(f"[tune] erro: {e}")
                 return
@@ -2448,7 +2513,7 @@ class ModelSegmenterUI:
             self.pb_tune.bar_style = "warning"
             self.pb_tune.description = f"cancelado ({res['n_trials']} trials)"
             self.out_tune.value = (
-                "<div style='color:#9a6f12;font-size:12px'><b>Tuning cancelado.</b> "
+                "<div style='color:var(--warn-ink);font-size:12px'><b>Tuning cancelado.</b> "
                 f"{res['n_trials']} trials concluídos. O modelo vigente foi preservado "
                 "(não reajustado).</div>")
             self._log(f"[tune] cancelado pelo usuário após {res['n_trials']} trials; "
@@ -2456,7 +2521,7 @@ class ModelSegmenterUI:
             return
         if not res.get("n_trials"):
             self.pb_tune.bar_style = "danger"
-            self.out_tune.value = ("<div style='color:#b3261e;font-size:12px'>Nenhum trial "
+            self.out_tune.value = ("<div style='color:var(--bad-tx);font-size:12px'>Nenhum trial "
                                    "concluído — nada a aplicar.</div>")
             self._log("[tune] nenhum trial concluído.")
             return
@@ -2491,7 +2556,7 @@ class ModelSegmenterUI:
             return
         self.btn_cancel_tune.disabled = True
         self.pb_tune.bar_style = "warning"
-        self.out_tune.value = ("<div style='color:#9a6f12;font-size:12px'><i>Cancelando… "
+        self.out_tune.value = ("<div style='color:var(--warn-ink);font-size:12px'><i>Cancelando… "
                                "aguardando o trial atual terminar.</i></div>")
         self.seg.cancel_tuning()
         self._log("[tune] cancelamento solicitado.")
@@ -2586,7 +2651,7 @@ class ModelSegmenterUI:
             if not g:
                 continue
             rows.append(f"<tr><td class='term'><b>{g['nome']}</b> "
-                        f"<span class='mono' style='color:#8a93a3'>{c}</span></td>"
+                        f"<span class='mono' style='color:var(--sub-ink)'>{c}</span></td>"
                         f"<td class='read'>{g['desc']}</td>"
                         f"<td class='read'>{g['rec']}</td>"
                         f"<td class='read'>{g['baixa']}</td></tr>")
@@ -2675,7 +2740,7 @@ class ModelSegmenterUI:
             except Exception as e:
                 self.pb_backelim.bar_style = "danger"
                 self.out_backelim_status.value = (
-                    f"<div style='color:#b3261e;font-size:12px'>Erro: "
+                    f"<div style='color:var(--bad-tx);font-size:12px'>Erro: "
                     f"{type(e).__name__}: {e}</div>")
                 self._log(f"[backward] erro: {e}")
                 return
@@ -2919,7 +2984,7 @@ class ModelSegmenterUI:
                     row["detail"] = type(e).__name__       # detalhe completo só no Console
                     break
             self._render_score_progress()
-            self.out_score.value = ("<div class='mseg-legend' style='color:#b23a2a'>✗ Falha na "
+            self.out_score.value = ("<div class='mseg-legend' style='color:var(--bad-ink)'>✗ Falha na "
                                     "escoragem — veja o <b>Console</b> (rodapé) para o detalhe."
                                     "</div>")
             self._log(f"[escorar] ERRO: {type(e).__name__}: {e}")
@@ -2946,20 +3011,20 @@ class ModelSegmenterUI:
             self.out_score_progress.value = ""
             return
         icon = {"run": "⏳", "ok": "✅", "err": "❌"}
-        cor = {"run": "#9a6f12", "ok": "#157a52", "err": "#b23a2a"}
+        cor = {"run": "var(--warn-ink)", "ok": "var(--ok-ink)", "err": "var(--bad-ink)"}
         rot = {"run": "processando…", "ok": "concluído", "err": "erro"}
         trs = ""
         for r in self._score_steps:
             st = r["status"]
             trs += (f"<tr><td style='padding:4px 10px'>{icon.get(st, '')}</td>"
                     f"<td style='padding:4px 10px'>{r['label']}</td>"
-                    f"<td style='padding:4px 10px;color:{cor.get(st, '#555')};font-weight:600'>"
+                    f"<td style='padding:4px 10px;color:{cor.get(st, 'var(--ink)')};font-weight:600'>"
                     f"{rot.get(st, st)}</td>"
-                    f"<td style='padding:4px 10px;color:#6b7480'>{r.get('detail', '')}</td></tr>")
+                    f"<td style='padding:4px 10px;color:var(--muted)'>{r.get('detail', '')}</td></tr>")
         self.out_score_progress.value = (
             "<div class='mseg-legend' style='margin-top:6px'>Progresso da escoragem</div>"
             "<table style='border-collapse:collapse;font-size:12px;width:100%;margin:2px 0 8px'>"
-            "<thead><tr style='background:#eef1f5'>"
+            "<thead><tr style='background:var(--tbl-head-bg)'>"
             "<th style='padding:4px 10px'></th>"
             "<th style='padding:4px 10px;text-align:left'>Etapa</th>"
             "<th style='padding:4px 10px;text-align:left'>Status</th>"
@@ -2979,8 +3044,9 @@ class ModelSegmenterUI:
             do_save(); return
         self._ow_pending = do_save
         self.out_overwrite_msg.value = (
-            "<div style='border:1px solid #f0c36d;background:#fff8e6;border-radius:10px;"
-            "padding:10px 12px;font-size:12.5px;color:#664d03;line-height:1.5'>"
+            "<div style='border:1px solid var(--notice-border);background:var(--notice-bg);"
+            "border-radius:10px;"
+            "padding:10px 12px;font-size:12.5px;color:var(--notice-ink);line-height:1.5'>"
             "<b>⚠️ O arquivo já existe</b><br>"
             f"<code>{_html.escape(path)}</code><br>Deseja sobrescrever?</div>")
         self.box_overwrite.layout.display = ""      # revela o diálogo inline
@@ -3024,7 +3090,7 @@ class ModelSegmenterUI:
         try:
             self.seg.report_pdf(path)
         except Exception as e:
-            self.out_pdf.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao gerar PDF: "
+            self.out_pdf.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro ao gerar PDF: "
                                   f"{type(e).__name__}: {e}</div>")
             self._log(f"[pdf] erro: {e}"); return
         self.out_pdf.value = f"<div class='mseg-legend'>✅ Relatório salvo em <code>{path}</code>.</div>"
@@ -3041,7 +3107,7 @@ class ModelSegmenterUI:
         try:
             self.seg.report_markdown(path)
         except Exception as e:
-            self.out_md.value = (f"<div style='color:#b3261e;font-size:12px'>Erro ao gerar "
+            self.out_md.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro ao gerar "
                                  f"Markdown: {type(e).__name__}: {e}</div>")
             self._log(f"[md] erro: {e}"); return
         self.out_md.value = (f"<div class='mseg-legend'>✅ Relatório salvo em <code>{path}</code> "
@@ -3078,7 +3144,7 @@ class ModelSegmenterUI:
         self._clear_adv_outputs()
         self._refresh_bar(); self._refresh_vars(force=True); self._sync_sel()
         if s.score_ is not None:
-            self.out_fit_status.value = ("<div style='color:#157a52;font-size:12px'>"
+            self.out_fit_status.value = ("<div style='color:var(--ok-ink);font-size:12px'>"
                                          "<b>Modelo carregado</b> — pronto para métricas, "
                                          "ratings e escoragem.</div>")
             try:
