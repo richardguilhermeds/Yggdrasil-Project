@@ -76,13 +76,39 @@ Algoritmos disponíveis (registry extensível em `ALGORITHMS`):
 
 Mais na UI e no segmentador: ratings em decis/quantil/árvore/optbin, e também manuais (`manual_score` por cortes de score, `manual_percentil` por lista de percentis); na regressão logística, a tabela da fórmula traz o p-valor (Wald) e estrelas de significância por coeficiente; relatório PDF do modelo (`report_pdf`) e tema escuro (toggle).
 
+### 6. 🏛️ Capital econômico de carteira (`yggdrasil.credit_risk.capital`)
+Estimativa do **capital para absorver perdas inesperadas** da carteira de crédito em 1 ano, no nível de confiança do apetite de risco (ex.: 99,9%) — a visão **interna** que complementa a provisão (ECL, IFRS 9 / CMN 4.966) e o capital regulatório de Pilar 1, capturando concentração e diversificação entre produtos (cartão, consignado, veículos) que o Pilar 1 ignora. Baseado no guia de construção (ASRF/Vasicek, Monte Carlo multifatorial, CreditMetrics e CreditRisk+) e organizado do contrato de dados ao uso gerencial.
+
+- **Contrato**: `Segment` (PD TTC, LGD/CCF *downturn*, ρ, fator sistêmico) e `Portfolio` (matriz de correlação entre fatores).
+- **Distribuição de perdas e medidas**: `LossDistribution`, `value_at_risk`, `expected_shortfall`, `economic_capital` (`CE = VaR_q − EL`).
+- **Motores**: `asrf_capital` (v1, analítico e aditivo), `simulate` (v2, Monte Carlo multifatorial com LGD estocástica e correlação adversa PD–LGD), `creditrisk_plus` (benchmark atuarial por recursão de Panjer) e `MigrationModel` (CreditMetrics / migração de estágio).
+- **Insumos**: `pit_to_ttc`, `lgd_downturn_from_series`, `ccf_downturn`; correlações `asset_correlation_moments`/`asset_correlation_mle`/`factor_correlation_matrix`/`nearest_correlation`; regulatório `basel_correlation`/`basel_irb_capital` (Pilar 1).
+- **Alocação e uso**: `euler_allocation` (contribuição à cauda), `raroc`/`raroc_table`, benefício de diversificação.
+- **Validação**: `sensitivity`, `correlation_stress`, `benchmark`, `pillar1_comparison`, `backtest_expected_loss`, `convergence`.
+- **Produtos**: `preset`/`PRESETS` (particularidades de cartão, consignado, veículos e afins). Visualizações (`report`, matplotlib) e registro no MLflow (`log_capital_run`) carregados sob demanda.
+
+```python
+from yggdrasil.credit_risk.capital import Portfolio, Segment
+
+carteira = Portfolio([
+    Segment("cartao_revolver", pd=0.06, lgd=0.75, ead=8e6, rho=0.10, n_obligors=40_000,
+            product="cartao", factor="cartao"),
+    Segment("consig_inss", pd=0.01, lgd=0.30, ead=12e6, rho=0.04, n_obligors=60_000,
+            product="consignado", factor="consignado"),
+], factor_corr=[[1.0, 0.25], [0.25, 1.0]], factor_names=["cartao", "consignado"])
+
+carteira.asrf_capital(q=0.999).summary()                 # v1 analítico (ASRF/Vasicek)
+sim = carteira.simulate(n_scenarios=200_000, q=0.999, seed=42)   # v2 Monte Carlo
+sim.economic_capital(); sim.allocate(metric="es")        # capital + alocação de Euler
+```
+
 ---
 
 ## 🗂️ Estrutura de pastas
 
 | Pasta | Conteúdo |
 |---|---|
-| `src/yggdrasil/` | Código-fonte principal (as cinco esteiras acima). |
+| `src/yggdrasil/` | Código-fonte principal (as seis esteiras acima). |
 | `tests/` | Testes automatizados (`pytest`): suíte parametrizada (classificação/regressão), incluindo UI, Spark, boosting e Optuna (estes *gated* pela dependência). |
 | `notebooks/tutoriais/` | Tutoriais passo a passo (índice abaixo). A lógica de produção não vive aqui. |
 | `docs/` | Metodologia (o *porquê* dos métodos) e documentação dos segmentadores. |
@@ -146,6 +172,7 @@ Todos centralizados em **[`notebooks/tutoriais/`](notebooks/tutoriais/)** (passo
 | 04 | [Árvore de segmentação unificada (PD & LGD por `task_type`)](notebooks/tutoriais/04_tutorial_tree_segmenter.ipynb) |
 | 06 | [Construtor de modelos (UI)](notebooks/tutoriais/06_tutorial_model_segmenter.ipynb) |
 | 07 | [Esteira ML + MLflow](notebooks/tutoriais/07_tutorial_esteira_ml_mlflow.ipynb) |
+| 08 | [Capital econômico (ASRF, Monte Carlo, alocação de Euler)](notebooks/tutoriais/08_tutorial_capital_economico.ipynb) |
 
 > 📖 **Metodologia** (o *porquê* dos métodos, como KS, PSI/CSI, WoE/IV, ratings com fusão monotônica, SHAP e veredito de EDA): [`docs/metodologia.md`](docs/metodologia.md).
 > 🌳 **Árvore de segmentação unificada (PD & LGD):** [`docs/credit-risk/tree-segmenter.md`](docs/credit-risk/tree-segmenter.md).
