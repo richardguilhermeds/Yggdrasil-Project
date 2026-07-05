@@ -34,6 +34,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Modelos econométricos (satélite) de PD/LGD/CCF — subpacote
+# yggdrasil.credit_risk.econometric. Motores de séries temporais e resposta
+# limitada (ARDL, SARIMAX, VECM/Johansen, beta regression, ADF/KPSS/Ljung-Box)
+# sobre statsmodels + arch. O restante de credit_risk (capital, segmentadores)
+# NÃO exige estes pacotes: o subpacote é carregado sob demanda.
+econometric = ["statsmodels>=0.14", "arch>=6.0"]
 # Treino automatizado opcional (motor PyCaret). Pesado e com pins próprios —
 # instale apenas se for usar o PyCaretTrainer.
 pycaret = ["pycaret>=3.0"]

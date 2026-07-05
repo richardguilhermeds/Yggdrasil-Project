@@ -16,6 +16,12 @@ Abriga:
   multifatorial, CreditRisk+, correlações, alocação de Euler/RAROC e validação
   (:class:`~yggdrasil.credit_risk.capital.Portfolio`,
   :class:`~yggdrasil.credit_risk.capital.Segment`).
+* :mod:`yggdrasil.credit_risk.econometric` — **modelos econométricos (satélite)**
+  de PD, LGD e CCF: ligam as séries agregadas dos parâmetros de risco às variáveis
+  macro (ARDL, ARIMA/ARIMAX, fator ``Z`` de Vasicek, beta/fractional logit,
+  VAR/VECM, painel), com seleção champion-challenger, projeção por cenários e
+  integração com ECL/estresse/capital. Carregado **sob demanda** — requer o extra
+  ``econometric`` (``statsmodels``, ``arch``), que o restante do pacote não exige.
 """
 from __future__ import annotations
 
@@ -23,7 +29,7 @@ from . import capital
 from .model import ModelSegmenter
 from .tree import TreeSegmenter
 
-__all__ = ["TreeSegmenter", "ModelSegmenter", "capital", "tree", "model"]
+__all__ = ["TreeSegmenter", "ModelSegmenter", "capital", "tree", "model", "econometric"]
 
 
 def __getattr__(name):
@@ -36,6 +42,12 @@ def __getattr__(name):
         from .model import ModelSegmenterUI
 
         return ModelSegmenterUI
+    # Modelos econométricos carregados sob demanda: só quem os usa precisa de
+    # statsmodels/arch (extra 'econometric'); capital/segmentadores não os exigem.
+    if name == "econometric":
+        import importlib
+
+        return importlib.import_module(f"{__name__}.econometric")
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
