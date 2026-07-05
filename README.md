@@ -20,7 +20,7 @@ O foco aplicado é risco de crédito (PD, LGD, EAD) no estilo regulatório brasi
 
 ## 📦 O que o pacote `yggdrasil` contempla hoje
 
-O código de produção vive em `src/yggdrasil/` (layout `src/`). São cinco esteiras isoladas que compartilham o mesmo contrato de dados, mas não interferem umas nas outras.
+O código de produção vive em `src/yggdrasil/` (layout `src/`). São **sete módulos isolados** que não interferem uns nos outros: as esteiras de ML, EDA e seleção compartilham o contrato de dados `feat_*`/`dt_ref`/`amostra`/`target`; os de risco de crédito (segmentadores, capital e econométricos) têm contratos próprios.
 
 ### 1. 🚂 Esteira de ML governada (`yggdrasil`)
 Avaliação completa de um modelo já treinado, orquestrada por MLflow. A entrada é uma tabela com features `feat_*`, coluna de data (`dt_ref`), coluna de amostra (`amostra`) e a variável resposta (`target`), tudo configurável via `ColumnConfig`. As amostras `DES` e `OOT` recebem análise completa; `SIMUL` e `BACKTEST` são *scoring-only* (predição mais grupo homogêneo).
@@ -102,14 +102,33 @@ sim = carteira.simulate(n_scenarios=200_000, q=0.999, seed=42)   # v2 Monte Carl
 sim.economic_capital(); sim.allocate(metric="es")        # capital + alocação de Euler
 ```
 
+### 7. 📈 Modelos econométricos (satélite) de PD/LGD/CCF (`yggdrasil.credit_risk.econometric`)
+Modelos **satélite / macro** que ligam as **séries temporais agregadas** dos parâmetros de risco (taxa de *default*, LGD e CCF por segmento) às **variáveis macroeconômicas** (desemprego, renda, juros, câmbio, inadimplência) e **projetam por cenário**. É o **eixo temporal**, complementar ao eixo transversal dos segmentadores: o transversal *ordena* o risco entre clientes, o satélite *desloca o nível* da curva conforme o ciclo. As projeções alimentam o *forward-looking* do ECL (IFRS 9 / CMN 4.966), os testes de estresse, o **capital econômico** (a ligação fator-macro) e o planejamento. Baseado no guia de construção (ARDL, ARIMAX, fator Z de Vasicek, beta/fractional logit, VAR/VECM, painel), organizado da série ao relatório de governança. Requer o extra `[econometric]` (`statsmodels` + `arch`) e é **carregado sob demanda** — o resto de `credit_risk` não o exige.
+
+- **Séries + sintéticos**: `RiskSeries` (contrato com `kind` pd/lgd/ccf) e geradores de **DGP conhecido** (`simulate_pd/lgd/ccf_series`, `make_reference_study`) — a base dos testes de recuperação de parâmetros.
+- **Transformações e diagnóstico**: `transforms` (logit/probit, **fator Z de Vasicek**, defasagens, dummies sazonais/evento/quebra); `diagnostics` (ADF/KPSS/PP, Ljung-Box, Breusch-Godfrey/Pagan/White, Jarque-Bera, ARCH-LM, VIF, Chow/Quandt-Andrews, CUSUM) com saída tabular padronizada.
+- **Modelos** (interface comum `fit`/`predict`/`project`/`diagnostics`): `ARDL` (principal), `ARIMA`/ARIMAX (benchmark), `VasicekZ` (ponte com o capital), `BetaRegression`/`FractionalLogit` (LGD/CCF), ingênuos (`RandomWalk`/`HistoricalMean`/`SeasonalNaive`), `VARModel`/`VECMModel` + cointegração (Engle-Granger/Johansen) e `PanelSatellite`.
+- **Seleção e cenários**: `search` champion-challenger (filtros de **sinal econômico** e **VIF**, *walk-forward*, Diebold-Mariano); `Scenario`/`ScenarioSet`, `project` e `ecl_projection` (ponderação de cenários para o ECL).
+- **Governança**: relatório HTML (`report`), registro no MLflow (`log_satellite_run`) e o pipeline declarativo `StudyConfig`/`run_study` (as "cinco chamadas") — carregados sob demanda.
+
+```python
+from yggdrasil.credit_risk.econometric import make_reference_study, StudyConfig, run_study
+
+est = make_reference_study()                       # macro + séries de PD/LGD/CCF sintéticas
+cfg = StudyConfig(kind="pd", candidates=["desemprego", "renda", "juros"],
+                  expected_signs={"desemprego": 1, "renda": -1, "juros": 1})
+r = run_study(cfg, est.pd.series, est.macro)       # seleção → ajuste → diagnóstico → projeção → relatório
+r.summary(); r.projection.mean_frame()             # ranking e projeção por cenário (base/adverso/otimista)
+```
+
 ---
 
 ## 🗂️ Estrutura de pastas
 
 | Pasta | Conteúdo |
 |---|---|
-| `src/yggdrasil/` | Código-fonte principal (as seis esteiras acima). |
-| `tests/` | Testes automatizados (`pytest`): suíte parametrizada (classificação/regressão), incluindo UI, Spark, boosting e Optuna (estes *gated* pela dependência). |
+| `src/yggdrasil/` | Código-fonte principal (os sete módulos acima). |
+| `tests/` | Testes automatizados (`pytest`): suíte parametrizada (classificação/regressão), incluindo UI, Spark, boosting, Optuna e econométricos (`statsmodels`/`arch`) — estes *gated* pela dependência. |
 | `notebooks/tutoriais/` | Tutoriais passo a passo (índice abaixo). A lógica de produção não vive aqui. |
 | `docs/` | Metodologia (o *porquê* dos métodos) e documentação dos segmentadores. |
 | `conf/` | Configuração por ambiente (dev/homolog/prod). Nunca versionar segredos. |
@@ -126,6 +145,7 @@ pip install -e ".[dev]"          # núcleo + ferramentas de teste/notebook
 pip install -e ".[ui]"           # opcional: UIs interativas (ipywidgets)
 pip install -e ".[spark]"        # opcional: geração/aplicação de régua em PySpark (fora do Databricks)
 pip install -e ".[catboost]"     # opcional: CatBoost (LightGBM e XGBoost já vêm no core)
+pip install -e ".[econometric]"  # opcional: modelos econométricos satélite (statsmodels + arch)
 pip install -e ".[pycaret]"      # opcional: treino automatizado via PyCaret
 ```
 
@@ -173,6 +193,7 @@ Todos centralizados em **[`notebooks/tutoriais/`](notebooks/tutoriais/)** (passo
 | 06 | [Construtor de modelos (UI)](notebooks/tutoriais/06_tutorial_model_segmenter.ipynb) |
 | 07 | [Esteira ML + MLflow](notebooks/tutoriais/07_tutorial_esteira_ml_mlflow.ipynb) |
 | 08 | [Capital econômico (ASRF, Monte Carlo, alocação de Euler)](notebooks/tutoriais/08_tutorial_capital_economico.ipynb) |
+| 09 | [Modelos econométricos satélite (PD/LGD/CCF, ARDL, fator Z, projeção por cenários)](notebooks/tutoriais/09_tutorial_modelos_econometricos.ipynb) |
 
 > 📖 **Metodologia** (o *porquê* dos métodos, como KS, PSI/CSI, WoE/IV, ratings com fusão monotônica, SHAP e veredito de EDA): [`docs/metodologia.md`](docs/metodologia.md).
 > 🌳 **Árvore de segmentação unificada (PD & LGD):** [`docs/credit-risk/tree-segmenter.md`](docs/credit-risk/tree-segmenter.md).
@@ -188,6 +209,10 @@ Todos centralizados em **[`notebooks/tutoriais/`](notebooks/tutoriais/)** (passo
 | Dispersão do alvo por folha (LGD / regressão) |
 |---|
 | ![Boxplot do alvo por folha](docs/img/tree_lgd_boxplot.png) |
+
+| Projeção condicional de PD por cenário — modelo satélite (leque 90%) |
+|---|
+| ![Projeção econométrica em leque](docs/img/econometric_fanchart.png) |
 
 > As UIs interativas (`TreeSegmenterUI` e `ModelSegmenterUI`) têm tema claro e escuro (toggle 🌙), abas de construção/diagnóstico/validação, sugestão de splits, critério de split (Gini/Entropy/KS/IV/Chi²/Variância/MAE/F-test), export SQL, diff de versões e relatório PDF. Rode os tutoriais para ver ao vivo.
 
