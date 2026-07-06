@@ -596,6 +596,23 @@ class _TwoStageModel:
 # ======================================================================
 # Classe principal
 # ======================================================================
+def _scorer_broadcast_getter(spark, scorer):
+    """Getter de zero-args que entrega o ``scorer`` aos executores Spark.
+
+    Usa ``spark.sparkContext.broadcast`` quando disponível (cluster clássico —
+    evita reenviar o modelo por task). Em **Spark Connect** (Databricks
+    serverless/shared, DBR 14.3+, ou Databricks Connect) a sessão NÃO expõe
+    ``sparkContext`` e o acesso/``.broadcast`` levanta ``PySparkAttributeError``;
+    nesse caso captura o scorer por **closure** (o ``mapInPandas`` serializa a
+    função 1× para os executores). O getter da via broadcast captura só o objeto
+    ``Broadcast`` (não o modelo), preservando a economia de rede."""
+    try:
+        bc = spark.sparkContext.broadcast(scorer)
+        return lambda: bc.value
+    except Exception:                      # Spark Connect: sem sparkContext/broadcast
+        return lambda: scorer
+
+
 class ModelSegmenter:
     """Segmentador orientado a modelo (classificação **ou** regressão).
 
@@ -4587,12 +4604,14 @@ class ModelSegmenter:
         _emit_progress(progress_callback, "prepare",
                        "Preparar escoragem distribuída (broadcast do modelo)", "ok",
                        f"{len(out_cols)} colunas de saída")
-        bc = spark.sparkContext.broadcast(scorer)
+        # getter do scorer nos executores: broadcast no cluster clássico; em Spark
+        # Connect (sem sparkContext) cai para closure. Ver _scorer_broadcast_getter.
+        _get_scorer = _scorer_broadcast_getter(spark, scorer)
         _cs, _cr, _cv, _rs, _rec, _suf = (col_score, col_rating, col_value, ruler_sample,
                                           recreate, cat_suffix)
 
         def _score_iter(it):
-            sc = bc.value
+            sc = _get_scorer()
             for part in it:
                 res = sc._score_pandas(part, _cs, _cr, _cv, _rs, _rec, _suf)
                 for c in out_cols:                 # garante todas as colunas do schema
