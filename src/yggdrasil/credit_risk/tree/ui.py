@@ -36,7 +36,11 @@ from .segmenter import TreeSegmenter
 
 _CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+/* SEM @import externo de fonts.googleapis.com: no Databricks o cluster costuma não
+   ter egress, e um @import render-blocking no topo do <style> deixa a requisição
+   pendente até o timeout de rede, adiando o 1º paint da UI (parece "não carrega").
+   Usa-se a font-stack do sistema declarada em font-family abaixo (IBM Plex se
+   instalada localmente; senão -apple-system/Segoe UI/Roboto...). */
 .treeui { --ac:#3b4a63; --ac-deep:#27324a; --ac-soft:#eef1f5; --ac-border:#cdd5e0;
   --ink:#1f2733; --muted:#6b7480; --line:#e7e9ee;
   /* tokens semânticos (status, tabelas, realces): o HTML gerado no Python usa
@@ -4272,7 +4276,7 @@ class TreeSegmenterUI:
                 self.out_tree_img.value = ""
                 self._refresh_tree_widget()
             else:
-                hint = ("<div style='font-size:11px;color:var(--sub-ink)4a5;margin-top:4px'>💡 instale "
+                hint = ("<div style='font-size:11px;color:var(--sub-ink);margin-top:4px'>💡 instale "
                         "<code>anywidget</code> (<code>pip install anywidget</code>) para uma "
                         "árvore CLICÁVEL: selecionar a folha, fundir irmãs e recolher ramos "
                         "direto na imagem, com métricas no hover.</div>")
