@@ -415,12 +415,19 @@ def _require(module: str, algorithm: str):
         ) from e
 
 
-def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None):
+def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None,
+                     random_state: int | None = None):
     """Instancia o estimador do algoritmo escolhido (registry extensível).
 
     sklearn é sempre disponível; LightGBM/XGBoost/CatBoost são pacotes opcionais
-    importados sob demanda (ver :func:`_require`)."""
+    importados sob demanda (ver :func:`_require`).
+
+    ``random_state`` semeia os estimadores estocásticos (florestas/boosting) para
+    reprodutibilidade; ``None`` cai no default histórico 42. Via ``setdefault``, uma
+    seed explícita em ``hyperparams`` (usuário/Optuna) vence. Logística/linear não
+    aceitam seed (não são estocásticas); CatBoost usa ``random_seed``."""
     hp = dict(hyperparams or {})
+    seed = 42 if random_state is None else int(random_state)
     if algorithm not in ALGORITHMS:
         raise ValueError(f"Algoritmo desconhecido: {algorithm!r}. "
                          f"Opções: {sorted(ALGORITHMS)}")
@@ -441,18 +448,18 @@ def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None):
         from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
         RF = RandomForestClassifier if is_clf else RandomForestRegressor
         hp.setdefault("n_estimators", 200)
-        hp.setdefault("random_state", 42)
+        hp.setdefault("random_state", seed)
         return RF(**hp)
     if algorithm == "extra_trees":
         from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
         ET = ExtraTreesClassifier if is_clf else ExtraTreesRegressor
         hp.setdefault("n_estimators", 200)
-        hp.setdefault("random_state", 42)
+        hp.setdefault("random_state", seed)
         return ET(**hp)
     if algorithm == "gradient_boosting":
         from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
         GB = GradientBoostingClassifier if is_clf else GradientBoostingRegressor
-        hp.setdefault("random_state", 42)
+        hp.setdefault("random_state", seed)
         return GB(**hp)
     if algorithm == "hist_gradient_boosting":
         from sklearn.ensemble import (HistGradientBoostingClassifier,
@@ -460,14 +467,14 @@ def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None):
         HGB = HistGradientBoostingClassifier if is_clf else HistGradientBoostingRegressor
         if "n_estimators" in hp:                       # nome unificado na UI → max_iter
             hp["max_iter"] = hp.pop("n_estimators")
-        hp.setdefault("random_state", 42)
+        hp.setdefault("random_state", seed)
         return HGB(**hp)
     if algorithm == "lightgbm":
         lgb = _require("lightgbm", algorithm)
         Est = lgb.LGBMClassifier if is_clf else lgb.LGBMRegressor
         hp.setdefault("n_estimators", 300)
         hp.setdefault("learning_rate", 0.05)
-        hp.setdefault("random_state", 42)
+        hp.setdefault("random_state", seed)
         hp.setdefault("verbose", -1)
         return Est(**hp)
     if algorithm == "xgboost":
@@ -475,7 +482,7 @@ def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None):
         Est = xgb.XGBClassifier if is_clf else xgb.XGBRegressor
         hp.setdefault("n_estimators", 300)
         hp.setdefault("learning_rate", 0.05)
-        hp.setdefault("random_state", 42)
+        hp.setdefault("random_state", seed)
         hp.setdefault("verbosity", 0)
         hp.setdefault("tree_method", "hist")
         return Est(**hp)
@@ -490,7 +497,7 @@ def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None):
             hp.setdefault("bootstrap_type", "Bernoulli")
         hp.setdefault("iterations", 300)
         hp.setdefault("learning_rate", 0.05)
-        hp.setdefault("random_seed", 42)
+        hp.setdefault("random_seed", seed)
         hp.setdefault("verbose", False)
         hp.setdefault("allow_writing_files", False)     # não polui o diretório
         return Est(**hp)
@@ -647,6 +654,7 @@ class ModelSegmenter:
         date_col: str | None = None,
         verbose: bool = True,
         score_scale: float = 1000.0,
+        random_state: int | None = 42,
     ):
         if task_type not in ("classification", "regression"):
             raise ValueError("task_type deve ser 'classification' ou 'regression'.")
@@ -718,6 +726,11 @@ class ModelSegmenter:
         # o negócio consome (escoragem :meth:`predict`/:meth:`assign` e os eixos de
         # score dos gráficos) é ``score_ * score_scale`` — 0–1000 por padrão.
         self.score_scale: float = float(score_scale)
+        # seed global de reprodutibilidade na elaboração de modelos: default 42
+        # (retrocompatível — números já publicados não mudam). Herdada como default
+        # por _build_pipeline/_build_estimator, tune_optuna, backward_elimination e
+        # SHAP; persistida em to_dict/from_dict. None também vira 42.
+        self.random_state: int = 42 if random_state is None else int(random_state)
         self.score_: pd.Series | None = None
         self.rating_strategy = None
         self.rating_col_: str | None = None
@@ -1117,7 +1130,10 @@ class ModelSegmenter:
             res["top_categorias"] = [(c, round(100 * p, 1)) for c, p in vc.head(8).items()]
         res.update(iv=None, forca="—", tendencia="—", n_inversoes=0, psi={}, pior_psi=None)
         try:
-            ivt = self.variable_iv(features=[feature], sample=sample)
+            # max_n_bins=6 casa com a tabela/plots da aba (variable_table usa 6 por
+            # default) → mesma chave de _bins_cache → cache hit, evita re-rodar o
+            # optbinning da MESMA variável a cada clique em "Analisar variável".
+            ivt = self.variable_iv(features=[feature], sample=sample, max_n_bins=6)
             if len(ivt):
                 r0 = ivt.iloc[0]
                 res["iv"] = None if pd.isna(r0["iv"]) else float(r0["iv"])
@@ -2106,7 +2122,7 @@ class ModelSegmenter:
         # que constrói um classificador e uma regressão a partir de um segmenter
         # de regressão); por padrão segue o task_type do segmenter.
         task = task or self.task_type
-        est = _build_estimator(algorithm, task, hyperparams)
+        est = _build_estimator(algorithm, task, hyperparams, random_state=self.random_state)
         if transform == "woe":
             # variáveis transformadas no estilo scorecard (binagem + WoE/risco do bin)
             encodings = {f: self._bin_encoding(f) for f in features}
@@ -2277,7 +2293,7 @@ class ModelSegmenter:
         return pd.DataFrame(rows)
 
     def tune_optuna(self, algorithm=None, n_trials=30, transform="raw", features=None,
-                    timeout=None, random_state=42, fit_best=True, verbose=False,
+                    timeout=None, random_state=None, fit_best=True, verbose=False,
                     progress_callback=None, log_mlflow=False, mlflow_experiment=None,
                     mlflow_run_name=None, search_space=None, register_model=False,
                     mlflow_model_name=None):
@@ -2314,6 +2330,9 @@ class ModelSegmenter:
         optuna = _require("optuna", "optuna")
         from sklearn.model_selection import train_test_split
 
+        # herda a seed do segmenter quando não especificada (reprodutibilidade)
+        if random_state is None:
+            random_state = self.random_state
         if algorithm is None:
             algorithm = "logistica" if self.task_type == "classification" else "hist_gradient_boosting"
         if algorithm not in TUNABLE_ALGORITHMS:
@@ -2822,9 +2841,9 @@ class ModelSegmenter:
         return {c: round(float(m.loc[oot, c] - m.loc[self.ref_sample, c]), 6)
                 for c in cols if _num(m.loc[oot, c]) and _num(m.loc[self.ref_sample, c])}
 
-    def backward_elimination(self, sample=None, min_features=1, algorithm=None,
+    def backward_elimination(self, sample=None, min_features=1, features=None, algorithm=None,
                              transform=None, hyperparams=None, n_repeats=3,
-                             importance_sample_size=5000, random_state=42,
+                             importance_sample_size=5000, random_state=None,
                              progress_callback=None) -> pd.DataFrame:
         """**Backward elimination** por importância: reajusta o modelo removendo, a
         cada passo, a variável **menos importante** e mede as métricas do modelo com
@@ -2838,20 +2857,24 @@ class ModelSegmenter:
         cheio ao mínimo — com ``n_variaveis``, ``removida`` (a menos importante do
         passo, retirada no passo seguinte), ``importancia`` (dela) e TODAS as
         métricas na amostra de avaliação (classificação: auc, gini, ks, ks_cutoff,
-        …; regressão: rmse, mae, mape, smape, medae, r2, mean_bias). Em
-        ``.attrs`` guarda ``eval_sample`` e ``algorithm``.
+        …; regressão: rmse, mae, mape, smape, medae, r2, mean_bias). ``features``
+        força o conjunto inicial (default: model_features/selecionadas). Em ``.attrs``
+        guarda ``eval_sample``, ``algorithm`` e ``feats0`` (o conjunto inicial).
 
         ``progress_callback(done, total, n_variaveis)`` (opcional) — barra de
         progresso na UI. ``n_repeats``/``importance_sample_size`` controlam o custo
         da permutação."""
         from sklearn.inspection import permutation_importance
+        if random_state is None:                          # herda a seed do segmenter
+            random_state = self.random_state
         if self.task_type == "classification":
             algorithm = algorithm or self.algorithm or "logistica"
         else:
             algorithm = algorithm or self.algorithm or "linear"
         transform = transform if transform is not None else (self.feature_transform or "raw")
         hyperparams = dict(hyperparams if hyperparams is not None else (self.hyperparams or {}))
-        feats = list(self.model_features or self.selected_features() or self.candidates)
+        feats = (list(features) if features is not None
+                 else list(self.model_features or self.selected_features() or self.candidates))
         if len(feats) < 2:
             raise ValueError("Backward elimination requer ao menos 2 variáveis no modelo.")
         min_features = max(1, int(min_features))
@@ -2912,7 +2935,100 @@ class ModelSegmenter:
         out = pd.DataFrame(rows)
         out.attrs["eval_sample"] = eval_sample
         out.attrs["algorithm"] = algorithm
+        out.attrs["feats0"] = list(feats)      # conjunto inicial (identidade p/ apply)
         return out
+
+    def apply_backward_selection(self, result, criterion="parsimony", tol=0.01,
+                                 metric=None, refit=True, rebuild_ratings=False):
+        """Aplica à seleção vigente (``included``) o subconjunto de variáveis do
+        passo **ótimo** de uma :meth:`backward_elimination` já executada.
+
+        ``result`` é o DataFrame devolvido por ela. ``criterion``:
+
+        * ``"parsimony"`` (default): o **menor** nº de variáveis cuja métrica fica
+          dentro de ``tol`` (relativo, ``|melhor|·tol``) da melhor — parcimônia /
+          cotovelo, alinhado à cultura de risco (menos variáveis, estável);
+        * ``"best"``: o passo de **melhor** métrica, independentemente do tamanho.
+
+        ``metric`` força a métrica de escolha (default: ``ks`` senão ``auc`` na
+        classificação — maior é melhor; ``rmse`` na regressão — menor é melhor).
+        Com ``refit`` (default) reajusta o modelo no subconjunto preservando
+        algoritmo/hyperparams/transform vigentes; com ``rebuild_ratings`` regenera
+        os ratings com a config atual — **réguas manuais são preservadas** (não são
+        regeradas silenciosamente). Devolve um dict-resumo (não ``self``)."""
+        cols = list(getattr(result, "columns", []))
+        if result is None or len(result) == 0 or "n_variaveis" not in cols:
+            raise ValueError("Resultado de backward_elimination vazio ou inválido.")
+        is_clf = self.task_type == "classification"
+        if metric is None:
+            prefs = (["ks", "auc", "gini"] if is_clf else ["rmse", "mae", "smape"])
+            metric = next((m for m in prefs if m in cols), None)
+            if metric is None:
+                raise ValueError(f"Nenhuma métrica conhecida em result: {cols}.")
+        # direção pela MÉTRICA, não pelo task_type: erro/perda = menor melhor; o resto
+        # (ks/auc/gini/r2/accuracy/f1/...) = maior melhor. Evita inverter com metric='r2'.
+        _lower_better = {"rmse", "mae", "mape", "smape", "medae", "brier", "logloss"}
+        higher_better = str(metric) not in _lower_better
+        vals = pd.to_numeric(result[metric], errors="coerce")
+        ns = result["n_variaveis"].astype(int)
+        ok = vals.notna()
+        if not ok.any():
+            raise ValueError(f"Métrica '{metric}' sem valores válidos no resultado.")
+        best = float(vals[ok].max() if higher_better else vals[ok].min())
+        if criterion == "best":
+            idx = vals[ok].idxmax() if higher_better else vals[ok].idxmin()
+            target_n = int(ns.loc[idx])
+        else:                                      # parcimônia / cotovelo
+            thr = tol * abs(best)
+            elig = ok & ((vals >= best - thr) if higher_better else (vals <= best + thr))
+            target_n = int(ns[elig].min())         # menor nº de variáveis na tolerância
+        # reconstrói o subconjunto do passo target_n: as features iniciais menos
+        # todas as 'removida' dos passos com n_variaveis > target_n (mesma ordem do
+        # backward). A coluna 'removida' é a variável retirada NO passo seguinte.
+        # reconstrói a partir do conjunto inicial ANCORADO no resultado (identidade),
+        # não do estado atual — evita aplicar um subconjunto de um backward de OUTRA
+        # seleção. Fallback ao estado atual só p/ resultados legados sem 'feats0'.
+        feats0 = list(result.attrs.get("feats0")
+                      or (self.model_features or self.selected_features() or self.candidates))
+        n_full = int(ns.max())
+        if len(feats0) != n_full:
+            raise RuntimeError(
+                f"A seleção/modelo vigente ({len(feats0)} variáveis) diverge do topo "
+                f"do backward ({n_full}). Rode o backward elimination de novo antes "
+                f"de aplicar (a seleção mudou desde então).")
+        removed = set(result.loc[ns > target_n, "removida"]) - {"—"}
+        subset = [f for f in feats0 if f not in removed]
+        if len(subset) != target_n:
+            raise RuntimeError(
+                f"Reconstrução inconsistente do subconjunto: esperado {target_n} "
+                f"variáveis, obtido {len(subset)}.")
+        self.clear_features()
+        for f in subset:
+            if f in self.candidates:
+                self.included.add(f)
+        rebuilt = reprojected = False
+        if refit:
+            self.fit(algorithm=self.algorithm, hyperparams=self.hyperparams,
+                     features=subset, transform=self.feature_transform or "raw")
+            method = (self.rating_config or {}).get("method")
+            if (rebuild_ratings and self.score_ is not None and method
+                    and method not in ("manual_score", "manual_percentil")):
+                cfg = self.rating_config
+                self.build_ratings(method=method, n_ratings=cfg.get("n_ratings", 10),
+                                   monotonic_fusion=cfg.get("monotonic_fusion", True),
+                                   alpha=cfg.get("alpha", 0.05))
+                rebuilt = True
+            elif self.rating_strategy is not None and self.score_ is not None:
+                # o fit trocou score_ mas a régua (ex.: cortes manuais) não foi
+                # regenerada → REPROJETA a estratégia vigente sobre o novo score,
+                # mantendo rating_ coerente sem re-ajustar os cortes do usuário.
+                self.rating_ = self.rating_strategy.transform(
+                    self._rating_frame(), self._make_cfg("_amostra"))
+                reprojected = True
+        return {"metric": metric, "criterion": criterion, "target_n": target_n,
+                "best": best, "features": subset, "removed": sorted(removed),
+                "refit": bool(refit), "ratings_rebuilt": rebuilt,
+                "ratings_reprojected": reprojected}
 
     def plot_backward_elimination(self, result, metrics=None, figsize=(9.4, 4.6),
                                   dpi=150, save_path=None, ax=None):
@@ -3473,7 +3589,7 @@ class ModelSegmenter:
             Xt = X
             names = list(self.model_features)
         if sample_size and len(Xt) > sample_size:
-            Xt = Xt.sample(sample_size, random_state=42)
+            Xt = Xt.sample(sample_size, random_state=self.random_state)
         return est, Xt, names
 
     def shap_values(self, sample=None, sample_size=2000):
@@ -3670,7 +3786,8 @@ class ModelSegmenter:
         elif method == "quantil":
             strat = RATING_REGISTRY[method](step=1.0 / max(n, 1), alpha=alpha)
         elif method == "arvore":
-            strat = RATING_REGISTRY[method](max_leaf_nodes=n, alpha=alpha)
+            strat = RATING_REGISTRY[method](max_leaf_nodes=n, alpha=alpha,
+                                            random_state=self.random_state)
         elif method == "manual_score":
             if not cuts:
                 raise ValueError("manual_score requer 'cuts' (lista de cortes de score).")
@@ -4762,7 +4879,7 @@ class ModelSegmenter:
             "meta": {"target": self.target, "task_type": self.task_type,
                      "sample_col": self.sample_col, "ref_sample": self.ref_sample,
                      "date_col": self.date_col, "feature_labels": self.feature_labels,
-                     "score_scale": self.score_scale},
+                     "score_scale": self.score_scale, "random_state": self.random_state},
             "candidates": list(self.candidates),
             "included": sorted(self.included),
             "var_meta": self.var_meta,
@@ -4794,7 +4911,8 @@ class ModelSegmenter:
                   sample_col=meta.get("sample_col"), ref_sample=meta.get("ref_sample", "DES"),
                   feature_labels=meta.get("feature_labels"),
                   features=data.get("candidates"), date_col=meta.get("date_col"),
-                  verbose=verbose, score_scale=meta.get("score_scale", 1000.0))
+                  verbose=verbose, score_scale=meta.get("score_scale", 1000.0),
+                  random_state=meta.get("random_state", 42))
         seg.included = set(data.get("included", seg.candidates))
         seg.var_meta = data.get("var_meta", seg.var_meta)
         seg.algorithm = data.get("algorithm")

@@ -308,11 +308,12 @@ class ModelSegmenterUI:
     ]
 
     def __init__(self, df, target="target", task_type="classification", sample_col=None,
-                 ref_sample="DES", feature_labels=None, features=None, date_col=None):
+                 ref_sample="DES", feature_labels=None, features=None, date_col=None,
+                 random_state=42):
         self.seg = ModelSegmenter(df, target=target, task_type=task_type,
                                   sample_col=sample_col, ref_sample=ref_sample,
                                   feature_labels=feature_labels, features=features,
-                                  date_col=date_col, verbose=False)
+                                  date_col=date_col, random_state=random_state, verbose=False)
         self.df = df
         self.task_type = task_type
         self.date_col = date_col
@@ -326,6 +327,10 @@ class ModelSegmenterUI:
         # cache do <img> base64 da prévia da variável por (feature, versão de bins):
         # trocar/clicar na lista de variáveis regenerava a figura a cada vez.
         self._preview_cache: dict = {}
+        # cache dos HTMLs das figuras da aba "Análise de variáveis" (aba 2) por
+        # (feature, amostra, coluna-de-safra, versão de bins): revisitar uma
+        # variável já analisada não re-renderiza nem re-encoda os 4–8 PNGs.
+        self._an_fig_cache: dict = {}
         # ranking LAZY: variable_iv() de todas as candidatas é caro demais para
         # pagar antes do primeiro paint — só computa sob demanda (⟳ Recalcular
         # ou o primeiro fluxo que force, ex.: auto-selecionar / pós-load).
@@ -760,6 +765,31 @@ class ModelSegmenterUI:
         self.out_vars = W.HTML()
         self.out_var_preview_h = W.HTML("<div class='mseg-h'>Estabilidade da variável no tempo</div>")
         self.out_var_preview = W.HTML()
+        # --- Feature 1: definir a seleção de variáveis (escolha ótima × manual) ---
+        self.btn_feat_optimal = W.Button(
+            description="Escolha ótima (backward)", button_style="primary", icon="star",
+            layout=W.Layout(width="auto", min_width="224px"),
+            tooltip="Roda o backward elimination e aplica o subconjunto mais PARCIMONIOSO "
+                    "(menor nº de variáveis dentro de 1% da melhor métrica), retreina o "
+                    "modelo e regenera os ratings. Substitui a seleção vigente (confirma em "
+                    "2 cliques).")
+        self.btn_feat_manual = W.Button(
+            description="Aplicar escolha manual", icon="hand-pointer-o",
+            layout=W.Layout(width="auto", min_width="202px"),
+            tooltip="Aplica como seleção do modelo exatamente as variáveis MARCADAS na lista "
+                    "'No modelo' acima (limpa e inclui as marcadas).")
+        self.out_star_ratings = W.HTML(
+            "<div class='mseg-legend' style='margin-top:2px'>"
+            "<b style='color:var(--sus-ink)'>★</b> <b>Como os ratings são elaborados</b>: ao "
+            "aplicar as variáveis, o modelo é retreinado e seu score é cortado em faixas "
+            "ordenadas do menor ao maior risco (decis, quantis, árvore ou binning ótimo, "
+            "conforme o método na aba <i>Ratings &amp; Score</i>). Faixas vizinhas cuja "
+            "inversão de risco não é significativa no OOT são <b>fundidas</b> para garantir "
+            "monotonicidade; cada rating recebe como valor previsto o <b>risco médio</b> da "
+            "faixa na DES (event rate na classificação, média na regressão). A escolha ótima "
+            "do nº de faixas usa a régua mais parcimoniosa que mantém a ordem de risco estável "
+            "entre amostras e retém quase toda a discriminação (Gini) do modelo.</div>")
+        self.out_feat_sel = W.HTML()
 
         self.btn_auto.on_click(self._on_auto_select)
         self.btn_auto_cat.on_click(self._on_auto_categorize)
@@ -787,6 +817,11 @@ class ModelSegmenterUI:
         self.dd_var.observe(lambda c: self._refresh_var_preview(), names="value")
         # clicar numa variável na lista "No modelo" também atualiza a prévia/análise
         self.sel_included.observe(self._on_sel_click, names="value")
+        self.btn_feat_manual.on_click(self._on_feat_manual)
+        # escolha ótima é destrutiva (roda backward, troca a seleção, retreina e
+        # regenera ratings): confirmação em dois cliques.
+        self.btn_feat_optimal.on_click(lambda b: self._confirm_twice(
+            self.btn_feat_optimal, lambda: self._on_feat_optimal(None)))
 
         tab_vars = W.VBox([
             W.HTML("<div class='mseg-h'>Seleção & categorização de variáveis</div>"),
@@ -799,6 +834,10 @@ class ModelSegmenterUI:
                     W.HBox([self.btn_incl_all, self.btn_clear,
                             self.btn_refresh_vars, self.btn_clear_derived],
                            layout=W.Layout(justify_content="space-between", width="99%"))]),
+            W.HTML("<div class='mseg-h' style='margin-top:4px'>Definir a seleção do modelo</div>"),
+            W.HBox([self.btn_feat_optimal, self.btn_feat_manual]),
+            self.out_star_ratings,
+            self.out_feat_sel,
             W.HBox([self.dd_categoria, self.btn_set_cat]),
             self.out_cat_hint,
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Ranking (IV / força / inversão / PSI)</div>"),
@@ -1716,6 +1755,121 @@ class ModelSegmenterUI:
         except Exception as e:
             self._log(f"[auto] erro: {e}")
 
+    def _on_feat_manual(self, b):
+        """Escolha manual: aplica como seleção do modelo exatamente as variáveis
+        MARCADAS na lista 'No modelo' (SelectMultiple)."""
+        try:
+            chosen = [f for f in tuple(self.sel_included.value) if f in self.seg.candidates]
+            if not chosen:
+                self.out_feat_sel.value = (
+                    "<div class='mseg-legend'>Marque ao menos uma variável na lista "
+                    "<b>No modelo</b> acima e clique novamente.</div>")
+                self._log("[escolha manual] nenhuma variável marcada.")
+                return
+            self.seg.clear_features()
+            for f in chosen:
+                self.seg.include(f)
+            self._sync_sel(); self._refresh_vars(); self._mark_dirty(); self._refresh_bar()
+            self.out_feat_sel.value = (
+                f"<div class='mseg-legend'>Escolha manual aplicada: <b>{len(chosen)}</b> "
+                f"variável(is) no modelo.</div>")
+            self._log(f"[escolha manual] {len(chosen)} variável(is) aplicada(s).")
+        except Exception as e:
+            self.out_feat_sel.value = f"<div style='color:var(--bad-tx)'>Erro: {e}</div>"
+            self._log(f"[escolha manual] erro: {e}")
+
+    def _on_feat_optimal(self, b):
+        """Escolha ótima: aplica o subconjunto PARCIMONIOSO do backward elimination
+        (reusa o resultado da aba 'Backward Elim.' quando compatível; senão roda numa
+        thread), retreina o modelo e regenera os ratings."""
+        import threading
+        if getattr(self, "_backelim_thread", None) is not None and self._backelim_thread.is_alive():
+            self._log("[escolha ótima] backward elimination em andamento — aguarde.")
+            return
+        # otimiza a SELEÇÃO VIGENTE (included) — respeita variáveis marcadas depois
+        # do treino; cai para model_features/candidates só se não houver seleção.
+        feats0 = list(self.seg.selected_features() or self.seg.model_features
+                      or self.seg.candidates)
+        if len(feats0) < 2:
+            self.out_feat_sel.value = (
+                "<div class='mseg-legend'>Selecione ao menos 2 variáveis antes da "
+                "escolha ótima.</div>")
+            self._log("[escolha ótima] menos de 2 variáveis.")
+            return
+
+        def _apply(res):
+            info = self.seg.apply_backward_selection(
+                res, criterion="parsimony", tol=0.01, refit=True, rebuild_ratings=True)
+            self._sync_sel(); self._refresh_vars(force=True)
+            # modelo foi retreinado ⇒ atualiza métricas/gráficos/fórmula e limpa "dirty"
+            self._render_metrics(); self._render_model_plots(); self._render_formula()
+            self._clear_dirty(); self._clear_adv_outputs()
+            if info.get("ratings_rebuilt") or info.get("ratings_reprojected"):
+                self._render_ratings()        # ratings regenerados OU reprojetados no novo score
+            self._refresh_bar()
+            _rt = (" e ratings regenerados" if info.get("ratings_rebuilt")
+                   else " e ratings reprojetados" if info.get("ratings_reprojected") else "")
+            feats = ", ".join(self.seg.label(f) for f in info["features"])
+            self.out_feat_sel.value = (
+                f"<div class='mseg-legend'><b style='color:var(--sus-ink)'>★</b> "
+                f"<b>Escolha ótima aplicada</b>: <b>{info['target_n']}</b> variável(is) — "
+                f"critério parcimônia (métrica {str(info['metric']).upper()}). Modelo "
+                f"retreinado{_rt}.<br><span style='color:var(--sub-ink)'>{feats}</span></div>")
+            self._log(f"[escolha ótima] {info['target_n']} variáveis + retreino{_rt}.")
+
+        # reusa o resultado do backward só se for da MESMA seleção (IDENTIDADE, não só
+        # contagem) — senão o subconjunto ótimo seria de outro conjunto de variáveis.
+        res0 = getattr(self, "_backelim_result", None)
+        if res0 is not None and len(res0) and set(res0.attrs.get("feats0", [])) == set(feats0):
+            try:
+                _apply(res0)
+            except Exception as e:
+                self.out_feat_sel.value = f"<div style='color:var(--bad-tx)'>Erro: {e}</div>"
+                self._log(f"[escolha ótima] erro ao aplicar: {e}")
+            return
+
+        # senão roda o backward (na seleção vigente) numa thread e aplica ao final
+        sample = self.dd_backelim_sample.value
+        min_features = max(1, min(int(self.sl_backelim_min.value), len(feats0) - 1))
+        total = max(1, len(feats0) - min_features + 1)
+        self.pb_backelim.max = total; self.pb_backelim.value = 0
+        self.pb_backelim.description = f"0/{total}"; self.pb_backelim.bar_style = "info"
+        self.pb_backelim.layout.visibility = "visible"
+        self.btn_feat_optimal.disabled = True
+        self.out_feat_sel.value = "<i>Rodando backward elimination para a escolha ótima…</i>"
+
+        def _progress(done, total_, nvar):
+            self.pb_backelim.value = done
+            self.pb_backelim.description = f"{done}/{total_}"
+            self.out_feat_sel.value = (
+                f"<div class='mseg-legend'>Backward: passo {done}/{total_} · "
+                f"{nvar} variáveis…</div>")
+
+        def _worker():
+            try:
+                res = self.seg.backward_elimination(sample=sample, min_features=min_features,
+                                                    features=feats0, progress_callback=_progress)
+                self._backelim_result = res
+                self.pb_backelim.value = self.pb_backelim.max
+                self.pb_backelim.bar_style = "success"; self.pb_backelim.description = "concluído ✓"
+                try:                              # atualiza também a aba Backward Elim.
+                    self._render_backelim_plot()
+                    self.out_backelim_table.value = self._df_html(res.round(4), center=True,
+                                                                  max_height="380px")
+                except Exception:
+                    pass
+                _apply(res)
+            except Exception as e:
+                self.pb_backelim.bar_style = "danger"
+                self.out_feat_sel.value = (
+                    f"<div style='color:var(--bad-tx)'>Erro: {type(e).__name__}: {e}</div>")
+                self._log(f"[escolha ótima] erro: {e}")
+            finally:
+                self.btn_feat_optimal.disabled = False
+
+        self._backelim_thread = threading.Thread(target=_worker, daemon=True)
+        self._backelim_thread.start()
+
     def _on_auto_categorize(self, b):
         try:
             rk = self.seg.auto_categorize(min_iv=self.sl_min_iv.value,
@@ -1782,12 +1936,23 @@ class ModelSegmenterUI:
         feat = self.dd_var2.value
         sample = None if self.dd_sample2.value == "(referência)" else self.dd_sample2.value
         tcol = self.tx_time2.value.strip() or None
+        _an_ws = (self.out_an_distbad, self.out_an_table, self.out_an_inv_sample,
+                  self.out_an_cards, self.out_an_time, self.out_an_inv_safra,
+                  self.out_an_psi, self.out_an_optbin_share)
+        # cache das figuras por (feature, amostra, safra, versão de bins): revisitar
+        # uma variável já analisada restaura os HTMLs sem re-renderizar/re-encodar os
+        # PNGs. _rank_version invalida quando bins/derivadas/amostra mudam.
+        _ck = (feat, sample, tcol, self.seg._rank_version)
+        _cached = self._an_fig_cache.get(_ck)
+        if _cached is not None:
+            for _w, _v in zip(_an_ws, _cached):
+                _w.value = _v
+            return
         # limpa os painéis da variável anterior antes de recompor — evita a tela
         # exibir, por alguns segundos, gráficos da variável antiga junto dos novos.
-        for _w in (self.out_an_distbad, self.out_an_table, self.out_an_inv_sample,
-                   self.out_an_cards, self.out_an_time, self.out_an_inv_safra,
-                   self.out_an_psi, self.out_an_optbin_share):
+        for _w in _an_ws:
             _w.value = ""
+        _an_ok = True
         self.btn_analyze.disabled = True          # evita duplo clique durante o render
         try:
             self.out_an_distbad.value = self._fig_html(
@@ -1803,6 +1968,7 @@ class ModelSegmenterUI:
             self.out_an_cards.value = self._var_cards(self.seg.variable_summary(feat, sample))
         except Exception as e:
             self.out_an_distbad.value = f"<i>{e}</i>"
+            _an_ok = False
         if tcol:
             # (out, fn, stretch): tudo estica p/ preencher a coluna. O par
             # "percentis · PSI" usa a MESMA figsize (mesmo tamanho) e TODAS as
@@ -1822,11 +1988,18 @@ class ModelSegmenterUI:
                     out.value = self._fig_html(fn(), stretch=stretch)
                 except Exception as e:
                     out.value = f"<i>{e}</i>"
+                    _an_ok = False            # não memoiza figura de safra com erro
         else:
             self.out_an_optbin_share.value = (
                 "<div class='mseg-legend'>Informe a coluna de safra para ver a "
                 "distribuição ao longo do tempo.</div>")
         self.btn_analyze.disabled = False
+        # memoiza os HTMLs renderizados (só em caso de sucesso) para revisita
+        # instantânea desta variável — evita re-render/re-encode dos PNGs
+        if _an_ok:
+            if len(self._an_fig_cache) > 64:      # backstop de memória
+                self._an_fig_cache.clear()
+            self._an_fig_cache[_ck] = tuple(_w.value for _w in _an_ws)
 
     def _var_cards(self, s):
         def card(k, v):
