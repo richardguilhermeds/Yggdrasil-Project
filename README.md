@@ -181,22 +181,22 @@ report.feature_profile        # 1 linha por feature, com flags e veredito
 
 ## 📓 Tutoriais
 
-Todos centralizados em **[`notebooks/tutoriais/`](notebooks/tutoriais/)** (passo a passo, prontos para Jupyter/Databricks):
+Todos centralizados em **[`notebooks/tutoriais/`](https://github.com/richardguilhermeds/Yggdrasil-Project/tree/main/notebooks/tutoriais)** (passo a passo, prontos para Jupyter/Databricks):
 
 | # | Tutorial |
 |---|---|
-| 00 | [Visão geral / PD](notebooks/tutoriais/00_tutorial_yggdrasil.ipynb) |
-| 01 | [LGD / regressão (alvo [0,1] bimodal)](notebooks/tutoriais/01_tutorial_lgd.ipynb) |
-| 02 | [EDA de features](notebooks/tutoriais/02_tutorial_eda_features.ipynb) |
-| 03 | [Seleção de features (PySpark)](notebooks/tutoriais/03_tutorial_feature_selection.ipynb) |
-| 04 | [Árvore de segmentação unificada (PD & LGD por `task_type`)](notebooks/tutoriais/04_tutorial_tree_segmenter.ipynb) |
-| 06 | [Construtor de modelos (UI)](notebooks/tutoriais/06_tutorial_model_segmenter.ipynb) |
-| 07 | [Esteira ML + MLflow](notebooks/tutoriais/07_tutorial_esteira_ml_mlflow.ipynb) |
-| 08 | [Capital econômico (ASRF, Monte Carlo, alocação de Euler)](notebooks/tutoriais/08_tutorial_capital_economico.ipynb) |
-| 09 | [Modelos econométricos satélite (PD/LGD/CCF, ARDL, fator Z, projeção por cenários)](notebooks/tutoriais/09_tutorial_modelos_econometricos.ipynb) |
+| 00 | [Visão geral / PD](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/00_tutorial_yggdrasil.ipynb) |
+| 01 | [LGD / regressão (alvo [0,1] bimodal)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/01_tutorial_lgd.ipynb) |
+| 02 | [EDA de features](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/02_tutorial_eda_features.ipynb) |
+| 03 | [Seleção de features (PySpark)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/03_tutorial_feature_selection.ipynb) |
+| 04 | [Árvore de segmentação unificada (PD & LGD por `task_type`)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/04_tutorial_tree_segmenter.ipynb) |
+| 06 | [Construtor de modelos (UI)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/06_tutorial_model_segmenter.ipynb) |
+| 07 | [Esteira ML + MLflow](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/07_tutorial_esteira_ml_mlflow.ipynb) |
+| 08 | [Capital econômico (ASRF, Monte Carlo, alocação de Euler)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/08_tutorial_capital_economico.ipynb) |
+| 09 | [Modelos econométricos satélite (PD/LGD/CCF, ARDL, fator Z, projeção por cenários)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/09_tutorial_modelos_econometricos.ipynb) |
 
-> 📖 **Metodologia** (o *porquê* dos métodos, como KS, PSI/CSI, WoE/IV, ratings com fusão monotônica, SHAP e veredito de EDA): [`docs/metodologia.md`](docs/metodologia.md).
-> 🌳 **Árvore de segmentação unificada (PD & LGD):** [`docs/credit-risk/tree-segmenter.md`](docs/credit-risk/tree-segmenter.md).
+> 📖 **Metodologia** (o *porquê* dos métodos, como KS, PSI/CSI, WoE/IV, ratings com fusão monotônica, SHAP e veredito de EDA): [`docs/metodologia.md`](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/docs/metodologia.md).
+> 🌳 **Árvore de segmentação unificada (PD & LGD):** [`docs/credit-risk/tree-segmenter.md`](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/docs/credit-risk/tree-segmenter.md).
 
 ---
 
@@ -204,15 +204,15 @@ Todos centralizados em **[`notebooks/tutoriais/`](notebooks/tutoriais/)** (passo
 
 | Árvore de PD (classificação) | Importância SHAP (model) |
 |---|---|
-| ![Árvore de segmentação de PD](docs/img/tree_pd.png) | ![Importância SHAP](docs/img/shap_importance.png) |
+| ![Árvore de segmentação de PD](https://raw.githubusercontent.com/richardguilhermeds/Yggdrasil-Project/main/docs/img/tree_pd.png) | ![Importância SHAP](https://raw.githubusercontent.com/richardguilhermeds/Yggdrasil-Project/main/docs/img/shap_importance.png) |
 
 | Dispersão do alvo por folha (LGD / regressão) |
 |---|
-| ![Boxplot do alvo por folha](docs/img/tree_lgd_boxplot.png) |
+| ![Boxplot do alvo por folha](https://raw.githubusercontent.com/richardguilhermeds/Yggdrasil-Project/main/docs/img/tree_lgd_boxplot.png) |
 
 | Projeção condicional de PD por cenário — modelo satélite (leque 90%) |
 |---|
-| ![Projeção econométrica em leque](docs/img/econometric_fanchart.png) |
+| ![Projeção econométrica em leque](https://raw.githubusercontent.com/richardguilhermeds/Yggdrasil-Project/main/docs/img/econometric_fanchart.png) |
 
 > As UIs interativas (`TreeSegmenterUI` e `ModelSegmenterUI`) têm tema claro e escuro (toggle 🌙), abas de construção/diagnóstico/validação, sugestão de splits, critério de split (Gini/Entropy/KS/IV/Chi²/Variância/MAE/F-test), export SQL, diff de versões e relatório PDF. Rode os tutoriais para ver ao vivo.
 
@@ -222,6 +222,6 @@ Todos centralizados em **[`notebooks/tutoriais/`](notebooks/tutoriais/)** (passo
 
 **Richard Guilherme**, Cientista de Dados com foco em risco de crédito (PD/LGD/EAD), modelagem regulatória (CMN 4.966/2021, IFRS 9) e MLOps em Databricks.
 
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-Richard%20Guilherme-0A66C2?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/richardguilhermeda/)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Richard%20Guilherme-0A66C2?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/richard-guilherme-da/)
 
 > 🔗 Conecte-se no LinkedIn para acompanhar projetos e conteúdos de ciência de dados e risco de crédito.
