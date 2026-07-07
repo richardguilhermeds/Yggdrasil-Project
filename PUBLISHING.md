@@ -37,8 +37,8 @@ python -m build
 Resultado esperado em `dist/`:
 
 ```
-yggdrasil_project-0.1.0.tar.gz
-yggdrasil_project-0.1.0-py3-none-any.whl
+yggdrasil_project-0.0.1.tar.gz
+yggdrasil_project-0.0.1-py3-none-any.whl
 ```
 
 Valide os metadados antes de subir:
@@ -78,7 +78,7 @@ pip install --index-url https://test.pypi.org/simple/ `
 python -c "import yggdrasil; print(yggdrasil.__version__)"
 ```
 
-Saída esperada: `0.1.0`. Depois pode apagar a `.venv-test`.
+Saída esperada: `0.0.1`. Depois pode apagar a `.venv-test`.
 
 ---
 
@@ -108,8 +108,8 @@ Página do projeto: https://pypi.org/project/yggdrasil-project/
 O PyPI **não** deixa reenviar uma versão já publicada. Para cada release:
 
 1. Suba o `version` em dois lugares (mantenha iguais):
-   - `pyproject.toml` → `version = "0.1.1"`
-   - `src/yggdrasil/__init__.py` → `__version__ = "0.1.1"`
+   - `pyproject.toml` → `version = "0.0.2"`
+   - `src/yggdrasil/__init__.py` → `__version__ = "0.0.2"`
 2. Repita os passos 1 a 3.
 
 > Dica: dá para eliminar a duplicação usando

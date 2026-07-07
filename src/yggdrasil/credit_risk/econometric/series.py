@@ -21,9 +21,9 @@ Gerador de séries sintéticas — :func:`simulate_pd_series`, :func:`simulate_l
     devolve a série observada, a macro que a dirigiu e o dicionário ``truth`` com
     os coeficientes verdadeiros.
 
-Nada aqui depende de Spark/Delta: os conectores internos do banco (leitura das
-bases contratuais, agregação por safra/estoque) são o núcleo **privado** que o
-guia recomenda manter fora do pacote aberto (§6.3). O que fica é o contrato e o
+Nada aqui depende de Spark/Delta: os conectores de dados internos (leitura das
+bases contratuais, agregação por safra/estoque) são a parte **específica de cada
+instituição**, mantida fora do pacote aberto. O que fica é o contrato e o
 gerador — reprodutíveis e públicos.
 """
 from __future__ import annotations
