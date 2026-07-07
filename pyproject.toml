@@ -1,13 +1,43 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "yggdrasil"
+# Nome de DISTRIBUIÇÃO (o que vai depois de `pip install`). O nome "yggdrasil"
+# já está registrado no PyPI por outro projeto, por isso a distribuição usa
+# "yggdrasil-project". O nome de IMPORT continua `yggdrasil` (ver
+# [tool.setuptools.packages.find]), então o uso segue: `from yggdrasil import ...`.
+name = "yggdrasil-project"
 version = "0.1.0"
-description = "Pacote com ferramentas e esteiras de Machine Learning para projetos em dados"
+description = "Ferramentas e esteiras governadas de Machine Learning para ciência de dados e risco de crédito (PD/LGD/EAD)"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Richard Guilherme", email = "richard.guilherme.dev@gmail.com" }]
+maintainers = [{ name = "Richard Guilherme", email = "richard.guilherme.dev@gmail.com" }]
+keywords = [
+    "machine-learning",
+    "credit-risk",
+    "risco-de-credito",
+    "mlflow",
+    "scorecard",
+    "pd-lgd-ead",
+    "ifrs9",
+    "data-science",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Natural Language :: Portuguese (Brazilian)",
+]
 requires-python = ">=3.9"
 dependencies = [
     "numpy>=1.23",
@@ -86,3 +116,5 @@ addopts = "-q"
 
 [project.urls]
 Homepage = "https://github.com/richardguilhermeds/Yggdrasil-Project"
+Repository = "https://github.com/richardguilhermeds/Yggdrasil-Project"
+Issues = "https://github.com/richardguilhermeds/Yggdrasil-Project/issues"
