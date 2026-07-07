@@ -34,6 +34,27 @@ except Exception as e:  # pragma: no cover
 from .segmenter import TreeSegmenter
 
 
+def _running_in_databricks() -> bool:
+    """True quando o código roda dentro de um cluster/notebook **Databricks**.
+
+    Detecta pelo env var que o Databricks Runtime sempre injeta
+    (``DATABRICKS_RUNTIME_VERSION``); como reforço, reconhece o ``dbutils`` que o
+    Databricks expõe no namespace do notebook. Serve para o preview da árvore
+    escolher, por padrão, o caminho **autocontido** (PNG data-URL, widget core do
+    ipywidgets) em vez do interativo (anywidget) — cujo frontend o Databricks
+    busca de um CDN, o que trava num cluster sem egress. Ver ``__init__``."""
+    import os
+    if os.environ.get("DATABRICKS_RUNTIME_VERSION"):
+        return True
+    try:                                   # dbutils é injetado no notebook Databricks
+        import builtins
+        if hasattr(builtins, "dbutils") or "dbutils" in getattr(builtins, "__dict__", {}):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 _CSS = """
 <style>
 /* SEM @import externo de fonts.googleapis.com: no Databricks o cluster costuma não
@@ -457,7 +478,8 @@ class TreeSegmenterUI:
 
     def __init__(self, df, target="target", task_type="classification",
                  sample_col=None, ref_sample="DES",
-                 feature_labels=None, features=None, tree_samples=None, date_col=None):
+                 feature_labels=None, features=None, tree_samples=None, date_col=None,
+                 allow_interactive_tree=None):
         # task_type: "classification" (PD, alvo binário) ou "regression" (LGD,
         # alvo contínuo) — define métricas, IV, cor e os gráficos exibidos.
         # tree_samples: amostras cujo alvo médio aparece nas folhas da árvore.
@@ -469,6 +491,19 @@ class TreeSegmenterUI:
         self._risk_mean = "PD média" if self._is_clf else "LGD médio"   # frase "X média/médio"
         self._tree_samples_cfg = tree_samples
         self.date_col = date_col
+        # "Ver árvore" (aba Construir): o preview interativo usa anywidget, cujo
+        # FRONTEND o gerenciador de widgets do Databricks busca de um CDN
+        # (jsDelivr/unpkg) — num cluster SEM egress a requisição trava e o preview
+        # "não carrega". Por isso, em Databricks, o preview cai por padrão no PNG
+        # ESTÁTICO AUTOCONTIDO (data-URL via W.HTML, widget CORE do ipywidgets —
+        # nunca busca rede), garantindo ZERO download externo. allow_interactive_tree:
+        #   None  → automático: interativo fora do Databricks, estático no Databricks;
+        #   True  → sempre tenta o interativo (só se o cluster tiver anywidget como
+        #           lib instalada, ou tiver egress liberado);
+        #   False → sempre estático (garante zero rede em qualquer ambiente).
+        if allow_interactive_tree is None:
+            allow_interactive_tree = not _running_in_databricks()
+        self.allow_interactive_tree = bool(allow_interactive_tree)
         self._kwargs = dict(target=target, task_type=task_type, sample_col=sample_col,
                             ref_sample=ref_sample, feature_labels=feature_labels,
                             date_col=date_col, verbose=False)
@@ -983,6 +1018,8 @@ class TreeSegmenterUI:
         # de ações contextual. Sem anywidget, out_tree_img segue com o PNG estático.
         self._tree_img_widget = None       # instância do widget (criada no 1º preview)
         self._img_selected = None          # sid do nó clicado na imagem (folha OU ramo)
+        # self.allow_interactive_tree foi resolvido no __init__ (Databricks → PNG
+        # estático autocontido, sem CDN do anywidget) — ver comentário lá.
         # barra de ações em 2 linhas: ① chip do nó + ações principais da folha;
         # ② estrutura (fusões/recolher) · histórico (desfazer/refazer) · árvore
         # inteira (auto-fit/resetar — as MESMAS instâncias dos cards, em 2ª view).
@@ -4275,6 +4312,17 @@ class TreeSegmenterUI:
             if self._ensure_tree_widget():
                 self.out_tree_img.value = ""
                 self._refresh_tree_widget()
+            elif not self.allow_interactive_tree:
+                # modo offline-safe (padrão em Databricks): PNG autocontido, sem
+                # nenhum download externo. A dica explica e ensina a religar o interativo.
+                hint = ("<div style='font-size:11px;color:var(--sub-ink);margin-top:4px'>🔒 "
+                        "preview <b>offline</b> — imagem autocontida, <b>sem download externo</b>. "
+                        "No Databricks a árvore CLICÁVEL (anywidget) fica desligada por padrão "
+                        "porque seu frontend seria buscado de um CDN (trava em cluster sem "
+                        "egress). Para religá-la num ambiente com egress/anywidget instalado: "
+                        "<code>TreeSegmenterUI(..., allow_interactive_tree=True)</code>.</div>")
+                self.out_tree_img.value = self._fig_html(self.seg.plot_tree(),
+                                                         border=True) + hint
             else:
                 hint = ("<div style='font-size:11px;color:var(--sub-ink);margin-top:4px'>💡 instale "
                         "<code>anywidget</code> (<code>pip install anywidget</code>) para uma "
@@ -4295,13 +4343,78 @@ class TreeSegmenterUI:
             self.box_tree_img.children = (self.tree_img_bar, self.out_tree_img,
                                           self.tree_img_split)
 
+    def check_tree_preview_offline(self, verbose: bool = True) -> dict:
+        """Valida que **"Ver árvore" não baixa nenhuma fonte/arquivo externo**.
+
+        Feito para rodar no **Databricks** e tirar a dúvida na hora: monta o preview
+        do jeito que o botão montaria e confere que o HTML só referencia recursos
+        EMBUTIDOS (``data:``) — sem ``http(s)``, ``@import`` ou ``url()`` de rede.
+        Varre também o JS/CSS do widget interativo. Reporta o modo vigente
+        (estático autocontido × interativo), se o ambiente é Databricks e se a
+        garantia offline vale.
+
+        Só o modo **estático** é 100% offline; o **interativo** (anywidget) pode ter
+        o frontend buscado de um CDN pelo gerenciador de widgets do Databricks — por
+        isso ``offline_guaranteed`` só é ``True`` no modo estático. Devolve um dict
+        e, com ``verbose``, imprime um resumo amigável.
+
+            ui.check_tree_preview_offline()      # rode numa célula do Databricks
+        """
+        import re
+        in_dbx = _running_in_databricks()
+        interactive = bool(self.allow_interactive_tree) and _tree_image_widget_cls() is not None
+        err = None
+        try:                                  # HTML que o botão injeta (imagem data-URL)
+            static_html = self._fig_html(self.seg.plot_tree(), border=True)
+        except Exception as e:
+            static_html, err = "", f"{type(e).__name__}: {e}"
+        # procura QUALQUER referência de rede no HTML estático + no JS/CSS do widget
+        # interativo: http(s)://, @import ... e url(...) que não seja data:
+        blob = static_html + _TREE_IMG_ESM + _TREE_IMG_CSS
+        ext = sorted(
+            set(re.findall(r"https?://[^\s\"')]+", blob))
+            | {m.strip() for m in re.findall(r"@import[^;{]+", blob)}
+            | {u for u in re.findall(r"url\(\s*['\"]?([^)'\"]+)", blob)
+               if not u.strip().lower().startswith("data:")}
+        )
+        report = {
+            "in_databricks": in_dbx,
+            "mode": "interativo (anywidget)" if interactive else "estático (autocontido)",
+            "allow_interactive_tree": bool(self.allow_interactive_tree),
+            "external_refs": ext,
+            "no_external_refs": not ext,
+            "offline_guaranteed": (not ext) and (not interactive),
+        }
+        if err:
+            report["plot_error"] = err
+        if verbose:
+            ok = "✅" if report["offline_guaranteed"] else ("⚠️" if not ext else "❌")
+            print(f"{ok} 'Ver árvore' — verificação de download externo")
+            print(f"   ambiente Databricks : {'sim' if in_dbx else 'não'}")
+            print(f"   modo do preview     : {report['mode']}")
+            print(f"   referências externas: {ext or 'nenhuma (só data:)'}")
+            if report["offline_guaranteed"]:
+                print("   → OFFLINE garantido: nada é baixado ao ver a árvore.")
+            elif interactive:
+                print("   → modo interativo: o frontend do anywidget pode vir de um CDN no "
+                      "Databricks. Para garantia total, use allow_interactive_tree=False "
+                      "(já é o padrão dentro do Databricks).")
+            if err:
+                print(f"   (obs.: não consegui desenhar a árvore agora — {err})")
+        return report
+
     def _tree_img_visible(self):
         w = self._tree_img_widget
         return w is not None and w in getattr(self.box_tree_img, "children", ())
 
     def _ensure_tree_widget(self):
         """Garante o widget interativo montado no card (instancia 1× e reusa).
-        Devolve False quando o anywidget não está disponível (fallback PNG)."""
+        Devolve False quando o preview interativo está desligado
+        (``allow_interactive_tree=False`` — padrão em Databricks, evita o CDN do
+        anywidget) ou quando o anywidget não está instalado; nos dois casos a UI
+        cai no PNG estático AUTOCONTIDO (data-URL, sem nenhum download externo)."""
+        if not self.allow_interactive_tree:      # modo offline-safe (sem rede/CDN)
+            return False
         if self._tree_img_widget is None:
             cls = _tree_image_widget_cls()
             if cls is None:
