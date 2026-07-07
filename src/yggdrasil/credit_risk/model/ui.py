@@ -1294,13 +1294,6 @@ class ModelSegmenterUI:
         ], layout=W.Layout(padding="2px"))
 
         # ---------- Aba 5: Validar & Exportar ----------
-        self.tx_time3 = W.Text(value=self.date_col or "", description="Coluna safra:",
-                               style={"description_width": "initial"})
-        self.btn_backtest = W.Button(description="Backtest", button_style="primary",
-                                     icon="calendar-check-o")
-        self.out_backtest = W.HTML()
-        self.out_psi = W.HTML()
-        self.out_psi_rating = W.HTML()   # PSI por rating (DES × OOT/ESTABILIDADE)
         self.btn_export = W.Button(description="Exportar DataFrame", icon="download")
         self.out_export = W.HTML()
         # rótulo e largura idênticos nos três campos ⇒ as caixas (e os botões que
@@ -1363,7 +1356,6 @@ class ModelSegmenterUI:
         # tabela de progresso da escoragem (carregando/escorando/salvando)
         self.out_score_progress = W.HTML()
         self._score_steps: list = []      # [{key,label,status,detail}] em ordem
-        self.btn_backtest.on_click(self._on_backtest)
         self.btn_export.on_click(self._on_export)
         self.btn_ruler.on_click(self._on_ruler)
         self.btn_score.on_click(self._on_score)
@@ -1373,17 +1365,6 @@ class ModelSegmenterUI:
 
         self.tx_in_table.layout = W.Layout(width="48%")
         self.tx_out_table.layout = W.Layout(width="48%")
-        card_valid = W.VBox([
-            W.HTML("<div class='mseg-h'>Validação · backtest e estabilidade dos ratings</div>"),
-            W.HBox([self.tx_time3, self.btn_backtest]),
-            W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Backtest por safra</div>"),
-                            self.out_backtest], layout=W.Layout(width="60%")),
-                    W.VBox([W.HTML("<div class='mseg-h'>PSI dos ratings</div>"),
-                            self.out_psi], layout=W.Layout(width="38%"))],
-                   layout=W.Layout(justify_content="space-between")),
-            W.HTML("<div class='mseg-h'>PSI por rating · DES × OOT e ESTABILIDADE</div>"),
-            self.out_psi_rating,
-        ]); card_valid.add_class("mseg-card")
         card_score = W.VBox([
             W.HTML("<div class='mseg-h'>Escoragem da base · score + rating + valor previsto "
                    "(régua)</div>"),
@@ -1419,7 +1400,7 @@ class ModelSegmenterUI:
             W.HBox([self.tx_experiment, self.tx_model, self.btn_mlflow]),
         ], layout=W.Layout(width="49%")); card_mlflow.add_class("mseg-card")
         tab_export = W.VBox([
-            card_valid, card_score,
+            card_score,
             W.HBox([card_persist, card_mlflow],
                    layout=W.Layout(justify_content="space-between", align_items="stretch")),
         ], layout=W.Layout(padding="2px"))
@@ -1555,9 +1536,21 @@ class ModelSegmenterUI:
         self.out_backelim_status = W.HTML()
         self.out_backelim_table = W.HTML()
         self.out_backelim_plot = W.HTML()
+        # retreino com o subconjunto ÓTIMO (★) destacado na tabela
+        self.btn_backelim_apply = W.Button(
+            description="Retreinar com as variáveis ótimas ★", button_style="success",
+            icon="star", disabled=True, layout=W.Layout(width="auto", min_width="268px"),
+            tooltip="Aplica o subconjunto ÓTIMO destacado (★) — o menor nº de variáveis "
+                    "dentro de 1% da melhor métrica — como seleção do modelo, retreina e "
+                    "regenera os ratings. Substitui a seleção vigente (confirma em 2 cliques).")
+        self.out_backelim_apply = W.HTML()
+        self._backelim_optimal = None      # dict do passo ótimo (backward_optimal_step)
         self._backelim_thread = None
         self._backelim_result = None
         self.btn_backelim.on_click(self._on_backelim)
+        # retreino é destrutivo (troca a seleção, retreina, regenera ratings): 2 cliques
+        self.btn_backelim_apply.on_click(lambda b: self._confirm_twice(
+            self.btn_backelim_apply, lambda: self._on_backelim_apply()))
         self.sm_backelim_metrics.observe(lambda c: self._render_backelim_plot(), names="value")
 
         card_backelim = W.VBox([
@@ -1577,7 +1570,11 @@ class ModelSegmenterUI:
             W.VBox([W.HTML("<div class='mseg-h'>Métricas × nº de variáveis</div>"),
                     self.out_backelim_plot]),
             W.VBox([W.HTML("<div class='mseg-h'>Tabela — variável removida a cada passo e "
-                           "métricas</div>"), self.out_backelim_table]),
+                           "métricas <span style='font-weight:400;color:var(--sub-ink)'>"
+                           "(★ = nº de variáveis ótimo · parcimônia)</span></div>"),
+                    self.out_backelim_table,
+                    W.HBox([self.btn_backelim_apply], layout=W.Layout(margin="8px 0 0 0")),
+                    self.out_backelim_apply]),
         ], layout=W.Layout(padding="2px"))
 
         self.tabs = W.Tab(children=[tab_vars, tab_an, tab_model, tab_backelim, tab_rating,
@@ -1798,24 +1795,7 @@ class ModelSegmenterUI:
             return
 
         def _apply(res):
-            info = self.seg.apply_backward_selection(
-                res, criterion="parsimony", tol=0.01, refit=True, rebuild_ratings=True)
-            self._sync_sel(); self._refresh_vars(force=True)
-            # modelo foi retreinado ⇒ atualiza métricas/gráficos/fórmula e limpa "dirty"
-            self._render_metrics(); self._render_model_plots(); self._render_formula()
-            self._clear_dirty(); self._clear_adv_outputs()
-            if info.get("ratings_rebuilt") or info.get("ratings_reprojected"):
-                self._render_ratings()        # ratings regenerados OU reprojetados no novo score
-            self._refresh_bar()
-            _rt = (" e ratings regenerados" if info.get("ratings_rebuilt")
-                   else " e ratings reprojetados" if info.get("ratings_reprojected") else "")
-            feats = ", ".join(self.seg.label(f) for f in info["features"])
-            self.out_feat_sel.value = (
-                f"<div class='mseg-legend'><b style='color:var(--sus-ink)'>★</b> "
-                f"<b>Escolha ótima aplicada</b>: <b>{info['target_n']}</b> variável(is) — "
-                f"critério parcimônia (métrica {str(info['metric']).upper()}). Modelo "
-                f"retreinado{_rt}.<br><span style='color:var(--sub-ink)'>{feats}</span></div>")
-            self._log(f"[escolha ótima] {info['target_n']} variáveis + retreino{_rt}.")
+            self._apply_backward_optimal(res, self.out_feat_sel)
 
         # reusa o resultado do backward só se for da MESMA seleção (IDENTIDADE, não só
         # contagem) — senão o subconjunto ótimo seria de outro conjunto de variáveis.
@@ -1854,8 +1834,7 @@ class ModelSegmenterUI:
                 self.pb_backelim.bar_style = "success"; self.pb_backelim.description = "concluído ✓"
                 try:                              # atualiza também a aba Backward Elim.
                     self._render_backelim_plot()
-                    self.out_backelim_table.value = self._df_html(res.round(4), center=True,
-                                                                  max_height="380px")
+                    self._render_backelim_table(res)
                 except Exception:
                     pass
                 _apply(res)
@@ -2932,8 +2911,7 @@ class ModelSegmenterUI:
                 f"<b>{res.attrs.get('eval_sample')}</b> (algoritmo "
                 f"<code>{res.attrs.get('algorithm')}</code>).</div>")
             self._render_backelim_plot()
-            self.out_backelim_table.value = self._df_html(
-                res.round(4), center=True, max_height="380px")
+            self._render_backelim_table(res)      # ★ na linha do nº ótimo + habilita retreino
             self._log(f"[backward] concluído: {len(res)} passos (avaliação em "
                       f"{res.attrs.get('eval_sample')}).")
 
@@ -2953,6 +2931,94 @@ class ModelSegmenterUI:
                 stretch=True)
         except Exception as e:
             self.out_backelim_plot.value = f"<i>{e}</i>"
+
+    def _render_backelim_table(self, res):
+        """Renderiza a tabela do backward destacando (★ + negrito) a linha do nº de
+        variáveis ÓTIMO (parcimônia · dentro de 1% da melhor métrica) e habilita o
+        botão de retreino com esse subconjunto. No-op silencioso sem resultado."""
+        if res is None or len(res) == 0:
+            self.out_backelim_table.value = ""
+            self._backelim_optimal = None
+            self._sync_backelim_apply_btn(None)
+            return
+        target_n = None
+        try:
+            pick = self.seg.backward_optimal_step(res, criterion="parsimony", tol=0.01)
+            self._backelim_optimal = pick
+            target_n = int(pick["target_n"])
+        except Exception:
+            self._backelim_optimal = None
+        disp = res.round(4).copy()
+        ns = disp["n_variaveis"].astype(int)
+        disp.insert(0, "★", ns.map(lambda n: "★" if n == target_n else ""))
+        sty = (disp.style.hide(axis="index").set_table_styles(self._TABLE_STYLES)
+               .set_properties(**{"font-size": "12px", "text-align": "center"})
+               .set_table_styles([{"selector": "th, td",
+                                   "props": [("text-align", "center")]}], overwrite=False))
+        if target_n is not None:
+            def _bold_optimal(row):                # linha ótima: negrito + fundo destacado
+                hit = int(row["n_variaveis"]) == target_n
+                return [("font-weight:700;background-color:var(--sus-bg)" if hit else "")] * len(row)
+            sty = sty.apply(_bold_optimal, axis=1)
+            sty = sty.map(lambda v: ("color:var(--sus-ink);font-weight:700" if v == "★" else ""),
+                          subset=["★"])
+        self.out_backelim_table.value = (
+            f"<div style='max-height:380px;overflow:auto'>{sty.to_html()}</div>")
+        self._sync_backelim_apply_btn(target_n)
+
+    def _sync_backelim_apply_btn(self, target_n):
+        """Habilita o botão de retreino só quando há um passo ótimo válido."""
+        self.btn_backelim_apply.disabled = not (
+            target_n is not None and self._backelim_result is not None)
+
+    def _apply_backward_optimal(self, res, out_widget=None):
+        """Aplica o subconjunto ÓTIMO do backward (parcimônia · 1%): troca a seleção,
+        retreina o modelo, regenera/reprojeta os ratings e atualiza toda a UI. Escreve
+        o resumo em ``out_widget`` (se dado) e loga. Devolve o dict-info do apply."""
+        info = self.seg.apply_backward_selection(
+            res, criterion="parsimony", tol=0.01, refit=True, rebuild_ratings=True)
+        self._sync_sel(); self._refresh_vars(force=True)
+        # modelo retreinado ⇒ atualiza métricas/gráficos/fórmula e limpa "dirty"
+        self._render_metrics(); self._render_model_plots(); self._render_formula()
+        self._clear_dirty(); self._clear_adv_outputs()
+        if info.get("ratings_rebuilt") or info.get("ratings_reprojected"):
+            self._render_ratings()            # ratings regenerados OU reprojetados no novo score
+        self._refresh_bar()
+        _rt = (" e ratings regenerados" if info.get("ratings_rebuilt")
+               else " e ratings reprojetados" if info.get("ratings_reprojected") else "")
+        feats = ", ".join(self.seg.label(f) for f in info["features"])
+        if out_widget is not None:
+            out_widget.value = (
+                f"<div class='mseg-legend'><b style='color:var(--sus-ink)'>★</b> "
+                f"<b>Escolha ótima aplicada</b>: <b>{info['target_n']}</b> variável(is) — "
+                f"critério parcimônia (métrica {str(info['metric']).upper()}). Modelo "
+                f"retreinado{_rt}.<br><span style='color:var(--sub-ink)'>{feats}</span></div>")
+        self._log(f"[escolha ótima] {info['target_n']} variáveis + retreino{_rt}.")
+        return info
+
+    def _on_backelim_apply(self):
+        """Retreina o modelo com o subconjunto ÓTIMO (★) do último backward."""
+        res = getattr(self, "_backelim_result", None)
+        if res is None or len(res) == 0:
+            self.out_backelim_apply.value = ("<i>Rode o backward elimination primeiro "
+                                             "(botão acima).</i>")
+            return
+        feats0 = (self.seg.model_features or self.seg.selected_features()
+                  or self.seg.candidates)
+        if set(res.attrs.get("feats0", [])) != set(feats0):
+            self.out_backelim_apply.value = (
+                "<div style='color:var(--warn-tx)'>A seleção de variáveis mudou desde o "
+                "último backward. Rode o backward elimination de novo antes de retreinar.</div>")
+            self._sync_backelim_apply_btn(None)
+            return
+        self.btn_backelim_apply.disabled = True
+        try:
+            self._apply_backward_optimal(res, self.out_backelim_apply)
+        except Exception as e:
+            self.out_backelim_apply.value = f"<div style='color:var(--bad-tx)'>Erro: {e}</div>"
+            self._log(f"[backward] erro ao retreinar: {e}")
+        finally:
+            self.btn_backelim_apply.disabled = False
 
     # ------------------------------------------------------------------ Aba 4 handlers
     def _on_suggest_n(self, b):
@@ -3064,32 +3130,6 @@ class ModelSegmenterUI:
         self._refresh_bar()
 
     # ------------------------------------------------------------------ Aba 5 handlers
-    def _on_backtest(self, b):
-        tcol = self.tx_time3.value.strip() or None
-        try:
-            self.out_backtest.value = self._df_html(
-                self.seg.backtest(tcol).round(4), max_height="320px", center=True,
-                color_validation=True,
-                pct_cols=["previsto_medio", "realizado_medio", "gap"])
-        except Exception as e:
-            self.out_backtest.value = f"<i>{e}</i>"
-        try:
-            self.out_psi.value = self._df_html(self.seg.psi(), center=True,
-                                               color_validation=True)
-        except Exception as e:
-            self.out_psi.value = f"<i>{e}</i>"
-        try:
-            det = self.seg.psi_rating_detalhe()
-            comps = [c[4:] for c in det.columns if c.startswith("PSI ")]
-            legenda = (" · ".join(f"DES × {c}" for c in comps)) or "sem amostras de comparação"
-            self.out_psi_rating.value = (
-                f"<div class='mseg-legend'>PSI por rating — {legenda}. Cada linha mostra a "
-                f"participação (%) do rating em cada amostra e a contribuição de PSI; a linha "
-                f"<b>TOTAL</b> traz o PSI agregado por amostra.</div>"
-                + self._df_html(det, center=True, max_height="360px"))
-        except Exception as e:
-            self.out_psi_rating.value = f"<i>{e}</i>"
-
     def _on_export(self, b):
         try:
             self.result = self.seg.assign()

@@ -2938,24 +2938,23 @@ class ModelSegmenter:
         out.attrs["feats0"] = list(feats)      # conjunto inicial (identidade p/ apply)
         return out
 
-    def apply_backward_selection(self, result, criterion="parsimony", tol=0.01,
-                                 metric=None, refit=True, rebuild_ratings=False):
-        """Aplica à seleção vigente (``included``) o subconjunto de variáveis do
-        passo **ótimo** de uma :meth:`backward_elimination` já executada.
+    def backward_optimal_step(self, result, criterion="parsimony", tol=0.01,
+                              metric=None) -> dict:
+        """Escolhe o passo **ótimo** de uma :meth:`backward_elimination` — **sem aplicar**.
 
-        ``result`` é o DataFrame devolvido por ela. ``criterion``:
+        No DataFrame ``result`` devolvido por ela, seleciona o nº de variáveis
+        recomendado e reconstrói o subconjunto correspondente (ancorado no
+        ``attrs['feats0']``, por identidade). ``criterion``:
 
         * ``"parsimony"`` (default): o **menor** nº de variáveis cuja métrica fica
-          dentro de ``tol`` (relativo, ``|melhor|·tol``) da melhor — parcimônia /
-          cotovelo, alinhado à cultura de risco (menos variáveis, estável);
-        * ``"best"``: o passo de **melhor** métrica, independentemente do tamanho.
+          dentro de ``tol`` (relativo, ``|melhor|·tol``) da melhor — parcimônia/cotovelo;
+        * ``"best"``: o passo de **melhor** métrica.
 
-        ``metric`` força a métrica de escolha (default: ``ks`` senão ``auc`` na
-        classificação — maior é melhor; ``rmse`` na regressão — menor é melhor).
-        Com ``refit`` (default) reajusta o modelo no subconjunto preservando
-        algoritmo/hyperparams/transform vigentes; com ``rebuild_ratings`` regenera
-        os ratings com a config atual — **réguas manuais são preservadas** (não são
-        regeradas silenciosamente). Devolve um dict-resumo (não ``self``)."""
+        ``metric`` default: ``ks``→``auc``→``gini`` (classificação, maior é melhor)
+        ou ``rmse`` (regressão, menor é melhor). Devolve ``{metric, criterion,
+        target_n, best, features, removed}`` **sem tocar no modelo** — usado por
+        :meth:`apply_backward_selection` (antes de reajustar) e pela UI, que destaca
+        a linha ótima e habilita o botão de retreino."""
         cols = list(getattr(result, "columns", []))
         if result is None or len(result) == 0 or "n_variaveis" not in cols:
             raise ValueError("Resultado de backward_elimination vazio ou inválido.")
@@ -3002,6 +3001,34 @@ class ModelSegmenter:
             raise RuntimeError(
                 f"Reconstrução inconsistente do subconjunto: esperado {target_n} "
                 f"variáveis, obtido {len(subset)}.")
+        return {"metric": metric, "criterion": criterion, "target_n": target_n,
+                "best": best, "features": subset, "removed": sorted(removed)}
+
+    def apply_backward_selection(self, result, criterion="parsimony", tol=0.01,
+                                 metric=None, refit=True, rebuild_ratings=False):
+        """Aplica à seleção vigente (``included``) o subconjunto de variáveis do
+        passo **ótimo** de uma :meth:`backward_elimination` já executada.
+
+        ``result`` é o DataFrame devolvido por ela. ``criterion``:
+
+        * ``"parsimony"`` (default): o **menor** nº de variáveis cuja métrica fica
+          dentro de ``tol`` (relativo, ``|melhor|·tol``) da melhor — parcimônia /
+          cotovelo, alinhado à cultura de risco (menos variáveis, estável);
+        * ``"best"``: o passo de **melhor** métrica, independentemente do tamanho.
+
+        ``metric`` força a métrica de escolha (default: ``ks`` senão ``auc`` na
+        classificação — maior é melhor; ``rmse`` na regressão — menor é melhor).
+        Com ``refit`` (default) reajusta o modelo no subconjunto preservando
+        algoritmo/hyperparams/transform vigentes; com ``rebuild_ratings`` regenera
+        os ratings com a config atual — **réguas manuais são preservadas** (não são
+        regeradas silenciosamente). Devolve um dict-resumo (não ``self``). A escolha
+        do passo ótimo é delegada a :meth:`backward_optimal_step`."""
+        pick = self.backward_optimal_step(result, criterion=criterion, tol=tol, metric=metric)
+        target_n = pick["target_n"]
+        subset = pick["features"]
+        removed = set(pick["removed"])
+        metric = pick["metric"]
+        best = pick["best"]
         self.clear_features()
         for f in subset:
             if f in self.candidates:
