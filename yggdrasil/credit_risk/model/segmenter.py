@@ -2390,8 +2390,12 @@ class ModelSegmenter:
                 modelagem = regression_metrics(yva, s)
                 valor = modelagem.get("r2", float("nan"))
             # grupo MONITORAMENTO (estabilidade/volumetria)
+            try:                          # PSI é MONITORAMENTO — não pode derrubar o trial
+                _psi_val = round(float(_psi_num(s_tr, s)), 6)
+            except Exception:
+                _psi_val = float("nan")
             monitoramento = {
-                "psi_score_des_val": round(float(_psi_num(s_tr, s)), 6),
+                "psi_score_des_val": _psi_val,
                 "n_treino": int(len(Xtr)), "n_validacao": int(len(Xva)),
             }
             trial.set_user_attr("modelagem", modelagem)
@@ -2436,8 +2440,10 @@ class ModelSegmenter:
             self.study_ = study
             cancelled = self._tuning_cancel.is_set()
             n_ok = _n_complete()
+            n_failed = sum(1 for t in study.trials
+                           if t.state == optuna.trial.TrialState.FAIL)
             self.tuning_ = {"algorithm": algorithm, "metric": "auc" if is_clf else "r2",
-                            "n_trials": n_ok,
+                            "n_trials": n_ok, "n_failed": n_failed,
                             "best_value": (round(float(study.best_value), 6)
                                            if n_ok else float("nan")),
                             "best_params": (dict(study.best_params) if n_ok else {}),
@@ -2456,17 +2462,30 @@ class ModelSegmenter:
                 def _mlflow_cb(study, trial):
                     self._log_optuna_trial(mlflow, trial, algorithm, transform)
                 study.optimize(objective, n_trials=n_trials, timeout=timeout,
-                               callbacks=callbacks + [_mlflow_cb])
-                if _n_complete():                # cancelamento cedo pode não ter trial concluído
-                    self._log_optuna_parent(mlflow, study, algorithm, transform, is_clf, feats)
-                # re-treina o melhor modelo DENTRO do run-pai e o registra junto
-                # dos trials (evita colisão de nome no Model Registry).
+                               callbacks=callbacks + [_mlflow_cb], catch=(Exception,))
+                # Persiste o resultado + refit ANTES do logging cosmético; e o log no
+                # MLflow (resumo do estudo + registro do modelo) vira best-effort: um
+                # problema/lentidão no MLflow ou no Model Registry não descarta o tuning
+                # nem deixa a run "presa" sem concluir.
                 _finish_best()
-                if register_model and fit_best and not self._tuning_cancel.is_set() and _n_complete():
-                    self._log_fitted_model(mlflow, registered_model_name=mlflow_model_name,
-                                           verbose=verbose)
+                try:
+                    if _n_complete():            # cancelamento cedo pode não ter trial concluído
+                        self._log_optuna_parent(mlflow, study, algorithm, transform, is_clf, feats)
+                    if (register_model and fit_best and not self._tuning_cancel.is_set()
+                            and _n_complete()):
+                        self._log_fitted_model(mlflow, registered_model_name=mlflow_model_name,
+                                               verbose=verbose)
+                except Exception as _e:          # noqa: BLE001 — logging é best-effort
+                    if verbose:
+                        print(f"[tune_optuna] aviso: log no MLflow falhou "
+                              f"({type(_e).__name__}: {_e}); resultado do tuning preservado.")
         else:
-            study.optimize(objective, n_trials=n_trials, timeout=timeout, callbacks=callbacks)
+            # catch=(Exception,): um trial que falhe (combo de hiperparâmetros inválido,
+            # métrica/predição degenerada, etc.) é marcado FAILED e o estudo CONTINUA. Sem
+            # isso, uma ÚNICA falha aborta o tuning inteiro (o modelo "para de treinar" ou
+            # a barra de progresso trava sem concluir).
+            study.optimize(objective, n_trials=n_trials, timeout=timeout,
+                           callbacks=callbacks, catch=(Exception,))
             _finish_best()
         # deixa a flag limpa para o PRÓXIMO tuning (já foi lida em _finish_best).
         self._tuning_cancel.clear()

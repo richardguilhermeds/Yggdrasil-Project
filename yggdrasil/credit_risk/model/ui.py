@@ -2688,19 +2688,25 @@ class ModelSegmenterUI:
                       "modelo preservado.")
             return
         if not res.get("n_trials"):
+            _fail = res.get("n_failed") or 0
             self.pb_tune.bar_style = "danger"
+            _extra = (f" Todos os {_fail} trials <b>falharam</b> — verifique o algoritmo/espaço "
+                      "de busca (ex.: combinação de hiperparâmetros inválida)." if _fail else "")
             self.out_tune.value = ("<div style='color:var(--bad-tx);font-size:12px'>Nenhum trial "
-                                   "concluído — nada a aplicar.</div>")
-            self._log("[tune] nenhum trial concluído.")
+                                   f"concluído — nada a aplicar.{_extra}</div>")
+            self._log(f"[tune] nenhum trial concluído (falhas: {_fail}).")
             return
         self.pb_tune.value = self.pb_tune.max
         self.pb_tune.bar_style = "success"
         self.pb_tune.description = f"{res['n_trials']}/{res['n_trials']} ✓"
         bp = "<br>".join(f"<code>{k}</code> = {v}" for k, v in res["best_params"].items())
+        _fail = res.get("n_failed") or 0
+        _fail_txt = (f" · <span style='color:var(--warn-ink)'>{_fail} trial(s) falharam "
+                     "(ignorados)</span>" if _fail else "")
         self.out_tune.value = (
             f"<div class='mseg-legend'><b>Optuna</b> · {res['n_trials']} trials · melhor "
             f"<b>{res['metric'].upper()} = {res['best_value']:.4f}</b> (no OOT/validação)"
-            f"<br>{bp}</div>")
+            f"{_fail_txt}<br>{bp}</div>")
         if log_mlflow:
             _mod = self.tx_model.value or "(artefato, sem registry)"
             _mlflow_msg = f" Trials + modelo registrados no MLflow (modelo: {_mod})."
