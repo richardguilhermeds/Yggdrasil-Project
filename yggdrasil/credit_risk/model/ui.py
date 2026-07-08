@@ -835,7 +835,7 @@ class ModelSegmenterUI:
                             self.btn_refresh_vars, self.btn_clear_derived],
                            layout=W.Layout(justify_content="space-between", width="99%"))]),
             W.HTML("<div class='mseg-h' style='margin-top:4px'>Definir a seleção do modelo</div>"),
-            W.HBox([self.btn_feat_optimal, self.btn_feat_manual]),
+            W.HBox([self.btn_feat_manual]),
             self.out_star_ratings,
             self.out_feat_sel,
             W.HBox([self.dd_categoria, self.btn_set_cat]),
@@ -1536,21 +1536,11 @@ class ModelSegmenterUI:
         self.out_backelim_status = W.HTML()
         self.out_backelim_table = W.HTML()
         self.out_backelim_plot = W.HTML()
-        # retreino com o subconjunto ÓTIMO (★) destacado na tabela
-        self.btn_backelim_apply = W.Button(
-            description="Retreinar com as variáveis ótimas ★", button_style="success",
-            icon="star", disabled=True, layout=W.Layout(width="auto", min_width="268px"),
-            tooltip="Aplica o subconjunto ÓTIMO destacado (★) — o menor nº de variáveis "
-                    "dentro de 1% da melhor métrica — como seleção do modelo, retreina e "
-                    "regenera os ratings. Substitui a seleção vigente (confirma em 2 cliques).")
         self.out_backelim_apply = W.HTML()
         self._backelim_optimal = None      # dict do passo ótimo (backward_optimal_step)
         self._backelim_thread = None
         self._backelim_result = None
         self.btn_backelim.on_click(self._on_backelim)
-        # retreino é destrutivo (troca a seleção, retreina, regenera ratings): 2 cliques
-        self.btn_backelim_apply.on_click(lambda b: self._confirm_twice(
-            self.btn_backelim_apply, lambda: self._on_backelim_apply()))
         self.sm_backelim_metrics.observe(lambda c: self._render_backelim_plot(), names="value")
 
         card_backelim = W.VBox([
@@ -1573,7 +1563,7 @@ class ModelSegmenterUI:
                            "métricas <span style='font-weight:400;color:var(--sub-ink)'>"
                            "(★ = nº de variáveis ótimo · parcimônia)</span></div>"),
                     self.out_backelim_table,
-                    W.HBox([self.btn_backelim_apply], layout=W.Layout(margin="8px 0 0 0")),
+                    W.HBox([self.btn_feat_optimal], layout=W.Layout(margin="8px 0 0 0")),
                     self.out_backelim_apply]),
         ], layout=W.Layout(padding="2px"))
 
@@ -1788,14 +1778,14 @@ class ModelSegmenterUI:
         feats0 = list(self.seg.selected_features() or self.seg.model_features
                       or self.seg.candidates)
         if len(feats0) < 2:
-            self.out_feat_sel.value = (
+            self.out_backelim_apply.value = (
                 "<div class='mseg-legend'>Selecione ao menos 2 variáveis antes da "
                 "escolha ótima.</div>")
             self._log("[escolha ótima] menos de 2 variáveis.")
             return
 
         def _apply(res):
-            self._apply_backward_optimal(res, self.out_feat_sel)
+            self._apply_backward_optimal(res, self.out_backelim_apply)
 
         # reusa o resultado do backward só se for da MESMA seleção (IDENTIDADE, não só
         # contagem) — senão o subconjunto ótimo seria de outro conjunto de variáveis.
@@ -1804,7 +1794,7 @@ class ModelSegmenterUI:
             try:
                 _apply(res0)
             except Exception as e:
-                self.out_feat_sel.value = f"<div style='color:var(--bad-tx)'>Erro: {e}</div>"
+                self.out_backelim_apply.value = f"<div style='color:var(--bad-tx)'>Erro: {e}</div>"
                 self._log(f"[escolha ótima] erro ao aplicar: {e}")
             return
 
@@ -1816,12 +1806,12 @@ class ModelSegmenterUI:
         self.pb_backelim.description = f"0/{total}"; self.pb_backelim.bar_style = "info"
         self.pb_backelim.layout.visibility = "visible"
         self.btn_feat_optimal.disabled = True
-        self.out_feat_sel.value = "<i>Rodando backward elimination para a escolha ótima…</i>"
+        self.out_backelim_apply.value = "<i>Rodando backward elimination para a escolha ótima…</i>"
 
         def _progress(done, total_, nvar):
             self.pb_backelim.value = done
             self.pb_backelim.description = f"{done}/{total_}"
-            self.out_feat_sel.value = (
+            self.out_backelim_apply.value = (
                 f"<div class='mseg-legend'>Backward: passo {done}/{total_} · "
                 f"{nvar} variáveis…</div>")
 
@@ -1840,7 +1830,7 @@ class ModelSegmenterUI:
                 _apply(res)
             except Exception as e:
                 self.pb_backelim.bar_style = "danger"
-                self.out_feat_sel.value = (
+                self.out_backelim_apply.value = (
                     f"<div style='color:var(--bad-tx)'>Erro: {type(e).__name__}: {e}</div>")
                 self._log(f"[escolha ótima] erro: {e}")
             finally:
@@ -1961,7 +1951,8 @@ class ModelSegmenterUI:
                      (self.out_an_psi,
                       lambda: self.seg.plot_variable_psi_by_safra(feat, tcol, figsize=_ts), True),
                      (self.out_an_optbin_share,
-                      lambda: self.seg.plot_variable_optbin_cumshare_timeseries(feat, tcol, sample), True))
+                      lambda: self.seg.plot_variable_optbin_cumshare_timeseries(
+                          feat, tcol, sample, all_samples=True), True))
             for out, fn, stretch in specs:
                 try:
                     out.value = self._fig_html(fn(), stretch=stretch)
@@ -2939,7 +2930,6 @@ class ModelSegmenterUI:
         if res is None or len(res) == 0:
             self.out_backelim_table.value = ""
             self._backelim_optimal = None
-            self._sync_backelim_apply_btn(None)
             return
         target_n = None
         try:
@@ -2964,12 +2954,6 @@ class ModelSegmenterUI:
                           subset=["★"])
         self.out_backelim_table.value = (
             f"<div style='max-height:380px;overflow:auto'>{sty.to_html()}</div>")
-        self._sync_backelim_apply_btn(target_n)
-
-    def _sync_backelim_apply_btn(self, target_n):
-        """Habilita o botão de retreino só quando há um passo ótimo válido."""
-        self.btn_backelim_apply.disabled = not (
-            target_n is not None and self._backelim_result is not None)
 
     def _apply_backward_optimal(self, res, out_widget=None):
         """Aplica o subconjunto ÓTIMO do backward (parcimônia · 1%): troca a seleção,
@@ -2995,30 +2979,6 @@ class ModelSegmenterUI:
                 f"retreinado{_rt}.<br><span style='color:var(--sub-ink)'>{feats}</span></div>")
         self._log(f"[escolha ótima] {info['target_n']} variáveis + retreino{_rt}.")
         return info
-
-    def _on_backelim_apply(self):
-        """Retreina o modelo com o subconjunto ÓTIMO (★) do último backward."""
-        res = getattr(self, "_backelim_result", None)
-        if res is None or len(res) == 0:
-            self.out_backelim_apply.value = ("<i>Rode o backward elimination primeiro "
-                                             "(botão acima).</i>")
-            return
-        feats0 = (self.seg.model_features or self.seg.selected_features()
-                  or self.seg.candidates)
-        if set(res.attrs.get("feats0", [])) != set(feats0):
-            self.out_backelim_apply.value = (
-                "<div style='color:var(--warn-tx)'>A seleção de variáveis mudou desde o "
-                "último backward. Rode o backward elimination de novo antes de retreinar.</div>")
-            self._sync_backelim_apply_btn(None)
-            return
-        self.btn_backelim_apply.disabled = True
-        try:
-            self._apply_backward_optimal(res, self.out_backelim_apply)
-        except Exception as e:
-            self.out_backelim_apply.value = f"<div style='color:var(--bad-tx)'>Erro: {e}</div>"
-            self._log(f"[backward] erro ao retreinar: {e}")
-        finally:
-            self.btn_backelim_apply.disabled = False
 
     # ------------------------------------------------------------------ Aba 4 handlers
     def _on_suggest_n(self, b):

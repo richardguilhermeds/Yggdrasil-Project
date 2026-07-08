@@ -1514,7 +1514,8 @@ class ModelSegmenter:
         return fig
 
     def variable_faixa_share_by_safra(self, feature, time_col=None, sample=None,
-                                      max_n_bins=6, min_bin_size=0.05, bins=None) -> pd.DataFrame:
+                                      max_n_bins=6, min_bin_size=0.05, bins=None,
+                                      all_samples=False) -> pd.DataFrame:
         """% de cada **faixa/categoria** da variável por safra (mês).
 
         Usa as MESMAS faixas da análise (:meth:`_resolve_bins`) — vale para
@@ -1524,11 +1525,13 @@ class ModelSegmenter:
 
         ``bins`` (opcional): lista de bins já resolvida a usar no lugar de
         :meth:`_resolve_bins` — útil para forçar as faixas do optimal binning
-        (ver :meth:`plot_variable_optbin_share_timeseries`)."""
+        (ver :meth:`plot_variable_optbin_share_timeseries`).
+        ``all_samples=True`` usa **toda a base** (todas as amostras/safras), não só
+        a amostra de referência."""
         time_col = time_col or self.date_col
         if time_col is None:
             raise ValueError("Informe time_col ou configure date_col.")
-        sub = self._frame(sample)
+        sub = self.df if all_samples else self._frame(sample)
         if time_col not in sub.columns:
             raise ValueError(f"Coluna de tempo '{time_col}' não existe no DataFrame.")
         if bins is None:
@@ -1600,14 +1603,18 @@ class ModelSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
-    def _optbin_numeric_bins(self, feature, sample=None, max_n_bins=5, min_bin_size=0.05):
+    def _optbin_numeric_bins(self, feature, sample=None, max_n_bins=5, min_bin_size=0.05,
+                             all_samples=False):
         """Faixas do **OPTIMAL BINNING** de uma variável NUMÉRICA — sempre roda o
         optbinning na amostra de ajuste, IGNORANDO eventuais bins manuais. Retorna
         a lista de bins numéricos (+ ``na`` se houver faltantes) ou ``[]`` quando
-        não dá para binar. (:meth:`_resolve_bins` respeita bins manuais; este não.)"""
+        não dá para binar. (:meth:`_resolve_bins` respeita bins manuais; este não.)
+
+        ``all_samples=True`` ajusta o binning em **toda a base** (todas as amostras),
+        não só na amostra de referência."""
         if OptimalBinning is None:
             raise ImportError("optbinning não instalado. Rode: pip install optbinning")
-        fit = self._frame(sample)
+        fit = self.df if all_samples else self._frame(sample)
         if self._detect_kind(feature, fit) != "num":
             return []
         x = fit[feature].to_numpy(dtype="float64")
@@ -1656,21 +1663,25 @@ class ModelSegmenter:
     def plot_variable_optbin_cumshare_timeseries(self, feature, time_col=None, sample=None,
                                                  max_n_bins=5, min_bin_size=0.05,
                                                  figsize=(11.5, 4.2), dpi=150,
-                                                 save_path=None, ax=None):
+                                                 save_path=None, ax=None, all_samples=False):
         """**Distribuição ACUMULADA das faixas do OPTIMAL BINNING ao longo do tempo**
         (só variáveis NUMÉRICAS): área EMPILHADA das %s de cada faixa por safra, da
         **primeira faixa (base) até a última (topo)**, somando 100%. Deixa ver como
         a composição da variável migra entre as faixas no tempo. Sempre usa o
-        optbinning (ignora bins manuais)."""
+        optbinning (ignora bins manuais).
+
+        ``all_samples=True`` (padrão na UI) calcula sobre **toda a base** — todas as
+        amostras e safras —, não só na DES/amostra de referência."""
         import matplotlib.colors as mcolors
-        if self._detect_kind(feature, self._frame(sample)) != "num":
+        if self._detect_kind(feature, self.df if all_samples else self._frame(sample)) != "num":
             fig, ax = _new_ax(figsize, dpi, ax)
             ax.text(0.5, 0.5, "apenas para variáveis numéricas", ha="center",
                     va="center", transform=ax.transAxes, color="#889"); ax.axis("off")
             fig.tight_layout(); return fig
-        bins = self._optbin_numeric_bins(feature, sample, max_n_bins, min_bin_size)
+        bins = self._optbin_numeric_bins(feature, sample, max_n_bins, min_bin_size,
+                                         all_samples=all_samples)
         sh = self.variable_faixa_share_by_safra(feature, time_col, sample, max_n_bins,
-                                                min_bin_size, bins=bins)
+                                                min_bin_size, bins=bins, all_samples=all_samples)
         fig, ax = _new_ax(figsize, dpi, ax)
         cats = [c for c in sh.columns if c != "safra"]
         if sh.empty or not cats:
