@@ -3152,9 +3152,15 @@ class ModelSegmenter:
             return fig
         x = result["n_variaveis"].to_numpy()
         palette = ["#15324a", "#b23a2a", "#157a52", "#9a6f12", "#6b46c1"]
+        # métricas limitadas a [0,1] (discriminação/classificação) → eixos FIXOS em 0–1,
+        # para leitura estável e comparável (evita a autoescala "pular" de trial a trial).
+        # As fora de [0,1] (regressão: rmse/mae/… · logloss) mantêm autoescala.
+        _UNIT = {"ks", "auc", "gini", "accuracy", "f1", "precision", "recall", "brier"}
         ln = ax.plot(x, result[metrics[0]].to_numpy(dtype="float64"), color=palette[0],
                      lw=2.0, marker="o", ms=4, label=metrics[0].upper())
         ax.set_ylabel(metrics[0].upper(), color=palette[0])
+        if metrics[0] in _UNIT:
+            ax.set_ylim(0.0, 1.0)
         ax.set_xlabel("nº de variáveis no modelo")
         ax.invert_xaxis()                    # cheio (esq.) → mínimo (dir.)
         ax.grid(axis="both", alpha=0.12)
@@ -3166,6 +3172,8 @@ class ModelSegmenter:
                                     color=palette[i % len(palette)], lw=1.8,
                                     marker="s", ms=3, label=mt.upper())
             ax2.set_ylabel(" · ".join(m.upper() for m in metrics[1:]))
+            if all(m in _UNIT for m in metrics[1:]):
+                ax2.set_ylim(0.0, 1.0)
         ax.legend(handles, [h.get_label() for h in handles], fontsize=8, loc="best",
                   framealpha=0.9)
         ax.set_title("Backward elimination — métricas × nº de variáveis", fontsize=11,
@@ -3666,6 +3674,52 @@ class ModelSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
+    def variables_profile_by_safra(self, time_col=None, features=None,
+                                    all_samples=True) -> pd.DataFrame:
+        """Perfil das variáveis do modelo **por safra (dbase)**: para cada safra e
+        cada variável, ``% missing``, ``média`` (numéricas) e ``moda`` (valor mais
+        frequente). Tabela LONGA — uma linha por (safra, variável), ordenada por
+        safra e pela ordem das variáveis no modelo —, para acompanhar a estabilidade
+        das variáveis ao longo do tempo numa única tabela. ``features`` default:
+        ``model_features`` (senão selecionadas/candidatas); ``all_samples=True`` usa
+        toda a população (todas as amostras/safras)."""
+        time_col = time_col or self.date_col
+        if time_col is None:
+            raise ValueError("Informe time_col ou configure date_col.")
+        feats = (list(features) if features is not None
+                 else list(self.model_features or self.selected_features() or self.candidates))
+        feats = [f for f in feats if f in self.df.columns]
+        if not feats:
+            raise ValueError("Nenhuma variável do modelo disponível (treine ou selecione).")
+        sub = self.df if all_samples else self._frame(None)
+        if time_col not in sub.columns:
+            raise ValueError(f"Coluna de tempo '{time_col}' não existe no DataFrame.")
+        safra = pd.to_datetime(sub[time_col], errors="coerce").dt.to_period("M").astype(str)
+        rows = []
+        for f in feats:
+            col = sub[f]
+            is_num = self._detect_kind(f, sub) == "num"
+            for per, s in col.groupby(safra):
+                if per == "NaT":
+                    continue
+                n = int(len(s)); m = s.dropna()
+                moda = None
+                if not m.empty:
+                    moda = m.value_counts().index[0]
+                    if is_num:
+                        moda = round(float(moda), 4)
+                rows.append({
+                    "safra": per, "variável": self.label(f),
+                    "% missing": round(100 * (n - len(m)) / n, 1) if n else float("nan"),
+                    "média": (round(float(m.mean()), 4) if (is_num and not m.empty)
+                              else float("nan")),
+                    "moda": moda,
+                })
+        out = pd.DataFrame(rows, columns=["safra", "variável", "% missing", "média", "moda"])
+        ordem = {self.label(f): i for i, f in enumerate(feats)}
+        return (out.assign(_o=out["variável"].map(ordem))
+                   .sort_values(["safra", "_o"]).drop(columns="_o").reset_index(drop=True))
+
     # ---- SHAP ----
     def _shap_inputs(self, sample=None, sample_size=2000):
         """(estimador, X_transformado_df, nomes) — para SHAP. Em pipelines,
@@ -4152,7 +4206,7 @@ class ModelSegmenter:
         fig, ax = _new_ax(figsize, dpi, ax)
         x = np.arange(len(labels)); w = 0.8 / max(len(samples), 1)
         palette = ["steelblue", "crimson"]       # base: referência × comparação
-        stab_color = "#7e57c2"                    # 3ª cor (roxo) p/ a safra de estabilidade
+        stab_color = "#2a9d8f"                    # 3ª cor (teal) p/ a safra de estabilidade
         base_i = 0
         for k, a in enumerate(samples):
             am = (pd.Series(True, index=self.df.index) if self.sample_col is None

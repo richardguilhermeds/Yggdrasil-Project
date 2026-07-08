@@ -1465,20 +1465,30 @@ class ModelSegmenterUI:
                    layout=W.Layout(justify_content="space-between")),
         ]); card_adv_disc.add_class("mseg-card")
 
+        # seletor de quais métricas plotar ao longo das safras (além de DES: a amostra
+        # é escolhida em dd_sample_adv; "(referência)" cobre toda a base)
+        if self.task_type == "classification":
+            _msafra_opts, _msafra_def = ["ks", "auc", "gini", "taxa_evento"], ("ks", "auc")
+        else:
+            _msafra_opts = ["rmse", "mae", "r2", "previsto_medio", "realizado_medio"]
+            _msafra_def = ("rmse", "mae")
+        self.sm_msafra_metrics = W.SelectMultiple(
+            options=_msafra_opts, value=_msafra_def, rows=4, description="Métricas:",
+            style={"description_width": "initial"}, layout=W.Layout(width="auto", min_width="150px"))
         self.btn_msafra = W.Button(description="Calcular", button_style="primary",
                                    icon="calendar",
-                                   tooltip="Métricas do modelo por safra (AUC/KS/Gini na "
-                                           "classificação · MAE/RMSE/R² na regressão). "
-                                           "Requer coluna de data (date_col).")
+                                   tooltip="Métricas do modelo por safra (escolha quais no "
+                                           "seletor ao lado). Requer coluna de data (date_col).")
         self.out_adv_msafra_tab = W.HTML()
         self.out_adv_msafra_fig = W.HTML()
         self.btn_msafra.on_click(self._on_adv_msafra)
         card_adv_safra = W.VBox([
             W.HTML("<div class='mseg-h'>Discriminação por safra</div>"),
             W.HTML("<div class='mseg-legend'>Evolução das métricas do modelo mês a mês — "
-                   "queda persistente indica degradação do poder discriminante. Requer "
-                   "coluna de data (<code>date_col</code>).</div>"),
-            W.HBox([self.btn_msafra]),
+                   "queda persistente indica degradação do poder discriminante. Escolha as "
+                   "métricas no seletor e a amostra em <b>Amostra:</b> (\"(referência)\" = toda "
+                   "a base). Requer coluna de data (<code>date_col</code>).</div>"),
+            W.HBox([self.sm_msafra_metrics, self.btn_msafra]),
             self.out_adv_msafra_tab,
             self.out_adv_msafra_fig,
         ]); card_adv_safra.add_class("mseg-card")
@@ -1500,7 +1510,27 @@ class ModelSegmenterUI:
             self.out_adv_backtest,
         ]); card_adv_bt.add_class("mseg-card")
 
-        tab_adv = W.VBox([card_adv_disc, card_adv_safra, card_adv_bt],
+        # perfil (estabilidade) de TODAS as variáveis do modelo por safra (dbase)
+        self.btn_varprofile = W.Button(description="Perfil das variáveis por safra",
+                                       button_style="primary", icon="table",
+                                       layout=W.Layout(width="auto", min_width="240px"),
+                                       tooltip="Tabela por safra (dbase) com % de missings, "
+                                               "média (numéricas) e moda de CADA variável do "
+                                               "modelo — estabilidade das variáveis no tempo. "
+                                               "Requer coluna de data.")
+        self.out_adv_varprofile = W.HTML()
+        self.btn_varprofile.on_click(self._on_adv_varprofile)
+        card_adv_varprofile = W.VBox([
+            W.HTML("<div class='mseg-h'>Perfil das variáveis do modelo por safra</div>"),
+            W.HTML("<div class='mseg-legend'>Para <b>todas as variáveis do modelo</b>, por safra "
+                   "(<i>dbase</i>): <b>% de missings</b>, <b>média</b> (numéricas) e <b>moda</b> "
+                   "(valor mais frequente). Uma única tabela, agrupada por safra — acompanha a "
+                   "estabilidade das variáveis ao longo do tempo. Requer coluna de data.</div>"),
+            W.HBox([self.btn_varprofile]),
+            self.out_adv_varprofile,
+        ]); card_adv_varprofile.add_class("mseg-card")
+
+        tab_adv = W.VBox([card_adv_disc, card_adv_safra, card_adv_varprofile, card_adv_bt],
                          layout=W.Layout(padding="2px"))
 
         # ---------- Aba: Importância (Backward Elimination) ----------
@@ -3508,7 +3538,7 @@ class ModelSegmenterUI:
         """Zera as saídas da aba Avançado — chamado ao re-treinar para não deixar
         gráficos/tabelas do modelo ANTIGO na tela."""
         for w in (self.out_adv_cap, self.out_adv_lift, self.out_adv_msafra_tab,
-                  self.out_adv_msafra_fig, self.out_adv_backtest):
+                  self.out_adv_msafra_fig, self.out_adv_backtest, self.out_adv_varprofile):
             w.value = ""
 
     def _on_adv_cap(self, b):
@@ -3554,8 +3584,8 @@ class ModelSegmenterUI:
                 ms = self.seg.metrics_by_safra(sample=self._adv_sample())
                 self.out_adv_msafra_tab.value = self._df_html(ms.round(4),
                                                               max_height="300px", center=True)
-                mets = (("ks", "auc") if self.task_type == "classification"
-                        else ("mae", "rmse"))
+                mets = tuple(self.sm_msafra_metrics.value) or (
+                    ("ks", "auc") if self.task_type == "classification" else ("rmse", "mae"))
                 self.out_adv_msafra_fig.value = self._fig_html(
                     self.seg.plot_metrics_by_safra(sample=self._adv_sample(), metrics=mets),
                     stretch=True)
@@ -3582,6 +3612,27 @@ class ModelSegmenterUI:
             except Exception as e:
                 self.out_adv_backtest.value = f"<i>{e}</i>"
                 self._log(f"[avançado] erro no backtest gráfico: {e}")
+
+    def _on_adv_varprofile(self, b):
+        if not (self.date_col or "").strip():
+            self.out_adv_varprofile.value = ("<div class='mseg-legend'>Informe a coluna de "
+                                             "data (<code>date_col</code>) para o perfil por "
+                                             "safra.</div>"); return
+        feats = (self.seg.model_features or self.seg.selected_features()
+                 or self.seg.candidates)
+        if not feats:
+            self.out_adv_varprofile.value = ("<i>Nenhuma variável no modelo — treine ou "
+                                             "selecione variáveis primeiro.</i>"); return
+        with self._busy(self.btn_varprofile,
+                        msg="calculando o perfil das variáveis por safra…"):
+            try:
+                tab = self.seg.variables_profile_by_safra()
+                self.out_adv_varprofile.value = self._df_html(tab, max_height="420px",
+                                                              center=True)
+                self._log(f"[avançado] perfil das variáveis por safra ({len(feats)} variáveis).")
+            except Exception as e:
+                self.out_adv_varprofile.value = f"<i>{e}</i>"
+                self._log(f"[avançado] erro no perfil das variáveis: {e}")
 
     # ------------------------------------------------------------------ display
     def _ipython_display_(self):
