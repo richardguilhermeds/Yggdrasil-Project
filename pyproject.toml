@@ -1,5 +1,12 @@
 [build-system]
-requires = ["setuptools>=77.0.0"]
+# Teto em <77: a partir do setuptools 77 (PEP 639) declarar a licença via
+# `license = "MIT"` (SPDX) + `license-files` passa a emitir `Metadata-Version: 2.4`
+# (License-Expression). pip/packaging antigos — comuns em runtimes Databricks e
+# imagens legadas — recusam a 2.4 ("unsupported metadata version"), quebrando o
+# `pip install git+…`. Com setuptools 61–76 a metadata fica em 2.1/2.2, instalável
+# tanto via Git quanto do PyPI. Reavaliar quando o piso de ambientes suportados já
+# trouxer pip recente (>=24.2).
+requires = ["setuptools>=61.0,<77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -11,8 +18,11 @@ name = "yggdrasil-project"
 version = "0.0.1"
 description = "Ferramentas e esteiras governadas de Machine Learning para ciência de dados e risco de crédito (PD/LGD/EAD)"
 readme = "README.md"
-license = "MIT"
-license-files = ["LICENSE"]
+# Formato clássico (Metadata 2.1/2.2) — ver o teto de setuptools em [build-system].
+# O formato SPDX (`license = "MIT"` + `license-files`) força Metadata 2.4 e quebra a
+# instalação em ambientes com pip antigo. O LICENSE continua embarcado no sdist/wheel
+# pelo glob default de `license_files` do setuptools.
+license = { text = "MIT" }
 authors = [{ name = "Richard Guilherme", email = "richard.guilherme.dev@gmail.com" }]
 maintainers = [{ name = "Richard Guilherme", email = "richard.guilherme.dev@gmail.com" }]
 keywords = [
@@ -27,6 +37,7 @@ keywords = [
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Financial and Insurance Industry",
     "Programming Language :: Python :: 3",
