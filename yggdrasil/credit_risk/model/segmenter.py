@@ -1603,18 +1603,15 @@ class ModelSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
-    def _optbin_numeric_bins(self, feature, sample=None, max_n_bins=5, min_bin_size=0.05,
-                             all_samples=False):
+    def _optbin_numeric_bins(self, feature, sample=None, max_n_bins=5, min_bin_size=0.05):
         """Faixas do **OPTIMAL BINNING** de uma variável NUMÉRICA — sempre roda o
-        optbinning na amostra de ajuste, IGNORANDO eventuais bins manuais. Retorna
-        a lista de bins numéricos (+ ``na`` se houver faltantes) ou ``[]`` quando
-        não dá para binar. (:meth:`_resolve_bins` respeita bins manuais; este não.)
-
-        ``all_samples=True`` ajusta o binning em **toda a base** (todas as amostras),
-        não só na amostra de referência."""
+        optbinning na amostra ``sample`` (default: referência/DES), IGNORANDO eventuais
+        bins manuais. Retorna a lista de bins numéricos (+ ``na`` se houver faltantes)
+        ou ``[]`` quando não dá para binar. (:meth:`_resolve_bins` respeita bins
+        manuais; este não.)"""
         if OptimalBinning is None:
             raise ImportError("optbinning não instalado. Rode: pip install optbinning")
-        fit = self.df if all_samples else self._frame(sample)
+        fit = self._frame(sample)
         if self._detect_kind(feature, fit) != "num":
             return []
         x = fit[feature].to_numpy(dtype="float64")
