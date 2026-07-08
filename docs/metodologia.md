@@ -503,7 +503,7 @@ $$\text{leakage} \;\lor\; \text{quase\_constante} \;\lor\; \text{IV} < 0{,}02 \;
 
 **Armadilhas.** O veredito é um **filtro de triagem**, não substitui julgamento de domínio: uma feature `revisar` por IV baixo pode ser valiosa em interação (capturada só pela permutação/SHAP), e uma `manter` ainda pode ser redundante (cruze com §4.9). *Leakage* e PSI dependem da correta marcação de DES/OOT e dos *missing codes* (`apply_missing_codes`); contrato de amostras incorreto contamina todo o veredito.
 
-Arquivos de referência: `src/yggdrasil/interpretability/shap_explain.py`; `src/yggdrasil/eda/{profile,binning,bivariate,importance,stability,correlation,report}.py`.
+Arquivos de referência: `yggdrasil/interpretability/shap_explain.py`; `yggdrasil/eda/{profile,binning,bivariate,importance,stability,correlation,report}.py`.
 
 ---
 

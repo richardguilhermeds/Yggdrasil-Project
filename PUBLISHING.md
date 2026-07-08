@@ -5,7 +5,7 @@ Guia de release do pacote. Nome de **distribuição**: `yggdrasil-project`
 continua `yggdrasil` → `from yggdrasil import MLPipeline`.
 
 > Rode tudo a partir da raiz do projeto (onde está o `pyproject.toml`), no seu
-> ambiente local — o build precisa acessar `src/yggdrasil/`.
+> ambiente local — o build precisa acessar `yggdrasil/` (na raiz do repo).
 
 ---
 
@@ -109,7 +109,7 @@ O PyPI **não** deixa reenviar uma versão já publicada. Para cada release:
 
 1. Suba o `version` em dois lugares (mantenha iguais):
    - `pyproject.toml` → `version = "0.0.2"`
-   - `src/yggdrasil/__init__.py` → `__version__ = "0.0.2"`
+   - `yggdrasil/__init__.py` → `__version__ = "0.0.2"`
 2. Repita os passos 1 a 3.
 
 > Dica: dá para eliminar a duplicação usando

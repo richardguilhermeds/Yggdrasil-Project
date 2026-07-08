@@ -118,10 +118,18 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+# Layout flat: o pacote `yggdrasil` vive na RAIZ do repo (não em src/), para que
+# `import yggdrasil` funcione sem instalar — direto no Databricks Repos (que põe a
+# raiz do repo no sys.path) e rodando da raiz localmente. O empacotamento continua
+# igual: só os pacotes `yggdrasil*` entram no wheel/sdist.
+where = ["."]
 include = ["yggdrasil*"]
+exclude = ["tests*", "notebooks*", "docs*"]
 
 [tool.pytest.ini_options]
+# Garante `import yggdrasil` nos testes sem `pip install` nem PYTHONPATH: adiciona a
+# raiz do repo (onde vive o pacote) ao sys.path na coleta.
+pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-q"
 

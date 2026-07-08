@@ -20,7 +20,7 @@ O foco aplicado é risco de crédito (PD, LGD, EAD) no estilo regulatório brasi
 
 ## 📦 O que o pacote `yggdrasil` contempla hoje
 
-O código de produção vive em `src/yggdrasil/` (layout `src/`). São **sete módulos isolados** que não interferem uns nos outros: as esteiras de ML, EDA e seleção compartilham o contrato de dados `feat_*`/`dt_ref`/`amostra`/`target`; os de risco de crédito (segmentadores, capital e econométricos) têm contratos próprios.
+O código de produção vive em `yggdrasil/`, na raiz do repositório (layout *flat*): assim `import yggdrasil` funciona **sem `pip install`** — tanto no clone local (rodando da raiz) quanto no Databricks Repos, que adiciona a raiz do repo ao `sys.path`. São **sete módulos isolados** que não interferem uns nos outros: as esteiras de ML, EDA e seleção compartilham o contrato de dados `feat_*`/`dt_ref`/`amostra`/`target`; os de risco de crédito (segmentadores, capital e econométricos) têm contratos próprios.
 
 ### 1. 🚂 Esteira de ML governada (`yggdrasil`)
 Avaliação completa de um modelo já treinado, orquestrada por MLflow. A entrada é uma tabela com features `feat_*`, coluna de data (`dt_ref`), coluna de amostra (`amostra`) e a variável resposta (`target`), tudo configurável via `ColumnConfig`. As amostras `DES` e `OOT` recebem análise completa; `SIMUL` e `BACKTEST` são *scoring-only* (predição mais grupo homogêneo).
@@ -127,7 +127,7 @@ r.summary(); r.projection.mean_frame()             # ranking e projeção por ce
 
 | Pasta | Conteúdo |
 |---|---|
-| `src/yggdrasil/` | Código-fonte principal (os sete módulos acima). |
+| `yggdrasil/` | Código-fonte principal (os sete módulos acima), na raiz do repo (layout *flat*). |
 | `tests/` | Testes automatizados (`pytest`): suíte parametrizada (classificação/regressão), incluindo UI, Spark, boosting, Optuna e econométricos (`statsmodels`/`arch`) — estes *gated* pela dependência. |
 | `notebooks/tutoriais/` | Tutoriais passo a passo (índice abaixo). A lógica de produção não vive aqui. |
 | `docs/` | Metodologia (o *porquê* dos métodos) e documentação dos segmentadores. |
