@@ -3132,12 +3132,16 @@ class ModelSegmenter:
                 "ratings_reprojected": reprojected}
 
     def plot_backward_elimination(self, result, metrics=None, figsize=(9.4, 4.6),
-                                  dpi=150, save_path=None, ax=None):
+                                  dpi=150, save_path=None, ax=None, y_range=None):
         """Curva das **métricas vs nº de variáveis** da :meth:`backward_elimination`
         (o modelo encolhendo à medida que a variável menos importante sai). ``result``
         é o DataFrame devolvido por ela; ``metrics`` escolhe quais métricas plotar
         (default: KS+AUC na classificação, RMSE+MAE na regressão). A 1ª métrica vai
-        no eixo esquerdo e as demais no direito (escalas diferentes)."""
+        no eixo esquerdo e as demais no direito (escalas diferentes).
+
+        ``y_range=(min, max)`` fixa AMBOS os eixos y nesse intervalo — útil em
+        regressão, onde as métricas não estão em 0–1. Sem ele, métricas de
+        discriminação (0–1) usam eixos fixos em 0–1 e as demais, autoescala."""
         if metrics is None:
             metrics = (["ks", "auc"] if self.task_type == "classification"
                        else ["rmse", "mae"])
@@ -3156,10 +3160,15 @@ class ModelSegmenter:
         # para leitura estável e comparável (evita a autoescala "pular" de trial a trial).
         # As fora de [0,1] (regressão: rmse/mae/… · logloss) mantêm autoescala.
         _UNIT = {"ks", "auc", "gini", "accuracy", "f1", "precision", "recall", "brier"}
+        # range manual (y_range) tem prioridade sobre o 0–1 automático das métricas 0–1
+        _yr = (tuple(y_range) if (y_range is not None and None not in y_range
+                                  and float(y_range[1]) > float(y_range[0])) else None)
         ln = ax.plot(x, result[metrics[0]].to_numpy(dtype="float64"), color=palette[0],
                      lw=2.0, marker="o", ms=4, label=metrics[0].upper())
         ax.set_ylabel(metrics[0].upper(), color=palette[0])
-        if metrics[0] in _UNIT:
+        if _yr is not None:
+            ax.set_ylim(*_yr)
+        elif metrics[0] in _UNIT:
             ax.set_ylim(0.0, 1.0)
         ax.set_xlabel("nº de variáveis no modelo")
         ax.invert_xaxis()                    # cheio (esq.) → mínimo (dir.)
@@ -3172,7 +3181,9 @@ class ModelSegmenter:
                                     color=palette[i % len(palette)], lw=1.8,
                                     marker="s", ms=3, label=mt.upper())
             ax2.set_ylabel(" · ".join(m.upper() for m in metrics[1:]))
-            if all(m in _UNIT for m in metrics[1:]):
+            if _yr is not None:
+                ax2.set_ylim(*_yr)
+            elif all(m in _UNIT for m in metrics[1:]):
                 ax2.set_ylim(0.0, 1.0)
         ax.legend(handles, [h.get_label() for h in handles], fontsize=8, loc="best",
                   framealpha=0.9)

@@ -1589,6 +1589,22 @@ class ModelSegmenterUI:
         # retreino com o nº escolhido é destrutivo (troca seleção, retreina, ratings): 2 cliques
         self.btn_backelim_apply_n.on_click(lambda b: self._confirm_twice(
             self.btn_backelim_apply_n, lambda: self._on_backelim_apply_n()))
+        # caixa p/ FIXAR o range do eixo y do gráfico. Habilitada por padrão; só entra no
+        # layout em REGRESSÃO (na classificação o eixo já é fixado em 0–1 automaticamente).
+        self.cb_backelim_yfix = W.Checkbox(
+            value=True, description="Fixar eixo y", indent=False,
+            layout=W.Layout(width="auto"),
+            tooltip="Fixa o intervalo do eixo y do gráfico. Recomendado em regressão "
+                    "(RMSE/MAE não estão em 0–1). Desmarque para autoescala.")
+        self.ft_backelim_ymin = W.FloatText(value=0.0, description="mín:",
+            style={"description_width": "initial"}, layout=W.Layout(width="130px"))
+        self.ft_backelim_ymax = W.FloatText(value=1.0, description="máx:",
+            style={"description_width": "initial"}, layout=W.Layout(width="130px"))
+        for _w in (self.cb_backelim_yfix, self.ft_backelim_ymin, self.ft_backelim_ymax):
+            _w.observe(lambda c: self._render_backelim_plot(), names="value")
+        _yfix_row = ([W.HBox([self.cb_backelim_yfix, self.ft_backelim_ymin,
+                              self.ft_backelim_ymax])]
+                     if self.task_type == "regression" else [])
 
         card_backelim = W.VBox([
             W.HTML("<div class='mseg-h'>Backward elimination — impacto de remover variáveis</div>"),
@@ -1599,6 +1615,7 @@ class ModelSegmenterUI:
                    "classificação (KS, ROC-AUC, Gini, …) · regressão (RMSE, MAE, MAPE, …).</div>"),
             W.HBox([self.dd_backelim_sample, self.sl_backelim_min]),
             W.HBox([self.sm_backelim_metrics, self.btn_backelim]),
+            *_yfix_row,
             self.pb_backelim,
             self.out_backelim_status,
         ]); card_backelim.add_class("mseg-card")
@@ -2973,9 +2990,13 @@ class ModelSegmenterUI:
         if res is None or len(res) == 0:
             return
         metrics = list(self.sm_backelim_metrics.value) or None
+        y_range = None
+        if self.task_type == "regression" and self.cb_backelim_yfix.value:
+            y_range = (self.ft_backelim_ymin.value, self.ft_backelim_ymax.value)
         try:
             self.out_backelim_plot.value = self._fig_html(
-                self.seg.plot_backward_elimination(res, metrics=metrics, figsize=(9.6, 4.6)),
+                self.seg.plot_backward_elimination(res, metrics=metrics, y_range=y_range,
+                                                   figsize=(9.6, 4.6)),
                 stretch=True)
         except Exception as e:
             self.out_backelim_plot.value = f"<i>{e}</i>"
