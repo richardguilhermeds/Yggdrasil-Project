@@ -1670,16 +1670,22 @@ class ModelSegmenter:
         a composição da variável migra entre as faixas no tempo. Sempre usa o
         optbinning (ignora bins manuais).
 
-        ``all_samples=True`` (padrão na UI) calcula sobre **toda a base** — todas as
-        amostras e safras —, não só na DES/amostra de referência."""
+        ``all_samples=True`` (padrão na UI) = análise de **estabilidade**: as faixas do
+        optbin são **fixadas na DES** (referência — yardstick estável, como no PSI) e a
+        **distribuição** é observada sobre **toda a população** (todas as amostras/safras).
+        Com ``all_samples=False``, faixas e distribuição usam a amostra ``sample``."""
         import matplotlib.colors as mcolors
         if self._detect_kind(feature, self.df if all_samples else self._frame(sample)) != "num":
             fig, ax = _new_ax(figsize, dpi, ax)
             ax.text(0.5, 0.5, "apenas para variáveis numéricas", ha="center",
                     va="center", transform=ax.transAxes, color="#889"); ax.axis("off")
             fig.tight_layout(); return fig
-        bins = self._optbin_numeric_bins(feature, sample, max_n_bins, min_bin_size,
-                                         all_samples=all_samples)
+        # Estabilidade: as faixas do optbin são um YARDSTICK. Quando o gráfico cobre
+        # toda a população (all_samples), elas são FIXADAS na referência (DES) e só a
+        # DISTRIBUIÇÃO (abaixo) varre todas as safras/amostras; fora disso, faixas e
+        # distribuição saem da mesma amostra.
+        bins = self._optbin_numeric_bins(
+            feature, self.ref_sample if all_samples else sample, max_n_bins, min_bin_size)
         sh = self.variable_faixa_share_by_safra(feature, time_col, sample, max_n_bins,
                                                 min_bin_size, bins=bins, all_samples=all_samples)
         fig, ax = _new_ax(figsize, dpi, ax)
