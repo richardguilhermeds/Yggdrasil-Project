@@ -2992,12 +2992,18 @@ class ModelSegmenter:
             thr = tol * abs(best)
             elig = ok & ((vals >= best - thr) if higher_better else (vals <= best + thr))
             target_n = int(ns[elig].min())         # menor nº de variáveis na tolerância
-        # reconstrói o subconjunto do passo target_n: as features iniciais menos
-        # todas as 'removida' dos passos com n_variaveis > target_n (mesma ordem do
-        # backward). A coluna 'removida' é a variável retirada NO passo seguinte.
-        # reconstrói a partir do conjunto inicial ANCORADO no resultado (identidade),
-        # não do estado atual — evita aplicar um subconjunto de um backward de OUTRA
-        # seleção. Fallback ao estado atual só p/ resultados legados sem 'feats0'.
+        # subconjunto do passo target_n — reconstruído por IDENTIDADE (ancorado em
+        # attrs['feats0'], não no estado atual): ver _backward_subset.
+        _, subset, removed = self._backward_subset(result, target_n)
+        return {"metric": metric, "criterion": criterion, "target_n": target_n,
+                "best": best, "features": subset, "removed": sorted(removed)}
+
+    def _backward_subset(self, result, target_n):
+        """Reconstrói ``(feats0, subset, removed)`` do passo com ``target_n`` variáveis
+        de uma :meth:`backward_elimination`, ancorado em ``attrs['feats0']`` (identidade,
+        não no estado atual). Base comum do passo ÓTIMO (:meth:`backward_optimal_step`)
+        e da escolha MANUAL (:meth:`backward_subset_at`)."""
+        ns = result["n_variaveis"].astype(int)
         feats0 = list(result.attrs.get("feats0")
                       or (self.model_features or self.selected_features() or self.candidates))
         n_full = int(ns.max())
@@ -3006,19 +3012,50 @@ class ModelSegmenter:
                 f"A seleção/modelo vigente ({len(feats0)} variáveis) diverge do topo "
                 f"do backward ({n_full}). Rode o backward elimination de novo antes "
                 f"de aplicar (a seleção mudou desde então).")
-        removed = set(result.loc[ns > target_n, "removida"]) - {"—"}
+        removed = set(result.loc[ns > int(target_n), "removida"]) - {"—"}
         subset = [f for f in feats0 if f not in removed]
-        if len(subset) != target_n:
+        if len(subset) != int(target_n):
             raise RuntimeError(
                 f"Reconstrução inconsistente do subconjunto: esperado {target_n} "
                 f"variáveis, obtido {len(subset)}.")
-        return {"metric": metric, "criterion": criterion, "target_n": target_n,
+        return feats0, subset, removed
+
+    def backward_subset_at(self, result, n_variaveis, metric=None) -> dict:
+        """Subconjunto de variáveis do passo com ``n_variaveis`` de uma
+        :meth:`backward_elimination` — **escolha MANUAL** do nº de variáveis (em vez do
+        ótimo). Reconstrói o subconjunto ancorado em ``attrs['feats0']`` (identidade),
+        **sem tocar no modelo**. Devolve o mesmo formato de
+        :meth:`backward_optimal_step` (``criterion='manual'``; ``best`` = a métrica no
+        passo escolhido) — usado pela UI e por :meth:`apply_backward_selection`
+        (via ``n_variaveis=...``)."""
+        cols = list(getattr(result, "columns", []))
+        if result is None or len(result) == 0 or "n_variaveis" not in cols:
+            raise ValueError("Resultado de backward_elimination vazio ou inválido.")
+        ns = result["n_variaveis"].astype(int)
+        target_n = int(n_variaveis)
+        if target_n not in set(ns.tolist()):
+            raise ValueError(f"n_variaveis={target_n} não existe no backward "
+                             f"(disponíveis: {sorted(set(ns.tolist()))}).")
+        if metric is None:
+            prefs = (["ks", "auc", "gini"] if self.task_type == "classification"
+                     else ["rmse", "mae", "smape"])
+            metric = next((m for m in prefs if m in cols), None)
+        best = None
+        if metric is not None and metric in cols:
+            v = pd.to_numeric(result.loc[ns == target_n, metric], errors="coerce")
+            if len(v) and pd.notna(v.iloc[0]):
+                best = float(v.iloc[0])
+        _, subset, removed = self._backward_subset(result, target_n)
+        return {"metric": metric, "criterion": "manual", "target_n": target_n,
                 "best": best, "features": subset, "removed": sorted(removed)}
 
     def apply_backward_selection(self, result, criterion="parsimony", tol=0.01,
-                                 metric=None, refit=True, rebuild_ratings=False):
-        """Aplica à seleção vigente (``included``) o subconjunto de variáveis do
-        passo **ótimo** de uma :meth:`backward_elimination` já executada.
+                                 metric=None, refit=True, rebuild_ratings=False,
+                                 n_variaveis=None):
+        """Aplica à seleção vigente (``included``) o subconjunto de variáveis de um
+        passo de uma :meth:`backward_elimination` já executada: o passo **ótimo**
+        (default) ou, se ``n_variaveis`` for dado, o passo com esse **nº de variáveis**
+        (escolha MANUAL do usuário — ignora ``criterion``/``tol``/``metric``).
 
         ``result`` é o DataFrame devolvido por ela. ``criterion``:
 
@@ -3034,12 +3071,16 @@ class ModelSegmenter:
         os ratings com a config atual — **réguas manuais são preservadas** (não são
         regeradas silenciosamente). Devolve um dict-resumo (não ``self``). A escolha
         do passo ótimo é delegada a :meth:`backward_optimal_step`."""
-        pick = self.backward_optimal_step(result, criterion=criterion, tol=tol, metric=metric)
+        if n_variaveis is not None:                 # escolha MANUAL do nº de variáveis
+            pick = self.backward_subset_at(result, n_variaveis, metric=metric)
+        else:                                       # passo ÓTIMO (parcimônia/best)
+            pick = self.backward_optimal_step(result, criterion=criterion, tol=tol, metric=metric)
         target_n = pick["target_n"]
         subset = pick["features"]
         removed = set(pick["removed"])
         metric = pick["metric"]
         best = pick["best"]
+        criterion = pick["criterion"]
         self.clear_features()
         for f in subset:
             if f in self.candidates:

@@ -1537,11 +1537,28 @@ class ModelSegmenterUI:
         self.out_backelim_table = W.HTML()
         self.out_backelim_plot = W.HTML()
         self.out_backelim_apply = W.HTML()
+        # escolha MANUAL do nº de variáveis (qualquer ponto da curva) — além do ótimo (★)
+        self.dd_backelim_n = W.Dropdown(
+            description="Nº de variáveis:", options=[], disabled=True,
+            style={"description_width": "initial"},
+            layout=W.Layout(width="auto", min_width="250px"),
+            tooltip="Escolhe um ponto QUALQUER da curva do backward (nº de variáveis) — não "
+                    "só o ótimo (★). O subconjunto são as variáveis que sobrevivem àquele "
+                    "passo (as menos importantes já foram removidas).")
+        self.btn_backelim_apply_n = W.Button(
+            description="Retreinar com o Nº escolhido", icon="check", disabled=True,
+            layout=W.Layout(width="auto", min_width="230px"),
+            tooltip="Aplica como seleção do modelo o subconjunto do nº de variáveis escolhido "
+                    "ao lado, retreina e regenera os ratings. Substitui a seleção vigente "
+                    "(confirma em 2 cliques).")
         self._backelim_optimal = None      # dict do passo ótimo (backward_optimal_step)
         self._backelim_thread = None
         self._backelim_result = None
         self.btn_backelim.on_click(self._on_backelim)
         self.sm_backelim_metrics.observe(lambda c: self._render_backelim_plot(), names="value")
+        # retreino com o nº escolhido é destrutivo (troca seleção, retreina, ratings): 2 cliques
+        self.btn_backelim_apply_n.on_click(lambda b: self._confirm_twice(
+            self.btn_backelim_apply_n, lambda: self._on_backelim_apply_n()))
 
         card_backelim = W.VBox([
             W.HTML("<div class='mseg-h'>Backward elimination — impacto de remover variáveis</div>"),
@@ -1563,7 +1580,11 @@ class ModelSegmenterUI:
                            "métricas <span style='font-weight:400;color:var(--sub-ink)'>"
                            "(★ = nº de variáveis ótimo · parcimônia)</span></div>"),
                     self.out_backelim_table,
-                    W.HBox([self.btn_feat_optimal], layout=W.Layout(margin="8px 0 0 0")),
+                    W.HBox([self.btn_feat_optimal,
+                            W.HTML("<span style='padding:0 8px;color:var(--sub-ink)'>ou</span>"),
+                            self.dd_backelim_n, self.btn_backelim_apply_n],
+                           layout=W.Layout(margin="8px 0 0 0", flex_flow="row wrap",
+                                           align_items="center")),
                     self.out_backelim_apply]),
         ], layout=W.Layout(padding="2px"))
 
@@ -2930,6 +2951,9 @@ class ModelSegmenterUI:
         if res is None or len(res) == 0:
             self.out_backelim_table.value = ""
             self._backelim_optimal = None
+            self.dd_backelim_n.options = []
+            self.dd_backelim_n.disabled = True
+            self.btn_backelim_apply_n.disabled = True
             return
         target_n = None
         try:
@@ -2954,13 +2978,45 @@ class ModelSegmenterUI:
                           subset=["★"])
         self.out_backelim_table.value = (
             f"<div style='max-height:380px;overflow:auto'>{sty.to_html()}</div>")
+        self._sync_backelim_n_options(res, target_n)
 
-    def _apply_backward_optimal(self, res, out_widget=None):
-        """Aplica o subconjunto ÓTIMO do backward (parcimônia · 1%): troca a seleção,
-        retreina o modelo, regenera/reprojeta os ratings e atualiza toda a UI. Escreve
-        o resumo em ``out_widget`` (se dado) e loga. Devolve o dict-info do apply."""
+    def _sync_backelim_n_options(self, res, target_n):
+        """Popula o seletor manual de nº de variáveis com os passos do backward
+        (rótulo com a métrica de cada passo; ★ marca o ótimo) e habilita o retreino.
+        O default do seletor é o próprio nº ótimo."""
+        try:
+            _m = (self._backelim_optimal or {}).get("metric")
+            if not _m:
+                _prefs = (["ks", "auc", "gini"] if self.task_type == "classification"
+                          else ["rmse", "mae", "smape"])
+                _m = next((c for c in _prefs if c in res.columns), None)
+            opts = []
+            for _, r in res.iterrows():
+                k = int(r["n_variaveis"])
+                star = " ★" if k == target_n else ""
+                if _m and _m in res.columns and pd.notna(r.get(_m)):
+                    opts.append((f"{k} variáveis · {_m.upper()}={float(r[_m]):.4f}{star}", k))
+                else:
+                    opts.append((f"{k} variáveis{star}", k))
+            self.dd_backelim_n.options = opts
+            valid = [k for _, k in opts]
+            self.dd_backelim_n.value = (target_n if target_n in valid
+                                        else (valid[0] if valid else None))
+            self.dd_backelim_n.disabled = not opts
+            self.btn_backelim_apply_n.disabled = not opts
+        except Exception:
+            self.dd_backelim_n.options = []
+            self.dd_backelim_n.disabled = True
+            self.btn_backelim_apply_n.disabled = True
+
+    def _apply_backward_optimal(self, res, out_widget=None, n_variaveis=None):
+        """Aplica um subconjunto do backward e atualiza toda a UI: o passo ÓTIMO
+        (parcimônia · 1%) ou, se ``n_variaveis`` for dado, o passo com esse nº de
+        variáveis (escolha MANUAL). Troca a seleção, retreina, regenera/reprojeta os
+        ratings, escreve o resumo em ``out_widget`` (se dado) e loga. Devolve o dict-info."""
         info = self.seg.apply_backward_selection(
-            res, criterion="parsimony", tol=0.01, refit=True, rebuild_ratings=True)
+            res, criterion="parsimony", tol=0.01, refit=True, rebuild_ratings=True,
+            n_variaveis=n_variaveis)
         self._sync_sel(); self._refresh_vars(force=True)
         # modelo retreinado ⇒ atualiza métricas/gráficos/fórmula e limpa "dirty"
         self._render_metrics(); self._render_model_plots(); self._render_formula()
@@ -2971,14 +3027,44 @@ class ModelSegmenterUI:
         _rt = (" e ratings regenerados" if info.get("ratings_rebuilt")
                else " e ratings reprojetados" if info.get("ratings_reprojected") else "")
         feats = ", ".join(self.seg.label(f) for f in info["features"])
+        _manual = info.get("criterion") == "manual"
         if out_widget is not None:
-            out_widget.value = (
-                f"<div class='mseg-legend'><b style='color:var(--sus-ink)'>★</b> "
-                f"<b>Escolha ótima aplicada</b>: <b>{info['target_n']}</b> variável(is) — "
-                f"critério parcimônia (métrica {str(info['metric']).upper()}). Modelo "
-                f"retreinado{_rt}.<br><span style='color:var(--sub-ink)'>{feats}</span></div>")
-        self._log(f"[escolha ótima] {info['target_n']} variáveis + retreino{_rt}.")
+            if _manual:
+                out_widget.value = (
+                    f"<div class='mseg-legend'><b>Nº escolhido aplicado</b>: "
+                    f"<b>{info['target_n']}</b> variável(is) — retreino no ponto da curva do "
+                    f"backward selecionado. Modelo retreinado{_rt}.<br>"
+                    f"<span style='color:var(--sub-ink)'>{feats}</span></div>")
+            else:
+                out_widget.value = (
+                    f"<div class='mseg-legend'><b style='color:var(--sus-ink)'>★</b> "
+                    f"<b>Escolha ótima aplicada</b>: <b>{info['target_n']}</b> variável(is) — "
+                    f"critério parcimônia (métrica {str(info['metric']).upper()}). Modelo "
+                    f"retreinado{_rt}.<br><span style='color:var(--sub-ink)'>{feats}</span></div>")
+        self._log(f"[{'nº escolhido' if _manual else 'escolha ótima'}] "
+                  f"{info['target_n']} variáveis + retreino{_rt}.")
         return info
+
+    def _on_backelim_apply_n(self):
+        """Retreina o modelo com o Nº de variáveis ESCOLHIDO na curva do backward
+        (qualquer ponto, não só o ótimo). Usa o último resultado do backward."""
+        res = getattr(self, "_backelim_result", None)
+        if res is None or len(res) == 0:
+            self.out_backelim_apply.value = (
+                "<i>Rode o backward elimination primeiro (botão acima).</i>")
+            return
+        n = self.dd_backelim_n.value
+        if n is None:
+            self.out_backelim_apply.value = "<i>Escolha um nº de variáveis ao lado.</i>"
+            return
+        self.btn_backelim_apply_n.disabled = True
+        try:
+            self._apply_backward_optimal(res, self.out_backelim_apply, n_variaveis=int(n))
+        except Exception as e:
+            self.out_backelim_apply.value = f"<div style='color:var(--bad-tx)'>Erro: {e}</div>"
+            self._log(f"[nº escolhido] erro: {e}")
+        finally:
+            self.btn_backelim_apply_n.disabled = False
 
     # ------------------------------------------------------------------ Aba 4 handlers
     def _on_suggest_n(self, b):
