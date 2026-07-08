@@ -7,6 +7,9 @@ notebooks/testes/
 .claude/worktrees/
 .claude/settings.local.json
 
+# Credenciais de publicação (tokens PyPI/TestPyPI) — NUNCA versionar
+.pypirc
+
 # Dados
 data/
 
