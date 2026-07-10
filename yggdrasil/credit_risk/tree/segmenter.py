@@ -2904,6 +2904,10 @@ class TreeSegmenter:
             return pd.Series(True, index=self.df.index)
         return self.segments[sid]["mask"].copy()
 
+    def label(self, feature) -> str:
+        """Rótulo de exibição da variável (alias de ``feature_labels``)."""
+        return self.feature_labels.get(feature, feature)
+
     def variable_summary(self, feature, sid=None, sample=None) -> dict:
         """Resumo de uma variável numa folha (referência DES por padrão):
         %missing, média/mediana/desvio, n, percentis (min, p5, p95, max), o IV
@@ -2950,6 +2954,79 @@ class TreeSegmenter:
         except Exception:
             pass
         return res
+
+    def variable_table(self, feature, sid=None, sample=None, max_n_bins=6,
+                       min_bin_size=0.05, splits=None) -> pd.DataFrame:
+        """Tabela por FAIXA de uma variável numa folha (referência DES por padrão):
+        ``faixa, n, repr_%, risco`` (event_rate/alvo médio) e — na **classificação** —
+        ``woe, logodds`` e ``iv_parcial`` (escala WoE/IV de Siddiqi). Na **regressão**,
+        ``iv_parcial`` é o desvio absoluto ponderado do alvo. IV total, monotonicidade
+        e ``risco_ordenavel`` (sem a faixa NA) em ``.attrs``.
+
+        Espelha :meth:`ModelSegmenter.variable_table` — base comum dos gráficos de
+        distribuição+badrate e logodds na aba unificada de Análise de variáveis."""
+        _EPS = 1e-6
+        sid = sid if (sid in self.segments) else "root"
+        mask = self._leaf_mask(sid)
+        if sample is None and self.sample_col is not None:
+            sample = self.ref_sample
+        if sample is not None and self.sample_col is not None:
+            mask = mask & (self.df[self.sample_col] == sample)
+        sub = self.df[mask]
+        n_tot = max(len(sub), 1)
+        risco_label = "event_rate" if self._is_clf else "alvo_medio"
+        bins, _modo, kind = self._resolve_bins(sub, feature, splits, None,
+                                               max_n_bins, min_bin_size)
+        if not bins:
+            out = pd.DataFrame(columns=["faixa", "n", "repr_%", risco_label])
+            out.attrs.update(iv=float("nan"), mono_ok=True, kind=kind,
+                             risco_label=risco_label, risco_ordenavel=[])
+            return out
+        y_all = sub[self.target].to_numpy(dtype="float64")
+        mean_global = float(np.nanmean(y_all)) if np.isfinite(y_all).any() else float("nan")
+        n_evt_tot = float(np.nansum(y_all == 1)) if self._is_clf else 0.0
+        n_non_tot = float(np.nansum(y_all == 0)) if self._is_clf else 0.0
+        n_base = float(np.sum(~np.isnan(y_all)))
+        rows, iv_total, is_na = [], 0.0, []
+        for b in bins:
+            m = self._mask_in(sub, feature, b).to_numpy()
+            yi = y_all[m]; yi_ok = yi[~np.isnan(yi)]
+            n_i = int(m.sum())
+            if n_i == 0:
+                continue
+            risco = float(np.nanmean(yi)) if yi_ok.size else float("nan")
+            row = {"faixa": self._bin_label(feature, b), "n": n_i,
+                   "repr_%": round(100 * n_i / n_tot, 1),
+                   risco_label: round(risco, 4) if np.isfinite(risco) else np.nan}
+            if self._is_clf:
+                n_evt = float((yi_ok == 1).sum()); n_non = float((yi_ok == 0).sum())
+                d_evt = n_evt / max(n_evt_tot, _EPS); d_non = n_non / max(n_non_tot, _EPS)
+                woe = float(np.log((d_non + _EPS) / (d_evt + _EPS)))
+                logodds = (float(np.log((risco + _EPS) / (1 - risco + _EPS)))
+                           if np.isfinite(risco) else np.nan)
+                ivp = (d_non - d_evt) * woe
+                row.update(woe=round(woe, 4),
+                           logodds=round(logodds, 4) if np.isfinite(logodds) else np.nan,
+                           iv_parcial=round(ivp, 4))
+                iv_total += ivp
+            else:
+                ivp = ((yi_ok.size / max(n_base, _EPS)) * abs(risco - mean_global)
+                       if np.isfinite(risco) else 0.0)
+                row["iv_parcial"] = round(ivp, 4)
+                iv_total += ivp
+            rows.append(row)
+            is_na.append(b.get("kind") == "na")
+        out = pd.DataFrame(rows)
+        if risco_label in out and len(out):
+            rcol = out.loc[~np.asarray(is_na), risco_label]   # exclui a faixa NA
+        else:
+            rcol = pd.Series(dtype=float)
+        mono = bool(rcol.is_monotonic_increasing or rcol.is_monotonic_decreasing) \
+            if len(rcol) else True
+        out.attrs.update(iv=round(float(iv_total), 4), mono_ok=mono, kind=kind,
+                         risco_label=risco_label, mean_global=round(mean_global, 4),
+                         risco_ordenavel=[float(x) for x in rcol])
+        return out
 
     def variable_by_safra(self, feature, time_col=None, sid=None, sample=None) -> pd.DataFrame:
         """Percentis (min, p5, média, p95, max) e %missing da variável NUMÉRICA
@@ -3080,6 +3157,347 @@ class TreeSegmenter:
         ax.set_title(f"Distribuição de '{rot}'" + (f" · {sample}" if sample else ""),
                      fontsize=11, fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def plot_variable_logodds(self, feature, sid=None, sample=None, max_n_bins=6,
+                              min_bin_size=0.05, figsize=(7.6, 3.4), dpi=150,
+                              save_path=None, ax=None):
+        """Barras de representatividade (%) + linha de **logodds/WoE** (classificação)
+        ou **alvo médio** (regressão) por faixa — leitura de monotonicidade, na folha.
+        Espelha :meth:`ModelSegmenter.plot_variable_logodds`."""
+        vt = self.variable_table(feature, sid=sid, sample=sample,
+                                 max_n_bins=max_n_bins, min_bin_size=min_bin_size)
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        if vt.empty:
+            ax.text(0.5, 0.5, "sem faixas", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        rcol = vt.attrs["risco_label"]
+        labels = vt["faixa"].tolist(); reprs = vt["repr_%"].to_numpy()
+        xs = list(range(len(labels)))
+        cols = ["#c98a8a" if "faltante" in f else "#9db8cf" for f in labels]
+        ax.bar(xs, reprs, color=cols, edgecolor="#2f5d82", alpha=0.85, width=0.7)
+        ax.set_ylabel("% da amostra"); ax.set_ylim(0, float(np.nanmax(reprs)) * 1.2 + 1)
+        ax2 = ax.twinx()
+        if self._is_clf and "logodds" in vt:
+            yline = vt["logodds"].to_numpy(); ylabel = "logodds"
+        else:
+            yline = vt[rcol].to_numpy()
+            ylabel = "event_rate" if self._is_clf else "alvo médio"
+        ax2.plot(xs, yline, color="#15324a", lw=2.3, marker="o", ms=5,
+                 markeredgecolor="#fff", markeredgewidth=0.6, label=ylabel)
+        ax2.set_ylabel(ylabel)
+        ax.set_xticks(xs); ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8)
+        ax.set_xlim(-0.7, len(labels) - 0.3)
+        mono = "monotônica" if vt.attrs.get("mono_ok") else "NÃO monotônica"
+        ax.set_title(f"'{self.label(feature)}' · {ylabel} por faixa  ·  IV={vt.attrs['iv']}"
+                     f"  ·  {mono}", fontsize=10.5, fontweight="bold", color="#15324a")
+        ax.grid(axis="y", alpha=0.12)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def plot_variable_distribution_badrate(self, feature, sid=None, sample=None,
+                                           max_n_bins=6, min_bin_size=0.05,
+                                           figsize=(9.0, 3.8), dpi=150,
+                                           save_path=None, ax=None):
+        """Distribuição (% por faixa) + linha do risco por faixa (**% de maus** na
+        classificação / **alvo médio** na regressão), faltantes destacados, na folha.
+        Espelha :meth:`ModelSegmenter.plot_variable_distribution_badrate`."""
+        vt = self.variable_table(feature, sid=sid, sample=sample,
+                                 max_n_bins=max_n_bins, min_bin_size=min_bin_size)
+        if ax is None and len(vt) > 8:
+            figsize = (figsize[0], figsize[1] + 0.30 * (len(vt) - 8))
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        if vt.empty:
+            ax.text(0.5, 0.5, "sem faixas", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        rcol = vt.attrs["risco_label"]
+        labels = vt["faixa"].tolist(); reprs = vt["repr_%"].to_numpy()
+        xs = list(range(len(labels)))
+        cols = ["#c98a8a" if "faltante" in f else "steelblue" for f in labels]
+        ax.bar(xs, reprs, color=cols, edgecolor="#2f5d82", alpha=0.85, width=0.7,
+               label="% da amostra")
+        for x0, rp in zip(xs, reprs):
+            ax.text(x0, rp, f"{rp:.0f}%", ha="center", va="bottom", fontsize=7.5,
+                    color="#15324a")
+        ax.set_ylabel("% da amostra"); ax.set_ylim(0, float(np.nanmax(reprs)) * 1.2 + 1)
+        is_clf = self._is_clf
+        risco = vt[rcol].to_numpy(dtype="float64")
+        yline = risco * 100 if is_clf else risco
+        ylabel = "% de maus" if is_clf else "alvo médio"
+        ax2 = ax.twinx()
+        ax2.plot(xs, yline, color="crimson", lw=2.3, marker="o", ms=5.5,
+                 markeredgecolor="#fff", markeredgewidth=0.7, label=ylabel)
+        for x0, yv in zip(xs, yline):
+            if np.isfinite(yv):
+                ax2.text(x0, yv, (f"{yv:.1f}%" if is_clf else f"{yv:.3f}"),
+                         ha="center", va="bottom", fontsize=7.5, color="crimson")
+        ax2.set_ylabel(ylabel, color="crimson"); ax2.tick_params(axis="y", labelcolor="crimson")
+        finite = yline[np.isfinite(yline)]
+        if finite.size:
+            ax2.set_ylim(0, float(np.nanmax(finite)) * 1.25 + (1 if is_clf else 1e-9))
+        ax.set_xticks(xs); ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8)
+        ax.set_xlim(-0.7, len(labels) - 0.3)
+        mono = "monotônica" if vt.attrs.get("mono_ok") else "NÃO monotônica"
+        ax.set_title(f"'{self.label(feature)}' · distribuição & {ylabel}  ·  "
+                     f"IV={vt.attrs['iv']}  ·  {mono}",
+                     fontsize=10.5, fontweight="bold", color="#15324a")
+        ax.grid(axis="y", alpha=0.12)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def variable_inversion(self, feature, sid=None, time_col=None, sample=None,
+                           max_n_bins=6, min_bin_size=0.05, min_n=20) -> dict:
+        """Inversão da ordem de risco das FAIXAS de uma variável, entre amostras e
+        safras, DENTRO de uma folha — o estudo de folhas-irmãs aplicado às faixas de
+        UMA variável. Veredito verde/amarelo/vermelho. Espelha
+        :meth:`ModelSegmenter.variable_inversion`."""
+        mask0 = self._leaf_mask(sid)
+        ref_mask = (mask0 & (self.df[self.sample_col] == self.ref_sample)
+                    if self.sample_col is not None else mask0)
+        ref = self.df[ref_mask]
+        bins, _modo, _kind = self._resolve_bins(ref, feature, None, None,
+                                                max_n_bins, min_bin_size)
+        empty = {"status": "green", "samples": [], "safras": [], "ordered": [],
+                 "labels": [], "series": None, "sample_inv": 0, "n_safras": 0,
+                 "safras_inv": 0, "safra_rate": 0.0}
+        if len(bins) < 2:
+            return empty
+        labels = [self._bin_label(feature, b) for b in bins]
+
+        def _risco(frame):
+            y = frame[self.target].to_numpy(dtype="float64")
+            y = y[~np.isnan(y)]
+            return float(np.mean(y)) if y.size else float("nan")
+
+        ref_risco = [_risco(ref[self._mask_in(ref, feature, b)]) for b in bins]
+        order = sorted(range(len(bins)),
+                       key=lambda i: (np.inf if pd.isna(ref_risco[i]) else ref_risco[i]))
+        # por amostra
+        xs_s = self._ordered_samples_with_value() or [None]
+        xs_s_lab = [str(a) if a is not None else "todos" for a in xs_s]
+        ser_s = {i: [] for i in range(len(bins))}
+        for a in xs_s:
+            fa = (self.df[mask0 & (self.df[self.sample_col] == a)]
+                  if a is not None else self.df[mask0])
+            for i, b in enumerate(bins):
+                ser_s[i].append(_risco(fa[self._mask_in(fa, feature, b)]))
+        # por safra
+        xs_t, ser_t = [], {i: [] for i in range(len(bins))}
+        tcol = time_col or self.date_col
+        if tcol is not None and tcol in self.df.columns:
+            base = (self.df[mask0 & (self.df[self.sample_col] == sample)]
+                    if (sample and self.sample_col is not None) else self.df[mask0])
+            safra = pd.to_datetime(base[tcol], errors="coerce").dt.to_period("M")
+            for per, g in base.groupby(safra):
+                if len(g) < min_n:
+                    continue
+                xs_t.append(str(per))
+                for i, b in enumerate(bins):
+                    ser_t[i].append(_risco(g[self._mask_in(g, feature, b)]))
+        series = {"ordered": order, "labels": labels, "ref_risco": ref_risco,
+                  "xs_sample": xs_s_lab, "ser_sample": ser_s,
+                  "xs_safra": xs_t, "ser_safra": ser_t}
+        sample_rows = []
+        for j, xlab in enumerate(xs_s_lab):
+            vals = {i: ser_s[i][j] for i in range(len(bins))}
+            n_inv, npp = _count_inversions(order, vals)
+            sample_rows.append({"amostra": xlab, "n_inv": n_inv, "n_pares": npp})
+        safra_rows = []
+        for j, xlab in enumerate(xs_t):
+            vals = {i: ser_t[i][j] for i in range(len(bins))}
+            n_inv, npp = _count_inversions(order, vals)
+            if npp == 0:
+                continue
+            safra_rows.append({"safra": xlab, "n_inv": n_inv, "n_pares": npp})
+        sample_inv = sum(r["n_inv"] for r in sample_rows
+                         if r["amostra"] != str(self.ref_sample))
+        n_safras = len(safra_rows)
+        safras_inv = sum(1 for r in safra_rows if r["n_inv"] > 0)
+        safra_rate = (safras_inv / n_safras) if n_safras else 0.0
+        status = ("red" if (sample_inv > 0 or safra_rate > 0.25)
+                  else "yellow" if safras_inv > 0 else "green")
+        return {"status": status, "samples": sample_rows, "safras": safra_rows,
+                "ordered": order, "labels": labels, "ref_risco": ref_risco,
+                "sample_inv": sample_inv, "n_safras": n_safras, "safras_inv": safras_inv,
+                "safra_rate": safra_rate, "series": series}
+
+    def plot_variable_inversion_by_sample(self, feature, sid=None, max_n_bins=6,
+                                          min_bin_size=0.05, figsize=(7.6, 4.0),
+                                          dpi=150, save_path=None, ax=None):
+        """Risco de cada faixa por amostra; cruzamentos = inversão da ordem de risco.
+        Espelha :meth:`ModelSegmenter.plot_variable_inversion_by_sample`."""
+        import matplotlib.pyplot as plt
+        inv = self.variable_inversion(feature, sid=sid, max_n_bins=max_n_bins,
+                                      min_bin_size=min_bin_size)
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        s = inv.get("series")
+        if not s or not inv["ordered"]:
+            ax.text(0.5, 0.5, "menos de 2 faixas", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        xs = s["xs_sample"]; x = list(range(len(xs)))
+        cmap = plt.get_cmap("RdYlGn_r"); k = len(inv["ordered"])
+        for rank, i in enumerate(inv["ordered"]):
+            ax.plot(x, s["ser_sample"][i], marker="o", lw=1.9, ms=5.5,
+                    color=cmap(rank / (k - 1) if k > 1 else 0.5),
+                    markeredgecolor="#33424f", markeredgewidth=0.6, label=s["labels"][i])
+        ax.set_xticks(x); ax.set_xticklabels(xs, fontsize=9)
+        ax.set_ylabel("risco médio"); ax.set_xlabel("amostra")
+        ax.set_title(f"'{self.label(feature)}' — risco das faixas por amostra",
+                     fontsize=11, fontweight="bold", color="#15324a")
+        ax.grid(axis="y", alpha=0.15)
+        ax.legend(fontsize=7.5, ncol=max(1, min(k, 3)), loc="best", framealpha=0.85)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def plot_variable_inversion_by_safra(self, feature, sid=None, time_col=None,
+                                         sample=None, max_n_bins=6, min_bin_size=0.05,
+                                         min_n=20, figsize=(9.6, 4.0), dpi=150,
+                                         save_path=None, ax=None):
+        """Risco de cada faixa por safra; safras com inversão ficam sombreadas.
+        Espelha :meth:`ModelSegmenter.plot_variable_inversion_by_safra`."""
+        import matplotlib.pyplot as plt
+        inv = self.variable_inversion(feature, sid=sid, time_col=time_col, sample=sample,
+                                      max_n_bins=max_n_bins, min_bin_size=min_bin_size,
+                                      min_n=min_n)
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        s = inv.get("series")
+        if not s or not s["xs_safra"]:
+            ax.text(0.5, 0.5, "sem dados por safra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        xs = s["xs_safra"]; x = list(range(len(xs))); ordered = inv["ordered"]
+        for j in x:
+            vals = {i: s["ser_safra"][i][j] for i in range(len(s["labels"]))}
+            n_inv, npp = _count_inversions(ordered, vals)
+            if npp and n_inv:
+                ax.axvspan(j - 0.5, j + 0.5, color="#d6453e", alpha=0.08, lw=0)
+        cmap = plt.get_cmap("RdYlGn_r"); k = len(ordered)
+        for rank, i in enumerate(ordered):
+            ax.plot(x, s["ser_safra"][i], marker="o", lw=1.7, ms=4.5,
+                    color=cmap(rank / (k - 1) if k > 1 else 0.5),
+                    markeredgecolor="#33424f", markeredgewidth=0.5, label=s["labels"][i])
+        ax.set_xticks(x); ax.set_xticklabels(_fmt_safras(xs), rotation=45, ha="right", fontsize=8)
+        ax.set_ylabel("risco médio"); ax.set_xlabel("safra")
+        ax.set_title(f"'{self.label(feature)}' — risco das faixas por safra"
+                     "  ·  faixas vermelhas = inversão",
+                     fontsize=11, fontweight="bold", color="#15324a")
+        ax.grid(axis="y", alpha=0.15)
+        ax.legend(fontsize=7.5, ncol=max(1, min(k, 3)), loc="best", framealpha=0.85)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def _optbin_numeric_bins(self, feature, sid=None, sample=None, max_n_bins=5,
+                             min_bin_size=0.05):
+        """Faixas do OPTIMAL BINNING de uma variável NUMÉRICA na folha (amostra de
+        referência por default), SEMPRE rodando o optbinning (ignora cortes manuais)."""
+        if OptimalBinning is None:
+            raise ImportError("optbinning não instalado. Rode: pip install optbinning")
+        mask0 = self._leaf_mask(sid)
+        m = (mask0 & (self.df[self.sample_col] == (sample or self.ref_sample))
+             if self.sample_col is not None else mask0)
+        fit = self.df[m]
+        if self._detect_kind(fit, feature, None) != "num":
+            return []
+        x = fit[feature].to_numpy(dtype="float64")
+        y = fit[self.target].to_numpy(dtype="float64")
+        ok = ~np.isnan(y); x, y = x[ok], y[ok]
+        x_obs = x[~np.isnan(x)]
+        if len(y) < 4 or x_obs.size == 0 or np.unique(x_obs).size < 2:
+            return []
+        if self._is_clf:
+            b = OptimalBinning(name=feature, dtype="numerical", max_n_bins=max_n_bins,
+                               min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
+            cortes = _fit_optbinning_splits(b, x, y.astype(int))
+        else:
+            b = ContinuousOptimalBinning(name=feature, dtype="numerical", max_n_bins=max_n_bins,
+                                         min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
+            cortes = _fit_optbinning_splits(b, x, y)
+        if not cortes:
+            return []
+        edges = [-np.inf, *cortes, np.inf]
+        bins = [{"kind": "num", "lo": edges[i], "hi": edges[i + 1]}
+                for i in range(len(edges) - 1)]
+        if fit[feature].isna().any():
+            bins.append({"kind": "na"})
+        return bins
+
+    def plot_variable_optbin_cumshare_timeseries(self, feature, sid=None, time_col=None,
+                                                 sample=None, max_n_bins=5, min_bin_size=0.05,
+                                                 figsize=(11.5, 4.2), dpi=150,
+                                                 save_path=None, ax=None):
+        """Distribuição ACUMULADA das faixas do OPTIMAL BINNING (numéricas) ao longo do
+        tempo, na folha — área empilhada das %s por safra, faixas FIXADAS na DES
+        (yardstick estável). Espelha
+        :meth:`ModelSegmenter.plot_variable_optbin_cumshare_timeseries`."""
+        import matplotlib.colors as mcolors
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        mask0 = self._leaf_mask(sid)
+        ref_mask = (mask0 & (self.df[self.sample_col] == self.ref_sample)
+                    if self.sample_col is not None else mask0)
+        if self._detect_kind(self.df[ref_mask], feature, None) != "num":
+            ax.text(0.5, 0.5, "apenas para variáveis numéricas", ha="center",
+                    va="center", transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        tcol = time_col or self.date_col
+        if tcol is None or tcol not in self.df.columns:
+            ax.text(0.5, 0.5, "sem coluna de tempo", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        bins = self._optbin_numeric_bins(feature, sid=sid, max_n_bins=max_n_bins,
+                                         min_bin_size=min_bin_size)
+        if len(bins) < 2:
+            ax.text(0.5, 0.5, "sem faixas do optbin", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        labels = [self._bin_label(feature, b) for b in bins]
+        base_all = self.df[mask0]                 # distribuição sobre toda a folha
+        safra = pd.to_datetime(base_all[tcol], errors="coerce").dt.to_period("M")
+        xs, Y = [], [[] for _ in bins]
+        for per, g in base_all.groupby(safra):
+            n_g = len(g)
+            if n_g == 0:
+                continue
+            xs.append(str(per))
+            for i, b in enumerate(bins):
+                Y[i].append(100 * int(self._mask_in(g, feature, b).sum()) / n_g)
+        if not xs:
+            ax.text(0.5, 0.5, "sem dados por safra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        x = list(range(len(xs)))
+        cmapc = mcolors.LinearSegmentedColormap.from_list("sc", ["steelblue", "crimson"])
+        n_real = sum(1 for b in bins if b.get("kind") != "na"); ri = 0
+        cores = []
+        for b in bins:
+            if b.get("kind") == "na":
+                cores.append("#c98a8a")
+            else:
+                cores.append(cmapc(ri / max(n_real - 1, 1))); ri += 1
+        ax.stackplot(x, *Y, labels=labels, colors=cores, alpha=0.9,
+                     edgecolor="white", linewidth=0.3)
+        ax.set_ylim(0, 100); ax.margins(x=0); ax.set_xticks(x)
+        ax.set_xticklabels(_fmt_safras(xs), rotation=45, ha="right", fontsize=8)
+        ax.set_ylabel("% acumulado da safra")
+        ax.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5),
+                  framealpha=0.9, title="faixa (optbin)")
+        ax.set_title(f"'{self.label(feature)}' — distribuição acumulada das faixas do "
+                     "optimal binning ao longo do tempo", fontsize=11,
+                     fontweight="bold", color="#15324a")
+        ax.grid(alpha=0.12, axis="y")
         fig.tight_layout()
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
