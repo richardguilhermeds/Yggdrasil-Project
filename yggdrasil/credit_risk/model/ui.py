@@ -2938,7 +2938,7 @@ class ModelSegmenterUI:
             self.out_metrics.value = (self._metrics_table_html(m)
                                       + self._metrics_guide_html(list(m.columns)))
         # comparação das principais métricas por amostra (DES vs OOT lado a lado):
-        # AUC/Gini/KS (classificação) ou RMSE/MAE/MedAE (regressão). O título vem do
+        # AUC/Gini/KS (classificação) ou RMSE/MAE/R² (regressão). O título vem do
         # layout (row_compare_dist); aqui vai só a figura, ampliada e esticada p/
         # preencher a coluna ao lado da distribuição do score.
         try:
