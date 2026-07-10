@@ -363,19 +363,20 @@ class TreeSegmenter:
 
     def _agg_memo(self, key, build):
         """Memoiza ``build()`` por (key, versão-da-árvore). Devolve sempre uma
-        cópia defensiva de DataFrame/dict/list para o chamador não corromper o
-        cache. ``build`` é uma função sem argumentos."""
+        cópia defensiva (DataFrame/Series/dict/list) para o chamador não corromper
+        o cache. ``build`` é uma função sem argumentos."""
+        import copy
         ck = (key, self._tree_version)
         hit = self._agg_cache.get(ck)
         if hit is None:
             hit = build()
             self._agg_cache[ck] = hit
-        if isinstance(hit, pd.DataFrame):
+        if isinstance(hit, (pd.DataFrame, pd.Series)):
             return hit.copy()
-        if isinstance(hit, dict):
-            return dict(hit)
-        if isinstance(hit, list):
-            return list(hit)
+        if isinstance(hit, (dict, list)):
+            # deepcopy: valores ANINHADOS mutáveis (ex.: grade_map = {'nota':dict,
+            # 'desc':dict}) não podem vazar por referência e contaminar o cache.
+            return copy.deepcopy(hit)
         return hit
 
     def _nonfeature_cols(self) -> set:
@@ -1363,7 +1364,10 @@ class TreeSegmenter:
             for sid in ids:
                 arr[self.segments[sid]["mask"].values] = sid
             return pd.Series(arr, index=self.df.index, dtype=object)
-        return self._agg_memo(("leaf_id_series",), build)
+        # a identidade do conjunto entra na chave: uma chamada com subconjunto de
+        # folhas não pode devolver a série do conjunto completo do cache.
+        cache_key = ("leaf_id_series", tuple(leaf_ids) if leaf_ids is not None else None)
+        return self._agg_memo(cache_key, build)
 
     # ------------------------------------------------------------------
     # TREE: desenha a árvore hierárquica (nós internos + folhas) em texto.
@@ -1441,7 +1445,14 @@ class TreeSegmenter:
         # vetorizado, em vez de materializar o subframe de cada segmento.
         leaf_ids = [sid for sid, s in self.segments.items() if s["is_leaf"]]
         leaf_id = self._leaf_id_series(leaf_ids)
-        means = self.df[self.target].groupby(leaf_id).mean()
+        # vmax na REFERÊNCIA (DES) quando há sample_col: as cores dos nós e a colorbar
+        # usam a média na DES (colorbar rotulada "(DES)"); usar a média all-samples faria
+        # uma folha com PD DES > vmax saturar e a escala ficar incoerente com o rótulo.
+        if self.sample_col is not None:
+            ref = self._mask_ref
+            means = self.df.loc[ref, self.target].groupby(leaf_id[ref]).mean()
+        else:
+            means = self.df[self.target].groupby(leaf_id).mean()
         vmax = float(means.max()) if len(means) and not means.isna().all() else 0.01
         return 0.0, (vmax if vmax > 1e-9 else 0.01)
 
@@ -2203,7 +2214,13 @@ class TreeSegmenter:
         if figsize is None:                       # mais largo e ALTO (legibilidade)
             figsize = (max(10.0, len(vals) * 1.6), 5.6)
         fig, ax = self._new_ax(figsize, dpi, ax)
-        norm = Normalize(0.0, 1.0)
+        # [0,1] como piso quando os dados residem no intervalo, ESTENDIDO quando há
+        # LGD fora de [0,1] (recuperações líquidas) — sem recortar caixas nem saturar
+        # a cor (que mapeia a média de cada folha).
+        means = np.asarray([float(np.mean(v)) for v in vals], dtype="float64")
+        ylo, yhi = self._hist_domain(np.concatenate(vals))
+        clo, chi = self._hist_domain(means)
+        norm = Normalize(clo, chi)
         cmap_obj = plt.get_cmap(cmap)
         bp = ax.boxplot(vals, positions=range(1, len(vals) + 1), widths=0.6,
                         patch_artist=True, showfliers=False,
@@ -2218,7 +2235,7 @@ class TreeSegmenter:
         sfx = f" · {sample}" if sample else ""
         ax.set_title(f"Dispersão do alvo por folha{sfx}", fontsize=12,
                      fontweight="bold", color="#15324a")
-        ax.set_ylim(0, 1)
+        ax.set_ylim(ylo, yhi)
         ax.grid(axis="y", alpha=0.2)
         fig.tight_layout()
         if save_path:
