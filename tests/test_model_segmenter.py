@@ -864,21 +864,22 @@ def test_plot_metric_shift_sem_oot():
 
 
 def test_plot_metric_comparison(seg):
-    # barras agrupadas: 3 métricas × (DES, OOT) lado a lado
+    # barras agrupadas: 3 métricas × (DES, OOT) lado a lado. Em regressão o R² vai
+    # num 2º eixo (twinx), então as barras se espalham por mais de um Axes.
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     seg.fit(_default_algo(seg.task_type))
     fig = seg.plot_metric_comparison()
-    ax = fig.axes[0]
-    bars = [p for c in ax.containers for p in c.patches]
+    bars = [p for a in fig.axes for c in a.containers for p in c.patches]
     assert len(bars) == 6                                   # 3 métricas × 2 amostras
-    xt = {t.get_text() for t in ax.get_xticklabels()}
+    base = {t.get_text().split()[0] for t in fig.axes[0].get_xticklabels()}  # tira a seta
     esperado = ({"AUC", "Gini", "KS"} if seg.task_type == "classification"
-                else {"RMSE", "MAE", "MedAE"})
-    assert xt == esperado
-    leg = {t.get_text() for t in ax.get_legend().get_texts()}
-    assert {"DES", "OOT"} <= leg                            # DES e OOT lado a lado
+                else {"RMSE", "MAE", "R²"})
+    assert base == esperado
+    legs = [a.get_legend() for a in fig.axes if a.get_legend() is not None]
+    leg_txt = {t.get_text() for lg in legs for t in lg.get_texts()}
+    assert {"DES", "OOT"} <= leg_txt                        # DES e OOT lado a lado
     plt.close(fig)
 
 
@@ -891,10 +892,10 @@ def test_plot_metric_comparison_sem_oot():
     seg = ModelSegmenter(df, target="target", task_type="regression",
                          date_col="dt_ref", verbose=False)
     seg.fit("linear")
-    ax = seg.plot_metric_comparison().axes[0]
-    bars = [p for c in ax.containers for p in c.patches]
+    fig = seg.plot_metric_comparison()
+    bars = [p for a in fig.axes for c in a.containers for p in c.patches]
     assert len(bars) == 3                                   # 1 amostra × 3 métricas
-    plt.close(ax.figure)
+    plt.close(fig)
 
 
 def test_plots_variavel(seg):

@@ -1197,7 +1197,7 @@ class ModelSegmenterUI:
         # score, lado a lado. O título dos grupos depende da tarefa.
         _mtitle = ("Principais métricas por amostra · AUC · Gini · KS"
                    if self.task_type == "classification"
-                   else "Principais métricas por amostra · RMSE · MAE · MedAE")
+                   else "Principais métricas por amostra · RMSE · MAE · R²")
         row_compare_dist = W.HBox([
             W.VBox([W.HTML(f"<div class='mseg-h'>{_mtitle}</div>"),
                     self.out_metric_compare], layout=W.Layout(width="58%")),
