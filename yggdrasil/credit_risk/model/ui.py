@@ -3743,7 +3743,10 @@ class ModelSegmenterUI:
                                       "calibração/resíduos na aba Modelo.</div>"); return
         with self._busy(self.btn_cap, self.btn_lift, msg="gerando a curva CAP…"):
             try:
-                self.out_adv_cap.value = self._fig_html(self.seg.plot_cap(), stretch=True)
+                # mesma figsize da lift ⇒ mesma proporção ⇒ MESMA altura nas colunas
+                # 49.5%/49.5% (stretch preenche a largura; a altura segue a proporção).
+                self.out_adv_cap.value = self._fig_html(
+                    self.seg.plot_cap(figsize=(6.2, 4.6)), stretch=True)
                 self._log("[avançado] curva CAP gerada.")
             except Exception as e:
                 self.out_adv_cap.value = f"<i>{e}</i>"
@@ -3758,7 +3761,8 @@ class ModelSegmenterUI:
         with self._busy(self.btn_cap, self.btn_lift, msg="gerando lift/gains…"):
             try:
                 self.out_adv_lift.value = self._fig_html(
-                    self.seg.plot_lift(sample=self._adv_sample()), stretch=True)
+                    self.seg.plot_lift(sample=self._adv_sample(), figsize=(6.2, 4.6)),
+                    stretch=True)
                 self._log("[avançado] lift/gains gerado.")
             except Exception as e:
                 self.out_adv_lift.value = f"<i>{e}</i>"
