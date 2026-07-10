@@ -655,7 +655,7 @@ class TreeSegmenter:
     # Tabela de bins: taxa de default (PD) + representatividade (num ou cat)
     # ------------------------------------------------------------------
     def _bin_table(self, sub, feature, bins, n_ref):
-        linhas = []
+        linhas, is_na = [], []
         for b in bins:
             m = self._mask_in(sub, feature, b)
             s = sub.loc[m, self.target]
@@ -668,13 +668,17 @@ class TreeSegmenter:
                 "valor_medio": round(s.mean(), 4),
                 "valor_std": round(s.std(), 4),
             })
+            is_na.append(b.get("kind") == "na")
         tbl = pd.DataFrame(linhas)
         if tbl.empty:                       # todos os bins vazios
             tbl.attrs["mono_ok"] = True
             return tbl
-        means = tbl["valor_medio"]
+        # a bin de faltantes (NA) não pertence à sequência ordenada pela variável — a
+        # média dos ausentes fica fixa no fim e quebraria/mascararia a monotonicidade
+        # das faixas reais; por isso é EXCLUÍDA do teste de mono_ok.
+        means = tbl.loc[~np.asarray(is_na), "valor_medio"]
         tbl.attrs["mono_ok"] = bool(
-            means.is_monotonic_increasing or means.is_monotonic_decreasing
+            len(means) < 2 or means.is_monotonic_increasing or means.is_monotonic_decreasing
         )
         return tbl
 
@@ -819,32 +823,28 @@ class TreeSegmenter:
                     folhas_por_pai.setdefault(s["parent"], []).append(sid)
 
             melhor = None  # (gap, sid_direita_do_par, motivo)
-            for pai, folhas in folhas_por_pai.items():
+            for pai in folhas_por_pai:
                 if pai is None:
                     continue
-                irmaos = [c for c in folhas
-                          if self.segments[c]["conditions"]
-                          and self.segments[c]["conditions"][-1]["kind"] != "na"]
-                if len(irmaos) < 2:
-                    continue
-                if all(self.segments[c]["conditions"][-1]["kind"] == "num"
-                       for c in irmaos):
-                    irmaos.sort(key=lambda c: self.segments[c]["conditions"][-1]["lo"])
-                else:
-                    irmaos.sort(key=lambda c: (self._leaf_target(c).mean()
-                                               if len(self._leaf_target(c)) else np.inf))
-                reprs = {c: (100 * int(self.segments[c]["mask"].sum()) / n_total
-                             if n_total else 0.0) for c in irmaos}
-                pds = {c: (self._leaf_target(c).mean()       # PD na referência (DES)
-                           if len(self._leaf_target(c)) else np.nan) for c in irmaos}
-                for i in range(len(irmaos) - 1):
-                    a, b = irmaos[i], irmaos[i + 1]
+                # Só pares de folhas TERMINAIS ADJACENTES (mesma fonte canônica de
+                # auto_merge/plot_tree/teste de hipótese): um nó expandido no meio
+                # QUEBRA a adjacência, então nunca pareamos folhas separadas por uma
+                # irmã não-folha — o que faria merge_leaf abortar sem mudar nada e a
+                # salvaguarda encerrar TODA a poda.
+                for a, b in self._adjacent_sibling_pairs(pai):
                     if a in protect or b in protect:          # respeita folhas travadas
                         continue
-                    gap = (abs(pds[b] - pds[a])
-                           if not (pd.isna(pds[a]) or pd.isna(pds[b])) else np.inf)
+                    ta, tb = self._leaf_target(a), self._leaf_target(b)
+                    pda = float(ta.mean()) if len(ta) else np.nan     # PD na referência (DES)
+                    pdb = float(tb.mean()) if len(tb) else np.nan
+                    gap = (abs(pdb - pda)
+                           if not (pd.isna(pda) or pd.isna(pdb)) else np.inf)
+                    repr_a = (100 * int(self.segments[a]["mask"].sum()) / n_total
+                              if n_total else 0.0)
+                    repr_b = (100 * int(self.segments[b]["mask"].sum()) / n_total
+                              if n_total else 0.0)
                     viola_gap = gap < min_valor_gap
-                    viola_repr = (reprs[a] < min_repr) or (reprs[b] < min_repr)
+                    viola_repr = (repr_a < min_repr) or (repr_b < min_repr)
                     if not (viola_gap or viola_repr):
                         continue
                     motivo = "ΔPD" if viola_gap else "repr."
@@ -1419,10 +1419,13 @@ class TreeSegmenter:
         def build():
             ids = leaf_ids if leaf_ids is not None else \
                 [sid for sid, s in self.segments.items() if s["is_leaf"]]
-            s = pd.Series(pd.NA, index=self.df.index, dtype=object)
+            # array numpy gravável e DEPOIS embrulhado em Series: sob pandas ≥3.0
+            # (copy-on-write) ``Series.values`` é read-only e a atribuição in-place
+            # ``s.values[mask] = sid`` levantaria ValueError.
+            arr = np.full(len(self.df), pd.NA, dtype=object)
             for sid in ids:
-                s.values[self.segments[sid]["mask"].values] = sid
-            return s
+                arr[self.segments[sid]["mask"].values] = sid
+            return pd.Series(arr, index=self.df.index, dtype=object)
         return self._agg_memo(("leaf_id_series",), build)
 
     # ------------------------------------------------------------------
@@ -1908,8 +1911,17 @@ class TreeSegmenter:
         # por folha num ÚNICO groupby e mapeia de volta via leaf_id por linha.
         leaf_id = self._leaf_id_series(leaf_ids)
         ref_pd = self.df.loc[ref_mask, self.target].groupby(leaf_id[ref_mask]).mean()
-        pd_map = {sid: (overall if pd.isna(ref_pd.get(sid, np.nan))
-                        else float(ref_pd.get(sid))) for sid in leaf_ids}
+        # fallback IGUAL ao da régua real (_predicted_series/_compute_leaves): folha sem
+        # linhas na referência ⇒ média da PRÓPRIA folha em TODAS as amostras (não a PD
+        # global), para metrics avaliar o mesmo score que a régua produz em produção;
+        # só se a folha for totalmente vazia é que cai na PD global (overall).
+        all_pd = self.df[self.target].groupby(leaf_id).mean()
+        pd_map = {}
+        for sid in leaf_ids:
+            v = ref_pd.get(sid, np.nan)
+            if pd.isna(v):
+                v = all_pd.get(sid, np.nan)
+            pd_map[sid] = float(v) if pd.notna(v) else float(overall)
         pred = leaf_id.map(pd_map).astype("float64")
 
         # ordem das amostras: referência primeiro
@@ -2276,6 +2288,17 @@ class TreeSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
+    @staticmethod
+    def _hist_domain(y, base_lo: float = 0.0, base_hi: float = 1.0):
+        """Faixa do eixo para histogramas do alvo: ``[0,1]`` por padrão, mas ESTENDIDA
+        para incluir massa fora de ``[0,1]`` (ex.: LGD com recuperações líquidas). O
+        ``hist`` descarta valores fora de ``range``; sem estender, LGD<0 ou >1 sumiria
+        do gráfico e a contagem deixaria de somar n (a média, calculada sobre todo y,
+        cairia fora do canvas)."""
+        if len(y) == 0:
+            return (base_lo, base_hi)
+        return (min(base_lo, float(np.min(y))), max(base_hi, float(np.max(y))))
+
     def plot_target_hist(self, sample: str | None = None, bins: int = 30,
                          color: str = "#2a9d8f", figsize=(12.0, 3.8),
                          save_path: str | None = None, dpi: int = 150, ax=None):
@@ -2295,7 +2318,8 @@ class TreeSegmenter:
             y = self.df[self.target].to_numpy(dtype="float64")
             sfx = ""
         y = y[~np.isnan(y)]
-        ax.hist(y, bins=bins, range=(0, 1), color=color, alpha=0.9,
+        lo, hi = self._hist_domain(y)
+        ax.hist(y, bins=bins, range=(lo, hi), color=color, alpha=0.9,
                 edgecolor="#15324a")
         if len(y):
             ax.axvline(float(np.mean(y)), color="#d6453e", lw=1.6, ls="--",
@@ -2305,7 +2329,7 @@ class TreeSegmenter:
         ax.set_ylabel("frequência")
         ax.set_title(f"Distribuição do alvo{sfx}", fontsize=12,
                      fontweight="bold", color="#15324a")
-        ax.set_xlim(0, 1)
+        ax.set_xlim(lo, hi)
         ax.grid(axis="y", alpha=0.2)
         fig.tight_layout()
         if save_path:
@@ -2337,7 +2361,8 @@ class TreeSegmenter:
                     transform=ax.transAxes, color="#889")
             ax.axis("off"); fig.tight_layout()
             return fig
-        ax.hist(y, bins=bins, range=(0, 1), color="steelblue", alpha=0.85,
+        lo, hi = self._hist_domain(y)
+        ax.hist(y, bins=bins, range=(lo, hi), color="steelblue", alpha=0.85,
                 edgecolor="#2f5d82")
         m = float(np.mean(y))
         ax.axvline(m, color="crimson", lw=1.8, ls="--", label=f"média {m:.3f}")
@@ -2345,7 +2370,7 @@ class TreeSegmenter:
         ax.set_xlabel("alvo"); ax.set_ylabel("freq.")
         ax.set_title(f"Alvo médio da folha{sfx} (n={y.size})", fontsize=10.5,
                      fontweight="bold", color="#15324a")
-        ax.set_xlim(0, 1); ax.grid(axis="y", alpha=0.15)
+        ax.set_xlim(lo, hi); ax.grid(axis="y", alpha=0.15)
         fig.tight_layout()
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
@@ -2872,8 +2897,19 @@ class TreeSegmenter:
                     transform=ax.transAxes, color="#889")
             ax.axis("off"); fig.tight_layout()
             return fig
-        p, lo, hi = self._wilson_ci(int(y.sum()), len(y))
-        # PD da carteira (mesma amostra) como referência
+        if self._is_clf:
+            p, lo, hi = self._wilson_ci(int(y.sum()), len(y))
+        else:
+            # alvo contínuo (LGD): ponto = média e IC = IC da média (normal). O IC
+            # binomial de Wilson e o int(y.sum()) só valem para proporção 0/1 e
+            # truncariam/distorceriam a estatística do alvo contínuo.
+            p = float(np.mean(y))
+            if y.size > 1:
+                se = float(np.std(y, ddof=1)) / np.sqrt(y.size)
+                lo, hi = p - 1.96 * se, p + 1.96 * se
+            else:
+                lo = hi = p
+        # PD/alvo da carteira (mesma amostra) como referência
         cart = self.df
         if sample is not None and self.sample_col is not None:
             cart = self.df[self.df[self.sample_col] == sample]
@@ -3054,10 +3090,26 @@ class TreeSegmenter:
             tbl = self._bin_table(sub, feature, bins, max(len(sub), 1))
         else:
             tbl = pd.DataFrame()
-        if tbl.empty:                         # fallback: histograma cru
-            x = sub[feature].to_numpy(dtype="float64"); x = x[~np.isnan(x)]
-            if x.size:
-                ax.hist(x, bins=20, color="steelblue", alpha=0.85, edgecolor="#2f5d82")
+        if tbl.empty:                         # fallback quando não há bins válidos
+            # categórica com 1 categoria na folha, ou folha pura (clf) ⇒ bins=[]. NÃO
+            # coagir para float (quebra em coluna de strings); ramificar por tipo.
+            if self._detect_kind(sub, feature, None) == "num":
+                x = sub[feature].to_numpy(dtype="float64"); x = x[~np.isnan(x)]
+                if x.size:
+                    ax.hist(x, bins=20, color="steelblue", alpha=0.85, edgecolor="#2f5d82")
+            else:                             # categórica: barras por categoria (% da folha)
+                vc = sub[feature].astype("object").value_counts().head(20)
+                n_tot = max(int(sub[feature].notna().sum()), 1)
+                if len(vc):
+                    xs = list(range(len(vc)))
+                    ax.bar(xs, 100 * vc.to_numpy() / n_tot, color="steelblue",
+                           edgecolor="#2f5d82", alpha=0.9, width=0.72)
+                    ax.set_xticks(xs)
+                    ax.set_xticklabels([str(k) for k in vc.index], rotation=25,
+                                       ha="right", fontsize=8)
+                else:
+                    ax.text(0.5, 0.5, "sem dados por faixa", ha="center", va="center",
+                            transform=ax.transAxes, color="#889")
         else:
             labels = [s.split(": ", 1)[-1] for s in tbl["faixa"]]
             reprs = tbl["repr_%"].to_numpy()
@@ -4175,6 +4227,14 @@ class TreeSegmenter:
     #   aplicar a segmentação (segmento + nota + PD) em escala no Spark.
     # ------------------------------------------------------------------
     def to_pyspark(self, func_name: str = "aplicar_regua") -> str:
+        """Gera o código PySpark (string) que reproduz a régua (segmento, nota e PD).
+
+        Contrato de faltantes: as colunas numéricas devem usar **NULL** (não ``NaN``)
+        para ausente. No Spark um ``NaN`` numérico é ordenado como o MAIOR valor e
+        ``isNull()`` não o captura, então um ``NaN`` literal cairia no bin mais alto —
+        divergindo do pandas. Se a tabela puder conter ``NaN`` literal, normalize antes
+        (``F.when(F.isnan(col), None).otherwise(col)``) ou use :meth:`apply_spark`, que
+        já trata ``NaN`` como faltante internamente."""
         regua = self._regua_dict()
 
         def cond_expr(conds):
@@ -4238,7 +4298,12 @@ class TreeSegmenter:
         ``table`` é o nome da tabela/CTE de origem. Cada folha vira um ramo do
         CASE (na ordem da nota); a condição final usa as MESMAS regras de
         pandas/Spark (faixas (lo, hi], ``IN`` para categóricas, ``IS NULL`` para
-        faltantes, ``include_na`` quando o nó de faltantes foi fundido)."""
+        faltantes, ``include_na`` quando o nó de faltantes foi fundido).
+
+        Contrato de faltantes: colunas numéricas devem usar **NULL** (não ``NaN``)
+        para ausente — no Spark um ``NaN`` é o MAIOR valor e ``IS NULL`` não o captura,
+        então cairia no bin mais alto. Normalize ``NaN``→``NULL`` antes (ex.:
+        ``nanvl``/``CASE WHEN isnan(x) THEN NULL``) ou use :meth:`apply_spark`."""
         regua = self._regua_dict()
 
         def _q(v):                       # literal de categoria com escape de aspas
@@ -4393,24 +4458,37 @@ class TreeSegmenter:
                 f"Colunas ausentes no Spark DataFrame: {faltando}. A tabela precisa "
                 f"ter as mesmas colunas usadas na árvore: {self.regua_features()}.")
 
+        # Paridade com pandas: no Spark um NaN literal numérico é ordenado como o MAIOR
+        # valor (NaN > lo = True) e isNull() NÃO o captura — então uma linha NaN cairia
+        # no bin mais alto no Spark, enquanto no pandas (que usa .isna()) fica faltante.
+        # Tratamos NaN como faltante (= NULL) nas colunas float, via uma expressão
+        # derivada, SEM alterar as colunas do DataFrame de saída.
+        float_cols = {name for name, t in sdf.dtypes if t in ("float", "double")}
+
+        def col_of(feat):
+            c = F.col(feat)
+            return (F.when(F.isnan(c), F.lit(None)).otherwise(c)
+                    if feat in float_cols else c)
+
         def cond_col(conds):
             expr = F.lit(True)
             for c in conds:
                 feat = c["feature"]
+                fc = col_of(feat)
                 if c["kind"] == "na":
-                    part = F.col(feat).isNull()
+                    part = fc.isNull()
                 elif c["kind"] == "num":
                     part = F.lit(True)
                     if c.get("lo") is not None:
-                        part = part & (F.col(feat) > c["lo"])
+                        part = part & (fc > c["lo"])
                     if c.get("hi") is not None:
-                        part = part & (F.col(feat) <= c["hi"])
+                        part = part & (fc <= c["hi"])
                     if c.get("include_na"):
-                        part = part | F.col(feat).isNull()
+                        part = part | fc.isNull()
                 else:
-                    part = F.col(feat).cast("string").isin([str(x) for x in c["cats"]])
+                    part = fc.cast("string").isin([str(x) for x in c["cats"]])
                     if c.get("include_na"):
-                        part = part | F.col(feat).isNull()
+                        part = part | fc.isNull()
                 expr = expr & part
             return expr
 
