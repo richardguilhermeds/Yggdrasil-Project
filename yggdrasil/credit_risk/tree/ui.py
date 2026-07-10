@@ -1402,7 +1402,7 @@ class TreeSegmenterUI:
         # ================================================================
         # ABA ④ VALIDAR & EXPORTAR — duas faixas: validação · exportar/registrar
         # ================================================================
-        sep_val = W.HTML("<div class='treeui-band'>① Validação regulatória · "
+        sep_val = W.HTML("<div class='treeui-band'>Validação regulatória · "
                          "monotonicidade · calibração · backtest</div>")
         valid_legend = W.HTML(
             f"<div class='treeui-legend'>Roda as três checagens: <b>monotonicidade</b> do {_rl} nas "
@@ -1422,7 +1422,7 @@ class TreeSegmenterUI:
         card_validacao.add_class("treeui-card")
         self._card_validacao = card_validacao
 
-        sep_exp = W.HTML("<div class='treeui-band treeui-band-muted'>② Exportar &amp; registrar</div>")
+        sep_exp = W.HTML("<div class='treeui-band'>Exportar &amp; registrar</div>")
         card_export_df = W.VBox([
             W.HTML("<div class='treeui-h'>Exportar DataFrame rotulado</div>"),
             W.HTML("<div class='treeui-legend'>Gera <b>ui.result</b> (pandas) com a coluna de "
@@ -1451,7 +1451,9 @@ class TreeSegmenterUI:
         export_row = W.HBox([card_mlflow, card_spark],
                             layout=W.Layout(width="100%", align_items="stretch",
                                             justify_content="space-between"))
-        tab_valid = W.VBox([sep_val, card_validacao, sep_exp, card_export_df, export_row])
+        # validação regulatória vai para a aba "Avançado" (abaixo) — a aba principal
+        # de exportação não sobrecarrega a decisão do analista com as checagens.
+        tab_valid = W.VBox([sep_exp, card_export_df, export_row])
 
         # ================================================================
         # ABA ⑤ HISTÓRICO — persistência (JSON) · imagem da árvore (lado a lado)
@@ -1585,12 +1587,15 @@ class TreeSegmenterUI:
             W.HBox([card_sug, card_merge, card_prune],
                    layout=W.Layout(justify_content="space-between", width="100%",
                                    align_items="stretch")),
-            card_imp, card_sql, card_diff])
+            card_imp, card_sql, card_diff,
+            # validação regulatória (monotonicidade/calibração/backtest + relatório)
+            # movida para cá: é uma etapa de fechamento, não da decisão de segmentação.
+            sep_val, card_validacao])
 
         # ---- montagem das abas (Análise de variável vem em 2º) ----------
         tabs = W.Tab(children=[tab_build, tab_var, tab_diag, tab_valid, tab_avancado, tab_hist])
         for i, titulo in enumerate(["Construir", "Análise de variáveis", "Diagnóstico",
-                                    "Validar & Exportar", "Avançado", "Histórico"]):
+                                    "Exportar", "Avançado", "Histórico"]):
             tabs.set_title(i, titulo)
         tabs.add_class("treeui-tabs")
         # a tabela de IV (optbinning de TODAS as variáveis na folha) é o item mais
