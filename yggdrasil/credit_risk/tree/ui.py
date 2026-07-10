@@ -473,7 +473,11 @@ class TreeSegmenterUI:
         r = int(round(255 + (59 - 255) * t))
         g = int(round(255 + (74 - 255) * t))
         b = int(round(255 + (99 - 255) * t))
-        fg = "#ffffff" if t > 0.40 else "#1f2733"
+        # escolhe preto/branco pela LUMINÂNCIA real do fundo (WCAG) — o limiar fixo
+        # t>0.40 punha branco sobre fundos claros demais (contraste ~1.6–2.3:1, abaixo
+        # de AA), já que t é limitado por ceiling=0.55 (fundo nunca fica escuro).
+        lum = 0.299 * r + 0.587 * g + 0.114 * b
+        fg = "#ffffff" if lum < 140 else "#1f2733"
         return "background-color:rgb(%d,%d,%d);color:%s" % (r, g, b, fg)
 
     def __init__(self, df, target="target", task_type="classification",
@@ -1868,7 +1872,11 @@ class TreeSegmenterUI:
                 return self._risk_label + " " + " ".join(parts)
             return f"{self._risk_label} {self._node_value(sid) * 100:.2f}%"
 
-        psi_hex = {"green": "var(--risk-lo)", "yellow": "var(--risk-mid)", "red": "var(--risk-hi)"}
+        # tokens SEMÂNTICOS de PSI (semáforo), iguais aos de _leaf_header_html/
+        # _var_cards_html/_diag_scorecard_html — antes usava a paleta de gradiente de
+        # risco (--risk-*), fazendo o verde/amarelo/vermelho do PSI na árvore não bater
+        # com o dos cartões.
+        psi_hex = {"green": "var(--ok-tx)", "yellow": "var(--warn-tx)", "red": "var(--bad-tx)"}
         # "barrinha" vertical que separa o bloco PD do bloco PSI na linha da folha
         sep_bar = ("<span style='display:inline-block;width:0;border-left:1px solid "
                    "var(--faint-ink);height:11px;margin:0 8px;vertical-align:middle'></span>")
@@ -3181,7 +3189,9 @@ class TreeSegmenterUI:
             html += ("<div class='treeui-metric' style='margin-top:6px;padding:8px 11px'>"
                      "<div class='k'>Categorias (share)</div>" + linhas + "</div>")
 
-        psi = {a: v for a, v in (s.get("psi") or {}).items() if v is not None}
+        # exclui None E NaN (v == v é falso p/ NaN): um PSI NaN geraria
+        # left:calc(nan%) (marcador some) e _psi_class(nan) cairia em "instável".
+        psi = {a: v for a, v in (s.get("psi") or {}).items() if v is not None and v == v}
         if psi:
             def gauge(p):
                 pos = min(max(p, 0.0) / 0.50, 1.0) * 100
@@ -3595,7 +3605,12 @@ class TreeSegmenterUI:
             return "<div style='color:var(--sub-ink)'>sem dados para o gráfico</div>"
         xmin, xmax = min(vals), max(vals)
         pad = (xmax - xmin) * 0.08 or 0.02
-        xmin, xmax = max(0, xmin - pad), min(1, xmax + pad)
+        # clamp em [0,1] só na CLASSIFICAÇÃO (PD ∈ [0,1]); na regressão (LGD pode ser
+        # <0 ou >1) usar os próprios min/max com padding, senão pos(v) estoura as barras.
+        if self._is_clf:
+            xmin, xmax = max(0, xmin - pad), min(1, xmax + pad)
+        else:
+            xmin, xmax = xmin - pad, xmax + pad
         span = (xmax - xmin) or 1.0
 
         def pos(v):
