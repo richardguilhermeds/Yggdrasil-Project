@@ -2366,10 +2366,13 @@ class TreeSegmenterUI:
         nota_map, _ = seg._grade_map()
         n_total = len(self.df)
         min_nota = self._min_nota_fn(filhos, nota_map)
+        ref = self.ref_sample if self.sample_col is not None else None
 
         def value_of(sid):
-            sub = self.df[seg.segments[sid]["mask"]]
-            return sub[self.target].mean() if len(sub) else float("inf")
+            # MESMA PD (DES) e leitura só da coluna-alvo dos chips/header/árvore — antes
+            # usava a amostra CHEIA e materializava o subframe inteiro por folha a cada
+            # refresh, divergindo do número exibido nos painéis.
+            return self._node_value(sid, ref)
 
         opts = []
 
@@ -2576,7 +2579,8 @@ class TreeSegmenterUI:
             dd = W.Dropdown(options=[(f"grupo {g}", g) for g in range(1, n + 1)], value=k,
                             layout=W.Layout(width="110px"))
             self._cat_widgets[c] = dd
-            lab = W.HTML(f"<span style='font-size:12px'><b>{c}</b>"
+            import html as _html             # escapa o nome da categoria (dados)
+            lab = W.HTML(f"<span style='font-size:12px'><b>{_html.escape(str(c))}</b>"
                          f"<span style='color:var(--sub-ink)'> · {self._risk_label} {means[c]:.3f}</span></span>")
             rows.append(W.HBox([dd, lab], layout=W.Layout(align_items="center")))
         na_n = int(s.isna().sum())
@@ -2603,8 +2607,13 @@ class TreeSegmenterUI:
             parent = self.seg.segments[sid]["parent"]
             if parent is None:
                 print("Esta folha é a raiz — não há pai para recolher."); return
+            redo_bak = list(self._redo)
             self._checkpoint()
-            self.seg.collapse(parent)
+            try:
+                self.seg.collapse(parent)
+            except Exception as e:
+                self._revert_checkpoint(redo_bak)
+                print("Erro ao recolher:", type(e).__name__, e); return
         self.locked &= set(self.seg.segments)
         self._pending = None
         self._refresh()
@@ -2619,8 +2628,17 @@ class TreeSegmenterUI:
                 print("Selecione uma folha."); return
             parent = self.seg.segments[sid]["parent"]
             before = set(self.seg.segments)
+            redo_bak = list(self._redo)
             self._checkpoint()
-            self.seg.merge_leaf(sid, side=side)
+            try:
+                self.seg.merge_leaf(sid, side=side)
+            except Exception as e:
+                self._revert_checkpoint(redo_bak)
+                print("Erro ao unir folhas:", type(e).__name__, e); return
+            if set(self.seg.segments) == before:      # no-op (ex.: vizinha não é folha)
+                self._revert_checkpoint(redo_bak)
+                print("Nada a unir deste lado (a vizinha não é uma folha terminal).")
+                return
         self.locked &= set(self.seg.segments)
         self._pending = None
         novos = [i for i in self.seg.segments
@@ -2808,10 +2826,15 @@ class TreeSegmenterUI:
             slim = (", " + " · ".join(lim)) if lim else ""
             scrit = "" if criterion == "optbin" else f", critério={criterion}"
             print(f"Auto-fit em '{alvo}' (profundidade ≤ {depth}{slim}{scrit})…")
+            redo_bak = list(self._redo)
             self._checkpoint()
-            self.seg.fit_auto(max_depth=depth, min_leaf_repr=cmin, max_bin_repr=cmax,
-                              criterion=criterion, subtree=sid if so_folha else None,
-                              from_scratch=not so_folha)
+            try:
+                self.seg.fit_auto(max_depth=depth, min_leaf_repr=cmin, max_bin_repr=cmax,
+                                  criterion=criterion, subtree=sid if so_folha else None,
+                                  from_scratch=not so_folha)
+            except Exception as e:
+                self._revert_checkpoint(redo_bak)
+                print("Erro no auto-fit:", type(e).__name__, e); return
         if so_folha:
             self.locked &= set(self.seg.segments)   # só folhas removidas saem
         else:
@@ -3112,6 +3135,7 @@ class TreeSegmenterUI:
     # Aba "Análise de variáveis"
     # ==================================================================
     def _var_cards_html(self, s, trend):
+        import html as _html                 # escapa nomes de categoria vindos dos dados
         psi_hex = {"green": "var(--ok-tx)", "yellow": "var(--warn-tx)", "red": "var(--bad-tx)"}
         tipo = s.get("tipo")
 
@@ -3150,7 +3174,8 @@ class TreeSegmenterUI:
         elif tipo == "cat" and s.get("top_categorias"):
             linhas = "".join(
                 f"<div style='display:flex;justify-content:space-between;font-size:12px;"
-                f"padding:3px 0;border-top:1px solid var(--hair)'><span>{c}</span>"
+                f"padding:3px 0;border-top:1px solid var(--hair)'>"
+                f"<span>{_html.escape(str(c))}</span>"
                 f"<span class='mono'>{p:.1f}%</span></div>"
                 for c, p in s["top_categorias"][:8])
             html += ("<div class='treeui-metric' style='margin-top:6px;padding:8px 11px'>"
@@ -3492,11 +3517,13 @@ class TreeSegmenterUI:
                 if not ok:
                     self.out_log.clear_output(wait=True)
                     print(msg); return
+            redo_bak = list(self._redo)
+            self._checkpoint()
             try:
-                self._checkpoint()
                 self.seg.grow(**self._pending)
                 self._pending = None
             except Exception as e:
+                self._revert_checkpoint(redo_bak)
                 print("Erro ao criar segmento:", type(e).__name__, e); return
         self._refresh()
 
@@ -3521,11 +3548,13 @@ class TreeSegmenterUI:
     def _on_prune(self, _):
         with self.out_log:
             self.out_log.clear_output(wait=True)
+            redo_bak = list(self._redo)
+            self._checkpoint()
             try:
-                self._checkpoint()
                 self.seg.prune(min_repr=self.sl_repr.value, min_valor_gap=self.sl_gap.value,
                                protect=set(self.locked))
             except Exception as e:
+                self._revert_checkpoint(redo_bak)
                 print("Erro na poda:", type(e).__name__, e); return
         self.locked &= set(self.seg.segments)
         self._refresh()
@@ -3545,10 +3574,14 @@ class TreeSegmenterUI:
         with self.out_log:
             self.out_log.clear_output(wait=True)
             print("DataFrame rotulado em  ui.result  · shape", self.result.shape)
-            display(self.result["segmento_pd_nota"].value_counts().sort_index())
+            try:
+                display(self.result["segmento_nota"].value_counts().sort_index())
+            except Exception as e:
+                print(f"(distribuição de notas indisponível: {e})")
 
     def _boot_forest_html(self, bc):
         """Forest plot: barra de IC por folha + marcador do ponto (DES) e da PD OOT."""
+        import html as _html                 # escapa descrições (categorias) vindas dos dados
         ref = bc.attrs.get("sample") or "todos"
         chk = bc.attrs.get("check_sample")
         lo_col, hi_col = "ic_low", "ic_high"
@@ -3585,7 +3618,8 @@ class TreeSegmenterUI:
                 ootmark = (f"<div style='position:absolute;left:{xo:.1f}%;top:3px;width:10px;"
                            f"height:10px;background:{col};border:1.5px solid var(--tile-bg);border-radius:50%;"
                            f"transform:translateX(-4px)' title='{chk}'></div>")
-            label = (r["descricao"][:40] + "…") if len(r["descricao"]) > 40 else r["descricao"]
+            _desc = str(r["descricao"])
+            label = _html.escape(_desc[:40] + "…" if len(_desc) > 40 else _desc)
             rows.append(
                 f"<div style='display:flex;align-items:center;margin:3px 0'>"
                 f"<div style='width:34px;color:var(--body-ink)'>[{r['nota']}]</div>"
@@ -4093,6 +4127,15 @@ class TreeSegmenterUI:
         if len(self._undo) > 50:
             self._undo.pop(0)
         self._redo.clear()
+        self._sync_undo_buttons()
+
+    def _revert_checkpoint(self, redo_bak):
+        """Desfaz o último :meth:`_checkpoint` quando a mutação FALHOU ou foi no-op:
+        remove o snapshot espúrio do undo e restaura a pilha de redo (que o checkpoint
+        havia zerado). Sem isto, um erro na mutação deixaria histórico corrompido."""
+        if self._undo:
+            self._undo.pop()
+        self._redo[:] = redo_bak
         self._sync_undo_buttons()
 
     def _restore(self, snap):
