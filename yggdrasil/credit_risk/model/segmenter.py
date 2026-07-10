@@ -254,7 +254,11 @@ def _trend(values) -> tuple:
         trend = "decrescente"
     else:
         trend = "não-monotônica"
-    n_inv = int((np.sign(diffs[:-1]) != np.sign(diffs[1:])).sum()) if len(diffs) > 1 else 0
+    # inversões = mudanças de sinal APENAS entre diferenças não-nulas: um platô
+    # (empate entre pontos adjacentes, np.sign(0)==0) não é uma inversão e não deve
+    # contradizer a tendência nem o _count_inversions (que usa '>' estrito).
+    nz = diffs[diffs != 0]
+    n_inv = int((np.sign(nz[:-1]) != np.sign(nz[1:])).sum()) if nz.size > 1 else 0
     return trend, n_inv
 
 
@@ -970,7 +974,7 @@ class ModelSegmenter:
         n_non_tot = float(np.nansum(y_all == 0)) if self.task_type == "classification" else 0.0
         n_base = float(np.sum(~np.isnan(y_all)))
 
-        rows, iv_total = [], 0.0
+        rows, iv_total, is_na = [], 0.0, []
         for b in bins:
             m = self._mask_in(sub, feature, b).to_numpy()
             yi = y_all[m]
@@ -978,6 +982,7 @@ class ModelSegmenter:
             n_i = int(m.sum())
             if n_i == 0:
                 continue
+            is_na.append(b.get("kind") == "na")
             risco = self._risco(yi)
             row = {"faixa": self._bin_label(feature, b), "n": n_i,
                    "repr_%": round(100 * n_i / n_tot, 1),
@@ -1003,11 +1008,19 @@ class ModelSegmenter:
             rows.append(row)
 
         out = pd.DataFrame(rows)
-        rcol = out[risco_label] if risco_label in out else pd.Series(dtype=float)
+        # a faixa de faltantes (NA) não pertence à sequência ordenável pela variável —
+        # excluída do teste de monotonicidade (sua média fica fixa no fim e
+        # quebraria/mascararia o mono_ok das faixas reais).
+        if risco_label in out and len(out):
+            rcol = out.loc[~np.asarray(is_na), risco_label]
+        else:
+            rcol = pd.Series(dtype=float)
         mono = bool(rcol.is_monotonic_increasing or rcol.is_monotonic_decreasing) \
             if len(rcol) else True
         out.attrs.update(iv=round(float(iv_total), 4), mono_ok=mono, kind=kind,
-                         risco_label=risco_label, mean_global=round(mean_global, 4))
+                         risco_label=risco_label, mean_global=round(mean_global, 4),
+                         # risco das faixas ORDENÁVEIS (sem o NA) p/ tendência/inversões
+                         risco_ordenavel=[float(x) for x in rcol])
         return out
 
     def variable_iv(self, features=None, sample=None, max_n_bins=5, min_bin_size=0.05,
@@ -1056,8 +1069,12 @@ class ModelSegmenter:
                 nb = len(vt)
                 iv = vt.attrs.get("iv", np.nan)
                 if nb:
-                    rcol = vt.attrs.get("risco_label")
-                    trend, n_inv = _trend(vt[rcol].tolist())
+                    # usa o risco das faixas ORDENÁVEIS (exclui o NA, que não entra
+                    # na tendência/contagem de inversões)
+                    vals = vt.attrs.get("risco_ordenavel")
+                    if vals is None:
+                        vals = vt[vt.attrs.get("risco_label")].tolist()
+                    trend, n_inv = _trend(vals)
                 if nonref:
                     psi_vals = self._variable_psi(feat, nonref, max_n_bins, min_bin_size)
             except Exception:
@@ -1366,9 +1383,25 @@ class ModelSegmenter:
         fig, ax = _new_ax(figsize, dpi, ax)
         if vt.empty:
             sub = self._frame(sample)
-            x = sub[feature].to_numpy(dtype="float64"); x = x[~np.isnan(x)]
-            if x.size:
-                ax.hist(x, bins=20, color="steelblue", alpha=0.85, edgecolor="#2f5d82")
+            # categórica com 1 categoria / poucos dados ⇒ vt vazio. NÃO coagir para
+            # float (quebra em strings); ramificar por tipo, como plot_*_badrate.
+            if self._detect_kind(feature, sub) == "num":
+                x = sub[feature].to_numpy(dtype="float64"); x = x[~np.isnan(x)]
+                if x.size:
+                    ax.hist(x, bins=20, color="steelblue", alpha=0.85, edgecolor="#2f5d82")
+            else:
+                vc = sub[feature].astype("object").value_counts().head(20)
+                n_tot = max(int(sub[feature].notna().sum()), 1)
+                if len(vc):
+                    xs = list(range(len(vc)))
+                    ax.bar(xs, 100 * vc.to_numpy() / n_tot, color="steelblue",
+                           edgecolor="#2f5d82", alpha=0.9, width=0.72)
+                    ax.set_xticks(xs)
+                    ax.set_xticklabels([str(k) for k in vc.index], rotation=25,
+                                       ha="right", fontsize=8)
+                else:
+                    ax.text(0.5, 0.5, "sem faixas", ha="center", va="center",
+                            transform=ax.transAxes, color="#889")
         else:
             labels = vt["faixa"].tolist(); reprs = vt["repr_%"].to_numpy()
             cols = ["#c98a8a" if "faltante" in f else "steelblue" for f in labels]
@@ -2366,6 +2399,7 @@ class ModelSegmenter:
             vf = vf[vf[self.target].notna()]
             if len(vf) >= 50:
                 va = vf
+        used_oot = va is not None          # o OOT de fato virou a validação?
         if va is None:                     # sem OOT com alvo → split do DES
             strat = tr[self.target].astype(int) if is_clf else None
             tr, va = train_test_split(tr, test_size=0.25, random_state=random_state,
@@ -2373,7 +2407,10 @@ class ModelSegmenter:
         ytr = tr[self.target].astype(int) if is_clf else tr[self.target]
         yva = va[self.target].astype(int) if is_clf else va[self.target]
         Xtr, Xva = tr[feats], va[feats]
-        val_sample = oot if (oot and oot != self.ref_sample and va is not None) else "split"
+        # `va is not None` é SEMPRE verdadeiro após o split acima — sem used_oot,
+        # um OOT de <50 linhas cairia no holdout do DES mas seria rotulado como OOT
+        # (tag MLflow enganosa para governança).
+        val_sample = oot if used_oot else "split"
 
         def objective(trial):
             from ...monitoring import psi as _psi_num
@@ -2968,6 +3005,8 @@ class ModelSegmenter:
         out = pd.DataFrame(rows)
         out.attrs["eval_sample"] = eval_sample
         out.attrs["algorithm"] = algorithm
+        out.attrs["transform"] = transform     # transform/hyperparams que geraram a ordem
+        out.attrs["hyperparams"] = dict(hyperparams)   # de remoção e as métricas do backward
         out.attrs["feats0"] = list(feats)      # conjunto inicial (identidade p/ apply)
         return out
 
@@ -3109,8 +3148,14 @@ class ModelSegmenter:
                 self.included.add(f)
         rebuilt = reprojected = False
         if refit:
-            self.fit(algorithm=self.algorithm, hyperparams=self.hyperparams,
-                     features=subset, transform=self.feature_transform or "raw")
+            # reajusta com o algoritmo/transform/hyperparams que GERARAM o backward
+            # (a ordem de remoção e as métricas vêm deles); fallback p/ os vigentes
+            # em resultados antigos que não gravaram esses attrs.
+            algo = result.attrs.get("algorithm") or self.algorithm
+            xform = result.attrs.get("transform", self.feature_transform or "raw")
+            hp = result.attrs.get("hyperparams", self.hyperparams)
+            self.fit(algorithm=algo, hyperparams=hp, features=subset,
+                     transform=xform or "raw")
             method = (self.rating_config or {}).get("method")
             if (rebuild_ratings and self.score_ is not None and method
                     and method not in ("manual_score", "manual_percentil")):
@@ -3206,6 +3251,10 @@ class ModelSegmenter:
         return y[ok], sc[ok]
 
     def plot_roc(self, sample=None, figsize=(5.4, 5.0), dpi=150, save_path=None, ax=None):
+        if self.task_type != "classification":
+            raise ValueError("plot_roc é exclusivo de classificação (eventos "
+                             "binários); em regressão use plot_calibration/"
+                             "plot_residuals.")
         from sklearn.metrics import roc_curve, roc_auc_score
         y, sc = self._sample_scores(sample)
         fig, ax = _new_ax(figsize, dpi, ax)
@@ -3227,6 +3276,10 @@ class ModelSegmenter:
         return fig
 
     def plot_ks(self, sample=None, figsize=(6.4, 4.2), dpi=150, save_path=None, ax=None):
+        if self.task_type != "classification":
+            raise ValueError("plot_ks é exclusivo de classificação (KS entre as CDFs "
+                             "de evento/não-evento); em regressão use plot_calibration/"
+                             "plot_residuals.")
         y, sc = self._sample_scores(sample)
         sc = sc * self.score_scale                          # score na escala de negócio
         fig, ax = _new_ax(figsize, dpi, ax)
@@ -4036,7 +4089,8 @@ class ModelSegmenter:
                              "repr_min_%": round(100 * repr_min, 1),
                              "gini": round(gini, 4) if np.isfinite(gini) else np.nan,
                              "ok": bool(mono_ok and vol_ok)})
-                evals[n] = (mono_ok, vol_ok, eff, inv["safra_rate"], gini)
+                evals[n] = (mono_ok, vol_ok, eff, inv["safra_rate"], gini,
+                            int(inv["sample_inv"]))
         finally:
             (self.rating_, self.rating_strategy, self.rating_col_,
              self.rating_labels_, self.rating_config) = snap
@@ -4061,12 +4115,14 @@ class ModelSegmenter:
                 reason = (f"{best} ratings — régua mais granular que mantém a monotonia entre "
                           f"amostras (0 inversões) e ≥ {min_repr * 100:.0f}% da base por faixa.")
         else:
-            # nenhuma zerou inversões: prioriza menos inversão entre amostras, depois
-            # volume adequado, menos inversão de safra e maior granularidade
-            best = min(evals, key=lambda n: (0 if evals[n][0] else 1, not evals[n][1],
+            # nenhuma zerou inversões: prioriza a MENOR contagem de inversões entre
+            # amostras (inteiro, não só o flag ==0), depois volume adequado, menos
+            # inversão de safra e maior granularidade
+            best = min(evals, key=lambda n: (evals[n][5], not evals[n][1],
                                              evals[n][3], -evals[n][2]))
             reason = (f"{best} ratings — nenhuma régua zerou as inversões; escolhida a de "
-                      f"menor inversão, volume adequado e maior granularidade.")
+                      f"MENOR nº de inversões entre amostras ({evals[best][5]}), volume "
+                      f"adequado e maior granularidade.")
         return {"best": int(best), "table": table, "reason": reason,
                 "n_recomendado": int(best)}
 
@@ -4240,8 +4296,42 @@ class ModelSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
+    @staticmethod
+    def _tight_ylim(values, pad_frac: float = 0.03, floor: float = 0.003):
+        """Faixa de Y justa em torno dos valores finitos — para "dar zoom" e revelar
+        cruzamentos/inversões que ficam comprimidos no eixo cheio. Aperta mais que a
+        folga padrão do matplotlib (~5%). Retorna ``(baixo, alto)`` em fração, ou
+        ``None`` se não houver valor finito."""
+        v = np.asarray([x for x in np.ravel(list(values))
+                        if x is not None and np.isfinite(x)], dtype=float)
+        if v.size == 0:
+            return None
+        lo, hi = float(v.min()), float(v.max())
+        pad = max((hi - lo) * pad_frac, floor)
+        return (max(0.0, lo - pad), hi + pad)
+
+    @staticmethod
+    def _apply_inversion_ylim(ax, values, ylim=None, auto_zoom=False):
+        """Aplica limites de Y ao gráfico de inversão. ``ylim=(baixo, alto)`` em
+        fração tem precedência; lados ``None`` (ou ``auto_zoom=True``) são
+        preenchidos pelo zoom automático justo aos dados. Sem nada, mantém o eixo
+        padrão (começando em 0)."""
+        if ylim is None and not auto_zoom:
+            return
+        lo = hi = None
+        if ylim is not None:
+            lo, hi = ylim
+        if auto_zoom or lo is None or hi is None:
+            tight = ModelSegmenter._tight_ylim(values)
+            if tight is not None:
+                lo = tight[0] if lo is None else lo
+                hi = tight[1] if hi is None else hi
+        if lo is not None or hi is not None:
+            ax.set_ylim(bottom=lo, top=hi)
+
     def plot_rating_inversion_by_sample(self, figsize=(7.6, 4.0), dpi=150,
-                                        save_path=None, ax=None):
+                                        save_path=None, ax=None, ylim=None,
+                                        auto_zoom=False):
         inv = self.rating_inversion()
         fig, ax = _new_ax(figsize, dpi, ax)
         labels, samples = self.rating_labels_, self._samples()
@@ -4255,6 +4345,9 @@ class ModelSegmenter:
         ax.set_xticks(x); ax.set_xticklabels(samples, fontsize=9)
         ax.set_ylabel("risco médio"); ax.set_xlabel("amostra")
         _pct_axis(ax, "y")
+        self._apply_inversion_ylim(
+            ax, [inv["risco_by_sample"][a].get(lab, np.nan)
+                 for a in samples for lab in inv["ordered"]], ylim, auto_zoom)
         ax.set_title("Risco dos ratings por amostra (cruzamento = inversão)",
                      fontsize=11, fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)
@@ -4265,7 +4358,8 @@ class ModelSegmenter:
         return fig
 
     def plot_rating_inversion_by_safra(self, time_col=None, sample=None, min_n=20,
-                                       figsize=(9.6, 4.0), dpi=150, save_path=None, ax=None):
+                                       figsize=(9.6, 4.0), dpi=150, save_path=None, ax=None,
+                                       ylim=None, auto_zoom=False):
         inv = self.rating_inversion(time_col, sample, min_n)
         fig, ax = _new_ax(figsize, dpi, ax)
         ss = inv["safra_series"]
@@ -4288,6 +4382,9 @@ class ModelSegmenter:
         ax.set_xticks(x); ax.set_xticklabels(_fmt_safras(xs), rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("risco médio"); ax.set_xlabel("safra")
         _pct_axis(ax, "y")
+        self._apply_inversion_ylim(
+            ax, [ss[per].get(lab, np.nan) for per in xs for lab in ordered],
+            ylim, auto_zoom)
         ax.set_title("Risco dos ratings por safra  ·  faixas vermelhas = inversão",
                      fontsize=11, fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)
@@ -4306,10 +4403,14 @@ class ModelSegmenter:
             raise ValueError("PSI requer sample_col.")
         rating = self._rating_series()
         labels = self.rating_labels_
+        valid = rating.notna()
         dist = {}
         for a in self.df[self.sample_col].dropna().unique():
             am = self.df[self.sample_col] == a
-            n_a = max(int(am.sum()), 1)
+            # denominador = ratings NÃO-NaN da amostra (score inválido ⇒ rating NaN
+            # não entra na distribuição), para as proporções somarem 1 e o PSI
+            # coincidir com rating_psi_by_safra (que já normaliza por não-NaN).
+            n_a = max(int((valid & am).sum()), 1)
             dist[a] = {l: int(((rating == l) & am).sum()) / n_a for l in labels}
         ref = dist[self.ref_sample]
         rows = []
@@ -4340,10 +4441,11 @@ class ModelSegmenter:
         if comparison_samples is None:
             comparison_samples = self._nonref_samples()
         comparison_samples = [a for a in comparison_samples if a != ref]
+        valid = rating.notna()
 
         def _dist(sample):
             am = self.df[self.sample_col] == sample
-            n = max(int(am.sum()), 1)
+            n = max(int((valid & am).sum()), 1)        # só ratings não-NaN (ver psi())
             return {l: int(((rating == l) & am).sum()) / n for l in labels}
 
         ref_dist = _dist(ref)
@@ -4514,23 +4616,37 @@ class ModelSegmenter:
         rows = []
         for a in self._samples():
             vals = {l: _risk_of(l, a) for l in labels}
-            risco = [vals[l] for l in labels]
-            trend, n_inv = _trend(risco)
+            seq = [vals[l] for l in ordered]           # risco na ordem esperada (DES asc.)
+            trend, _ = _trend(seq)                     # tendência (rótulo) via _trend
+            # n_inversoes = DESCIDAS ADJACENTES na escada esperada — a MESMA definição de
+            # TreeSegmenter.monotonicity_report (antes usava mudanças de sinal do _trend,
+            # que dava número diferente para o mesmo conceito).
+            descidas = [(ordered[i], ordered[i + 1]) for i in range(len(seq) - 1)
+                        if np.isfinite(seq[i]) and np.isfinite(seq[i + 1])
+                        and seq[i + 1] < seq[i]]
+            n_inv = len(descidas)
             if self.sample_col is not None and a == self.ref_sample:
                 inv_txt = "(referência)"
             else:
-                pares = _inverted_pairs(ordered, vals)
+                pares = _inverted_pairs(ordered, vals)   # diagnóstico complementar (vs DES)
                 inv_txt = ", ".join(f"{x}↔{y}" for x, y in pares) if pares else "—"
             rows.append({"amostra": a, "monotonico": n_inv == 0,
                          "tendencia": trend, "n_inversoes": n_inv,
                          "inverte_vs_DES": inv_txt})
         return pd.DataFrame(rows)
 
-    def backtest(self, time_col=None, sample=None, tol=0.10) -> pd.DataFrame:
-        """Risco previsto (score médio) vs realizado (alvo médio) por safra."""
+    def backtest(self, time_col=None, sample=None, tol=None) -> pd.DataFrame:
+        """Risco previsto (score médio) vs realizado (alvo médio) por safra.
+
+        ``gap = realizado − previsto`` (mesma convenção de ``calibration_table`` e do
+        ``TreeSegmenter``): gap positivo = risco realizado ACIMA do previsto
+        (sub-provisionamento). ``tol`` default é sensível ao ``task_type``
+        (0,03 para classificação / 0,10 para regressão), igual ao TreeSegmenter."""
         time_col = time_col or self.date_col
         if time_col is None:
             raise ValueError("Informe time_col ou configure date_col.")
+        if tol is None:                       # tolerância de gap default por tipo de alvo
+            tol = 0.03 if self.task_type == "classification" else 0.10
         if self.score_ is None:
             raise RuntimeError("Gere o score antes (fit / set_model).")
         base = self._frame(sample) if sample else self.df
@@ -4542,7 +4658,7 @@ class ModelSegmenter:
         for per, g in base.groupby(safra):
             prev = float(sc.reindex(g.index).mean(skipna=True))
             real = self._risco(g[self.target])
-            gap = prev - real if (np.isfinite(prev) and np.isfinite(real)) else np.nan
+            gap = real - prev if (np.isfinite(prev) and np.isfinite(real)) else np.nan
             rows.append({"safra": str(per), "n": len(g),
                          "previsto_medio": round(prev, 4) if np.isfinite(prev) else np.nan,
                          "realizado_medio": round(real, 4) if np.isfinite(real) else np.nan,
@@ -5051,6 +5167,7 @@ class ModelSegmenter:
             "var_meta": self.var_meta,
             "algorithm": self.algorithm,
             "hyperparams": self.hyperparams,
+            "feature_transform": self.feature_transform,
             "model_features": list(self.model_features),
             "rating_config": self.rating_config,
             "two_stage": self.two_stage,
@@ -5083,6 +5200,7 @@ class ModelSegmenter:
         seg.var_meta = data.get("var_meta", seg.var_meta)
         seg.algorithm = data.get("algorithm")
         seg.hyperparams = data.get("hyperparams", {})
+        seg.feature_transform = data.get("feature_transform", "raw")
         seg.model_features = data.get("model_features", [])
         seg.rating_config = data.get("rating_config", {})
         seg.two_stage = bool(data.get("two_stage", False))
