@@ -863,6 +863,40 @@ def test_plot_metric_shift_sem_oot():
     plt.close(ax.figure)
 
 
+def test_plot_metric_comparison(seg):
+    # barras agrupadas: 3 métricas × (DES, OOT) lado a lado
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    seg.fit(_default_algo(seg.task_type))
+    fig = seg.plot_metric_comparison()
+    ax = fig.axes[0]
+    bars = [p for c in ax.containers for p in c.patches]
+    assert len(bars) == 6                                   # 3 métricas × 2 amostras
+    xt = {t.get_text() for t in ax.get_xticklabels()}
+    esperado = ({"AUC", "Gini", "KS"} if seg.task_type == "classification"
+                else {"RMSE", "MAE", "MedAE"})
+    assert xt == esperado
+    leg = {t.get_text() for t in ax.get_legend().get_texts()}
+    assert {"DES", "OOT"} <= leg                            # DES e OOT lado a lado
+    plt.close(fig)
+
+
+def test_plot_metric_comparison_sem_oot():
+    # sem amostra OOT (sem sample_col) → mostra só a DES (3 barras), sem quebrar
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    df = _synthetic("regression").drop(columns=["amostra"])
+    seg = ModelSegmenter(df, target="target", task_type="regression",
+                         date_col="dt_ref", verbose=False)
+    seg.fit("linear")
+    ax = seg.plot_metric_comparison().axes[0]
+    bars = [p for c in ax.containers for p in c.patches]
+    assert len(bars) == 3                                   # 1 amostra × 3 métricas
+    plt.close(ax.figure)
+
+
 def test_plots_variavel(seg):
     import matplotlib
     matplotlib.use("Agg")
@@ -1010,9 +1044,10 @@ def test_ui_fluxo_treina_e_ratings(task):
         assert ui.seg.rating_ is not None
 
 
-def test_ui_metrics_centralizada_e_shift(task):
+def test_ui_metrics_centralizada_e_comparacao(task):
     """A tabela de métricas por amostra fica com as células centralizadas (a regra
-    `td` center vence a de direita herdada) e o gráfico do shift DES→OOT aparece."""
+    `td` center vence a de direita herdada) e o gráfico de comparação das principais
+    métricas por amostra (DES vs OOT) aparece."""
     pytest.importorskip("ipywidgets")
     import contextlib
     import io
@@ -1028,8 +1063,8 @@ def test_ui_metrics_centralizada_e_shift(task):
     # célula (td) centralizada e a regra vem depois da de direita (vence por ordem)
     assert re.search(r"td\s*\{[^}]*text-align:\s*center", html)
     assert html.rindex("text-align: center") > html.index("text-align: right")
-    # gráfico do shift DES→OOT renderizado junto às métricas
-    assert "img" in ui.out_metric_shift.value
+    # gráfico de comparação das métricas (DES vs OOT) renderizado junto às métricas
+    assert "img" in ui.out_metric_compare.value
 
 
 def test_ui_bins_manuais_e_formula(task):

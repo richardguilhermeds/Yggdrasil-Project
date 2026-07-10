@@ -3579,6 +3579,71 @@ class ModelSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
+    def plot_metric_comparison(self, figsize=(8.4, 4.7), dpi=150, save_path=None, ax=None):
+        """Compara as principais métricas do modelo **entre amostras** (DES vs OOT
+        lado a lado), em barras agrupadas — uma métrica por grupo, uma barra por
+        amostra. Classificação: **AUC, Gini, KS** (↑ maior = melhor). Regressão:
+        **RMSE, MAE, MedAE** (↓ menor = melhor). Referência (DES) em steelblue e
+        comparação (OOT) em crimson (safra de estabilidade em teal, como nos demais
+        gráficos por amostra). Usa :meth:`metrics`."""
+        fig, ax = _new_ax(figsize, dpi, ax)
+        if self.task_type == "classification":
+            pares = [("auc", "AUC"), ("gini", "Gini"), ("ks", "KS")]
+            subtitulo = "↑ maior = melhor"
+            fmt = lambda v: f"{v:.3f}"
+        else:
+            pares = [("rmse", "RMSE"), ("mae", "MAE"), ("medae", "MedAE")]
+            subtitulo = "↓ menor = melhor"
+            fmt = lambda v: f"{v:.3g}"
+        try:
+            m = self.metrics().set_index("amostra")
+        except Exception:
+            m = pd.DataFrame()
+        pares = [(c, l) for c, l in pares if c in m.columns]
+        samples = [a for a in self._samples() if a in m.index] if not m.empty else []
+        if not pares or not samples:
+            ax.text(0.5, 0.5, "sem métricas para comparar", ha="center", va="center",
+                    transform=ax.transAxes, color="#8891a0")
+            ax.axis("off"); fig.tight_layout()
+            if save_path:
+                fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+            return fig
+
+        labels = [l for _, l in pares]
+        x = np.arange(len(pares))
+        w = 0.8 / max(len(samples), 1)
+        palette = ["steelblue", "crimson"]        # referência × comparação (como nos ratings)
+        stab_color = "#2a9d8f"                    # 3ª cor (teal) p/ a safra de estabilidade
+        base_i = 0
+        finite_vals = []
+        for k, a in enumerate(samples):
+            vals = [float(m.loc[a, c]) for c, _ in pares]
+            if _is_stability_sample(a):
+                color = stab_color
+            else:
+                color = palette[base_i % len(palette)]; base_i += 1
+            xk = x + k * w
+            ax.bar(xk, [v if np.isfinite(v) else 0.0 for v in vals], width=w, label=a,
+                   alpha=0.9, color=color, edgecolor="#33424f", linewidth=0.5)
+            for xi, v in zip(xk, vals):
+                if np.isfinite(v):
+                    finite_vals.append(v)
+                    ax.text(xi, v, fmt(v), ha="center", va="bottom" if v >= 0 else "top",
+                            fontsize=7.5, color="#15324a")
+        ymax = max(finite_vals + [0.0]); ymin = min(finite_vals + [0.0])
+        ax.set_ylim(ymin * 1.10 if ymin < 0 else 0.0, ymax * 1.16 if ymax > 0 else 1.0)
+        ax.set_xticks(x + (len(samples) - 1) * w / 2)
+        ax.set_xticklabels(labels, fontsize=10)
+        ax.set_ylabel("valor da métrica")
+        ax.set_title(f"Principais métricas por amostra · {subtitulo}", fontsize=11,
+                     fontweight="bold", color="#15324a")
+        ax.legend(fontsize=8, ncol=min(len(samples), 3), loc="best", framealpha=0.85)
+        ax.grid(axis="y", alpha=0.15)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
     # ---- discriminação por safra ----
     def metrics_by_safra(self, sample=None, time_col=None) -> pd.DataFrame:
         """Métricas do modelo **por safra** (mês de ``date_col``/``time_col``).

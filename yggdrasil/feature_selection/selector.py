@@ -201,6 +201,10 @@ class FeatureSelectionReport:
     panels: Dict[str, object] = field(default_factory=dict)
     problem_type: Optional[str] = None
     cfg: Optional[ColumnConfig] = None
+    # Correlação (Spearman) das features selecionadas — cross-book, para as análises
+    # pós-seleção (a redundância do pipeline é por book; esta matriz pega o resto).
+    overall_correlation: pd.DataFrame = field(default_factory=pd.DataFrame)
+    fs_cfg: Optional[FeatureSelectionConfig] = None
 
     def to_csv(self, path: str) -> str:
         self.selection_table.to_csv(path, index=False)
@@ -282,6 +286,12 @@ def run_feature_selection(
             overall.insert(1, "book", overall["feature"].map(book_de))
         else:
             overall = pd.DataFrame(columns=["feature", "book", "rf_importance", "score"])
+
+        # Correlação dos SOBREVIVENTES (uma passada Spark; vazia se < 2 numéricas).
+        if selected_overall and len(numeric_columns(base, selected_overall)) >= 2:
+            overall_corr = correlation_matrices(base, selected_overall, fs_cfg)["spearman"]
+        else:
+            overall_corr = pd.DataFrame()
     finally:
         base.unpersist()
 
@@ -289,6 +299,28 @@ def run_feature_selection(
     if with_panels:
         panels["overview"] = plots.plot_book_overview(selection_table)
         panels["overall_importance"] = plots.plot_overall_importance(overall, fs_cfg.top_k_overall)
+
+        # ── análises pós-seleção (facilitam a vida depois da seleção) ────────
+        panels["post_selection_dashboard"] = plots.plot_post_selection_dashboard(
+            selection_table, problem_type, fs_cfg.boruta_max_iter)
+        panels["funnel"] = plots.plot_selection_funnel(selection_table)
+        panels["decision_map"] = plots.plot_decision_map(selection_table, problem_type)
+        panels["book_power"] = plots.plot_book_power_contribution(selection_table)
+        panels["cluster_redundancy"] = plots.plot_cluster_redundancy(selection_table)
+        panels["leakage_audit"] = plots.plot_leakage_audit(
+            selection_table, problem_type, fs_cfg.leakage_auc, fs_cfg.iv_leakage)
+        panels["survivor_scorecard"] = plots.plot_survivor_scorecard(selection_table)
+        if (fs_cfg.boruta_enable and "boruta_hits" in selection_table.columns
+                and selection_table["boruta_hits"].notna().any()):
+            panels["boruta"] = plots.plot_boruta_significance(
+                selection_table, fs_cfg.boruta_max_iter, fs_cfg.boruta_alpha)
+        if problem_type == "classification":
+            panels["power_quadrant"] = plots.plot_power_quadrant_iv_ks(
+                selection_table, fs_cfg.iv_min, 0.10, fs_cfg.iv_leakage)
+        if not overall_corr.empty and len(overall_corr) >= 2:
+            panels["survivor_correlation"] = plots.plot_survivor_corr_heatmap(
+                overall_corr, selection_table, fs_cfg.corr_high)
+
         for name, t in book_tables.items():
             panels[f"book::{name}"] = plots.plot_book_selection(t, name, fs_cfg.top_k_book)
             if not corr_by_book[name].empty and len(corr_by_book[name]) >= 2:
@@ -298,6 +330,7 @@ def run_feature_selection(
         selection_table=selection_table, book_tables=book_tables,
         selected_features=selected_features, selected_overall=selected_overall,
         overall_importance=overall, panels=panels, problem_type=problem_type, cfg=cfg,
+        overall_correlation=overall_corr, fs_cfg=fs_cfg,
     )
     if mlflow_experiment:
         _log_mlflow(report, mlflow_experiment, run_name)

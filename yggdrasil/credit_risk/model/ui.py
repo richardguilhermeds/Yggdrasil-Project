@@ -1094,7 +1094,7 @@ class ModelSegmenterUI:
                             names="value")
         self.out_algo_help = W.HTML()   # tutorial do algoritmo/parâmetros selecionado
         self.out_metrics = W.HTML()
-        self.out_metric_shift = W.HTML()   # gráfico do shift DES→OOT das principais métricas
+        self.out_metric_compare = W.HTML()   # barras: principais métricas por amostra (DES vs OOT)
         self.out_formula = W.HTML()
         self.out_model_a = W.HTML()
         self.out_model_b = W.HTML()
@@ -1193,10 +1193,14 @@ class ModelSegmenterUI:
             _head_a, _head_b = "Curva ROC", "Curva KS"
         else:
             _head_a, _head_b = "Calibração · DES", "Resíduos · DES"
-        # linha 1: shift das métricas (ampliado) + distribuição do score, lado a lado
-        row_shift_dist = W.HBox([
-            W.VBox([W.HTML("<div class='mseg-h'>Shift das principais métricas · DES → OOT</div>"),
-                    self.out_metric_shift], layout=W.Layout(width="58%")),
+        # linha 1: comparação das métricas por amostra (ampliada) + distribuição do
+        # score, lado a lado. O título dos grupos depende da tarefa.
+        _mtitle = ("Principais métricas por amostra · AUC · Gini · KS"
+                   if self.task_type == "classification"
+                   else "Principais métricas por amostra · RMSE · MAE · MedAE")
+        row_compare_dist = W.HBox([
+            W.VBox([W.HTML(f"<div class='mseg-h'>{_mtitle}</div>"),
+                    self.out_metric_compare], layout=W.Layout(width="58%")),
             W.VBox([W.HTML("<div class='mseg-h'>Distribuição do score</div>"),
                     self.out_model_c], layout=W.Layout(width="41%")),
         ], layout=W.Layout(justify_content="space-between"))
@@ -1213,7 +1217,7 @@ class ModelSegmenterUI:
         metrics_card = W.VBox([
             self.out_dirty_warn,
             W.HTML("<div class='mseg-h'>Métricas por amostra</div>"), self.out_metrics,
-            row_shift_dist, row_calib_resid,
+            row_compare_dist, row_calib_resid,
         ]); metrics_card.add_class("mseg-card")
 
         tab_model = W.VBox([
@@ -2933,18 +2937,15 @@ class ModelSegmenterUI:
             m = self.seg.metrics().round(4)
             self.out_metrics.value = (self._metrics_table_html(m)
                                       + self._metrics_guide_html(list(m.columns)))
-        # shift DES→OOT das principais métricas (só quando há OOT para comparar).
-        # O título vem do layout (row_shift_dist); aqui vai só a figura, ampliada
-        # e esticada p/ preencher a coluna ao lado da distribuição do score.
-        if self.seg.metric_shifts():
-            try:
-                self.out_metric_shift.value = self._fig_html(
-                    self.seg.plot_metric_shift(figsize=(8.4, 4.7)), stretch=True)
-            except Exception as e:
-                self.out_metric_shift.value = f"<i>{e}</i>"
-        else:
-            self.out_metric_shift.value = ("<div class='mseg-legend'>Sem amostra OOT "
-                                           "para comparar.</div>")
+        # comparação das principais métricas por amostra (DES vs OOT lado a lado):
+        # AUC/Gini/KS (classificação) ou RMSE/MAE/MedAE (regressão). O título vem do
+        # layout (row_compare_dist); aqui vai só a figura, ampliada e esticada p/
+        # preencher a coluna ao lado da distribuição do score.
+        try:
+            self.out_metric_compare.value = self._fig_html(
+                self.seg.plot_metric_comparison(figsize=(8.4, 4.7)), stretch=True)
+        except Exception as e:
+            self.out_metric_compare.value = f"<i>{e}</i>"
 
     def _render_metrics_twostage(self):
         """Três visões do Two-Stage: classificador (etapa 1), regressão (etapa 2,

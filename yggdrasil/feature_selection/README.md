@@ -256,6 +256,8 @@ score_consenso = sum(w*v) / sum(w)      # média ponderada; se W <= 0, score = N
 | `panels` | `Dict[str, object]` | Figuras matplotlib (ver seção 11); vazio se `with_panels=False` |
 | `problem_type` | `Optional[str]` | Tipo de problema usado |
 | `cfg` | `Optional[ColumnConfig]` | O `ColumnConfig` usado |
+| `overall_correlation` | `pd.DataFrame` | Correlação (Spearman) das selecionadas — **cross-book**; vazia se < 2 numéricas |
+| `fs_cfg` | `Optional[FeatureSelectionConfig]` | A config de seleção usada (limiares p/ as análises pós-seleção) |
 
 **Colunas da `selection_table`** (ordem canônica `_COLS`):
 
@@ -292,6 +294,27 @@ Com `with_panels=True` (default), o relatório traz figuras matplotlib em `repor
 | `"corr::<nome>"` | `plot_corr_heatmap` — heatmap de correlação do book (**só** se a matriz não for vazia e tiver ≥ 2 features) |
 
 `top_k_book` (default 15) e `top_k_overall` (default 25) controlam quantas features aparecem nos painéis por book e no ranking global, respectivamente.
+
+### Análises pós-seleção
+
+Além dos quatro painéis acima, o relatório traz um bloco de **análises visuais pós-seleção** — pensadas para a etapa *depois* de selecionar, quando é preciso **entender, justificar e auditar** o conjunto final antes de modelar. Todas saem prontas em `report.panels` (com `with_panels=True`) e também são chamáveis direto via `from yggdrasil.feature_selection import plots`.
+
+| Chave | Figura | Para quê |
+|-------|--------|----------|
+| `"post_selection_dashboard"` | `plot_post_selection_dashboard` — painel 2×2 (funil + mapa + Boruta + books) | visão-resumo de uma tela |
+| `"funnel"` | `plot_selection_funnel` — funil de atrito por etapa | onde cada feature foi perdida (derivado do `motivo`) |
+| `"decision_map"` | `plot_decision_map` — importância multivariada × sinal univariado | trade-off e fronteira da decisão; leakage destacado |
+| `"book_power"` | `plot_book_power_contribution` — share de importância × nº por book (HHI) | de onde vem o poder; risco de concentração numa origem |
+| `"cluster_redundancy"` | `plot_cluster_redundancy` — representante (★) × redundantes por cluster | por que cada redundante saiu e quem ficou |
+| `"boruta"` | `plot_boruta_significance` — hits × bandas binomiais (Bonferroni) | robustez estatística de cada decisão do Boruta |
+| `"power_quadrant"` | `plot_power_quadrant_iv_ks` — quadrante IV × KS (**classificação**) | faixas de IV (Siddiqi) + zona de leakage |
+| `"leakage_audit"` | `plot_leakage_audit` — watchlist por sinal, features flagradas em crimson | revisar sinais implausivelmente altos |
+| `"survivor_scorecard"` | `plot_survivor_scorecard` — heatmap-tabela de qualidade dos sobreviventes | auditoria de uma olhada, feature a feature |
+| `"survivor_correlation"` | `plot_survivor_corr_heatmap` — correlação **cross-book** dos sobreviventes | redundância residual que o pipeline (por book) não pega |
+
+> **Cross-book.** A deduplicação de redundância roda **por book** (a matriz de correlação da etapa 4 é calculada dentro de cada book). Duas features altamente correlacionadas em books **diferentes** sobrevivem; o `"survivor_correlation"` (a partir de `report.overall_correlation`) é onde essa redundância residual aparece — os pares com `|corr| ≥ corr_high` ficam contornados em crimson.
+
+Painéis **condicionais**: `"boruta"` só sai com Boruta ligado e hits presentes; `"power_quadrant"` só em classificação; `"survivor_correlation"` só com ≥ 2 selecionadas numéricas. Ao chamar direto, `plot_boruta_significance(selection_table, n_iter, alpha)` precisa do `n_iter` (use `report.fs_cfg.boruta_max_iter`), pois ele não é coluna da tabela.
 
 Exibindo e salvando (cada figura é uma `Figure` matplotlib com `_repr_png_` para render inline no Jupyter):
 
