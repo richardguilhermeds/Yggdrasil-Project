@@ -43,64 +43,22 @@ except Exception:  # pragma: no cover
     mannwhitneyu = None
     ttest_ind = None
 
+# helpers puros compartilhados com o ModelSegmenter (fonte única — sem drift)
+from .._common import (
+    fmt as _fmt,
+    fmt_safras as _fmt_safras,
+    classifica_psi as _classifica_psi,
+    classifica_iv as _classifica_iv,
+    count_inversions as _count_inversions,
+    fit_optbinning_splits as _fit_optbinning_splits,
+)
+
 TASK_TYPES = ("classification", "regression")
 
 
-def _fmt_safras(safras) -> list:
-    """Rótulos de safra → 'mmm/aa' (padrão de mês/ano do repositório).
-
-    Delega ao helper único :func:`yggdrasil.reporting.style.fmt_month_year`."""
-    from ...reporting.style import fmt_month_year
-    return fmt_month_year(safras)
-
-
-def _fit_optbinning_splits(b, x, y) -> list:
-    """Roda ``b.fit(x, y)`` e devolve ``list(b.splits)``.
-
-    Silencia os ``RuntimeWarning`` de "divide by zero" benignos do optbinning
-    (em ``auto_monotonic``, quando algum prebin fica com 0 registros) — o ajuste
-    ainda produz cortes válidos. Devolve ``[]`` se o ajuste falhar.
-
-    ``ValueError`` (problema inviável / sem corte) é o caminho esperado e fica
-    silencioso. Qualquer outra exceção (ex.: incompatibilidade de versão de
-    dependência) é **avisada** em vez de mascarada como "sem corte válido".
-    """
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            with np.errstate(divide="ignore", invalid="ignore"):
-                b.fit(x, y)
-        return list(b.splits)
-    except ValueError:
-        return []
-    except Exception as e:
-        warnings.warn(
-            f"optbinning falhou inesperadamente em '{getattr(b, 'name', '?')}': "
-            f"{type(e).__name__}: {e}", RuntimeWarning)
-        return []
-
-
 # ======================================================================
-# Helpers
+# Helpers (formatação/classificação/optbinning vêm de credit_risk._common)
 # ======================================================================
-def _fmt(x: float) -> str:
-    """Formata limites de faixa de forma legível."""
-    if x == -np.inf:
-        return "-inf"
-    if x == np.inf:
-        return "inf"
-    return f"{x:.4g}"
-
-
-def _classifica_psi(psi: float) -> str:
-    """Classificação usual de PSI para monitoramento de estabilidade."""
-    if psi < 0.10:
-        return "estável"
-    if psi < 0.25:
-        return "atenção"
-    return "instável"
-
-
 def _intervalo_por_extenso(lo: float, hi: float) -> str:
     """Converte um intervalo (lo, hi] em texto legível."""
     if lo == -np.inf:
@@ -108,27 +66,6 @@ def _intervalo_por_extenso(lo: float, hi: float) -> str:
     if hi == np.inf:
         return f"acima de {_fmt(lo)}"
     return f"entre {_fmt(lo)} e {_fmt(hi)}"
-
-
-def _classifica_iv(iv, task_type: str = "classification") -> str:
-    """Faixas de força do IV, conforme o tipo de alvo.
-
-    classification → IV **binário** (WoE clássico, escala de Siddiqi):
-        < 0.02 inútil · 0.02–0.10 fraco · 0.10–0.30 médio · 0.30–0.50 forte ·
-        ≥ 0.50 suspeito.
-    regression → IV **contínuo** (optbinning): desvio absoluto médio ponderado do
-        alvo por faixa em relação à média da folha — escala bem menor, recalibrada:
-        < 0.01 inútil · 0.01–0.03 fraco · 0.03–0.10 médio · 0.10–0.35 forte ·
-        ≥ 0.35 suspeito."""
-    if iv is None or (isinstance(iv, float) and np.isnan(iv)):
-        return "—"
-    faixas = ((0.02, 0.10, 0.30, 0.50) if task_type == "classification"
-              else (0.01, 0.03, 0.10, 0.35))
-    rotulos = ("inútil", "fraco", "médio", "forte")
-    for lim, rot in zip(faixas, rotulos):
-        if iv < lim:
-            return rot
-    return "suspeito"
 
 
 # ======================================================================
@@ -3468,25 +3405,6 @@ class TreeSegmenter:
             series[sid] = vals
         return ordered, nota, desc, xs, series
 
-    @staticmethod
-    def _count_inversions(ordered, values) -> tuple:
-        """Nº de pares de irmãs invertidos vs. a ordem de referência e nº de
-        pares comparáveis. `values` = dict sid->PD num ponto (amostra/safra).
-        Par (i<j na referência) inverte quando PD_i > PD_j."""
-        n_inv = n_pairs = 0
-        for a in range(len(ordered)):
-            va = values.get(ordered[a], float("nan"))
-            if pd.isna(va):
-                continue
-            for b in range(a + 1, len(ordered)):
-                vb = values.get(ordered[b], float("nan"))
-                if pd.isna(vb):
-                    continue
-                n_pairs += 1
-                if va > vb:
-                    n_inv += 1
-        return n_inv, n_pairs
-
     def sibling_inversion_summary(self, parent_sid, time_col=None, sample=None,
                                   min_n: int = 20, leaves=None) -> dict:
         """Diagnóstico de inversão das folhas-irmãs de `parent_sid`. Compara a
@@ -3503,7 +3421,7 @@ class TreeSegmenter:
         sample_rows = []
         for j, xlab in enumerate(xs_s):
             vals = {sid: ser_s[sid][j] for sid in ordered}
-            n_inv, npp = self._count_inversions(ordered, vals)
+            n_inv, npp = _count_inversions(ordered, vals)
             sample_rows.append({"amostra": xlab, "n_inv": n_inv, "n_pares": npp})
 
         safra_rows, safra_err = [], None
@@ -3512,7 +3430,7 @@ class TreeSegmenter:
                 parent_sid, time_col, sample, leaves, min_n=min_n)
             for j, xlab in enumerate(xs_t):
                 vals = {sid: ser_t[sid][j] for sid in ordered}
-                n_inv, npp = self._count_inversions(ordered, vals)
+                n_inv, npp = _count_inversions(ordered, vals)
                 if npp == 0:
                     continue
                 safra_rows.append({"safra": xlab, "n_inv": n_inv, "n_pares": npp})
@@ -3625,7 +3543,7 @@ class TreeSegmenter:
         # sombreia as safras com inversão (≥1 par fora de ordem vs. referência)
         for j in x:
             vals = {sid: series[sid][j] for sid in ordered}
-            n_inv, npp = self._count_inversions(ordered, vals)
+            n_inv, npp = _count_inversions(ordered, vals)
             if npp and n_inv:
                 ax.axvspan(j - 0.5, j + 0.5, color="#d6453e", alpha=0.08, lw=0)
         for sid in ordered:

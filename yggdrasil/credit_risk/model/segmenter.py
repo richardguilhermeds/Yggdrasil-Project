@@ -38,6 +38,15 @@ import pandas as pd
 from ...config import ColumnConfig
 from ...metrics import classification_metrics, regression_metrics
 from ...ratings import RATING_REGISTRY
+# helpers puros compartilhados com o TreeSegmenter (fonte única — sem drift)
+from .._common import (
+    fmt as _fmt,
+    fmt_safras as _fmt_safras,
+    classifica_psi as _classifica_psi,
+    classifica_iv as _classifica_iv,
+    count_inversions as _count_inversions,
+    fit_optbinning_splits as _fit_optbinning_splits,
+)
 
 try:  # optbinning é dependência core, mas degradamos com elegância.
     from optbinning import ContinuousOptimalBinning, OptimalBinning
@@ -191,51 +200,7 @@ def _optuna_space(trial, algorithm: str, space: dict | None = None) -> dict:
 # ======================================================================
 # Helpers de módulo
 # ======================================================================
-def _fmt(x: float) -> str:
-    """Formata limites de faixa de forma legível."""
-    if x == -np.inf:
-        return "-inf"
-    if x == np.inf:
-        return "inf"
-    return f"{x:.4g}"
-
-
-def _classifica_psi(psi: float) -> str:
-    """Classificação usual de PSI para monitoramento de estabilidade."""
-    if psi is None or (isinstance(psi, float) and np.isnan(psi)):
-        return "—"
-    if psi < 0.10:
-        return "estável"
-    if psi < 0.25:
-        return "atenção"
-    return "instável"
-
-
-def _classifica_iv(iv, task_type: str) -> str:
-    """Força do IV. Na **classificação** usa a escala WoE/IV de Siddiqi
-    (0.02/0.1/0.3/0.5); na **regressão** usa a escala do IV contínuo (desvio
-    absoluto médio do alvo por faixa: 0.01/0.03/0.10/0.35), bem menor."""
-    if iv is None or (isinstance(iv, float) and np.isnan(iv)):
-        return "—"
-    if task_type == "classification":
-        if iv < 0.02:
-            return "inútil"
-        if iv < 0.10:
-            return "fraco"
-        if iv < 0.30:
-            return "médio"
-        if iv < 0.50:
-            return "forte"
-        return "suspeito"
-    if iv < 0.01:
-        return "inútil"
-    if iv < 0.03:
-        return "fraco"
-    if iv < 0.10:
-        return "médio"
-    if iv < 0.35:
-        return "forte"
-    return "suspeito"
+# _fmt / _classifica_psi / _classifica_iv vêm de credit_risk._common (import acima)
 
 
 def _trend(values) -> tuple:
@@ -262,24 +227,7 @@ def _trend(values) -> tuple:
     return trend, n_inv
 
 
-def _count_inversions(ordered, values) -> tuple:
-    """Nº de pares invertidos vs. a ordem de referência e nº de pares comparáveis.
-    `ordered` = lista de chaves na ordem de risco de referência (crescente);
-    `values` = dict chave->risco num ponto (amostra/safra). Par (i<j na ref.)
-    inverte quando risco_i > risco_j."""
-    n_inv = n_pairs = 0
-    for a in range(len(ordered)):
-        va = values.get(ordered[a], float("nan"))
-        if pd.isna(va):
-            continue
-        for b in range(a + 1, len(ordered)):
-            vb = values.get(ordered[b], float("nan"))
-            if pd.isna(vb):
-                continue
-            n_pairs += 1
-            if va > vb:
-                n_inv += 1
-    return n_inv, n_pairs
+# _count_inversions vem de credit_risk._common (import acima)
 
 
 def _inverted_pairs(ordered, values) -> list:
@@ -301,30 +249,7 @@ def _inverted_pairs(ordered, values) -> list:
     return pairs
 
 
-def _fit_optbinning_splits(b, x, y) -> list:
-    """Roda ``b.fit(x, y)`` e devolve ``list(b.splits)``.
-
-    Silencia os ``RuntimeWarning`` de "divide by zero" benignos do optbinning
-    (em ``auto_monotonic``, quando algum prebin fica com 0 registros) — o ajuste
-    ainda produz cortes válidos. Devolve ``[]`` se o ajuste falhar.
-
-    ``ValueError`` (problema inviável / sem corte) é o caminho esperado e fica
-    silencioso. Qualquer outra exceção (ex.: incompatibilidade de versão de
-    dependência) é **avisada** em vez de mascarada como "sem corte válido".
-    """
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            with np.errstate(divide="ignore", invalid="ignore"):
-                b.fit(x, y)
-        return list(b.splits)
-    except ValueError:
-        return []
-    except Exception as e:
-        warnings.warn(
-            f"optbinning falhou inesperadamente em '{getattr(b, 'name', '?')}': "
-            f"{type(e).__name__}: {e}", RuntimeWarning)
-        return []
+# _fit_optbinning_splits vem de credit_risk._common (import acima)
 
 
 def _new_ax(figsize, dpi, ax):
@@ -384,12 +309,7 @@ def _is_stability_sample(name) -> bool:
     return "estab" in str(name).strip().lower()
 
 
-def _fmt_safras(safras) -> list:
-    """Rótulos de safra → 'mmm/aa' (padrão de mês/ano do repositório).
-
-    Delega ao helper único :func:`yggdrasil.reporting.style.fmt_month_year`."""
-    from ...reporting.style import fmt_month_year
-    return fmt_month_year(safras)
+# _fmt_safras vem de credit_risk._common (import acima)
 
 
 def _emit_progress(cb, key: str, label: str, status: str, detail: str = "") -> None:
