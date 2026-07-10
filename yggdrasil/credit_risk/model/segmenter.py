@@ -3579,16 +3579,17 @@ class ModelSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
-    def plot_metric_comparison(self, figsize=(8.4, 4.7), dpi=150, save_path=None, ax=None):
+    def plot_metric_comparison(self, figsize=(6.6, 4.8), dpi=150, save_path=None, ax=None):
         """Compara as principais métricas do modelo **entre amostras** (DES vs OOT
         lado a lado), em barras agrupadas — uma métrica por grupo, uma barra por
-        amostra. Classificação: **AUC, Gini, KS** (↑ maior = melhor, eixo único).
-        Regressão: **RMSE, MAE** (erro, eixo esquerdo, ↓ menor = melhor) e **R²**
-        (eixo direito com escala própria, ↑ maior = melhor) — R² tem escala e direção
-        distintas do erro, por isso num eixo separado. A direção "melhor" vai numa
-        seta em cada rótulo. Referência (DES) em steelblue e comparação (OOT) em
-        crimson (safra de estabilidade em teal). Usa :meth:`metrics`."""
+        amostra, com os valores **em %**. Sobre cada grupo, anota a **variação
+        DES→OOT** (seta + %; verde = melhora, vermelho = piora). Classificação:
+        **AUC, Gini, KS** (↑ maior = melhor, eixo único). Regressão: **RMSE, MAE**
+        (erro, eixo esquerdo, ↓ menor = melhor) e **R²** (eixo direito com escala
+        própria, ↑ maior = melhor). Referência (DES) em steelblue e comparação (OOT)
+        em crimson (safra de estabilidade em teal). Usa :meth:`metrics`."""
         from matplotlib.patches import Patch
+        from matplotlib.ticker import PercentFormatter
 
         fig, ax = _new_ax(figsize, dpi, ax)
         try:
@@ -3607,7 +3608,7 @@ class ModelSegmenter:
         plano = [p for p in plano if p[0] in m.columns]
         if not plano or not samples:
             ax.text(0.5, 0.5, "sem métricas para comparar", ha="center", va="center",
-                    transform=ax.transAxes, color="#8891a0")
+                    transform=ax.transAxes, color="#8891a0", fontsize=12)
             ax.axis("off"); fig.tight_layout()
             if save_path:
                 fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
@@ -3624,46 +3625,68 @@ class ModelSegmenter:
 
         w = 0.8 / max(len(samples), 1)
         ax2 = ax.twinx() if any(right for *_, right in plano) else None
+        ref, oot = self.ref_sample, self._oot_sample()
+        tem_oot = (ref in samples and oot in samples and oot != ref)
 
         def _val(x):
             return (float(x) if isinstance(x, (int, float, np.integer, np.floating))
                     and np.isfinite(x) else np.nan)
 
         left_vals, right_vals = [], []
-        for gi, (col, _lab, _up, right) in enumerate(plano):
+        for gi, (col, _lab, up, right) in enumerate(plano):
             axis = ax2 if right else ax
-            fmt = (lambda v: f"{v:.3f}") if (self.task_type == "classification" or right) \
-                else (lambda v: f"{v:.3g}")
+            vals_g = {}
             for k, a in enumerate(samples):
-                v = _val(m.loc[a, col]); xi = gi + k * w
+                v = _val(m.loc[a, col]); xi = gi + k * w; vals_g[a] = v
                 axis.bar(xi, v if np.isfinite(v) else 0.0, width=w, color=cores[a],
                          alpha=0.9, edgecolor="#33424f", linewidth=0.5)
                 if np.isfinite(v):
                     (right_vals if right else left_vals).append(v)
-                    axis.text(xi, v, fmt(v), ha="center", va="bottom" if v >= 0 else "top",
-                              fontsize=7.5, color="#15324a")
+                    axis.text(xi, v, f"{v * 100:.1f}%", ha="center",
+                              va="bottom" if v >= 0 else "top", fontsize=9.5,
+                              color="#15324a", fontweight="bold")
+            # variação DES→OOT sobre o grupo (topo do eixo; verde melhora / vermelho piora)
+            dref, doot = vals_g.get(ref, np.nan), vals_g.get(oot, np.nan)
+            if tem_oot and np.isfinite(dref) and np.isfinite(doot) and abs(dref) > 1e-9:
+                delta = doot - dref
+                rel = 100.0 * delta / abs(dref)
+                piora = (delta < 0) if up else (delta > 0)
+                seta = "▼" if delta < 0 else "▲"
+                cor = "#d6453e" if piora else "#1aa64b"
+                xc = gi + (len(samples) - 1) * w / 2
+                axis.text(xc, 0.965, f"{seta} {abs(rel):.1f}%",
+                          transform=axis.get_xaxis_transform(), ha="center", va="top",
+                          fontsize=10.5, fontweight="bold", color=cor)
 
+        # folga no topo p/ os rótulos de valor e a variação não colidirem com as barras
         lmax = max(left_vals + [0.0]); lmin = min(left_vals + [0.0])
-        ax.set_ylim(lmin * 1.10 if lmin < 0 else 0.0, lmax * 1.16 if lmax > 0 else 1.0)
+        ax.set_ylim(lmin * 1.12 if lmin < 0 else 0.0, lmax * 1.30 if lmax > 0 else 1.0)
+        # eixo em %: 1 casa quando os valores são pequenos (erro de regressão ~0.01),
+        # senão inteiro (AUC/Gini/KS/R²).
+        ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=1 if lmax < 0.1 else 0))
+        ax.tick_params(axis="y", labelsize=10)
         if ax2 is not None:
             rmax = max(right_vals + [0.0]); rmin = min(right_vals + [0.0])
-            ax2.set_ylim(rmin * 1.10 if rmin < 0 else 0.0, max(rmax * 1.16, 1.0))
-            ax2.set_ylabel("R² (eixo direito)", fontsize=10, color="#15324a")
+            ax2.set_ylim(rmin * 1.12 if rmin < 0 else 0.0, max(rmax * 1.30, 1.0))
+            ax2.set_yticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])   # R² ≤ 100%: não rotula acima
+            ax2.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
+            ax2.tick_params(axis="y", labelsize=10)
+            ax2.set_ylabel("R² (eixo direito)", fontsize=11, color="#15324a")
 
         labels = [f"{lab} {'↑' if up else '↓'}" for _c, lab, up, _r in plano]
         ax.set_xticks(np.arange(len(plano)) + (len(samples) - 1) * w / 2)
-        ax.set_xticklabels(labels, fontsize=10)
-        ax.set_ylabel("erro · unidade do alvo (RMSE · MAE)"
-                      if self.task_type == "regression" else "valor da métrica")
-        ax.set_title("Principais métricas por amostra", fontsize=11,
+        ax.set_xticklabels(labels, fontsize=12)
+        ax.set_ylabel("erro · % do alvo (RMSE · MAE)"
+                      if self.task_type == "regression" else "métrica (%)", fontsize=11)
+        ax.set_title("Principais métricas por amostra", fontsize=13,
                      fontweight="bold", color="#15324a")
-        # legenda por amostra (as barras podem estar em 2 eixos → monta com Patches).
-        leg_ax = ax2 if ax2 is not None else ax
-        leg_ax.legend(handles=[Patch(color=cores[a], label=a) for a in samples],
-                      fontsize=8, ncol=min(len(samples), 3), loc="upper right",
-                      framealpha=0.85)
         ax.grid(axis="y", alpha=0.15)
-        fig.tight_layout()
+        # legenda por amostra ABAIXO do gráfico (não colide com a variação no topo nem
+        # com as barras, e serve aos dois eixos). Reserva a faixa inferior no layout.
+        fig.tight_layout(rect=(0, 0.08, 1, 1))
+        fig.legend(handles=[Patch(color=cores[a], label=a) for a in samples],
+                   loc="lower center", ncol=min(len(samples), 3), fontsize=10,
+                   framealpha=0.85, bbox_to_anchor=(0.5, 0.0))
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig

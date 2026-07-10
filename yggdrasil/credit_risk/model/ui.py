@@ -1198,11 +1198,13 @@ class ModelSegmenterUI:
         _mtitle = ("Principais métricas por amostra · AUC · Gini · KS"
                    if self.task_type == "classification"
                    else "Principais métricas por amostra · RMSE · MAE · R²")
+        # Larguras iguais às da linha 2 (49.5%) p/ que métricas · score · ROC · KS
+        # fiquem alinhados num grid 2x2 (mesma coluna, mesmo figsize → mesma altura).
         row_compare_dist = W.HBox([
             W.VBox([W.HTML(f"<div class='mseg-h'>{_mtitle}</div>"),
-                    self.out_metric_compare], layout=W.Layout(width="58%")),
+                    self.out_metric_compare], layout=W.Layout(width="49.5%")),
             W.VBox([W.HTML("<div class='mseg-h'>Distribuição do score</div>"),
-                    self.out_model_c], layout=W.Layout(width="41%")),
+                    self.out_model_c], layout=W.Layout(width="49.5%")),
         ], layout=W.Layout(justify_content="space-between"))
         # linha 2: calibração (DES) + resíduos, lado a lado
         row_calib_resid = W.HBox([
@@ -2941,9 +2943,11 @@ class ModelSegmenterUI:
         # AUC/Gini/KS (classificação) ou RMSE/MAE/R² (regressão). O título vem do
         # layout (row_compare_dist); aqui vai só a figura, ampliada e esticada p/
         # preencher a coluna ao lado da distribuição do score.
+        # tight=False + mesmo figsize das demais (6.6x4.8) => mesma altura renderizada
+        # (grid alinhado). Ver specs de out_model_a/b/c abaixo.
         try:
             self.out_metric_compare.value = self._fig_html(
-                self.seg.plot_metric_comparison(figsize=(8.4, 4.7)), stretch=True)
+                self.seg.plot_metric_comparison(figsize=(6.6, 4.8)), tight=False, stretch=True)
         except Exception as e:
             self.out_metric_compare.value = f"<i>{e}</i>"
 
@@ -3083,9 +3087,12 @@ class ModelSegmenterUI:
             fn_a, fn_b = self.seg.plot_roc, self.seg.plot_ks
         else:
             fn_a, fn_b = self.seg.plot_calibration, self.seg.plot_residuals
-        specs = [(self.out_model_a, fn_a, (6.0, 5.0)),
-                 (self.out_model_b, fn_b, (6.4, 5.0)),
-                 (self.out_model_c, self.seg.plot_score_distribution, (6.4, 4.7))]
+        # Mesmo figsize (6.6x4.8) do gráfico de métricas → todas as 4 imagens saem
+        # com a MESMA proporção; com colunas de mesma largura (49.5%) e tight=False,
+        # renderizam com a mesma altura, alinhando métricas · score · ROC · KS.
+        specs = [(self.out_model_a, fn_a, (6.6, 4.8)),
+                 (self.out_model_b, fn_b, (6.6, 4.8)),
+                 (self.out_model_c, self.seg.plot_score_distribution, (6.6, 4.8))]
         for out, fn, fs in specs:
             try:
                 out.value = self._fig_html(fn(figsize=fs), tight=False, stretch=True)

@@ -877,7 +877,7 @@ def test_plot_metric_comparison(seg):
     esperado = ({"AUC", "Gini", "KS"} if seg.task_type == "classification"
                 else {"RMSE", "MAE", "R²"})
     assert base == esperado
-    legs = [a.get_legend() for a in fig.axes if a.get_legend() is not None]
+    legs = list(fig.legends) + [a.get_legend() for a in fig.axes if a.get_legend() is not None]
     leg_txt = {t.get_text() for lg in legs for t in lg.get_texts()}
     assert {"DES", "OOT"} <= leg_txt                        # DES e OOT lado a lado
     plt.close(fig)
