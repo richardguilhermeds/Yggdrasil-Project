@@ -2399,13 +2399,23 @@ class ModelSegmenter:
             n_ok = _n_complete()
             n_failed = sum(1 for t in study.trials
                            if t.state == optuna.trial.TrialState.FAIL)
+            best_val = float(study.best_value) if n_ok else float("nan")
+            # trials DEGENERADOS (métrica não-finita: AUC/R² NaN) retornam a sentinela
+            # -1e9 e ficam COMPLETE. Se o MELHOR ainda é a sentinela, NENHUM trial
+            # produziu métrica válida — não reajustar com hiperparâmetros de um trial
+            # degenerado (o "best" seria arbitrário).
+            degenerate = bool(n_ok) and np.isfinite(best_val) and best_val <= -1e8
             self.tuning_ = {"algorithm": algorithm, "metric": "auc" if is_clf else "r2",
                             "n_trials": n_ok, "n_failed": n_failed,
-                            "best_value": (round(float(study.best_value), 6)
-                                           if n_ok else float("nan")),
-                            "best_params": (dict(study.best_params) if n_ok else {}),
-                            "cancelled": cancelled}
-            if fit_best and n_ok and not cancelled:
+                            "best_value": (round(best_val, 6)
+                                           if (n_ok and not degenerate) else float("nan")),
+                            "best_params": (dict(study.best_params)
+                                            if (n_ok and not degenerate) else {}),
+                            "degenerate": degenerate, "cancelled": cancelled}
+            if degenerate and verbose:
+                print("[tune_optuna] aviso: todos os trials produziram métrica inválida "
+                      "(AUC/R² não-finito) — modelo NÃO reajustado.")
+            if fit_best and n_ok and not cancelled and not degenerate:
                 self.fit(algorithm=algorithm, hyperparams=study.best_params,
                          features=feats, transform=transform)
 
@@ -2680,8 +2690,10 @@ class ModelSegmenter:
             nm = self.feature_labels[nm]
         return f"{wrap}({nm})" if wrap else nm
 
-    def _logit_wald_pvalues(self, est, pre, names) -> dict:
-        """p-valores de Wald (aprox.) por termo da **logística**: z = coef/EP,
+    def _logit_wald_pvalues(self, est, pre, names) -> list:
+        """p-valores de Wald (aprox.) da **logística**, como LISTA alinhada por
+        POSIÇÃO a ``names``/``coef`` (não um dict por nome — dois termos com o mesmo
+        rótulo de exibição colapsariam e receberiam o p-valor errado): z = coef/EP,
         EP da diagonal de inv(Xᵀ W X), W = p(1−p). Aproximação (a logística do
         sklearn é regularizada); serve como indicação de significância."""
         from scipy.stats import norm
@@ -2699,7 +2711,7 @@ class ModelSegmenter:
         beta = np.concatenate([np.ravel(est.intercept_), np.ravel(est.coef_)])
         z = np.divide(beta, se, out=np.zeros_like(beta), where=se > 0)
         pv = 2.0 * (1.0 - norm.cdf(np.abs(z)))
-        return {nm: float(pv[i + 1]) for i, nm in enumerate(names)}
+        return [float(pv[i + 1]) for i in range(len(names))]   # alinhado a names/coef
 
     @staticmethod
     def _signif_stars(p) -> str:
@@ -2733,10 +2745,11 @@ class ModelSegmenter:
         if self.task_type == "classification" and not out.empty:
             out["odds_ratio"] = np.exp(out["coef"]).round(4)
         if self.algorithm == "logistica" and not out.empty:
-            try:                                   # p-valor de Wald (aprox.) por termo
-                pvals = self._logit_wald_pvalues(est, pre, names)
-                out["p_valor"] = out["termo"].map(lambda t: round(pvals.get(t, np.nan), 4))
-                out["signif"] = out["p_valor"].map(self._signif_stars)
+            try:                                   # p-valor de Wald (aprox.), por POSIÇÃO
+                pvals = self._logit_wald_pvalues(est, pre, names)   # lista alinhada a coef
+                if len(pvals) == len(out):
+                    out["p_valor"] = [round(float(p), 4) for p in pvals]
+                    out["signif"] = out["p_valor"].map(self._signif_stars)
             except Exception:
                 pass
         out = out.reindex(out["coef"].abs().sort_values(ascending=False).index).reset_index(drop=True)
@@ -3861,6 +3874,7 @@ class ModelSegmenter:
         fig.suptitle("SHAP — contribuição por variável", fontsize=11,
                      fontweight="bold", color="#15324a")
         fig.tight_layout()
+        plt.close(fig)          # tira do Gcf: evita re-exibição inline e vazamento de figuras
         return fig
 
     def plot_shap_bar(self, sample=None, sample_size=2000, max_display=15):
@@ -3881,6 +3895,7 @@ class ModelSegmenter:
         fig.suptitle("SHAP — importância global (|valor| médio)", fontsize=11,
                      fontweight="bold", color="#15324a")
         fig.tight_layout()
+        plt.close(fig)          # tira do Gcf: evita re-exibição inline e vazamento de figuras
         return fig
 
     # ------------------------------------------------------------------
@@ -4589,12 +4604,12 @@ class ModelSegmenter:
 
     def plot_backtest(self, sample=None, tolerancia=0.2, time_col=None,
                       figsize=(9.6, 4.4), dpi=150, save_path=None, ax=None):
-        """Backtest gráfico: previsto × realizado por safra (duas linhas) com
-        **banda de tolerância** sombreada em torno do previsto
-        (``previsto ± tolerancia·previsto``; ``tolerancia=0.2`` = ±20%) e
-        marcadores destacados nos meses em que o realizado sai da banda.
-        Funciona nos dois ``task_type`` (unidade do alvo: PD/LGD). Usa a mesma
-        agregação por safra de :meth:`backtest`."""
+        """Backtest gráfico: previsto × realizado por safra (duas linhas) com uma
+        **banda visual** sombreada (``previsto ± tolerancia·previsto``; ``0.2`` =
+        ±20% — só referência visual). Os **marcadores vermelhos** destacam as safras
+        em ``status='alerta'`` da tabela :meth:`backtest` (|gap| > tol ABSOLUTO,
+        default por task_type), para o gráfico e a tabela nunca discordarem.
+        Funciona nos dois ``task_type`` (unidade do alvo: PD/LGD)."""
         bt = self.backtest(time_col=time_col, sample=sample)
         fig, ax = _new_ax(figsize, dpi, ax)
         if bt.empty:
@@ -4607,17 +4622,19 @@ class ModelSegmenter:
         lo = prev * (1.0 - float(tolerancia))
         hi = prev * (1.0 + float(tolerancia))
         ax.fill_between(x, lo, hi, color="#8aa4bf", alpha=0.25,
-                        label=f"tolerância ±{100 * tolerancia:.0f}%")
+                        label=f"banda visual ±{100 * tolerancia:.0f}%")
         ax.plot(x, prev, color="#15324a", lw=2.2, marker="o", ms=4.5,
                 label="previsto (médio)")
         ax.plot(x, real, color="#1aa64b", lw=2.0, marker="o", ms=4.5,
                 label="realizado (médio)")
-        # meses FORA da banda: marcador destacado em vermelho sobre o realizado
-        fora = np.isfinite(real) & np.isfinite(prev) & ((real < lo) | (real > hi))
-        if fora.any():
-            xs = [x0 for x0, f in zip(x, fora) if f]
-            ax.plot(xs, real[fora], "o", ms=9, mfc="none", mec="#d6453e", mew=2.0,
-                    label="fora da banda")
+        # marcadores destacados = safras em ALERTA na tabela backtest (|gap| > tol
+        # ABSOLUTO, mesmo critério de backtest()), NÃO a banda relativa visual — assim
+        # os pontos vermelhos batem com o 'status' da tabela.
+        alerta = (bt["status"].to_numpy() == "alerta") & np.isfinite(real) & np.isfinite(prev)
+        if alerta.any():
+            xs = [x0 for x0, f in zip(x, alerta) if f]
+            ax.plot(xs, real[alerta], "o", ms=9, mfc="none", mec="#d6453e", mew=2.0,
+                    label="alerta (|gap| > tol)")
         labels = _fmt_safras(bt["safra"])
         step = max(1, len(bt) // 18)
         ax.set_xticks(x[::step])
