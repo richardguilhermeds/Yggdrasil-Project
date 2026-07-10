@@ -1249,6 +1249,46 @@ class ModelSegmenterUI:
         self.out_rating_dist = W.HTML()
         self.out_rating_inv_s = W.HTML()
         self.out_rating_inv_t = W.HTML()
+        # Zoom dos gráficos de inversão: aproxima o eixo Y para revelar cruzamentos
+        # (inversões) que somem quando o eixo começa em 0 — em especial inversões
+        # ENTRE SAFRAS. Campos mín/máx em % são opcionais (vazios ⇒ zoom automático
+        # justo aos dados); o botão ↺ volta ao eixo cheio.
+        self._inv_s_zoom = False
+        self._inv_t_zoom = False
+        _zoom_lay = W.Layout(width="82px")
+        self.btn_zoom_inv_s = W.Button(description="🔍 Zoom", layout=W.Layout(width="98px"),
+                                       tooltip="Aproxima o eixo Y (zoom) para revelar "
+                                               "cruzamentos/inversões entre amostras. Deixe os "
+                                               "campos vazios para zoom automático, ou informe "
+                                               "mín/máx em %.")
+        self.btn_reset_inv_s = W.Button(description="↺", layout=W.Layout(width="42px"),
+                                        tooltip="Volta ao eixo cheio (começando em 0).")
+        self.tx_inv_s_min = W.Text(value="", placeholder="mín %", layout=_zoom_lay,
+                                   continuous_update=False)
+        self.tx_inv_s_max = W.Text(value="", placeholder="máx %", layout=_zoom_lay,
+                                   continuous_update=False)
+        self.btn_zoom_inv_t = W.Button(description="🔍 Zoom", layout=W.Layout(width="98px"),
+                                       tooltip="Aproxima o eixo Y (zoom) para revelar inversões "
+                                               "ENTRE SAFRAS. Deixe os campos vazios para zoom "
+                                               "automático, ou informe mín/máx em %.")
+        self.btn_reset_inv_t = W.Button(description="↺", layout=W.Layout(width="42px"),
+                                        tooltip="Volta ao eixo cheio (começando em 0).")
+        self.tx_inv_t_min = W.Text(value="", placeholder="mín %", layout=_zoom_lay,
+                                   continuous_update=False)
+        self.tx_inv_t_max = W.Text(value="", placeholder="máx %", layout=_zoom_lay,
+                                   continuous_update=False)
+        self.btn_zoom_inv_s.on_click(self._on_zoom_inv_s)
+        self.btn_reset_inv_s.on_click(self._on_reset_inv_s)
+        self.btn_zoom_inv_t.on_click(self._on_zoom_inv_t)
+        self.btn_reset_inv_t.on_click(self._on_reset_inv_t)
+        self.tx_inv_s_min.observe(lambda c: self._render_inv_sample(), names="value")
+        self.tx_inv_s_max.observe(lambda c: self._render_inv_sample(), names="value")
+        self.tx_inv_t_min.observe(lambda c: self._render_inv_safra(), names="value")
+        self.tx_inv_t_max.observe(lambda c: self._render_inv_safra(), names="value")
+        self.box_zoom_inv_s = W.HBox([self.btn_zoom_inv_s, self.btn_reset_inv_s,
+                                      self.tx_inv_s_min, self.tx_inv_s_max])
+        self.box_zoom_inv_t = W.HBox([self.btn_zoom_inv_t, self.btn_reset_inv_t,
+                                      self.tx_inv_t_min, self.tx_inv_t_max])
         self.out_rating_psi_safra = W.HTML()   # PSI dos ratings ao longo do tempo (por safra)
         self.out_rating_psi_sample = W.HTML()  # PSI dos ratings por amostra (DES × OOT/ESTABILIDADE)
         self.out_rating_mono = W.HTML()
@@ -1272,9 +1312,11 @@ class ModelSegmenterUI:
                     W.VBox([W.HTML("<div class='mseg-h'>Distribuição dos ratings</div>"),
                             self.out_rating_dist], layout=W.Layout(width="50%"))]),
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Inversão entre ratings · amostras</div>"),
-                            self.out_rating_inv_s], layout=W.Layout(width="50%")),
+                            self.out_rating_inv_s, self.box_zoom_inv_s],
+                           layout=W.Layout(width="50%")),
                     W.VBox([W.HTML("<div class='mseg-h'>Inversão entre ratings · safras</div>"),
-                            self.out_rating_inv_t], layout=W.Layout(width="50%"))]),
+                            self.out_rating_inv_t, self.box_zoom_inv_t],
+                           layout=W.Layout(width="50%"))]),
             W.VBox([W.HTML("<div class='mseg-h'>PSI dos ratings por amostra · DES × OOT e "
                            "ESTABILIDADE</div>"),
                     W.HTML("<div class='mseg-legend'>Estabilidade da régua entre amostras: PSI da "
@@ -2647,6 +2689,8 @@ class ModelSegmenterUI:
             self._refresh_bar()
             if two:                           # já traz o rating sobre a resposta combinada
                 self._auto_build_rating()
+            else:                             # mantém a régua coerente com o NOVO score
+                self._reproject_ratings_after_refit()
         except Exception as e:
             self.pb_fit.bar_style = "danger"
             self.pb_fit.description = "erro"
@@ -2768,6 +2812,7 @@ class ModelSegmenterUI:
         self._clear_dirty()                   # modelo re-treinado no tuning ⇒ em dia
         self._clear_adv_outputs()
         self._refresh_bar()
+        self._reproject_ratings_after_refit()  # ratings coerentes com o score re-treinado
 
     def _on_cancel_tune(self, b):
         """Sinaliza o cancelamento do tuning em andamento (a thread de fundo termina
@@ -2840,6 +2885,45 @@ class ModelSegmenterUI:
                       f"({len(self.seg.rating_labels_)} faixas) — ver a aba Ratings & Score.")
         except Exception as e:
             self._log(f"[ratings] não foi possível gerar automaticamente: {e}")
+
+    def _reproject_ratings_after_refit(self):
+        """Após um retreino que troca ``seg.score_`` (fit simples / tuning), mantém os
+        ratings coerentes com o NOVO score: reprojeta a régua vigente sobre o novo
+        score (mesmos cortes/fusão, via ``rating_strategy.transform`` — mesmo padrão de
+        :meth:`apply_backward_selection`) e re-renderiza a aba. Sem ratings prévios é
+        no-op; se não der para reprojetar, limpa a aba para não exibir/exportar ratings
+        do modelo anterior."""
+        seg = self.seg
+        if getattr(seg, "rating_", None) is None:
+            return                                        # nunca houve rating — nada a fazer
+        if seg.rating_strategy is None:
+            self._clear_ratings_outputs()
+            self._log("[ratings] limpos após o retreino (sem estratégia para reprojetar).")
+            return
+        try:
+            seg.rating_ = seg.rating_strategy.transform(
+                seg._rating_frame(), seg._make_cfg("_amostra"))
+            self._render_ratings()
+            self._log(f"[ratings] reprojetados sobre o novo score "
+                      f"({len(seg.rating_labels_)} faixas).")
+        except Exception as e:
+            self._clear_ratings_outputs()
+            self._log(f"[ratings] limpos após o retreino (não foi possível "
+                      f"reprojetar: {e}).")
+
+    def _clear_ratings_outputs(self):
+        """Invalida a régua de rating no ``seg`` e zera a aba Ratings & Score, para que
+        nada (tabela, gráficos, ``assign``/export) use ratings de um modelo anterior."""
+        self.seg.rating_ = None
+        self.seg.rating_strategy = None
+        self.seg.rating_labels_ = []
+        self.seg.rating_config = {}
+        for w in (self.out_rating_auto, self.out_rating_table, self.out_rating_badrate,
+                  self.out_rating_dist, self.out_rating_inv_s, self.out_rating_inv_t,
+                  self.out_rating_psi_sample, self.out_rating_psi_safra,
+                  self.out_rating_mono):
+            w.value = ""
+        self._refresh_bar()
 
     def _metrics_table_html(self, m):
         """Tabela de métricas centralizada e com identificador visual: cada célula
@@ -3200,6 +3284,71 @@ class ModelSegmenterUI:
         except Exception as e:
             self._log(f"[ratings] erro: {e}")
 
+    # ---------------------------------------------------- zoom dos gráficos de inversão
+    def _read_inv_ylim(self, tx_min, tx_max):
+        """(baixo, alto) em fração a partir de dois campos de % (texto); lado
+        vazio/inválido vira ``None``. Retorna ``None`` se ambos vazios."""
+        def _p(t):
+            s = (t.value or "").strip().replace("%", "").replace(",", ".")
+            if not s:
+                return None
+            try:
+                return float(s) / 100.0
+            except ValueError:
+                return None
+        lo, hi = _p(tx_min), _p(tx_max)
+        return None if (lo is None and hi is None) else (lo, hi)
+
+    def _render_inv_sample(self):
+        """Renderiza o gráfico de inversão por amostra respeitando o estado de zoom."""
+        if getattr(self.seg, "rating_", None) is None:
+            return
+        try:
+            ylim = self._read_inv_ylim(self.tx_inv_s_min, self.tx_inv_s_max)
+            self.out_rating_inv_s.value = self._fig_html(
+                self.seg.plot_rating_inversion_by_sample(
+                    figsize=(8.4, 4.0), ylim=ylim, auto_zoom=self._inv_s_zoom),
+                tight=False)
+        except Exception as e:
+            self.out_rating_inv_s.value = f"<i>{e}</i>"
+
+    def _render_inv_safra(self):
+        """Renderiza o gráfico de inversão por safra respeitando o estado de zoom."""
+        if getattr(self.seg, "rating_", None) is None:
+            return
+        try:
+            ylim = self._read_inv_ylim(self.tx_inv_t_min, self.tx_inv_t_max)
+            self.out_rating_inv_t.value = self._fig_html(
+                self.seg.plot_rating_inversion_by_safra(
+                    figsize=(8.4, 4.0), ylim=ylim, auto_zoom=self._inv_t_zoom),
+                tight=False)
+        except Exception as e:
+            self.out_rating_inv_t.value = f"<i>{e}</i>"
+
+    def _on_zoom_inv_s(self, b):
+        self._inv_s_zoom = True
+        self.btn_zoom_inv_s.button_style = "info"
+        self._render_inv_sample()
+
+    def _on_reset_inv_s(self, b):
+        self._inv_s_zoom = False
+        self.btn_zoom_inv_s.button_style = ""
+        self.tx_inv_s_min.value = ""
+        self.tx_inv_s_max.value = ""
+        self._render_inv_sample()
+
+    def _on_zoom_inv_t(self, b):
+        self._inv_t_zoom = True
+        self.btn_zoom_inv_t.button_style = "info"
+        self._render_inv_safra()
+
+    def _on_reset_inv_t(self, b):
+        self._inv_t_zoom = False
+        self.btn_zoom_inv_t.button_style = ""
+        self.tx_inv_t_min.value = ""
+        self.tx_inv_t_max.value = ""
+        self._render_inv_safra()
+
     def _render_ratings(self):
         """Renderiza tabela e gráficos dos ratings a partir do estado atual do
         ``seg`` (usado ao gerar ratings e ao carregar um modelo já ratingado)."""
@@ -3208,18 +3357,12 @@ class ModelSegmenterUI:
         self.out_rating_table.value = self._df_html(rt, center=True, pct_cols=rate_cols)
         self.out_rating_badrate.value = self._fig_html(self.seg.plot_rating_badrate())
         self.out_rating_dist.value = self._fig_html(self.seg.plot_rating_distribution())
-        # mesma figsize + tight=False ⇒ os dois gráficos de inversão (amostras ×
-        # safras) saem com a MESMA altura nas colunas 50/50
-        inv_size = (8.4, 4.0)
-        self.out_rating_inv_s.value = self._fig_html(
-            self.seg.plot_rating_inversion_by_sample(figsize=inv_size), tight=False)
+        # os dois gráficos de inversão passam pelos helpers de zoom (mesma figsize +
+        # tight=False ⇒ MESMA altura nas colunas 50/50), respeitando o estado de zoom.
+        self._render_inv_sample()
         self.out_rating_mono.value = self._df_html(
             self.seg.monotonicity_report(), center=True)
-        try:
-            self.out_rating_inv_t.value = self._fig_html(
-                self.seg.plot_rating_inversion_by_safra(figsize=inv_size), tight=False)
-        except Exception as e:
-            self.out_rating_inv_t.value = f"<i>{e}</i>"
+        self._render_inv_safra()
         try:
             self.out_rating_psi_sample.value = self._fig_html(
                 self.seg.plot_rating_psi_by_sample(figsize=(9.6, 4.2)), stretch=True)
