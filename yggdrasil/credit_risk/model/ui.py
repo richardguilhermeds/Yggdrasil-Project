@@ -628,9 +628,10 @@ class ModelSegmenterUI:
         threading.Timer(timeout, _revert).start()
 
     def _mark_dirty(self):
-        """Marca o modelo como DESATUALIZADO (variáveis/derivadas/bins/WoE mudaram
-        depois do treino): pill âmbar na barra + tarja sobre o card de métricas.
-        No-op sem modelo treinado; a flag limpa no próximo fit bem-sucedido."""
+        """Marca o modelo como DESATUALIZADO (variáveis/derivadas/bins/WoE OU
+        algoritmo/hiperparâmetros mudaram depois do treino): pill âmbar na barra +
+        tarja sobre o card de métricas. No-op sem modelo treinado; a flag limpa no
+        próximo fit bem-sucedido."""
         if self.seg.score_ is None or self._dirty_since_fit:
             return
         self._dirty_since_fit = True
@@ -638,9 +639,9 @@ class ModelSegmenterUI:
             "<div style='border:1px solid var(--notice-border);background:var(--notice-bg);"
             "border-radius:10px;"
             "padding:9px 12px;font-size:12px;color:var(--notice-ink);margin-bottom:8px'>"
-            "⚠️ <b>Modelo desatualizado</b> — variáveis/bins/WoE mudaram depois do "
-            "treino; as métricas e gráficos abaixo refletem o modelo ANTIGO. "
-            "Re-treine na aba Modelo.</div>")
+            "⚠️ <b>Modelo desatualizado</b> — variáveis/bins/WoE ou "
+            "algoritmo/hiperparâmetros mudaram depois do treino; as métricas e gráficos "
+            "abaixo refletem o modelo ANTIGO. Re-treine na aba Modelo.</div>")
         self._refresh_bar()
 
     def _clear_dirty(self):
@@ -1093,8 +1094,13 @@ class ModelSegmenterUI:
         self.out_shap_rel = W.HTML()       # importância relativa por variável (categóricas agregadas)
         self.btn_fit.on_click(self._on_fit)
         self.btn_shap.on_click(self._on_shap)
-        self.dd_algo.observe(lambda c: self._sync_algo_visibility(), names="value")
-        self.cb_max_depth.observe(lambda c: self._sync_algo_visibility(), names="value")
+        self.dd_algo.observe(lambda c: (self._sync_algo_visibility(), self._mark_dirty()),
+                             names="value")
+        self.cb_max_depth.observe(lambda c: (self._sync_algo_visibility(), self._mark_dirty()),
+                                  names="value")
+        # trocar algoritmo/hiperparâmetros depois do treino também desatualiza o modelo
+        for _hp in (self.sl_n_est, self.sl_max_depth, self.tx_C, self.tx_lr):
+            _hp.observe(lambda c: self._mark_dirty(), names="value")
 
         # --- Two-Stage (hurdle de LGD): opção só para regressão -------------
         _tgt = pd.to_numeric(self.df[self.seg.target], errors="coerce")
@@ -1898,9 +1904,13 @@ class ModelSegmenterUI:
             self._apply_backward_optimal(res, self.out_backelim_apply)
 
         # reusa o resultado do backward só se for da MESMA seleção (IDENTIDADE, não só
-        # contagem) — senão o subconjunto ótimo seria de outro conjunto de variáveis.
+        # contagem) E da MESMA amostra de avaliação — senão o passo ótimo viria de
+        # métricas de outra amostra/outro conjunto de variáveis.
         res0 = getattr(self, "_backelim_result", None)
-        if res0 is not None and len(res0) and set(res0.attrs.get("feats0", [])) == set(feats0):
+        same = (res0 is not None and len(res0)
+                and set(res0.attrs.get("feats0", [])) == set(feats0)
+                and res0.attrs.get("eval_sample") == self.dd_backelim_sample.value)
+        if same:
             try:
                 _apply(res0)
             except Exception as e:
@@ -2340,6 +2350,14 @@ class ModelSegmenterUI:
                 hi = self._sp_high[name].value
                 if hi < lo:                          # tolera inversão do usuário
                     lo, hi = hi, lo
+                if spec.get("log"):                  # escala log exige limites > 0
+                    floor = spec.get("low") or 1e-12
+                    floor = floor if floor > 0 else 1e-12
+                    if lo < floor:                   # 0/negativo faria o Optuna rejeitar
+                        self._log(f"[tune] '{name}' é log-scale: mín {lo:g} ajustado "
+                                  f"para {floor:g} (deve ser > 0).")
+                        lo = floor
+                    hi = max(hi, lo)
                 new = dict(spec)                     # preserva type/step/log
                 new["low"], new["high"] = lo, hi
                 space[name] = new
@@ -2787,6 +2805,15 @@ class ModelSegmenterUI:
                                    f"concluído — nada a aplicar.{_extra}</div>")
             self._log(f"[tune] nenhum trial concluído (falhas: {_fail}).")
             return
+        if res.get("degenerate"):            # trials "concluíram" mas com métrica inválida
+            self.pb_tune.bar_style = "danger"
+            self.pb_tune.description = "degenerado"
+            self.out_tune.value = ("<div style='color:var(--bad-tx);font-size:12px'>Todos os "
+                                   "trials produziram <b>métrica inválida</b> (AUC/R² não-finito "
+                                   "— ex.: validação de uma só classe). Modelo <b>não</b> "
+                                   "reajustado; revise variáveis/amostra/espaço de busca.</div>")
+            self._log("[tune] estudo degenerado (métrica inválida); modelo preservado.")
+            return
         self.pb_tune.value = self.pb_tune.max
         self.pb_tune.bar_style = "success"
         self.pb_tune.description = f"{res['n_trials']}/{res['n_trials']} ✓"
@@ -3021,7 +3048,9 @@ class ModelSegmenterUI:
             self._log("[backward] menos de 2 variáveis disponíveis.")
             return
         sample = self.dd_backelim_sample.value
-        min_features = int(self.sl_backelim_min.value)
+        # clamp ao conjunto vigente (como _on_feat_optimal): o max do slider é fixado
+        # na build e pode ficar >= nº atual de variáveis se a seleção encolheu.
+        min_features = max(1, min(int(self.sl_backelim_min.value), len(feats0) - 1))
         total = max(1, len(feats0) - min_features + 1)
         self.pb_backelim.max = total
         self.pb_backelim.value = 0
