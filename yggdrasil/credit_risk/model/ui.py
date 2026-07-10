@@ -473,9 +473,20 @@ class ModelSegmenterUI:
 
     def _df_html(self, df, max_height=None, color_categoria=False, center=False,
                  color_forca=False, color_tendencia=False, color_estabilidade=False,
-                 color_validation=False, pct_cols=None):
+                 color_validation=False, pct_cols=None, highlight_included=False):
         sty = (df.style.hide(axis="index").set_table_styles(self._TABLE_STYLES)
                .set_properties(**{"font-size": "12px"}))
+        if highlight_included and "incluida" in df.columns:
+            # DESTAQUE das variáveis selecionadas p/ o modelo: linha inteira com fundo
+            # verde + acento à esquerda (as colunas coloridas mantêm sua cor semântica).
+            def _row_incl(row):
+                if not str(row.get("incluida", "")).strip().startswith("✓"):
+                    return [""] * len(row)
+                base = "background-color:var(--ok-bg);font-weight:600"
+                out = [base] * len(row)
+                out[0] = base + ";box-shadow:inset 3px 0 0 var(--ok-tx)"
+                return out
+            sty = sty.apply(_row_incl, axis=1)
         if center:
             sty = sty.set_properties(**{"text-align": "center"})
             sty = sty.set_table_styles([{"selector": "th, td",
@@ -904,6 +915,7 @@ class ModelSegmenterUI:
             lambda c: (self._sync_bin_controls(), self._on_analyze(None)), names="value")
         self.out_an_cards = W.HTML()
         self.out_an_distbad = W.HTML()    # distribuição + % de maus (gráfico único)
+        self.out_an_logodds = W.HTML()    # logodds/WoE por faixa (comportamento)
         self.out_an_table = W.HTML()
         self.out_an_inv_sample = W.HTML()
         self.out_an_inv_safra = W.HTML()
@@ -933,18 +945,17 @@ class ModelSegmenterUI:
             layout=W.Layout(width="49%"))
         _row = lambda a, b: W.HBox(
             [a, b], layout=W.Layout(justify_content="space-between", align_items="flex-start"))
-        # linha 1: tabela por faixa · distribuição vs risco médio (PD/LGD)
-        row1 = _row(_col("Tabela por faixa", self.out_an_table),
-                    _col(f"Distribuição &amp; {_dist_h} por faixa", self.out_an_distbad))
-        # linha 2: risco das faixas por amostra · por safra
-        row2 = _row(_col("Risco das faixas por amostra", self.out_an_inv_sample),
-                    _col("Risco das faixas por safra", self.out_an_inv_safra))
-        # linha 3: variável ao longo do tempo (percentis) · PSI por safra
-        row3 = _row(_col("Variável ao longo do tempo · percentis por safra", self.out_an_time),
+        # aba unificada (mesmas seções/ordem do TreeSegmenterUI):
+        # comportamento · resumo & estabilidade + tabela · inversão · tempo · optbin
+        row_comport = _row(_col(f"Comportamento · distribuição &amp; {_dist_h} por faixa",
+                                self.out_an_distbad),
+                           _col("Logodds / WoE por faixa", self.out_an_logodds))
+        row_resumo = _row(_col("Resumo &amp; estabilidade", self.out_an_cards),
+                          _col("Tabela por faixa", self.out_an_table))
+        row2 = _row(_col("Inversão da ordem de risco · por amostra", self.out_an_inv_sample),
+                    _col("Inversão da ordem de risco · por safra", self.out_an_inv_safra))
+        row3 = _row(_col("Ao longo do tempo · percentis por safra", self.out_an_time),
                     _col("PSI da variável por safra vs DES", self.out_an_psi))
-        # linha 4 (largura TOTAL, 2 colunas): distribuição ACUMULADA (área empilhada)
-        # das faixas do OPTIMAL BINNING ao longo do tempo — só numéricas, da primeira
-        # faixa (base) até a última (topo). Substitui os antigos gráficos de share.
         row_optbin = W.VBox(
             [W.HTML("<div class='mseg-h'>Distribuição acumulada das faixas do optimal binning "
                     "ao longo do tempo (numéricas)</div>"),
@@ -952,8 +963,7 @@ class ModelSegmenterUI:
         tab_an = W.VBox([
             W.HBox([self.dd_var2, self.dd_sample2, self.tx_time2, self.btn_analyze]),
             bin_card,
-            self.out_an_cards,
-            row1, row2, row3, row_optbin,
+            row_comport, row_resumo, row2, row3, row_optbin,
         ], layout=W.Layout(padding="2px"))
 
         # ---------- Aba 3: Modelo ----------
@@ -1808,7 +1818,8 @@ class ModelSegmenterUI:
                 rk = rk.rename(columns={"bins_manuais": "manual"})
             self.out_vars.value = self._df_html(rk, max_height="320px",
                                                 color_categoria=True, color_forca=True,
-                                                color_tendencia=True, color_estabilidade=True)
+                                                color_tendencia=True, color_estabilidade=True,
+                                                highlight_included=True)
         except Exception as e:
             self.out_vars.value = f"<i>falha ao calcular IV: {e}</i>"
         self._refresh_var_preview()
@@ -2025,9 +2036,9 @@ class ModelSegmenterUI:
         feat = self.dd_var2.value
         sample = None if self.dd_sample2.value == "(referência)" else self.dd_sample2.value
         tcol = self.tx_time2.value.strip() or None
-        _an_ws = (self.out_an_distbad, self.out_an_table, self.out_an_inv_sample,
-                  self.out_an_cards, self.out_an_time, self.out_an_inv_safra,
-                  self.out_an_psi, self.out_an_optbin_share)
+        _an_ws = (self.out_an_distbad, self.out_an_logodds, self.out_an_table,
+                  self.out_an_inv_sample, self.out_an_cards, self.out_an_time,
+                  self.out_an_inv_safra, self.out_an_psi, self.out_an_optbin_share)
         # cache das figuras por (feature, amostra, safra, versão de bins): revisitar
         # uma variável já analisada restaura os HTMLs sem re-renderizar/re-encodar os
         # PNGs. _rank_version invalida quando bins/derivadas/amostra mudam.
@@ -2047,6 +2058,9 @@ class ModelSegmenterUI:
             self.out_an_distbad.value = self._fig_html(
                 self.seg.plot_variable_distribution_badrate(feat, sample=sample,
                                                             figsize=(6.4, 3.4)), tight=False)
+            self.out_an_logodds.value = self._fig_html(
+                self.seg.plot_variable_logodds(feat, sample=sample, figsize=(6.4, 3.4)),
+                tight=False)
             vt = self.seg.variable_table(feat, sample=sample)
             self.out_an_table.value = self._df_html(vt, max_height="240px", center=True)
             # "risco das faixas por amostra" esticado p/ preencher a coluna (menos
@@ -2054,7 +2068,20 @@ class ModelSegmenterUI:
             self.out_an_inv_sample.value = self._fig_html(
                 self.seg.plot_variable_inversion_by_sample(feat, figsize=(7.2, 3.4)),
                 stretch=True)
-            self.out_an_cards.value = self._var_cards(self.seg.variable_summary(feat, sample))
+            summ = self.seg.variable_summary(feat, sample)
+            trend = None                       # tendência da média p/ os cards ricos
+            if tcol and summ.get("tipo") == "num":
+                try:
+                    bs = self.seg.variable_by_safra(feat, tcol, sample)
+                    med = bs["media"].dropna()
+                    if len(med) >= 2 and med.iloc[0] != 0:
+                        trend = {"pct": 100 * (med.iloc[-1] - med.iloc[0]) / abs(med.iloc[0]),
+                                 "n_safras": len(bs), "de": float(med.iloc[0]),
+                                 "para": float(med.iloc[-1]), "ini": str(bs["safra"].iloc[0]),
+                                 "fim": str(bs["safra"].iloc[-1])}
+                except Exception:
+                    pass
+            self.out_an_cards.value = self._var_cards(summ, trend)
         except Exception as e:
             self.out_an_distbad.value = f"<i>{e}</i>"
             _an_ok = False
@@ -2091,17 +2118,62 @@ class ModelSegmenterUI:
                 self._an_fig_cache.clear()
             self._an_fig_cache[_ck] = tuple(_w.value for _w in _an_ws)
 
-    def _var_cards(self, s):
+    def _var_cards(self, s, trend=None):
+        """Resumo & estabilidade rico (unificado com o TreeSegmenterUI): chips de
+        qualidade + estatísticas, **gauges de PSI por amostra** e **tendência da
+        média** (quando ``trend`` é fornecido)."""
         def card(k, v):
             return f"<div class='mseg-metric'><div class='k'>{k}</div><div class='v'>{v}</div></div>"
+
+        def fnum(x, nd=2):
+            return f"{x:.{nd}f}" if isinstance(x, (int, float)) and x == x else "—"
         cells = [card("tipo", s["tipo"]), card("%falt.", f"{s['pct_missing']:.1f}%"),
                  card("IV", "—" if s["iv"] is None else f"{s['iv']:.4f}"),
                  card("força", s["forca"]), card("tendência", s["tendencia"]),
                  card("inversões", s["n_inversoes"]),
                  card("PSI pior", "—" if s["pior_psi"] is None else f"{s['pior_psi']:.4f}")]
         if s["tipo"] == "num" and "media" in s:
-            cells += [card("média", s["media"]), card("mediana", s["mediana"])]
-        return f"<div class='mseg-metrics'>{''.join(cells)}</div>"
+            cells += [card("média", s["media"]), card("mediana", s["mediana"]),
+                      card("desvio", fnum(s.get("desvio"), 3)),
+                      card("P5–P95", f"{fnum(s.get('p5'))} – {fnum(s.get('p95'))}")]
+        html = f"<div class='mseg-metrics'>{''.join(cells)}</div>"
+        # Estabilidade · PSI por amostra (gauges), como o TreeSegmenterUI
+        psi = {a: v for a, v in (s.get("psi") or {}).items() if v is not None and v == v}
+        if psi:
+            _cls = lambda v: ("ok" if v < 0.10 else "warn" if v < 0.25 else "bad")
+            _txt = {"ok": "estável", "warn": "atenção", "bad": "instável"}
+            rows = ""
+            for a, v in psi.items():
+                ab = "ESTAB" if a == "ESTABILIDADE" else a
+                c = _cls(v); pos = min(max(v, 0.0) / 0.50, 1.0) * 100
+                gauge = ("<div style='position:relative;flex:1;height:8px;border-radius:5px;"
+                         "background:linear-gradient(to right,var(--ok-tx) 0%,var(--ok-tx) 20%,"
+                         "var(--warn-tx) 20%,var(--warn-tx) 50%,var(--bad-tx) 50%,"
+                         "var(--bad-tx) 100%)'>"
+                         f"<div style='position:absolute;left:calc({pos:.1f}% - 1px);top:-2px;"
+                         "width:2px;height:12px;background:var(--ink);border-radius:1px'></div></div>")
+                rows += ("<div style='display:flex;align-items:center;gap:9px;margin:6px 0'>"
+                         f"<div style='width:74px;font-size:11.5px;color:var(--muted);"
+                         f"white-space:nowrap'>PSI {ab}</div>"
+                         f"<div class='mono' style='width:50px;font-size:13px;font-weight:600;"
+                         f"color:var(--{c}-tx)'>{v:.3f}</div>{gauge}"
+                         f"<div style='width:54px;text-align:right;font-size:10.5px;"
+                         f"color:var(--{c}-tx)'>{_txt[c]}</div></div>")
+            html += ("<div class='mseg-h' style='margin-top:12px'>Estabilidade · PSI por "
+                     "amostra (vs. DES)</div>" + rows)
+        # Tendência da média ao longo das safras
+        if trend:
+            arrow = "↑" if trend["pct"] >= 0 else "↓"
+            tc = ("var(--bad-tx)" if abs(trend["pct"]) >= 10
+                  else "var(--warn-tx)" if abs(trend["pct"]) >= 3 else "var(--ok-tx)")
+            html += ("<div style='display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;"
+                     "font-size:11.5px;margin-top:12px;padding-top:8px;"
+                     "border-top:1px solid var(--hair)'>"
+                     "<span style='color:var(--muted)'>Tendência da média</span>"
+                     f"<b style='color:{tc};font-size:13px'>{arrow} {trend['pct']:+.0f}%</b>"
+                     f"<span style='color:var(--sub-ink)'>{trend['de']:.2f} → {trend['para']:.2f} · "
+                     f"{trend['n_safras']} safras ({trend['ini']} → {trend['fim']})</span></div>")
+        return html
 
     # ---- bins manuais (categorizar "na mão") ----
     def _sync_binmode(self):

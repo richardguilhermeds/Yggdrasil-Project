@@ -1012,11 +1012,15 @@ class TreeSegmenterUI:
         self.out_preview_seg = W.HTML()     # segmentação proposta (dentro de "Dividir a folha")
         self.out_table = W.HTML()
         # aba "Análise de variável"
-        self.out_var_dist = W.HTML()
-        self.out_var_time = W.HTML()
-        self.out_var_psi = W.HTML()
-        self.out_var_table = W.HTML()
-        self.out_var_cards = W.HTML()
+        self.out_var_dist = W.HTML()          # distribuição & badrate (comportamento)
+        self.out_var_logodds = W.HTML()       # logodds/WoE por faixa
+        self.out_var_time = W.HTML()          # percentis por safra
+        self.out_var_psi = W.HTML()           # PSI por safra
+        self.out_var_table = W.HTML()         # tabela por faixa
+        self.out_var_cards = W.HTML()         # resumo & estabilidade
+        self.out_var_inv_s = W.HTML()         # inversão por amostra
+        self.out_var_inv_t = W.HTML()         # inversão por safra
+        self.out_var_optbin = W.HTML()        # distribuição acumulada das faixas (optbin)
         self.out_tree_img = W.HTML()                      # preview da árvore (estático/erros)
         # preview INTERATIVO da árvore: widget clicável (anywidget, lazy) + barra
         # de ações contextual. Sem anywidget, out_tree_img segue com o PNG estático.
@@ -1509,35 +1513,59 @@ class TreeSegmenterUI:
                                    width="100%")),
         ])
         var_controls.add_class("treeui-card")
+        # ---- aba unificada (mesmas seções do ModelSegmenterUI): comportamento,
+        # resumo & estabilidade, tabela por faixa, inversão, tempo, optbin ----
         card_var_dist = W.VBox([
-            W.HTML("<div class='treeui-h'>Comportamento da variável · distribuição</div>"),
+            W.HTML("<div class='treeui-h'>Comportamento da variável · distribuição &amp; risco</div>"),
             self.out_var_dist], layout=W.Layout(width="52%"))
         card_var_dist.add_class("treeui-card")
+        card_var_logodds = W.VBox([
+            W.HTML("<div class='treeui-h'>Logodds / WoE por faixa</div>"),
+            self.out_var_logodds], layout=W.Layout(width="46%"))
+        card_var_logodds.add_class("treeui-card")
+        var_row_a = W.HBox([card_var_dist, card_var_logodds],
+                           layout=W.Layout(justify_content="space-between",
+                                           align_items="stretch", width="100%"))
         card_var_cards = W.VBox([
             W.HTML("<div class='treeui-h'>Resumo &amp; estabilidade</div>"),
             self.out_var_cards], layout=W.Layout(width="46%"))
         card_var_cards.add_class("treeui-card")
-        var_row_a = W.HBox([card_var_dist, card_var_cards],
+        card_var_table = W.VBox([
+            W.HTML("<div class='treeui-h'>Tabela por faixa</div>"),
+            self.out_var_table], layout=W.Layout(width="52%"))
+        card_var_table.add_class("treeui-card")
+        var_row_b = W.HBox([card_var_cards, card_var_table],
                            layout=W.Layout(justify_content="space-between",
                                            align_items="stretch", width="100%"))
+        card_inv_s = W.VBox([
+            W.HTML("<div class='treeui-h'>Inversão da ordem de risco · por amostra</div>"),
+            self.out_var_inv_s], layout=W.Layout(width="49%"))
+        card_inv_s.add_class("treeui-card")
+        card_inv_t = W.VBox([
+            W.HTML("<div class='treeui-h'>Inversão da ordem de risco · por safra</div>"),
+            self.out_var_inv_t], layout=W.Layout(width="49%"))
+        card_inv_t.add_class("treeui-card")
+        var_row_inv = W.HBox([card_inv_s, card_inv_t],
+                             layout=W.Layout(justify_content="space-between",
+                                             align_items="stretch", width="100%"))
         card_var_time = W.VBox([
-            W.HTML("<div class='treeui-h'>Comportamento ao longo do tempo · por safra</div>"),
-            W.HTML("<div class='treeui-legend'>Numérica: percentis (min–max, p5–p95, média) por "
-                   "safra. Categórica: representatividade (%) de cada categoria por safra.</div>"),
-            self.out_var_time])
+            W.HTML("<div class='treeui-h'>Ao longo do tempo · percentis/share por safra</div>"),
+            self.out_var_time], layout=W.Layout(width="49%"))
         card_var_time.add_class("treeui-card")
-        card_var_table = W.VBox([
-            W.HTML("<div class='treeui-h'>Detalhe por safra</div>"),
-            self.out_var_table], layout=W.Layout(width="49%"))
-        card_var_table.add_class("treeui-card")
         card_var_psi = W.VBox([
-            W.HTML(f"<div class='treeui-h'>PSI por safra · vs. data de referência ({self.ref_sample})</div>"),
+            W.HTML(f"<div class='treeui-h'>PSI por safra · vs. referência ({self.ref_sample})</div>"),
             self.out_var_psi], layout=W.Layout(width="49%"))
         card_var_psi.add_class("treeui-card")
-        var_row_b = W.HBox([card_var_table, card_var_psi],
-                           layout=W.Layout(justify_content="space-between",
-                                           align_items="stretch", width="100%"))
-        tab_var = W.VBox([var_controls, var_row_a, card_var_time, var_row_b])
+        var_row_time = W.HBox([card_var_time, card_var_psi],
+                              layout=W.Layout(justify_content="space-between",
+                                              align_items="stretch", width="100%"))
+        card_var_optbin = W.VBox([
+            W.HTML("<div class='treeui-h'>Distribuição acumulada das faixas do optimal "
+                   "binning · por safra (numéricas)</div>"),
+            self.out_var_optbin])
+        card_var_optbin.add_class("treeui-card")
+        tab_var = W.VBox([var_controls, var_row_a, var_row_b, var_row_inv,
+                          var_row_time, card_var_optbin])
 
         # ---- ABA AVANÇADO: sugerir splits · auto-merge · importância · SQL · diff ----
         card_sug = W.VBox([
@@ -3023,6 +3051,12 @@ class TreeSegmenterUI:
             disp["psi pior"] = iv["pior_psi"].values
             psi_cols.append("psi pior")
             disp["psi_status"] = iv["psi_classificacao"].values
+        # variáveis que ENTRARAM na árvore (selecionadas p/ o modelo) — realçadas
+        try:
+            _used = set(self.seg.regua_features())
+        except Exception:
+            _used = set()
+        _used_idx = {i for i, v in enumerate(disp["variavel"].tolist()) if v in _used}
         disp["variavel"] = disp["variavel"].map(
             lambda v: self.seg.feature_labels.get(v, v))
         if len(disp):
@@ -3080,13 +3114,19 @@ class TreeSegmenterUI:
             }.get(v, "color:var(--sub-ink)")
 
         def reco_row(r):
-            # variável recomendada (★, maior IV): filete de acento + negrito,
-            # tint quase imperceptível — destaque discreto, sem realce pesado.
-            if r.name != 0:
+            # DESTAQUE: variável que ENTROU na árvore (selecionada) = fundo verde +
+            # acento; a variável recomendada (★, maior IV) = acento discreto. A seleção
+            # (verde) tem precedência visual sobre a recomendação.
+            used = r.name in _used_idx
+            top = (r.name == 0)
+            if not (used or top):
                 return [""] * len(r)
-            css = ["background-color:var(--tbl-zebra)"] * len(r)
-            css[0] = ("background-color:var(--tbl-zebra);border-left:3px solid var(--ac);"
-                      "font-weight:600;color:var(--ac-deep)")
+            bg = "var(--ok-bg)" if used else "var(--tbl-zebra)"
+            css = [f"background-color:{bg}"] * len(r)
+            css[0] = (f"background-color:{bg};border-left:3px solid var(--ok-tx);"
+                      "font-weight:600" if used
+                      else f"background-color:{bg};border-left:3px solid var(--ac);"
+                           "font-weight:600;color:var(--ac-deep)")
             return css
 
         fmt = {"iv": "{:.4f}",
@@ -3115,6 +3155,8 @@ class TreeSegmenterUI:
                 f"<b>{qual}</b> · {self._risk_mean} (DES) = {pd_med} · IV {_iv_kind} (optbinning)"
                 + (" · PSI por amostra de validação (OOT, ESTAB, …) e pior caso, "
                    "nos mesmos bins do IV (DES × amostra)" if has_psi else "")
+                + ("  ·  <b style='color:var(--ok-tx)'>verde</b> = variável que entrou "
+                   "na árvore" if _used_idx else "")
                 + "</div>")
         self._set_html(self.out_iv, "iv", hint + self._styler_html(sty))
 
@@ -3357,7 +3399,9 @@ class TreeSegmenterUI:
         feat = self.dd_var.value
         sid = self.dd_var_leaf.value
         tcol = self.tx_var_time.value.strip()
-        for o in (self.out_var_dist, self.out_var_time, self.out_var_psi, self.out_var_table):
+        for o in (self.out_var_dist, self.out_var_logodds, self.out_var_time,
+                  self.out_var_psi, self.out_var_table, self.out_var_inv_s,
+                  self.out_var_inv_t, self.out_var_optbin):
             o.value = ""                       # HTML widgets: limpa via .value
         self.out_var_cards.value = ""
 
@@ -3390,12 +3434,39 @@ class TreeSegmenterUI:
             print(f"Análise de '{lbl}' concluída"
                   + (f" · folha {self._leaf_label(sid)}" if sid not in (None, 'root') else "")
                   + ".")
+        # Resumo & estabilidade
         self.out_var_cards.value = self._var_cards_html(summ, trend)
+        # Comportamento: distribuição & risco + logodds/WoE
         try:
             self.out_var_dist.value = self._fig_html(
-                self.seg.plot_variable_distribution(feat, sid=sid))
+                self.seg.plot_variable_distribution_badrate(feat, sid=sid))
         except Exception as e:
-            self.out_var_dist.value = err("distribuição", e)
+            self.out_var_dist.value = err("distribuição & risco", e)
+        try:
+            self.out_var_logodds.value = self._fig_html(
+                self.seg.plot_variable_logodds(feat, sid=sid))
+        except Exception as e:
+            self.out_var_logodds.value = err("logodds", e)
+        # Tabela por faixa
+        try:
+            vt = self.seg.variable_table(feat, sid=sid)
+            self.out_var_table.value = (
+                "<div style='font-size:12px;color:var(--sub-ink)'>sem faixas para esta "
+                "variável nesta folha.</div>" if vt.empty
+                else self._df_html(vt.round(4), max_height="360px", center=True))
+        except Exception as e:
+            self.out_var_table.value = err("tabela por faixa", e)
+        # Inversão da ordem de risco · por amostra
+        if self.sample_col is not None:
+            try:
+                self.out_var_inv_s.value = self._fig_html(
+                    self.seg.plot_variable_inversion_by_sample(feat, sid=sid))
+            except Exception as e:
+                self.out_var_inv_s.value = err("inversão por amostra", e)
+        else:
+            self.out_var_inv_s.value = ("<div style='font-size:12px;color:var(--sub-ink)'>"
+                                        "inversão por amostra requer amostras (DES/OOT).</div>")
+        # Ao longo do tempo (percentis · PSI · inversão por safra · optbin)
         if tcol and tcol in self.df.columns:
             try:
                 self.out_var_time.value = self._fig_html(
@@ -3403,29 +3474,39 @@ class TreeSegmenterUI:
             except Exception as e:
                 self.out_var_time.value = err("série temporal", e)
             try:
-                if kind == "cat":
-                    self.out_var_table.value = self._styler_html(self._style_var_share(
-                        self.seg.variable_share_by_safra(feat, tcol, sid=sid)), max_height="360px")
-                else:
-                    bs2 = bs if bs is not None else self.seg.variable_by_safra(feat, tcol, sid=sid)
-                    self.out_var_table.value = self._styler_html(
-                        self._style_var_safra(bs2), max_height="360px")
-            except Exception as e:
-                self.out_var_table.value = err("tabela por safra", e)
-            try:
                 if self.sample_col is not None:
                     self.out_var_psi.value = self._fig_html(
                         self.seg.plot_variable_psi_by_safra(feat, tcol, sid=sid))
                 else:
-                    self.out_var_psi.value = ("<div style='font-size:12px;color:var(--sub-ink)'>PSI por "
-                                              "safra requer amostras (DES/OOT).</div>")
+                    self.out_var_psi.value = ("<div style='font-size:12px;color:var(--sub-ink)'>"
+                                              "PSI por safra requer amostras (DES/OOT).</div>")
             except Exception as e:
                 self.out_var_psi.value = err("PSI por safra", e)
+            try:
+                self.out_var_inv_t.value = self._fig_html(
+                    self.seg.plot_variable_inversion_by_safra(feat, sid=sid, time_col=tcol),
+                    full_width=True)
+            except Exception as e:
+                self.out_var_inv_t.value = err("inversão por safra", e)
+            if kind == "num":
+                try:
+                    self.out_var_optbin.value = self._fig_html(
+                        self.seg.plot_variable_optbin_cumshare_timeseries(feat, sid=sid, time_col=tcol),
+                        full_width=True)
+                except Exception as e:
+                    self.out_var_optbin.value = err("optbin por safra", e)
+            else:
+                self.out_var_optbin.value = ("<div style='font-size:12px;color:var(--sub-ink)'>"
+                                             "optbin ao longo do tempo é só para variáveis "
+                                             "numéricas.</div>")
         else:
-            self.out_var_time.value = ("<div style='font-size:12px;color:var(--sub-ink)'>Informe a "
-                                       "<b>coluna de safra</b> (ex.: dt_ref) acima para ver o "
-                                       "comportamento ao longo do tempo, os percentis por safra "
-                                       "e o PSI por safra.</div>")
+            _need = ("<div style='font-size:12px;color:var(--sub-ink)'>Informe a <b>coluna de "
+                     "safra</b> (ex.: dt_ref) acima para as análises ao longo do tempo "
+                     "(percentis, PSI, inversão por safra e optbin).</div>")
+            self.out_var_time.value = _need
+            self.out_var_psi.value = _need
+            self.out_var_inv_t.value = _need
+            self.out_var_optbin.value = _need
 
     def _prepare_split(self):
         """Monta self._pending a partir dos controles atuais. Valida via show_grow."""
