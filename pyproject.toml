@@ -72,6 +72,12 @@ dependencies = [
     # parte do core: a UI do modelo traz o botão "Tunar com Optuna" por padrão e
     # os trials são logáveis no MLflow.
     "optuna>=3.0",
+    # anywidget: preview CLICÁVEL da árvore (selecionar/fundir/recolher direto na
+    # imagem) — parte do CORE para a interface interativa vir pronta por padrão.
+    # Entrega o JS pelo próprio comm do widget, por isso funciona também no
+    # Databricks; sem ele a UI cai no PNG estático. (ipywidgets/ipython seguem no
+    # extra [ui].)
+    "anywidget>=0.9",
 ]
 
 [project.optional-dependencies]
