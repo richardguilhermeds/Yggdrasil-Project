@@ -14,7 +14,7 @@ Na cosmologia nórdica, Yggdrasil é a árvore-mundo: um freixo imenso cujos gal
 
 Aqui a árvore vira metáfora de organização. O `Yggdrasil-Project` é um repositório pessoal de ciência de dados que cresce a partir de três raízes: estatística, machine learning e tutoriais. A ideia é manter os três num lugar só, onde um apoia o outro.
 
-O foco aplicado é risco de crédito (PD, LGD, EAD) no estilo regulatório brasileiro (CMN 4.966/2021, IFRS 9). O núcleo é pandas puro e roda tanto localmente quanto no Databricks.
+O foco aplicado é o **crédito**, de forma ampla — cobrindo todo o ciclo: da **concessão** (aprovação, definição de limites e precificação), passando pela **recuperação** (cobrança e renegociação), até o **risco de crédito** (PD, LGD, EAD). O núcleo é pandas puro e roda tanto localmente quanto no Databricks.
 
 ---
 
@@ -77,7 +77,7 @@ Algoritmos disponíveis (registry extensível em `ALGORITHMS`):
 Mais na UI e no segmentador: ratings em decis/quantil/árvore/optbin, e também manuais (`manual_score` por cortes de score, `manual_percentil` por lista de percentis); na regressão logística, a tabela da fórmula traz o p-valor (Wald) e estrelas de significância por coeficiente; relatório PDF do modelo (`report_pdf`) e tema escuro (toggle).
 
 ### 6. 🏛️ Capital econômico de carteira (`yggdrasil.credit_risk.capital`)
-Estimativa do **capital para absorver perdas inesperadas** da carteira de crédito em 1 ano, no nível de confiança do apetite de risco (ex.: 99,9%) — a visão **interna** que complementa a provisão (ECL, IFRS 9 / CMN 4.966) e o capital regulatório de Pilar 1, capturando concentração e diversificação entre produtos (cartão, consignado, veículos) que o Pilar 1 ignora. Baseado no guia de construção (ASRF/Vasicek, Monte Carlo multifatorial, CreditMetrics e CreditRisk+) e organizado do contrato de dados ao uso gerencial.
+Estimativa do **capital para absorver perdas inesperadas** da carteira de crédito em 1 ano, no nível de confiança do apetite de risco (ex.: 99,9%) — a visão **interna** que complementa a provisão (ECL) e o capital regulatório de Pilar 1, capturando concentração e diversificação entre produtos (cartão, consignado, veículos) que o Pilar 1 ignora. Baseado no guia de construção (ASRF/Vasicek, Monte Carlo multifatorial, CreditMetrics e CreditRisk+) e organizado do contrato de dados ao uso gerencial.
 
 - **Contrato**: `Segment` (PD TTC, LGD/CCF *downturn*, ρ, fator sistêmico) e `Portfolio` (matriz de correlação entre fatores).
 - **Distribuição de perdas e medidas**: `LossDistribution`, `value_at_risk`, `expected_shortfall`, `economic_capital` (`CE = VaR_q − EL`).
@@ -103,7 +103,7 @@ sim.economic_capital(); sim.allocate(metric="es")        # capital + alocação 
 ```
 
 ### 7. 📈 Modelos econométricos (satélite) de PD/LGD/CCF (`yggdrasil.credit_risk.econometric`)
-Modelos **satélite / macro** que ligam as **séries temporais agregadas** dos parâmetros de risco (taxa de *default*, LGD e CCF por segmento) às **variáveis macroeconômicas** (desemprego, renda, juros, câmbio, inadimplência) e **projetam por cenário**. É o **eixo temporal**, complementar ao eixo transversal dos segmentadores: o transversal *ordena* o risco entre clientes, o satélite *desloca o nível* da curva conforme o ciclo. As projeções alimentam o *forward-looking* do ECL (IFRS 9 / CMN 4.966), os testes de estresse, o **capital econômico** (a ligação fator-macro) e o planejamento. Baseado no guia de construção (ARDL, ARIMAX, fator Z de Vasicek, beta/fractional logit, VAR/VECM, painel), organizado da série ao relatório de governança. Requer o extra `[econometric]` (`statsmodels` + `arch`) e é **carregado sob demanda** — o resto de `credit_risk` não o exige.
+Modelos **satélite / macro** que ligam as **séries temporais agregadas** dos parâmetros de risco (taxa de *default*, LGD e CCF por segmento) às **variáveis macroeconômicas** (desemprego, renda, juros, câmbio, inadimplência) e **projetam por cenário**. É o **eixo temporal**, complementar ao eixo transversal dos segmentadores: o transversal *ordena* o risco entre clientes, o satélite *desloca o nível* da curva conforme o ciclo. As projeções alimentam o *forward-looking* do ECL, os testes de estresse, o **capital econômico** (a ligação fator-macro) e o planejamento. Baseado no guia de construção (ARDL, ARIMAX, fator Z de Vasicek, beta/fractional logit, VAR/VECM, painel), organizado da série ao relatório de governança. Requer o extra `[econometric]` (`statsmodels` + `arch`) e é **carregado sob demanda** — o resto de `credit_risk` não o exige.
 
 - **Séries + sintéticos**: `RiskSeries` (contrato com `kind` pd/lgd/ccf) e geradores de **DGP conhecido** (`simulate_pd/lgd/ccf_series`, `make_reference_study`) — a base dos testes de recuperação de parâmetros.
 - **Transformações e diagnóstico**: `transforms` (logit/probit, **fator Z de Vasicek**, defasagens, dummies sazonais/evento/quebra); `diagnostics` (ADF/KPSS/PP, Ljung-Box, Breusch-Godfrey/Pagan/White, Jarque-Bera, ARCH-LM, VIF, Chow/Quandt-Andrews, CUSUM) com saída tabular padronizada.
@@ -220,7 +220,7 @@ Todos centralizados em **[`notebooks/tutoriais/`](https://github.com/richardguil
 
 ## 👤 Sobre o desenvolvedor
 
-**Richard Guilherme**, Cientista de Dados com foco em risco de crédito (PD/LGD/EAD), modelagem regulatória (CMN 4.966/2021, IFRS 9) e MLOps em Databricks.
+**Richard Guilherme**, Cientista de Dados com foco em crédito (PD/LGD/EAD), modelagem regulatória e MLOps em Databricks.
 
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Richard%20Guilherme-0A66C2?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/richard-guilherme-da/)
 
