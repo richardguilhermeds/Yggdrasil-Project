@@ -950,8 +950,8 @@ class ModelSegmenterUI:
         row_comport = _row(_col(f"Comportamento · distribuição &amp; {_dist_h} por faixa",
                                 self.out_an_distbad),
                            _col("Logodds / WoE por faixa", self.out_an_logodds))
-        row_resumo = _row(_col("Resumo &amp; estabilidade", self.out_an_cards),
-                          _col("Tabela por faixa", self.out_an_table))
+        row_resumo = _row(_col("Tabela por faixa", self.out_an_table),
+                          _col("Resumo &amp; estabilidade", self.out_an_cards))
         row2 = _row(_col("Inversão da ordem de risco · por amostra", self.out_an_inv_sample),
                     _col("Inversão da ordem de risco · por safra", self.out_an_inv_safra))
         row3 = _row(_col("Ao longo do tempo · percentis por safra", self.out_an_time),
@@ -1339,20 +1339,24 @@ class ModelSegmenterUI:
                     W.VBox([W.HTML("<div class='mseg-h'>Inversão entre ratings · safras</div>"),
                             self.out_rating_inv_t, self.box_zoom_inv_t],
                            layout=W.Layout(width="50%"))]),
-            W.VBox([W.HTML("<div class='mseg-h'>PSI dos ratings por amostra · DES × OOT e "
-                           "ESTABILIDADE</div>"),
-                    W.HTML("<div class='mseg-legend'>Estabilidade da régua entre amostras: PSI da "
-                           "distribuição dos ratings de cada amostra vs a referência (DES). "
-                           "Verde &lt; 0,10 (estável) · amarelo &lt; 0,25 (atenção) · vermelho "
-                           "≥ 0,25 (instável).</div>"),
-                    self.out_rating_psi_sample]),
-            W.VBox([W.HTML("<div class='mseg-h'>PSI dos ratings ao longo do tempo · por safra "
-                           "vs DES</div>"),
-                    W.HTML("<div class='mseg-legend'>Estabilidade da régua no tempo: PSI da "
-                           "distribuição dos ratings de cada safra vs a referência (DES). "
-                           "Verde &lt; 0,10 (estável) · amarelo &lt; 0,25 (atenção) · vermelho "
-                           "≥ 0,25 (instável). Requer coluna de data (<code>date_col</code>).</div>"),
-                    self.out_rating_psi_safra]),
+            # PSI por amostra × PSI por safra lado a lado (mesma figsize + tight=False
+            # ⇒ mesma altura nas colunas 50/50, como os gráficos de inversão acima).
+            W.HBox([
+                W.VBox([W.HTML("<div class='mseg-h'>PSI dos ratings por amostra · DES × OOT e "
+                               "ESTABILIDADE</div>"),
+                        W.HTML("<div class='mseg-legend'>Estabilidade da régua entre amostras: PSI da "
+                               "distribuição dos ratings de cada amostra vs a referência (DES). "
+                               "Verde &lt; 0,10 (estável) · amarelo &lt; 0,25 (atenção) · vermelho "
+                               "≥ 0,25 (instável).</div>"),
+                        self.out_rating_psi_sample], layout=W.Layout(width="50%")),
+                W.VBox([W.HTML("<div class='mseg-h'>PSI dos ratings ao longo do tempo · por safra "
+                               "vs DES</div>"),
+                        W.HTML("<div class='mseg-legend'>Estabilidade da régua no tempo: PSI da "
+                               "distribuição dos ratings de cada safra vs a referência (DES). "
+                               "Verde &lt; 0,10 (estável) · amarelo &lt; 0,25 (atenção) · vermelho "
+                               "≥ 0,25 (instável). Requer coluna de data (<code>date_col</code>).</div>"),
+                        self.out_rating_psi_safra], layout=W.Layout(width="50%")),
+            ], layout=W.Layout(justify_content="space-between")),
             W.VBox([W.HTML("<div class='mseg-h'>Monotonicidade por amostra</div>"),
                     self.out_rating_mono]),
         ], layout=W.Layout(padding="2px"))
@@ -3472,14 +3476,16 @@ class ModelSegmenterUI:
         self.out_rating_mono.value = self._df_html(
             self.seg.monotonicity_report(), center=True)
         self._render_inv_safra()
+        # figsize igual + tight=False ⇒ os dois PSI saem com a MESMA altura nas
+        # colunas 50/50 (ficam lado a lado; ver layout em _build_layout).
         try:
             self.out_rating_psi_sample.value = self._fig_html(
-                self.seg.plot_rating_psi_by_sample(figsize=(9.6, 4.2)), stretch=True)
+                self.seg.plot_rating_psi_by_sample(figsize=(8.4, 4.0)), tight=False, stretch=True)
         except Exception as e:
             self.out_rating_psi_sample.value = f"<i>{e}</i>"
         try:
             self.out_rating_psi_safra.value = self._fig_html(
-                self.seg.plot_rating_psi_by_safra(figsize=(9.6, 4.2)), stretch=True)
+                self.seg.plot_rating_psi_by_safra(figsize=(8.4, 4.0)), tight=False, stretch=True)
         except Exception as e:
             self.out_rating_psi_safra.value = f"<i>{e}</i>"
         self._refresh_bar()

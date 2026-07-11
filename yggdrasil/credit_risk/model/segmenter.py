@@ -311,6 +311,13 @@ def _is_stability_sample(name) -> bool:
 
 # _fmt_safras vem de credit_risk._common (import acima)
 
+# Métricas limitadas a [0,1] (discriminação/classificação): os eixos que só as
+# contêm devem ficar FIXOS em 0–1, para leitura estável e comparável — a autoescala
+# "dá zoom" e exagera variações pequenas. As fora de [0,1] (regressão: rmse/mae ·
+# logloss · r2, que pode ser negativo) mantêm autoescala.
+_UNIT_METRICS = frozenset({"ks", "auc", "gini", "accuracy", "f1", "precision",
+                           "recall", "brier"})
+
 
 def _emit_progress(cb, key: str, label: str, status: str, detail: str = "") -> None:
     """Dispara um evento de progresso (escoragem) para a UI, se houver callback.
@@ -1663,8 +1670,11 @@ class ModelSegmenter:
         ax.set_xticks(x)
         ax.set_xticklabels(_fmt_safras(sh["safra"]), rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("% acumulado da safra")
-        ax.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5),
-                  framealpha=0.9, title="faixa (optbin)")
+        # legenda no canto superior esquerdo, logo abaixo do título (dentro do gráfico);
+        # caixa branca semiopaca p/ ficar legível sobre a área empilhada.
+        leg = ax.legend(fontsize=8, loc="upper left", framealpha=0.92,
+                        title="faixa (optbin)", labelspacing=0.3, borderpad=0.5)
+        leg.get_frame().set_edgecolor("#cccccc")
         ax.set_title(f"'{self.label(feature)}' — distribuição acumulada das faixas do "
                      f"optimal binning ao longo do tempo", fontsize=11,
                      fontweight="bold", color="#15324a")
@@ -3134,10 +3144,9 @@ class ModelSegmenter:
             return fig
         x = result["n_variaveis"].to_numpy()
         palette = ["#15324a", "#b23a2a", "#157a52", "#9a6f12", "#6b46c1"]
-        # métricas limitadas a [0,1] (discriminação/classificação) → eixos FIXOS em 0–1,
-        # para leitura estável e comparável (evita a autoescala "pular" de trial a trial).
-        # As fora de [0,1] (regressão: rmse/mae/… · logloss) mantêm autoescala.
-        _UNIT = {"ks", "auc", "gini", "accuracy", "f1", "precision", "recall", "brier"}
+        # métricas limitadas a [0,1] (discriminação) → eixos FIXOS em 0–1 (constante
+        # de módulo _UNIT_METRICS); as fora de [0,1] (regressão/logloss) autoescala.
+        _UNIT = _UNIT_METRICS
         # range manual (y_range) tem prioridade sobre o 0–1 automático das métricas 0–1
         _yr = (tuple(y_range) if (y_range is not None and None not in y_range
                                   and float(y_range[1]) > float(y_range[0])) else None)
@@ -3768,6 +3777,10 @@ class ModelSegmenter:
         for i, c in enumerate(cols):
             ax.plot(x, ms[c], marker="o", lw=2.0, ms=4.5, color=cores[i % len(cores)],
                     markeredgecolor="#33424f", markeredgewidth=0.5, label=c.upper())
+        # métricas de discriminação (KS/AUC/Gini/…) ⇒ eixo fixo em 0–1 (comparável);
+        # regressão (rmse/mae) autoescala. Todas as plotadas partilham o MESMO eixo.
+        if all(c in _UNIT_METRICS for c in cols):
+            ax.set_ylim(0.0, 1.0)
         # rótulos mmm/aa; com muitas safras, afina os ticks p/ não sobrepor
         labels = _fmt_safras(ms["safra"])
         step = max(1, len(ms) // 18)

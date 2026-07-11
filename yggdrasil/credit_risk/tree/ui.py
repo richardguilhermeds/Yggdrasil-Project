@@ -1534,7 +1534,7 @@ class TreeSegmenterUI:
             W.HTML("<div class='treeui-h'>Tabela por faixa</div>"),
             self.out_var_table], layout=W.Layout(width="52%"))
         card_var_table.add_class("treeui-card")
-        var_row_b = W.HBox([card_var_cards, card_var_table],
+        var_row_b = W.HBox([card_var_table, card_var_cards],
                            layout=W.Layout(justify_content="space-between",
                                            align_items="stretch", width="100%"))
         card_inv_s = W.VBox([
