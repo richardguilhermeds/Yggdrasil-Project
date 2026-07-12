@@ -14,7 +14,7 @@ Na cosmologia nórdica, Yggdrasil é a árvore-mundo: um freixo imenso cujos gal
 
 Aqui a árvore vira metáfora de organização. O `Yggdrasil-Project` é um repositório pessoal de ciência de dados que cresce a partir de três raízes: estatística, machine learning e tutoriais. A ideia é manter os três num lugar só, onde um apoia o outro.
 
-O foco aplicado é o **crédito**, de forma ampla — cobrindo todo o ciclo: da **concessão** (aprovação, definição de limites e precificação), passando pela **recuperação** (cobrança e renegociação), até o **risco de crédito** (PD, LGD, EAD). O núcleo é pandas puro e roda tanto localmente quanto no Databricks.
+O foco aplicado é o **crédito**, de forma ampla — cobrindo todo o ciclo: da **concessão** (aprovação, definição de limites e precificação), passando pela **recuperação** (cobrança e renegociação), até o **risco de crédito**. O núcleo é pandas puro e roda tanto localmente quanto no Databricks.
 
 ---
 
@@ -41,9 +41,9 @@ Análise exploratória inicial das features: missing (global e por safra), perce
 Seleção por book (grupo de features por palavra-chave ou prefixo, ex.: `serasa`, `bvs`) sobre um Spark DataFrame. O pipeline por book vai de missing a variância, importância (RF `pyspark.ml` com IV/KS/AUC/Gini/corr_target), redundância (Pearson e Spearman), Boruta (Spark-native com shadows, e fallback driver/sklearn) até o consenso (`selecionada` e `motivo`). Saída: tabela e painéis por book, mais um ranking global. Backend `"spark"` ou `"driver"`.
 
 ### 4. 🌳 Árvore de segmentação de risco de crédito (`yggdrasil.credit_risk.tree`)
-`TreeSegmenter` e `TreeSegmenterUI` são uma única classe/UI que atende PD e LGD, escolhendo o comportamento por `task_type` (substituem as antigas classes separadas `SequentialPDSegmenter` e `SequentialLGDSegmenter`). É uma régua sequencial com UI interativa (5 abas): binning ótimo/manual, faltantes em bin própria, notas por folha, IV, PSI/CSI, bootstrap, calibração, backtest, save/load JSON e `predict`/`to_pyspark`/`apply_spark`/`log_to_mlflow`.
-- `task_type="classification"` (PD), alvo binário: binning binário, IV WoE (escala Siddiqi), KS/AUC/Gini/Acurácia/F1 e gráficos ROC/KS/taxa-default/distribuição.
-- `task_type="regression"` (LGD), alvo contínuo: binning contínuo, IV contínuo, métricas MAE/RMSE/R² e boxplot/histograma do alvo.
+`TreeSegmenter` e `TreeSegmenterUI` são uma única classe/UI que atende classificação e regressão, escolhendo o comportamento por `task_type` (substituem as antigas classes separadas por tarefa). É uma régua sequencial com UI interativa (5 abas): binning ótimo/manual, faltantes em bin própria, notas por folha, IV, PSI/CSI, bootstrap, calibração, backtest, save/load JSON e `predict`/`to_pyspark`/`apply_spark`/`log_to_mlflow`.
+- `task_type="classification"`, alvo binário: binning binário, IV WoE (escala Siddiqi), KS/AUC/Gini/Acurácia/F1 e gráficos ROC/KS/taxa-default/distribuição.
+- `task_type="regression"`, alvo contínuo: binning contínuo, IV contínuo, métricas MAE/RMSE/R² e boxplot/histograma do alvo.
 
 A aba Avançado traz, entre outros: critério de split selecionável no Auto-fit e no split por folha (`criterion=` em `fit_auto`/`grow`, com `optbin`, mais `gini`/`entropy`/`ks`/`iv`/`chi2` na classificação e `variance`/`mae`/`ftest` na regressão); `suggest_splits()` (TOP-N variáveis com nº de bins, PSI por amostra, teste de hipótese e IV) e sugestão de cortes com máx. bins por variável na folha; `feature_importance()` das variáveis que entraram na árvore; auto-merge de folhas indistinguíveis (`auto_merge`); `to_sql()` (régua como `CASE WHEN` copiável); `diff_trees()` (migração de notas e métricas entre duas versões); `report_pdf()` (relatório do modelo em PDF) e tema escuro na UI.
 
@@ -79,9 +79,9 @@ Mais na UI e no segmentador: ratings em decis/quantil/árvore/optbin, e também 
 ### 6. 🏛️ Capital econômico de carteira (`yggdrasil.credit_risk.capital`)
 Estimativa do **capital para absorver perdas inesperadas** da carteira de crédito em 1 ano, no nível de confiança do apetite de risco (ex.: 99,9%) — a visão **interna** que complementa a provisão (ECL) e o capital regulatório de Pilar 1, capturando concentração e diversificação entre produtos (cartão, consignado, veículos) que o Pilar 1 ignora. Baseado no guia de construção (ASRF/Vasicek, Monte Carlo multifatorial, CreditMetrics e CreditRisk+) e organizado do contrato de dados ao uso gerencial.
 
-- **Contrato**: `Segment` (PD TTC, LGD/CCF *downturn*, ρ, fator sistêmico) e `Portfolio` (matriz de correlação entre fatores).
+- **Contrato**: `Segment` (frequência TTC, perda/conversão *downturn*, ρ, fator sistêmico) e `Portfolio` (matriz de correlação entre fatores).
 - **Distribuição de perdas e medidas**: `LossDistribution`, `value_at_risk`, `expected_shortfall`, `economic_capital` (`CE = VaR_q − EL`).
-- **Motores**: `asrf_capital` (v1, analítico e aditivo), `simulate` (v2, Monte Carlo multifatorial com LGD estocástica e correlação adversa PD–LGD), `creditrisk_plus` (benchmark atuarial por recursão de Panjer) e `MigrationModel` (CreditMetrics / migração de estágio).
+- **Motores**: `asrf_capital` (v1, analítico e aditivo), `simulate` (v2, Monte Carlo multifatorial com severidade estocástica e correlação adversa frequência–severidade), `creditrisk_plus` (benchmark atuarial por recursão de Panjer) e `MigrationModel` (CreditMetrics / migração de estágio).
 - **Insumos**: `pit_to_ttc`, `lgd_downturn_from_series`, `ccf_downturn`; correlações `asset_correlation_moments`/`asset_correlation_mle`/`factor_correlation_matrix`/`nearest_correlation`; regulatório `basel_correlation`/`basel_irb_capital` (Pilar 1).
 - **Alocação e uso**: `euler_allocation` (contribuição à cauda), `raroc`/`raroc_table`, benefício de diversificação.
 - **Validação**: `sensitivity`, `correlation_stress`, `benchmark`, `pillar1_comparison`, `backtest_expected_loss`, `convergence`.
@@ -102,19 +102,19 @@ sim = carteira.simulate(n_scenarios=200_000, q=0.999, seed=42)   # v2 Monte Carl
 sim.economic_capital(); sim.allocate(metric="es")        # capital + alocação de Euler
 ```
 
-### 7. 📈 Modelos econométricos (satélite) de PD/LGD/CCF (`yggdrasil.credit_risk.econometric`)
-Modelos **satélite / macro** que ligam as **séries temporais agregadas** dos parâmetros de risco (taxa de *default*, LGD e CCF por segmento) às **variáveis macroeconômicas** (desemprego, renda, juros, câmbio, inadimplência) e **projetam por cenário**. É o **eixo temporal**, complementar ao eixo transversal dos segmentadores: o transversal *ordena* o risco entre clientes, o satélite *desloca o nível* da curva conforme o ciclo. As projeções alimentam o *forward-looking* do ECL, os testes de estresse, o **capital econômico** (a ligação fator-macro) e o planejamento. Baseado no guia de construção (ARDL, ARIMAX, fator Z de Vasicek, beta/fractional logit, VAR/VECM, painel), organizado da série ao relatório de governança. Requer o extra `[econometric]` (`statsmodels` + `arch`) e é **carregado sob demanda** — o resto de `credit_risk` não o exige.
+### 7. 📈 Modelos econométricos (satélite) das séries de risco (`yggdrasil.credit_risk.econometric`)
+Modelos **satélite / macro** que ligam as **séries temporais agregadas** dos parâmetros de risco (taxa de *default*, perda e conversão por segmento) às **variáveis macroeconômicas** (desemprego, renda, juros, câmbio, inadimplência) e **projetam por cenário**. É o **eixo temporal**, complementar ao eixo transversal dos segmentadores: o transversal *ordena* o risco entre clientes, o satélite *desloca o nível* da curva conforme o ciclo. As projeções alimentam o *forward-looking* do ECL, os testes de estresse, o **capital econômico** (a ligação fator-macro) e o planejamento. Baseado no guia de construção (ARDL, ARIMAX, fator Z de Vasicek, beta/fractional logit, VAR/VECM, painel), organizado da série ao relatório de governança. Requer o extra `[econometric]` (`statsmodels` + `arch`) e é **carregado sob demanda** — o resto de `credit_risk` não o exige.
 
 - **Séries + sintéticos**: `RiskSeries` (contrato com `kind` pd/lgd/ccf) e geradores de **DGP conhecido** (`simulate_pd/lgd/ccf_series`, `make_reference_study`) — a base dos testes de recuperação de parâmetros.
 - **Transformações e diagnóstico**: `transforms` (logit/probit, **fator Z de Vasicek**, defasagens, dummies sazonais/evento/quebra); `diagnostics` (ADF/KPSS/PP, Ljung-Box, Breusch-Godfrey/Pagan/White, Jarque-Bera, ARCH-LM, VIF, Chow/Quandt-Andrews, CUSUM) com saída tabular padronizada.
-- **Modelos** (interface comum `fit`/`predict`/`project`/`diagnostics`): `ARDL` (principal), `ARIMA`/ARIMAX (benchmark), `VasicekZ` (ponte com o capital), `BetaRegression`/`FractionalLogit` (LGD/CCF), ingênuos (`RandomWalk`/`HistoricalMean`/`SeasonalNaive`), `VARModel`/`VECMModel` + cointegração (Engle-Granger/Johansen) e `PanelSatellite`.
+- **Modelos** (interface comum `fit`/`predict`/`project`/`diagnostics`): `ARDL` (principal), `ARIMA`/ARIMAX (benchmark), `VasicekZ` (ponte com o capital), `BetaRegression`/`FractionalLogit` (alvos em [0,1]), ingênuos (`RandomWalk`/`HistoricalMean`/`SeasonalNaive`), `VARModel`/`VECMModel` + cointegração (Engle-Granger/Johansen) e `PanelSatellite`.
 - **Seleção e cenários**: `search` champion-challenger (filtros de **sinal econômico** e **VIF**, *walk-forward*, Diebold-Mariano); `Scenario`/`ScenarioSet`, `project` e `ecl_projection` (ponderação de cenários para o ECL).
 - **Governança**: relatório HTML (`report`), registro no MLflow (`log_satellite_run`) e o pipeline declarativo `StudyConfig`/`run_study` (as "cinco chamadas") — carregados sob demanda.
 
 ```python
 from yggdrasil.credit_risk.econometric import make_reference_study, StudyConfig, run_study
 
-est = make_reference_study()                       # macro + séries de PD/LGD/CCF sintéticas
+est = make_reference_study()                       # macro + séries de risco sintéticas
 cfg = StudyConfig(kind="pd", candidates=["desemprego", "renda", "juros"],
                   expected_signs={"desemprego": 1, "renda": -1, "juros": 1})
 r = run_study(cfg, est.pd.series, est.macro)       # seleção → ajuste → diagnóstico → projeção → relatório
@@ -185,32 +185,32 @@ Todos centralizados em **[`notebooks/tutoriais/`](https://github.com/richardguil
 
 | # | Tutorial |
 |---|---|
-| 00 | [Visão geral / PD](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/00_tutorial_yggdrasil.ipynb) |
-| 01 | [LGD / regressão (alvo [0,1] bimodal)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/01_tutorial_lgd.ipynb) |
+| 00 | [Visão geral (classificação)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/00_tutorial_yggdrasil.ipynb) |
+| 01 | [Regressão (alvo [0,1] bimodal)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/01_tutorial_lgd.ipynb) |
 | 02 | [EDA de features](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/02_tutorial_eda_features.ipynb) |
 | 03 | [Seleção de features (PySpark)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/03_tutorial_feature_selection.ipynb) |
-| 04 | [Árvore de segmentação unificada (PD & LGD por `task_type`)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/04_tutorial_tree_segmenter.ipynb) |
+| 04 | [Árvore de segmentação unificada (classificação & regressão por `task_type`)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/04_tutorial_tree_segmenter.ipynb) |
 | 06 | [Construtor de modelos (UI)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/06_tutorial_model_segmenter.ipynb) |
 | 07 | [Esteira ML + MLflow](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/07_tutorial_esteira_ml_mlflow.ipynb) |
 | 08 | [Capital econômico (ASRF, Monte Carlo, alocação de Euler)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/08_tutorial_capital_economico.ipynb) |
-| 09 | [Modelos econométricos satélite (PD/LGD/CCF, ARDL, fator Z, projeção por cenários)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/09_tutorial_modelos_econometricos.ipynb) |
+| 09 | [Modelos econométricos satélite (ARDL, fator Z, projeção por cenários)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/09_tutorial_modelos_econometricos.ipynb) |
 
 > 📖 **Metodologia** (o *porquê* dos métodos, como KS, PSI/CSI, WoE/IV, ratings com fusão monotônica, SHAP e veredito de EDA): [`docs/metodologia.md`](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/docs/metodologia.md).
-> 🌳 **Árvore de segmentação unificada (PD & LGD):** [`docs/credit-risk/tree-segmenter.md`](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/docs/credit-risk/tree-segmenter.md).
+> 🌳 **Árvore de segmentação unificada (classificação & regressão):** [`docs/credit-risk/tree-segmenter.md`](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/docs/credit-risk/tree-segmenter.md).
 
 ---
 
 ## 🖼️ Galeria
 
-| Árvore de PD (classificação) | Importância SHAP (model) |
+| Árvore (classificação) | Importância SHAP (model) |
 |---|---|
-| ![Árvore de segmentação de PD](https://raw.githubusercontent.com/richardguilhermeds/Yggdrasil-Project/main/docs/img/tree_pd.png) | ![Importância SHAP](https://raw.githubusercontent.com/richardguilhermeds/Yggdrasil-Project/main/docs/img/shap_importance.png) |
+| ![Árvore de segmentação (classificação)](https://raw.githubusercontent.com/richardguilhermeds/Yggdrasil-Project/main/docs/img/tree_pd.png) | ![Importância SHAP](https://raw.githubusercontent.com/richardguilhermeds/Yggdrasil-Project/main/docs/img/shap_importance.png) |
 
-| Dispersão do alvo por folha (LGD / regressão) |
+| Dispersão do alvo por folha (regressão) |
 |---|
 | ![Boxplot do alvo por folha](https://raw.githubusercontent.com/richardguilhermeds/Yggdrasil-Project/main/docs/img/tree_lgd_boxplot.png) |
 
-| Projeção condicional de PD por cenário — modelo satélite (leque 90%) |
+| Projeção condicional por cenário — modelo satélite (leque 90%) |
 |---|
 | ![Projeção econométrica em leque](https://raw.githubusercontent.com/richardguilhermeds/Yggdrasil-Project/main/docs/img/econometric_fanchart.png) |
 
@@ -220,7 +220,7 @@ Todos centralizados em **[`notebooks/tutoriais/`](https://github.com/richardguil
 
 ## 👤 Sobre o desenvolvedor
 
-**Richard Guilherme**, Cientista de Dados com foco em crédito (PD/LGD/EAD), modelagem regulatória e MLOps em Databricks.
+**Richard Guilherme**, Cientista de Dados com foco em crédito e MLOps em Databricks.
 
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Richard%20Guilherme-0A66C2?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/richard-guilherme-da/)
 

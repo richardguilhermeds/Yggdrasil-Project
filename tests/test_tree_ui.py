@@ -70,9 +70,19 @@ def test_ui_banner_titulo_por_task(task):
     html = next(c.value for c in ui.panel.children
                 if hasattr(c, "value") and "treeui-banner" in (c.value or ""))
     titulo = re.search(r"class='t'>([^<]+)<", html).group(1)
-    esperado = "Segmentação de PD" if task == "classification" else "Segmentação de LGD"
-    assert titulo == esperado
-    assert ui._risk_label == ("PD" if task == "classification" else "LGD")
+    # sem problem_label, o rótulo dos gráficos é o nome da coluna alvo (nunca "PD"/"LGD")
+    assert titulo == "Segmentação de target"
+    assert ui._risk_label == "target"
+
+
+def test_ui_problem_label_sobrescreve_rotulo(task):
+    import re
+    ui = _build(task, problem_label="Risco")
+    html = next(c.value for c in ui.panel.children
+                if hasattr(c, "value") and "treeui-banner" in (c.value or ""))
+    titulo = re.search(r"class='t'>([^<]+)<", html).group(1)
+    assert titulo == "Segmentação de Risco"
+    assert ui._risk_label == "Risco"
 
 
 def test_ui_leaf_hist_por_task(task):

@@ -4,10 +4,10 @@ TreeSegmenter
 Construtor sequencial e híbrido de **árvore de segmentação** para risco de
 crédito, **unificado por** ``task_type``:
 
-- ``task_type="classification"`` — alvo **binário** (ex.: PD, 0 = adimplente,
+- ``task_type="classification"`` — alvo **binário** (ex.: 0 = adimplente,
   1 = default). Binning ótimo binário (``OptimalBinning``), IV WoE (Siddiqi),
   métricas de discriminação **KS, ROC/AUC, Gini, Acurácia, F1**.
-- ``task_type="regression"`` — alvo **contínuo** em [0, 1] (ex.: LGD). Binning
+- ``task_type="regression"`` — alvo **contínuo** em [0, 1]. Binning
   ótimo contínuo (``ContinuousOptimalBinning``), IV contínuo (desvio médio
   ponderado), métricas **MAE, RMSE, R²**.
 
@@ -243,7 +243,7 @@ def _aplicar_regua_pandas(regua, df, col_seg="segmento",
 class TreeSegmenter:
     """Árvore de segmentação unificada (classificação/regressão) com binning
     ótimo/manual, poda e PSI. O comportamento por tipo de alvo é escolhido por
-    ``task_type`` ("classification" p/ PD · "regression" p/ LGD)."""
+    ``task_type`` ("classification" p/ alvo · "regression" p/ alvo)."""
 
     def __init__(
         self,
@@ -253,6 +253,7 @@ class TreeSegmenter:
         sample_col: str | None = None,
         ref_sample: str = "DES",
         feature_labels: dict[str, str] | None = None,
+        problem_label: str | None = None,
         min_leaf_rows: int = 50,
         date_col: str | None = None,
         verbose: bool = True,
@@ -262,9 +263,12 @@ class TreeSegmenter:
                 f"task_type inválido: {task_type!r}. Use um de {TASK_TYPES}.")
         self.task_type = task_type
         self._is_clf = task_type == "classification"
-        # rótulos de risco por tipo de alvo (PD na classificação · LGD na regressão)
-        self._risk_word = "PD" if self._is_clf else "LGD"
-        self._risk_mean = "PD média" if self._is_clf else "LGD médio"
+        # rótulo do alvo nos gráficos/relatórios: `problem_label` se informado,
+        # senão o nome da coluna alvo. Nunca rótulo fixo — o tipo de alvo
+        # (binário/contínuo) segue vindo de `task_type`.
+        self.problem_label = problem_label
+        self._risk_word = problem_label or target
+        self._risk_mean = f"média de {self._risk_word}"
         # cache do binning ótimo por folha (o solver do optbinning é o gargalo) —
         # ver _resolve_bins_cached; chaveado por id() da máscara da folha
         self._bins_cache: dict = {}
@@ -276,7 +280,7 @@ class TreeSegmenter:
         # recompute redundante (o maior gargalo da UI da árvore no Databricks).
         self._tree_version: int = 0
         self._agg_cache: dict = {}        # (nome, *args, version) -> resultado
-        # alvo (PD/LGD) por folha restrito à referência — chaveado por id(mask),
+        # alvo por folha restrito à referência — chaveado por id(mask),
         # invalida sozinho quando a folha é refeita (mesma ideia do _bins_cache)
         self._leaf_target_cache: dict = {}
         # máscara por ASSINATURA DE CONDIÇÕES: como (condições → máscara) é função
@@ -298,7 +302,7 @@ class TreeSegmenter:
         self.sample_col = sample_col
         self.ref_sample = ref_sample
         # coluna de DATA/safra: NÃO entra na modelagem (fica fora das features);
-        # serve só para os gráficos no tempo (PD/variável por safra, PSI por safra).
+        # serve só para os gráficos no tempo (alvo/variável por safra, PSI por safra).
         self.date_col = date_col
         if date_col is not None and date_col not in self.df.columns:
             raise ValueError(f"Coluna de data '{date_col}' não está no DataFrame "
@@ -590,7 +594,7 @@ class TreeSegmenter:
         return bins, modo, kind
 
     # ------------------------------------------------------------------
-    # Tabela de bins: taxa de default (PD) + representatividade (num ou cat)
+    # Tabela de bins: taxa de default (alvo) + representatividade (num ou cat)
     # ------------------------------------------------------------------
     def _bin_table(self, sub, feature, bins, n_ref):
         linhas, is_na = [], []
@@ -647,7 +651,7 @@ class TreeSegmenter:
             previews[sid] = tbl
             print(f"\n┌─ PREVIEW: dividir '{sid}'")
             print(f"│  feature = {feature} | tipo = {kind} | modo = {modo}")
-            print(f"│  monotonicidade da PD respeitada: {tbl.attrs['mono_ok']}")
+            print(f"│  monotonicidade de {self._risk_word} respeitada: {tbl.attrs['mono_ok']}")
             print(tbl.to_string(index=False))
         print("\n→ se aprovado, repita como .grow(...) com os mesmos argumentos")
         return previews
@@ -655,7 +659,7 @@ class TreeSegmenter:
     def _assign_na_to_worst(self, filhos: dict):
         """Quando um split NÃO gera nó de faltantes (a variável não tinha missing
         no ajuste), roteia eventuais missings do scoring para a folha-irmã de PIOR
-        risco — maior PD (classificação) ou maior LGD (regressão) na referência
+        risco — maior alvo (classificação) ou maior alvo (regressão) na referência
         (DES) — marcando ``include_na=True`` na condição dessa irmã. Atribuição
         conservadora; não faz nada se já houver um nó de faltantes entre as irmãs."""
         if not filhos or any(f["conditions"][-1].get("kind") == "na"
@@ -739,11 +743,11 @@ class TreeSegmenter:
     # ------------------------------------------------------------------
     # PRUNE: poda por FUSÃO de folhas-IRMÃS (mesmo pai). Em cada rodada funde um
     #   par de irmãs adjacentes que viole um dos critérios:
-    #     - diferença de PD média entre as duas irmãs < `min_valor_gap` (ex.: 0.02
+    #     - diferença de alvo médio entre as duas irmãs < `min_valor_gap` (ex.: 0.02
     #       = 2 p.p.) → separam pouco, devem ser unidas;
     #     - alguma das duas tem representatividade < `min_repr` % (imaterial) →
-    #       é unida à irmã adjacente mais próxima em PD.
-    #   Prioriza o par de menor diferença de PD. Só funde irmãs (o nó de
+    #       é unida à irmã adjacente mais próxima em alvo.
+    #   Prioriza o par de menor diferença de alvo. Só funde irmãs (o nó de
     #   faltantes não entra). Itera até nenhum par violar os critérios.
     # ------------------------------------------------------------------
     def prune(self, min_repr: float = 2.0, min_valor_gap: float | None = None,
@@ -773,7 +777,7 @@ class TreeSegmenter:
                     if a in protect or b in protect:          # respeita folhas travadas
                         continue
                     ta, tb = self._leaf_target(a), self._leaf_target(b)
-                    pda = float(ta.mean()) if len(ta) else np.nan     # PD na referência (DES)
+                    pda = float(ta.mean()) if len(ta) else np.nan     # alvo na referência (DES)
                     pdb = float(tb.mean()) if len(tb) else np.nan
                     gap = (abs(pdb - pda)
                            if not (pd.isna(pda) or pd.isna(pdb)) else np.inf)
@@ -834,8 +838,8 @@ class TreeSegmenter:
 
     # ------------------------------------------------------------------
     # MERGE_LEAF: funde uma folha com a folha-irmã adjacente (mesmo pai).
-    #   side="left"  -> vizinha de menor corte (num) / menor PD (cat)
-    #   side="right" -> vizinha de maior corte (num) / maior PD (cat)
+    #   side="left"  -> vizinha de menor corte (num) / menor alvo (cat)
+    #   side="right" -> vizinha de maior corte (num) / maior alvo (cat)
     #   Numérico: os dois intervalos viram um só (lo=min, hi=max).
     #   Categórico: as categorias dos dois grupos são unidas.
     #   Se o pai ficar com uma única folha, a fusão equivale a recolhê-lo.
@@ -872,7 +876,7 @@ class TreeSegmenter:
                                  for c in irmaos):
             irmaos.sort(key=lambda c: self.segments[c]["conditions"][-1]["lo"])
         else:
-            # mesma chave (PD na referência/DES) usada por prune/auto_merge/teste —
+            # mesma chave (alvo na referência/DES) usada por prune/auto_merge/teste —
             # senão a ordem das irmãs diverge e a fusão erra o par ou aborta
             irmaos.sort(key=lambda c: (self._leaf_target(c).mean()
                                        if len(self._leaf_target(c)) else np.inf))
@@ -1010,10 +1014,10 @@ class TreeSegmenter:
 
     # ------------------------------------------------------------------
     # AUTO_MERGE: funde automaticamente pares de folhas-IRMÃS (mesmo pai)
-    #   adjacentes que NÃO se distinguem em PD. Em cada rodada, escolhe o par
+    #   adjacentes que NÃO se distinguem em alvo. Em cada rodada, escolhe o par
     #   de irmãs vizinhas mais parecido e o funde se:
-    #     - o teste de hipótese não rejeita a igualdade de PD (p > alpha), OU
-    #     - a diferença de PD média entre elas é < min_valor_gap.
+    #     - o teste de hipótese não rejeita a igualdade de alvo (p > alpha), OU
+    #     - a diferença de alvo médio entre elas é < min_valor_gap.
     #   Só funde irmãs (a única fusão válida na árvore). Por padrão o nó de
     #   faltantes NÃO entra; com `include_missing=True` ele também é juntado ao
     #   bin populado irmão estatisticamente mais próximo. `protect` = ids de
@@ -1117,13 +1121,13 @@ class TreeSegmenter:
     # ------------------------------------------------------------------
     # Ordenação ESQUERDA→DIREITA das folhas (posição na árvore construída).
     #   A nota passa a ser essa posição: 1, 2, 3, … da esquerda p/ a direita.
-    #   Em cada nó os filhos são ordenados pela MENOR PD (DES) de folha do ramo
+    #   Em cada nó os filhos são ordenados pela MENOR alvo (DES) de folha do ramo
     #   (asc. = ramo de menor risco à esquerda), espelhando o layout de plot_tree.
-    #   Para um split único, posição = ordem de PD (idêntico ao comportamento
+    #   Para um split único, posição = ordem de alvo (idêntico ao comportamento
     #   anterior); em árvores profundas, as notas leem 1, 2, 3 de fato.
     # ------------------------------------------------------------------
     def _node_value(self, sid: str) -> float:
-        """PD média do nó na amostra de referência (DES), com fallback p/ todas.
+        """alvo médio do nó na amostra de referência (DES), com fallback p/ todas.
 
         Lê apenas a COLUNA-ALVO (não materializa o subframe inteiro) e reusa a
         máscara de referência pré-computada — chamado por folha em _leaf_order."""
@@ -1176,11 +1180,11 @@ class TreeSegmenter:
         return order
 
     # ------------------------------------------------------------------
-    # LEAVES: segmentos-folha finais, com nota de PD e descrição
+    # LEAVES: segmentos-folha finais, com nota de alvo e descrição
     #   nota: 1..N pela POSIÇÃO esquerda→direita na árvore
     #   with_psi:  adiciona a contribuição de PSI de cada folha por amostra
     #              (psi_<amostra>), tendo a referência (DES) como base
-    #   with_test: adiciona p_vs_prox = p-valor do teste de PD entre a folha e a
+    #   with_test: adiciona p_vs_prox = p-valor do teste de alvo entre a folha e a
     #              IRMÃ adjacente (mesmo pai — só irmãs são comparáveis/fundíveis).
     #              p alto ⇒ irmãs não distinguíveis (candidatas a fusão); folhas sem
     #              irmã à frente ficam com NaN. test: 'mannwhitney' (default)/'welch'
@@ -1202,7 +1206,7 @@ class TreeSegmenter:
                 continue
             sub = self.df[seg["mask"]]
             # valor_medio na referência (DES) = base da régua; assim nota é
-            # monotônica na PD que entra em predict/apply_spark (com fallback)
+            # monotônica no alvo que entra em predict/apply_spark (com fallback)
             if self.sample_col is not None:
                 ref_t = sub.loc[sub[self.sample_col] == self.ref_sample, self.target]
                 pd_m = ref_t.mean() if len(ref_t) else sub[self.target].mean()
@@ -1273,7 +1277,7 @@ class TreeSegmenter:
             out[f"repr_{amostra}_%"] = repr_col
         return out
 
-    # alvo (PD) de uma folha, restrito à amostra de referência quando houver
+    # alvo de uma folha, restrito à amostra de referência quando houver
     # (sem NaN, para os testes/fusões não ficarem cegos por valores ausentes)
     def _leaf_target(self, sid: str) -> np.ndarray:
         # Cache por id() da máscara da folha: prune/auto_merge e o teste de
@@ -1293,7 +1297,7 @@ class TreeSegmenter:
         self._leaf_target_cache[ck] = (vals, mask)   # guarda mask p/ o id não reciclar
         return vals
 
-    # p-valor do teste de igualdade de PD entre duas folhas (na referência)
+    # p-valor do teste de igualdade de alvo entre duas folhas (na referência)
     def _pair_pvalue(self, sid_a: str, sid_b: str, test: str = "mannwhitney",
                      min_n: int = 8) -> float:
         if mannwhitneyu is None:        # scipy ausente (importado no topo do módulo)
@@ -1308,10 +1312,10 @@ class TreeSegmenter:
         except Exception:
             return np.nan
 
-    # p-valor do teste de PD entre uma folha e a IRMÃ adjacente (mesmo pai).
+    # p-valor do teste de alvo entre uma folha e a IRMÃ adjacente (mesmo pai).
     #   Só irmãs são diretamente comparáveis (e fundíveis), por isso o teste é
     #   restrito a elas — folhas de pais diferentes não se comparam. A ordem das
-    #   irmãs é a mesma da fusão (por corte, no numérico; por PD, no categórico).
+    #   irmãs é a mesma da fusão (por corte, no numérico; por alvo, no categórico).
     #   A última irmã do grupo e o nó de faltantes ficam com NaN (sem par à frente).
     def _append_adjacency_test(self, out, test="mannwhitney", min_n=8):
         leaf_ids = out["segmento"].tolist()
@@ -1371,8 +1375,8 @@ class TreeSegmenter:
 
     # ------------------------------------------------------------------
     # TREE: desenha a árvore hierárquica (nós internos + folhas) em texto.
-    #   Cada nó mostra n, representatividade e PD média; folhas trazem [nota N].
-    #   Filhos são ordenados por PD (ascendente por padrão).
+    #   Cada nó mostra n, representatividade e alvo médio; folhas trazem [nota N].
+    #   Filhos são ordenados por alvo (ascendente por padrão).
     # ------------------------------------------------------------------
     def tree(self, ascending: bool = True) -> str:
         # mapa pai -> filhos
@@ -1414,7 +1418,7 @@ class TreeSegmenter:
             conn = "" if is_root else ("└─ " if is_last else "├─ ")
             tag = f"  [nota {nota_map.get(sid, '?')}]" if seg["is_leaf"] else ""
             linhas.append(f"{prefix}{conn}{rotulo(sid)}  "
-                          f"(n={n}, {rep:.1f}%, PD={pdv:.4f}){tag}")
+                          f"(n={n}, {rep:.1f}%, {self._risk_word}={pdv:.4f}){tag}")
             ch = sorted(filhos.get(sid, []), key=min_nota)
             child_prefix = "" if is_root else prefix + ("   " if is_last else "│  ")
             for i, c in enumerate(ch):
@@ -1429,14 +1433,14 @@ class TreeSegmenter:
         return out
 
     # ------------------------------------------------------------------
-    # _value_color_range: faixa (vmin, vmax) da escala de cor da PD, a partir das
-    #   PDs observadas nos nós. Diferente da LGD (fixa 0–1), a PD costuma ser
+    # _value_color_range: faixa (vmin, vmax) da escala de cor do alvo, a partir das
+    #   valores observados nos nós. Diferente do alvo (fixa 0–1), o alvo costuma ser
     #   pequena (ex.: 0–0.3), então a escala é dinâmica para as cores
     #   discriminarem — ancorada em 0 (sem default = verde).
     # ------------------------------------------------------------------
     def _value_color_range(self):
-        """Faixa de cor do alvo na árvore. Regressão (LGD em [0,1]) usa escala
-        fixa 0–1; classificação (PD, taxas pequenas) usa escala dinâmica até a
+        """Faixa de cor do alvo na árvore. Regressão (alvo em [0,1]) usa escala
+        fixa 0–1; classificação (alvo, taxas pequenas) usa escala dinâmica até a
         maior taxa observada para dar contraste."""
         if not self._is_clf:
             return 0.0, 1.0
@@ -1447,7 +1451,7 @@ class TreeSegmenter:
         leaf_id = self._leaf_id_series(leaf_ids)
         # vmax na REFERÊNCIA (DES) quando há sample_col: as cores dos nós e a colorbar
         # usam a média na DES (colorbar rotulada "(DES)"); usar a média all-samples faria
-        # uma folha com PD DES > vmax saturar e a escala ficar incoerente com o rótulo.
+        # uma folha com alvo DES > vmax saturar e a escala ficar incoerente com o rótulo.
         if self.sample_col is not None:
             ref = self._mask_ref
             means = self.df.loc[ref, self.target].groupby(leaf_id[ref]).mean()
@@ -1458,17 +1462,17 @@ class TreeSegmenter:
 
     # ------------------------------------------------------------------
     # PLOT_TREE: desenha a árvore como IMAGEM (matplotlib). Cada nó mostra o
-    #   rótulo da condição, n, % e PD média; folhas trazem a nota. A cor do nó
-    #   reflete a PD (verde = baixa → vermelho = alta). Devolve a Figure e,
+    #   rótulo da condição, n, % e alvo médio; folhas trazem a nota. A cor do nó
+    #   reflete o alvo (verde = baixa → vermelho = alta). Devolve a Figure e,
     #   se `save_path` for dado, salva a imagem (PNG/SVG/PDF…).
     # ------------------------------------------------------------------
     def plot_tree(self, ascending: bool = True, figsize=None, cmap: str = "RdYlGn_r",
                   show_samples: bool = False, title: str | None = "auto",
                   save_path: str | None = None, dpi: int = 150, ax=None,
                   highlight: str | None = None):
-        # "auto" → título conforme o tipo de alvo (PD p/ classificação · LGD p/ regressão)
+        # "auto" → título conforme o rótulo do alvo (self._risk_word)
         if title == "auto":
-            title = f"Segmentação de {'PD' if self._is_clf else 'LGD'}"
+            title = f"Segmentação de {self._risk_word}"
         try:
             import textwrap
 
@@ -1546,7 +1550,7 @@ class TreeSegmenter:
                        max(3.5, (md + 1) * Y_GAP * 0.95))
         fig, ax = self._new_ax(figsize, dpi, ax)
 
-        vmin, vmax = self._value_color_range()      # escala de cor da PD (dinâmica)
+        vmin, vmax = self._value_color_range()      # escala de cor do alvo (dinâmica)
         norm = Normalize(vmin, vmax)
         cmap_obj = plt.get_cmap(cmap)
 
@@ -1591,7 +1595,7 @@ class TreeSegmenter:
                               fontsize=base_fs, color=txt_color, zorder=3,
                               fontweight="bold", linespacing=1.12, clip_on=True)
             fit_items.append((t_split, bw * 0.94, bh * 0.58))
-            # 2) representatividade e PD (em %, 2 casas) na MESMA linha, separados por barra
+            # 2) representatividade e alvo (em %, 2 casas) na MESMA linha, separados por barra
             pd_txt = (f"{self._risk_word} {pdv * 100:.2f}%" if not pd.isna(pdv)
                       else f"{self._risk_word} —")
             metr = f"repr. {rep:.1f}%  |  {pd_txt}"
@@ -1829,8 +1833,8 @@ class TreeSegmenter:
         return pd.DataFrame(self._csi_detalhe)
 
     # ------------------------------------------------------------------
-    # METRICS: avalia a régua como um modelo de PD (classificação).
-    #   Score de cada linha = PD média do seu segmento na amostra de referência
+    # METRICS: avalia a régua como um modelo de alvo (classificação).
+    #   Score de cada linha = alvo médio do seu segmento na amostra de referência
     #   (DES). Retorna, por amostra (DES, OOT, ...): taxa de default observada,
     #   **KS**, **AUC** (ROC), **Gini**, **Acurácia** e **F1**. Acurácia/F1 usam
     #   o corte KS-ótimo por amostra (ou `cutoff`, se informado).
@@ -1854,15 +1858,15 @@ class TreeSegmenter:
             ref_mask = pd.Series(True, index=self.df.index)
         overall = self.df.loc[ref_mask, self.target].mean()
 
-        # score por linha = PD média do segmento na referência (régua). Em vez de
+        # score por linha = alvo médio do segmento na referência (régua). Em vez de
         # `pred[m.values] = v` full-length por folha, agrega o alvo da referência
         # por folha num ÚNICO groupby e mapeia de volta via leaf_id por linha.
         leaf_id = self._leaf_id_series(leaf_ids)
         ref_pd = self.df.loc[ref_mask, self.target].groupby(leaf_id[ref_mask]).mean()
         # fallback IGUAL ao da régua real (_predicted_series/_compute_leaves): folha sem
-        # linhas na referência ⇒ média da PRÓPRIA folha em TODAS as amostras (não a PD
+        # linhas na referência ⇒ média da PRÓPRIA folha em TODAS as amostras (não o alvo
         # global), para metrics avaliar o mesmo score que a régua produz em produção;
-        # só se a folha for totalmente vazia é que cai na PD global (overall).
+        # só se a folha for totalmente vazia é que cai no alvo global (overall).
         all_pd = self.df[self.target].groupby(leaf_id).mean()
         pd_map = {}
         for sid in leaf_ids:
@@ -1914,10 +1918,10 @@ class TreeSegmenter:
         return pd.DataFrame(linhas)
 
     # ------------------------------------------------------------------
-    # BOOTSTRAP_CI: intervalo de confiança da PD (taxa de default) por folha,
+    # BOOTSTRAP_CI: intervalo de confiança do alvo (taxa de default) por folha,
     #   via reamostragem bootstrap na amostra `sample` (default = referência/DES).
     #   Se houver `check_sample` (default = 1ª não-referência, ex. OOT), traz a
-    #   PD dela por folha e verifica a ADERÊNCIA: se a PD de OOT cai dentro do
+    #   alvo dela por folha e verifica a ADERÊNCIA: se o alvo de OOT cai dentro do
     #   IC bootstrap do DES (estável) ou fora (acima/abaixo = alerta).
     # ------------------------------------------------------------------
     def bootstrap_ci(self, n_boot: int = 1000, ci: float = 0.95,
@@ -1998,7 +2002,7 @@ class TreeSegmenter:
     # VALIDAÇÃO: backtesting por safra, monotonicidade e calibração
     # ==================================================================
     def _predicted_series(self) -> pd.Series:
-        """PD prevista por linha = PD média do segmento na referência (régua)."""
+        """alvo previsto por linha = alvo médio do segmento na referência (régua)."""
         pred = pd.Series(np.nan, index=self.df.index, dtype="float64")
         for sid, seg in self.segments.items():
             if not seg["is_leaf"]:
@@ -2013,9 +2017,9 @@ class TreeSegmenter:
         return pred
 
     # ------------------------------------------------------------------
-    # BACKTEST: PD prevista (régua) vs realizada ao longo do tempo (safra).
+    # BACKTEST: alvo previsto (régua) vs realizada ao longo do tempo (safra).
     #   `time_col` = coluna de período (ex.: dt_ref). Em cada período traz n,
-    #   PD prevista, taxa de default realizada, o gap e um status (ok/alerta
+    #   alvo previsto, taxa de default realizada, o gap e um status (ok/alerta
     #   por `tol`).
     # ------------------------------------------------------------------
     def backtest(self, time_col: str, sample: str | None = None,
@@ -2045,11 +2049,54 @@ class TreeSegmenter:
         out.attrs.update(time_col=time_col, sample=sample, tol=tol)
         return out
 
+    def plot_backtest(self, time_col: str, sample: str | None = None,
+                      tol: float | None = None, figsize=(7.2, 4.2),
+                      save_path: str | None = None, dpi: int = 150, ax=None):
+        """Backtest **gráfico**: alvo previsto (régua) × realizado por safra, com a
+        banda de tolerância do gap e as safras em **alerta** destacadas. Leitura
+        visual do :meth:`backtest` (sem tabela)."""
+        import matplotlib.pyplot as plt  # noqa: F401
+        from matplotlib.ticker import PercentFormatter
+        bt = self.backtest(time_col, sample=sample, tol=tol)
+        tol = bt.attrs.get("tol", 0.03 if self._is_clf else 0.10)
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        if bt.empty:
+            ax.text(0.5, 0.5, "sem dados para backtest", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout()
+            if save_path:
+                fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+            return fig
+        labels = _fmt_safras([str(p) for p in bt["periodo"]])
+        x = list(range(len(bt)))
+        prev = bt["valor_previsto"].to_numpy(dtype="float64")
+        real = bt["valor_realizado"].to_numpy(dtype="float64")
+        ax.fill_between(x, prev - tol, prev + tol, color="#9bb7c9", alpha=0.22,
+                        label=f"tolerância ±{tol}")
+        ax.plot(x, prev, color="#0f3d57", lw=1.8, marker="o", ms=4.5,
+                label="previsto (régua)")
+        ax.plot(x, real, color="#d6453e", lw=1.8, marker="s", ms=4.5, label="realizado")
+        alert = (bt["status"].to_numpy() == "alerta")
+        if alert.any():
+            xa = np.asarray(x)[alert]
+            ax.scatter(xa, real[alert], s=130, facecolors="none", edgecolors="#d6453e",
+                       linewidths=1.7, zorder=4, label="alerta (|gap| > tol)")
+        ax.set_xticks(x); ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+        ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
+        ax.set_ylabel(self._risk_word); ax.set_xlabel("safra")
+        ax.set_title(f"Backtest da régua — {self._risk_word} previsto × realizado por safra",
+                     fontsize=12, fontweight="bold", color="#15324a")
+        ax.legend(fontsize=8, loc="best"); ax.grid(axis="y", alpha=0.2)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
     # ------------------------------------------------------------------
-    # MONOTONICITY_REPORT: verifica se a PD cresce ao longo das folhas 1..N
+    # MONOTONICITY_REPORT: verifica se o alvo cresce ao longo das folhas 1..N
     #   (posição esquerda→direita), em cada amostra — tanto na referência (DES)
     #   quanto nas demais (estabilidade). Lista as inversões (pares de notas
-    #   consecutivas onde a PD cai).
+    #   consecutivas onde o alvo cai).
     # ------------------------------------------------------------------
     def monotonicity_report(self) -> pd.DataFrame:
         lv = self.leaves()
@@ -2079,7 +2126,7 @@ class TreeSegmenter:
         return pd.DataFrame(rows)
 
     # ------------------------------------------------------------------
-    # CALIBRATION_TABLE: por folha, PD prevista (régua/DES) vs realizada na
+    # CALIBRATION_TABLE: por folha, alvo previsto (régua/DES) vs realizada na
     #   amostra de verificação (default = 1ª não-referência, ex.: OOT).
     # ------------------------------------------------------------------
     def calibration_table(self, check_sample: str | None = None) -> pd.DataFrame:
@@ -2111,7 +2158,7 @@ class TreeSegmenter:
         return out
 
     # ------------------------------------------------------------------
-    # PLOT_CALIBRATION: dispersão PD prevista (x) vs realizada (y) por folha,
+    # PLOT_CALIBRATION: dispersão alvo previsto (x) vs realizada (y) por folha,
     #   com a diagonal y=x (calibração perfeita) e faixa de tolerância.
     # ------------------------------------------------------------------
     def plot_calibration(self, check_sample: str | None = None, tol: float | None = None,
@@ -2146,8 +2193,8 @@ class TreeSegmenter:
                         textcoords="offset points", xytext=(6, 4), fontsize=9)
         ax.set_xlim(0, lim_hi)
         ax.set_ylim(0, lim_hi)
-        _prev = "PD prevista" if self._is_clf else "LGD previsto"
-        _real = "PD realizada" if self._is_clf else "LGD realizado"
+        _prev = f"{self._risk_word} previsto"
+        _real = f"{self._risk_word} realizado"
         ax.set_xlabel(f"{_prev} (régua · {self.ref_sample if self.sample_col else 'todos'})")
         ax.set_ylabel(f"{_real} ({chk if chk else 'todos'})")
         ax.set_title(f"Calibração da régua de {self._risk_word} por folha", fontsize=12,
@@ -2184,7 +2231,7 @@ class TreeSegmenter:
         return "\n".join(linhas)
 
     # ------------------------------------------------------------------
-    # Plots de DISTRIBUIÇÃO do alvo (só fazem sentido em regressão, ex.: LGD)
+    # Plots de DISTRIBUIÇÃO do alvo (só fazem sentido em regressão)
     # ------------------------------------------------------------------
     def plot_leaf_boxplots(self, sample: str | None = None, ascending: bool = True,
                            cmap: str = "RdYlGn_r", figsize=None,
@@ -2215,7 +2262,7 @@ class TreeSegmenter:
             figsize = (max(10.0, len(vals) * 1.6), 5.6)
         fig, ax = self._new_ax(figsize, dpi, ax)
         # [0,1] como piso quando os dados residem no intervalo, ESTENDIDO quando há
-        # LGD fora de [0,1] (recuperações líquidas) — sem recortar caixas nem saturar
+        # alvo fora de [0,1] (recuperações líquidas) — sem recortar caixas nem saturar
         # a cor (que mapeia a média de cada folha).
         means = np.asarray([float(np.mean(v)) for v in vals], dtype="float64")
         ylo, yhi = self._hist_domain(np.concatenate(vals))
@@ -2245,8 +2292,8 @@ class TreeSegmenter:
     @staticmethod
     def _hist_domain(y, base_lo: float = 0.0, base_hi: float = 1.0):
         """Faixa do eixo para histogramas do alvo: ``[0,1]`` por padrão, mas ESTENDIDA
-        para incluir massa fora de ``[0,1]`` (ex.: LGD com recuperações líquidas). O
-        ``hist`` descarta valores fora de ``range``; sem estender, LGD<0 ou >1 sumiria
+        para incluir massa fora de ``[0,1]`` (ex.: recuperações líquidas). O
+        ``hist`` descarta valores fora de ``range``; sem estender, alvo<0 ou >1 sumiria
         do gráfico e a contagem deixaria de somar n (a média, calculada sobre todo y,
         cairia fora do canvas)."""
         if len(y) == 0:
@@ -2389,8 +2436,8 @@ class TreeSegmenter:
 
         mr = self.monotonicity_report()
         ok = bool(mr["monotonico"].all())
-        L += ["## Monotonicidade da PD por nota", "",
-              ("✅ PD monotônica crescente em todas as amostras."
+        L += [f"## Monotonicidade de {self._risk_word} por nota", "",
+              (f"✅ {self._risk_word} cresce monotonicamente em todas as amostras."
                if ok else "⚠️ Há inversões de monotonicidade — ver tabela."),
               "", self._df_to_md(mr[["amostra", "monotonico", "n_inversoes"]]), ""]
 
@@ -2407,7 +2454,7 @@ class TreeSegmenter:
                 pass
 
         try:
-            L += ["## Discriminação (régua como modelo de PD)", "",
+            L += [f"## Discriminação (régua como modelo de {self._risk_word})", "",
                   self._df_to_md(self.metrics()), ""]
         except Exception:
             pass
@@ -2477,7 +2524,7 @@ class TreeSegmenter:
         return out
 
     # ------------------------------------------------------------------
-    # PLOT_ROC: curva ROC da régua (score = PD prevista) por amostra, com a AUC
+    # PLOT_ROC: curva ROC da régua (score = alvo previsto) por amostra, com a AUC
     #   na legenda. Mede o poder de ORDENAÇÃO de risco da segmentação.
     # ------------------------------------------------------------------
     def plot_roc(self, samples: list | None = None, figsize=(6.0, 6.0),
@@ -2513,7 +2560,7 @@ class TreeSegmenter:
         ax.set_ylim(0, 1)
         ax.set_xlabel("Falso positivo (1 − especificidade)")
         ax.set_ylabel("Verdadeiro positivo (sensibilidade)")
-        ax.set_title("Curva ROC da régua de PD", fontsize=12, fontweight="bold",
+        ax.set_title(f"Curva ROC da régua de {self._risk_word}", fontsize=12, fontweight="bold",
                      color="#15324a")
         ax.legend(fontsize=8, loc="lower right")
         ax.grid(alpha=0.2)
@@ -2524,7 +2571,7 @@ class TreeSegmenter:
 
     # ------------------------------------------------------------------
     # PLOT_KS: curva KS — distribuições acumuladas de bons (alvo 0) e maus
-    #   (alvo 1) ao longo do score (PD prevista), com a distância KS marcada.
+    #   (alvo 1) ao longo do score (alvo previsto), com a distância KS marcada.
     # ------------------------------------------------------------------
     def plot_ks(self, sample: str | None = None, figsize=(7.0, 4.6),
                 save_path: str | None = None, dpi: int = 150, ax=None):
@@ -2565,9 +2612,9 @@ class TreeSegmenter:
                     textcoords="offset points", xytext=(8, 0), fontsize=10,
                     fontweight="bold", color="#0f3d57")
         sfx = f" · {sample}" if sample else ""
-        ax.set_xlabel("score (PD prevista)")
+        ax.set_xlabel(f"score ({self._risk_word} previsto)")
         ax.set_ylabel("proporção acumulada")
-        ax.set_title(f"Curva KS da régua de PD{sfx}", fontsize=12, fontweight="bold",
+        ax.set_title(f"Curva KS da régua de {self._risk_word}{sfx}", fontsize=12, fontweight="bold",
                      color="#15324a")
         ax.legend(fontsize=8, loc="lower right")
         ax.grid(alpha=0.2)
@@ -2578,9 +2625,9 @@ class TreeSegmenter:
         return fig
 
     # ------------------------------------------------------------------
-    # PLOT_LEAF_BADRATE: taxa de default (PD) por folha (barras na ordem da
+    # PLOT_LEAF_BADRATE: taxa de default (alvo) por folha (barras na ordem da
     #   nota), com IC de Wilson — mostra a separação de risco entre folhas e a
-    #   incerteza amostral de cada PD. Substitui o boxplot (alvo binário).
+    #   incerteza amostral de cada alvo. Substitui o boxplot (alvo binário).
     # ------------------------------------------------------------------
     def plot_leaf_badrate(self, sample: str | None = None, ascending: bool = True,
                           cmap: str = "RdYlGn_r", figsize=None,
@@ -2624,7 +2671,7 @@ class TreeSegmenter:
                     color="#15324a", fontweight="bold")
         ax.set_xticks(xs)
         ax.set_xticklabels([f"folha {n}" for n in notas], rotation=0, fontsize=9)
-        ax.set_ylabel("Taxa de default (PD)")
+        ax.set_ylabel(f"Taxa de default ({self._risk_word})")
         sfx = f" · {sample}" if sample else ""
         ax.set_title(f"Taxa de default por folha{sfx} (IC de Wilson 95%)", fontsize=12,
                      fontweight="bold", color="#15324a")
@@ -2636,7 +2683,7 @@ class TreeSegmenter:
         return fig
 
     # ------------------------------------------------------------------
-    # PLOT_SCORE_DISTRIBUTION: distribuição do score (PD prevista) separada por
+    # PLOT_SCORE_DISTRIBUTION: distribuição do score (alvo previsto) separada por
     #   classe (bons × maus) — quanto mais separadas as massas, melhor o KS/AUC.
     # ------------------------------------------------------------------
     def plot_score_distribution(self, sample: str | None = None, bins: int = 30,
@@ -2671,7 +2718,7 @@ class TreeSegmenter:
                 edgecolor="#157a52", label=f"bons (n={good.size})", density=True)
         ax.hist(bad, bins=bins, range=rng, color="#d6453e", alpha=0.55,
                 edgecolor="#b23a2a", label=f"maus (n={bad.size})", density=True)
-        ax.set_xlabel("score (PD prevista)")
+        ax.set_xlabel(f"score ({self._risk_word} previsto)")
         ax.set_ylabel("densidade")
         ax.set_title(f"Distribuição do score por classe{sfx}", fontsize=12,
                      fontweight="bold", color="#15324a")
@@ -2684,7 +2731,7 @@ class TreeSegmenter:
 
     # ------------------------------------------------------------------
     # PLOT_FEATURE_PD: preview da variável candidata DENTRO de uma folha —
-    #   taxa de default (PD) por faixa da variável (com a representatividade),
+    #   taxa de default (alvo) por faixa da variável (com a representatividade),
     #   nos mesmos bins do split. Mostra a FORMA da relação antes de dividir e
     #   se é monotônica. Use antes do `grow` para escolher a variável/corte.
     # ------------------------------------------------------------------
@@ -2718,7 +2765,7 @@ class TreeSegmenter:
         xs = list(range(len(labels)))
 
         # BARRAS = representatividade/volumetria (%), eixo esquerdo (steelblue)
-        # LINHA  = taxa de default (PD), eixo direito (crimson) — tema padrão da lib
+        # LINHA  = taxa de default (alvo), eixo direito (crimson) — tema padrão da lib
         col_bar, col_line = "steelblue", "crimson"
         bars = ax.bar(xs, reprs, color=col_bar, edgecolor="#2f5d82", alpha=0.85,
                       width=0.62, label="Representatividade (%)")
@@ -2733,7 +2780,7 @@ class TreeSegmenter:
                     color="white" if dentro else col_bar, fontweight="bold")
 
         # LINHA = risco médio por faixa, eixo da direita (vermelho)
-        _lab = "Taxa de default (PD)" if self._is_clf else "LGD (alvo)"
+        _lab = f"Taxa de default ({self._risk_word})" if self._is_clf else self._risk_word
         ax2 = ax.twinx()
         line, = ax2.plot(xs, pds, color=col_line, marker="o", lw=2.2,
                          markersize=7, markeredgecolor="#fff", zorder=5,
@@ -2764,7 +2811,7 @@ class TreeSegmenter:
     # PLOT_FEATURE_HIST: histograma de uma variável NUMÉRICA dentro de uma
     #   folha, com linhas verticais nos cortes propostos (ótimo ou manual).
     #   Mostra a forma da distribuição da variável antes de dividir. Para
-    #   variável categórica cai no plot_feature_value (barras × PD).
+    #   variável categórica cai no plot_feature_value (barras × alvo).
     # ------------------------------------------------------------------
     def plot_feature_hist(self, feature: str, sid: str | None = None, splits=None,
                           dtype=None, max_n_bins: int = 6, min_bin_size: float = 0.05,
@@ -2780,7 +2827,7 @@ class TreeSegmenter:
             sub = self.df[self.segments[sid]["mask"]]
         kind = self._detect_kind(sub, feature, dtype)
         if kind != "num":
-            # categórica não tem histograma — barras de representatividade × PD
+            # categórica não tem histograma — barras de representatividade × alvo
             return self.plot_feature_value(feature, sid=sid, splits=splits, dtype=dtype,
                                         max_n_bins=max_n_bins, min_bin_size=min_bin_size,
                                         max_bin_size=max_bin_size,
@@ -2823,8 +2870,8 @@ class TreeSegmenter:
         return fig
 
     # ------------------------------------------------------------------
-    # PLOT_LEAF_TARGET_HIST: PD da folha (referência DES por padrão) como uma
-    #   barra horizontal com IC de Wilson, comparada à PD da carteira — leitura
+    # PLOT_LEAF_TARGET_HIST: alvo da folha (referência DES por padrão) como uma
+    #   barra horizontal com IC de Wilson, comparada à alvo da carteira — leitura
     #   rápida do nível de risco da folha. (Alvo binário não tem histograma.)
     # ------------------------------------------------------------------
     def plot_leaf_target_hist(self, sid: str | None = None, sample: str | None = None,
@@ -2854,7 +2901,7 @@ class TreeSegmenter:
         if self._is_clf:
             p, lo, hi = self._wilson_ci(int(y.sum()), len(y))
         else:
-            # alvo contínuo (LGD): ponto = média e IC = IC da média (normal). O IC
+            # alvo contínuo (alvo): ponto = média e IC = IC da média (normal). O IC
             # binomial de Wilson e o int(y.sum()) só valem para proporção 0/1 e
             # truncariam/distorceriam a estatística do alvo contínuo.
             p = float(np.mean(y))
@@ -2863,7 +2910,7 @@ class TreeSegmenter:
                 lo, hi = p - 1.96 * se, p + 1.96 * se
             else:
                 lo = hi = p
-        # PD/alvo da carteira (mesma amostra) como referência
+        # alvo da carteira (mesma amostra) como referência
         cart = self.df
         if sample is not None and self.sample_col is not None:
             cart = self.df[self.df[self.sample_col] == sample]
@@ -2882,12 +2929,12 @@ class TreeSegmenter:
             ax.legend(fontsize=8, loc="lower right")
         ax.set_yticks([])
         ax.set_xlim(0, xmax)
-        ax.set_xlabel("Taxa de default (PD)" if self._is_clf else "LGD (alvo)")
+        ax.set_xlabel(f"Taxa de default ({self._risk_word})" if self._is_clf else self._risk_word)
         if self._is_clf:
-            ax.set_title(f"PD da folha{sfx} (n={y.size}; maus={int(y.sum())})",
+            ax.set_title(f"{self._risk_word} da folha{sfx} (n={y.size}; maus={int(y.sum())})",
                          fontsize=10.5, fontweight="bold", color="#15324a")
         else:
-            ax.set_title(f"LGD da folha{sfx} (n={y.size})",
+            ax.set_title(f"{self._risk_word} da folha{sfx} (n={y.size})",
                          fontsize=10.5, fontweight="bold", color="#15324a")
         ax.grid(axis="x", alpha=0.15)
         fig.tight_layout()
@@ -3648,15 +3695,15 @@ class TreeSegmenter:
         return fig
 
     # ==================================================================
-    # FOLHAS-IRMÃS: comparação da PD média entre folhas de MESMO PAI, por
+    # FOLHAS-IRMÃS: comparação da alvo médio entre folhas de MESMO PAI, por
     #   amostra e por safra, com detecção de INVERSÃO de ordenação. Duas irmãs
-    #   "invertem" quando a ordem da PD média observada numa amostra/safra
-    #   contradiz a ordem de referência (PD na DES) — sinal de instabilidade
+    #   "invertem" quando a ordem da alvo médio observada numa amostra/safra
+    #   contradiz a ordem de referência (alvo na DES) — sinal de instabilidade
     #   da segmentação (o ranking de risco não se sustenta no tempo/fora da
     #   amostra de desenvolvimento).
     # ==================================================================
     def _ordered_samples_with_value(self) -> list:
-        """Amostras que têm PD observada, com a referência (DES) à frente."""
+        """Amostras que têm alvo observada, com a referência (DES) à frente."""
         if self.sample_col is None:
             return []
         samples = list(self.df[self.sample_col].dropna().unique())
@@ -3668,7 +3715,7 @@ class TreeSegmenter:
     def _sibling_meta(self, parent_sid, leaves=None):
         """Metadados das folhas-irmãs de `parent_sid`:
         (ordenadas_por_PD_DES, nota_por_sid, descrição_curta_por_sid,
-        pd_ref_por_sid). A ORDEM DE REFERÊNCIA é a PD média na DES (asc.)."""
+        pd_ref_por_sid). A ORDEM DE REFERÊNCIA é a alvo médio na DES (asc.)."""
         lv = self.leaves()
         nota = dict(zip(lv["segmento"], lv["nota"]))
         if leaves is None:
@@ -3676,7 +3723,7 @@ class TreeSegmenter:
                       if s["parent"] == parent_sid and s["is_leaf"]]
         pd_ref = {}
         for sid in leaves:
-            v = self._leaf_target(sid)          # PD na referência (DES), sem NaN
+            v = self._leaf_target(sid)          # alvo na referência (DES), sem NaN
             pd_ref[sid] = float(v.mean()) if len(v) else float("nan")
         ordered = sorted(leaves, key=lambda c: (np.inf if pd.isna(pd_ref[c])
                                                 else pd_ref[c], str(c)))
@@ -3789,7 +3836,7 @@ class TreeSegmenter:
         return out
 
     def _sibling_sample_series(self, parent_sid, leaves=None):
-        """Série da PD média por AMOSTRA para cada folha-irmã.
+        """Série da alvo médio por AMOSTRA para cada folha-irmã.
         Retorna (ordered, nota, desc, xs, series) com series[sid] = [médias]."""
         ordered, nota, desc, _pd = self._sibling_meta(parent_sid, leaves)
         samples = self._ordered_samples_with_value()
@@ -3809,7 +3856,7 @@ class TreeSegmenter:
 
     def _sibling_safra_series(self, parent_sid, time_col=None, sample=None,
                               leaves=None, min_n: int = 1):
-        """Série da PD média por SAFRA (mês de `time_col`) para cada folha-irmã.
+        """Série da alvo médio por SAFRA (mês de `time_col`) para cada folha-irmã.
         `sample` restringe a uma amostra (None = todas). Safras com < `min_n`
         observações na folha viram NaN. Retorna (ordered, nota, desc, xs, series)."""
         time_col = time_col or self.date_col
@@ -3843,7 +3890,7 @@ class TreeSegmenter:
     def sibling_inversion_summary(self, parent_sid, time_col=None, sample=None,
                                   min_n: int = 20, leaves=None) -> dict:
         """Diagnóstico de inversão das folhas-irmãs de `parent_sid`. Compara a
-        ordem de PD de referência (DES) com a observada em cada AMOSTRA e em
+        ordem de alvo de referência (DES) com a observada em cada AMOSTRA e em
         cada SAFRA. Retorna contagens por amostra/safra e um veredito
         (verde/amarelo/vermelho). `leaves` restringe a comparação a um trecho
         contíguo de folhas terminais adjacentes (uma run de `sibling_leaf_groups`);
@@ -3891,7 +3938,7 @@ class TreeSegmenter:
                 "safra_err": safra_err}
 
     def sibling_value_by_sample(self, parent_sid, leaves=None) -> pd.DataFrame:
-        """Tabela tidy: PD média de cada folha-irmã por amostra."""
+        """Tabela tidy: alvo médio de cada folha-irmã por amostra."""
         ordered, nota, desc, xs, series = self._sibling_sample_series(parent_sid, leaves)
         rows = []
         for sid in ordered:
@@ -3903,7 +3950,7 @@ class TreeSegmenter:
 
     def sibling_value_by_safra(self, parent_sid, time_col=None, sample=None,
                             leaves=None, min_n: int = 1) -> pd.DataFrame:
-        """Tabela tidy: PD média de cada folha-irmã por safra (linhas = safra)."""
+        """Tabela tidy: alvo médio de cada folha-irmã por safra (linhas = safra)."""
         ordered, nota, desc, xs, series = self._sibling_safra_series(
             parent_sid, time_col, sample, leaves, min_n=min_n)
         data = {"safra": xs}
@@ -3914,7 +3961,7 @@ class TreeSegmenter:
         return pd.DataFrame(data)
 
     def _sibling_colors(self, ordered):
-        """Cor por folha (verde→vermelho na ordem de PD) p/ os gráficos."""
+        """Cor por folha (verde→vermelho na ordem de alvo) p/ os gráficos."""
         import matplotlib.pyplot as plt
         cmap = plt.get_cmap("RdYlGn_r")
         k = len(ordered)
@@ -3924,7 +3971,7 @@ class TreeSegmenter:
     def plot_sibling_value_by_sample(self, parent_sid, leaves=None,
                                   figsize=(7.6, 4.0), dpi=150,
                                   save_path=None, ax=None):
-        """Linhas da PD média das folhas-irmãs por amostra (DES, OOT, …). Onde
+        """Linhas da alvo médio das folhas-irmãs por amostra (DES, OOT, …). Onde
         as linhas se cruzam há INVERSÃO da ordem de risco entre as irmãs."""
         try:
             import matplotlib.pyplot as plt  # noqa: F401
@@ -3959,7 +4006,7 @@ class TreeSegmenter:
                                  leaves=None, min_n: int = 1,
                                  figsize=(9.6, 4.0), dpi=150,
                                  save_path=None, ax=None):
-        """Linhas da PD média das folhas-irmãs por safra ao longo do tempo. As
+        """Linhas da alvo médio das folhas-irmãs por safra ao longo do tempo. As
         safras em que a ordem de risco inverte (vs. DES) ficam sombreadas em
         vermelho — leitura rápida de instabilidade temporal."""
         try:
@@ -4344,7 +4391,7 @@ class TreeSegmenter:
 
     # ------------------------------------------------------------------
     # ASSIGN: rotula cada linha com seu segmento-folha
-    #   Por padrão adiciona também a nota de PD (1..N) e a descrição
+    #   Por padrão adiciona também a nota de alvo (1..N) e a descrição
     #   por extenso. Colunas: <col>, <col>_nota, <col>_desc
     # ------------------------------------------------------------------
     def assign(
@@ -4430,6 +4477,7 @@ class TreeSegmenter:
                 "date_col": self.date_col,
                 "min_leaf_rows": self.min_leaf_rows,
                 "feature_labels": dict(self.feature_labels),
+                "problem_label": self.problem_label,
             },
             "segments": segs,
         }
@@ -4506,6 +4554,7 @@ class TreeSegmenter:
                   ref_sample=meta.get("ref_sample", "DES"),
                   date_col=date_col,
                   feature_labels=meta.get("feature_labels"),
+                  problem_label=meta.get("problem_label"),
                   min_leaf_rows=meta.get("min_leaf_rows", 50),
                   verbose=verbose)
         seg._load_segments(data["segments"])
@@ -4545,7 +4594,7 @@ class TreeSegmenter:
         return out
 
     def _regua_dict(self) -> dict:
-        """Régua final: folhas com nota, condições e PD (na referência/DES)."""
+        """Régua final: folhas com nota, condições e alvo (na referência/DES)."""
         nota_map, _ = self._grade_map()
         leaves = []
         for sid, seg in self.segments.items():
@@ -4557,7 +4606,7 @@ class TreeSegmenter:
                 pdv = float(ref.mean()) if len(ref) else float(sub[self.target].mean())
             else:
                 pdv = float(sub[self.target].mean())
-            if np.isnan(pdv):                       # folha vazia → PD global (sem NaN na régua)
+            if np.isnan(pdv):                       # folha vazia → alvo global (sem NaN na régua)
                 if self.sample_col is not None:
                     g = self.df.loc[self.df[self.sample_col] == self.ref_sample,
                                     self.target].mean()
@@ -4572,15 +4621,15 @@ class TreeSegmenter:
 
     def predict(self, X: pd.DataFrame, col_seg="segmento",
                 col_nota="nota", col_valor="valor_regua") -> pd.DataFrame:
-        """Aplica a régua a um DataFrame pandas novo: segmento, nota e PD."""
+        """Aplica a régua a um DataFrame pandas novo: segmento, nota e alvo."""
         return _aplicar_regua_pandas(self._regua_dict(), X, col_seg, col_nota, col_valor)
 
     # ------------------------------------------------------------------
     # TO_PYSPARK: gera o código da régua como F.when().otherwise() para
-    #   aplicar a segmentação (segmento + nota + PD) em escala no Spark.
+    #   aplicar a segmentação (segmento + nota + alvo) em escala no Spark.
     # ------------------------------------------------------------------
     def to_pyspark(self, func_name: str = "aplicar_regua") -> str:
-        """Gera o código PySpark (string) que reproduz a régua (segmento, nota e PD).
+        """Gera o código PySpark (string) que reproduz a régua (segmento, nota e alvo).
 
         Contrato de faltantes: as colunas numéricas devem usar **NULL** (não ``NaN``)
         para ausente. No Spark um ``NaN`` numérico é ordenado como o MAIOR valor e
@@ -4623,7 +4672,7 @@ class TreeSegmenter:
 
         L = ["from pyspark.sql import functions as F", "",
              f"def {func_name}(df, col_seg='segmento', col_nota='nota', col_valor='valor_regua'):",
-             '    """Régua de PD gerada por TreeSegmenter (segmento, nota e PD por folha)."""']
+             f'    """Régua de {self._risk_word} gerada por TreeSegmenter (segmento, nota e {self._risk_word} por folha)."""']
         for i, leaf in enumerate(regua["leaves"], 1):
             L.append(f'    c{i} = {cond_expr(leaf["conditions"])}')
         L.append("    seg = (")
@@ -4730,7 +4779,7 @@ class TreeSegmenter:
         from matplotlib.backends.backend_pdf import PdfPages
         import matplotlib.pyplot as plt
 
-        rl = "PD" if self._is_clf else "LGD"
+        rl = self._risk_word
         n_folhas = sum(s["is_leaf"] for s in self.segments.values())
         prof = max(s["depth"] for s in self.segments.values())
         feats = self.regua_features()
@@ -4789,7 +4838,7 @@ class TreeSegmenter:
 
     # ------------------------------------------------------------------
     # APPLY_SPARK: aplica a régua DIRETAMENTE num Spark DataFrame, devolvendo-o
-    #   com as colunas de segmento, nota e PD ("reconstrói as folhas" na
+    #   com as colunas de segmento, nota e alvo ("reconstrói as folhas" na
     #   tabela). Diferente de `to_pyspark` (que só gera o código), aqui a régua
     #   é executada. Exige pyspark e que as colunas usadas na árvore existam no
     #   `sdf` com o MESMO nome (senão levanta erro listando as que faltam).
@@ -4903,7 +4952,7 @@ class TreeSegmenter:
 
         Uma restrição de concentração é de POPULAÇÃO, então partimos de cortes
         finos por QUANTIL GLOBAL (numérico) ou de uma categoria por grupo ordenada
-        por PD em DES (categórico) e fundimos os bins adjacentes pequenos —
+        por alvo em DES (categórico) e fundimos os bins adjacentes pequenos —
         preferindo não estourar o máximo — até cada faixa/grupo ter ≥ `min_leaf_repr`
         da carteira. (O optbinning não serve aqui: devolve o nº ótimo por IV, não
         granularidade fina, e seu `min_bin_size` é relativo a DES, não global.)
@@ -4925,7 +4974,7 @@ class TreeSegmenter:
             core = [{"kind": "num", "lo": edges[i], "hi": edges[i + 1]}
                     for i in range(len(edges) - 1)]
         else:
-            # uma categoria por grupo, ordenadas por PD em DES (contiguidade de risco)
+            # uma categoria por grupo, ordenadas por alvo em DES (contiguidade de risco)
             ref = self._fit_frame(sub, 0.0).dropna(subset=[feature, self.target])
             means = (ref.groupby(ref[feature].astype(str))[self.target].mean()
                      .sort_values())
@@ -5142,7 +5191,8 @@ class TreeSegmenter:
     def log_to_mlflow(self, experiment: str | None = None,
                       run_name: str | None = None, registered_model_name: str | None = None,
                       artifact_path: str = "modelo", extra_params: dict | None = None,
-                      registry_uri: str | None = None, verbose: bool = True) -> str:
+                      registry_uri: str | None = None, save_base: bool = False,
+                      verbose: bool = True) -> str:
         try:
             import mlflow
             import mlflow.pyfunc
@@ -5279,6 +5329,33 @@ class TreeSegmenter:
                 mlflow.log_artifacts(d, artifact_path="regua")
             model_info = _log_model()
             version = getattr(model_info, "registered_model_version", None)
+            # relatório em abas (Resumo/Métricas/Estabilidade) + base opcional
+            try:
+                from .._mlflow_report import log_tabbed_report
+                m_df = self.metrics()
+                p_df = self.psi() if self.sample_col is not None else None
+                _amostras = list(p_df["amostra"]) if p_df is not None else []
+                val_sample = ("OOT" if "OOT" in _amostras
+                              else (_amostras[0] if _amostras else None))
+                stab = []
+                if p_df is not None:
+                    stab.append(("PSI da segmentação por amostra", p_df))
+                stab.append(("Folhas da régua",
+                             self.leaves(with_psi=(self.sample_col is not None))))
+                dev_df = oot_df = None
+                if save_base and self.sample_col is not None:
+                    dev_df = self.df[self.df[self.sample_col] == self.ref_sample]
+                    if val_sample is not None:
+                        oot_df = self.df[self.df[self.sample_col] == val_sample]
+                log_tabbed_report(
+                    mlflow, run, title=f"TreeSegmenter — {self.task_type}",
+                    subtitle=f"alvo '{self.target}' · {n_folhas} folhas · ref. {self.ref_sample}",
+                    val_sample=val_sample, metrics_df=m_df, psi_df=p_df,
+                    stability_blocks=stab, save_base=save_base,
+                    dev_df=dev_df, oot_df=oot_df, verbose=verbose)
+            except Exception as e:                       # pragma: no cover
+                if verbose:
+                    print(f"[mlflow] relatório em abas não gerado: {type(e).__name__}: {e}")
             run_id = run.info.run_id
 
         if verbose:

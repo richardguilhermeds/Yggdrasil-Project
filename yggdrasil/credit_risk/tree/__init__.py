@@ -2,9 +2,9 @@
 yggdrasil.credit_risk.tree
 ==========================
 Árvore de segmentação **unificada** para risco de crédito: uma única classe
-(:class:`TreeSegmenter`) que atende **classificação** (ex.: PD) e **regressão**
-(ex.: LGD) escolhendo o comportamento por ``task_type``. Substitui as antigas
-classes separadas ``SequentialPDSegmenter``/``SequentialLGDSegmenter``.
+(:class:`TreeSegmenter`) que atende **classificação** e **regressão**
+escolhendo o comportamento por ``task_type``. Substitui as antigas
+classes separadas por tarefa.
 
 Binning ótimo (OptBinning binário ou contínuo) ou manual, notas por folha, IV
 (WoE binário ou contínuo), PSI por amostra (DES/OOT), IC bootstrap, faltantes em
@@ -15,14 +15,14 @@ Uso típico::
 
     from yggdrasil.credit_risk.tree import TreeSegmenter
 
-    # PD (classificação)
+    # classificação
     seg = TreeSegmenter(df, target="target", task_type="classification",
                         sample_col="amostra", ref_sample="DES")
     seg.fit_auto(max_depth=3)
     seg.metrics()                 # KS, AUC, Gini, Acurácia, F1 por amostra
 
-    # LGD (regressão) — mesma API, só troca o task_type
-    seg = TreeSegmenter(df, target="lgd", task_type="regression",
+    # regressão — mesma API, só troca o task_type
+    seg = TreeSegmenter(df, target="target", task_type="regression",
                         sample_col="amostra", ref_sample="DES")
     seg.fit_auto(max_depth=3)
     seg.metrics()                 # MAE, RMSE, R² por amostra

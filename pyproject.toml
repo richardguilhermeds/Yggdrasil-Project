@@ -16,7 +16,7 @@ build-backend = "setuptools.build_meta"
 # [tool.setuptools.packages.find]), então o uso segue: `from yggdrasil import ...`.
 name = "yggdrasil-project"
 version = "0.0.5"
-description = "Ferramentas e esteiras governadas de Machine Learning para ciência de dados e risco de crédito (PD/LGD/EAD)"
+description = "Ferramentas e esteiras governadas de Machine Learning para ciência de dados e risco de crédito"
 readme = "README.md"
 # Formato clássico (Metadata 2.1/2.2) — ver o teto de setuptools em [build-system].
 # O formato SPDX (`license = "MIT"` + `license-files`) força Metadata 2.4 e quebra a
@@ -31,8 +31,6 @@ keywords = [
     "risco-de-credito",
     "mlflow",
     "scorecard",
-    "pd-lgd-ead",
-    "ifrs9",
     "data-science",
 ]
 classifiers = [
@@ -81,7 +79,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Modelos econométricos (satélite) de PD/LGD/CCF — subpacote
+# Modelos econométricos (satélite) das séries de risco — subpacote
 # yggdrasil.credit_risk.econometric. Motores de séries temporais e resposta
 # limitada (ARDL, SARIMAX, VECM/Johansen, beta regression, ADF/KPSS/Ljung-Box)
 # sobre statsmodels + arch. O restante de credit_risk (capital, segmentadores)
@@ -90,14 +88,14 @@ econometric = ["statsmodels>=0.14", "arch>=6.0"]
 # Treino automatizado opcional (motor PyCaret). Pesado e com pins próprios —
 # instale apenas se for usar o PyCaretTrainer.
 pycaret = ["pycaret>=3.0"]
-# Interface interativa do segmentador de LGD (LGDSegmenterUI, ipywidgets) —
+# Interface interativa dos segmentadores (ipywidgets) —
 # usada dentro do Jupyter/Databricks. O núcleo funciona sem ela.
 # anywidget: preview CLICÁVEL da árvore na TreeSegmenterUI (selecionar/fundir/
 # recolher direto na imagem). Entrega o JS pelo próprio comm do widget, por
 # isso funciona também no Databricks (runtimes recentes); sem ele a UI cai no
 # PNG estático.
 ui = ["ipywidgets>=8.0", "ipython>=8.0", "anywidget>=0.9"]
-# Geração/aplicação da régua de LGD em PySpark (no Databricks o pyspark já vem
+# Geração/aplicação da régua em PySpark (no Databricks o pyspark já vem
 # no cluster; instale só fora dele).
 spark = ["pyspark>=3.4"]
 # Boosting: LightGBM e XGBoost já vêm no core (acima). CatBoost segue opcional.

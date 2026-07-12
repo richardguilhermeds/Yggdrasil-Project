@@ -2,7 +2,7 @@
 yggdrasil.credit_risk.model
 ===========================
 Segmentação **orientada a modelo** para risco de crédito — unifica
-**classificação** (ex.: PD) e **regressão** (ex.: LGD) num único objeto via o
+**classificação** e **regressão** num único objeto via o
 parâmetro ``task_type``.
 
 O núcleo é o :class:`ModelSegmenter`: análise univariada das variáveis (logodds/

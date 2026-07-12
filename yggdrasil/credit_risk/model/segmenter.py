@@ -2,7 +2,7 @@
 ModelSegmenter
 ==============
 Segmentador **orientado a modelo** para risco de crédito, unificando
-**classificação** (ex.: PD) e **regressão** (ex.: LGD) num único objeto via o
+**classificação** e **regressão** num único objeto via o
 parâmetro ``task_type``.
 
 Diferente dos irmãos :class:`~yggdrasil.credit_risk.lgd.SequentialLGDSegmenter`
@@ -459,7 +459,7 @@ class WoeBinEncoder(BaseEstimator, TransformerMixin):
     """Transforma cada variável no **valor do seu bin** — WoE (classificação) ou
     risco médio do bin (regressão) — usando bins/grupos já ajustados na amostra de
     referência (faixas para contínuas, grupos para categóricas, como nas árvores
-    de PD/LGD). Serve para alimentar os modelos com variáveis transformadas, no
+    de alvo). Serve para alimentar os modelos com variáveis transformadas, no
     estilo *scorecard*.
 
     ``encodings``: ``{feature: {"kind", "bins": [(bin_dict, valor), ...],
@@ -496,7 +496,7 @@ class WoeBinEncoder(BaseEstimator, TransformerMixin):
 
 
 class _TwoStageModel:
-    """Modelo *hurdle* de duas etapas para regressão (típico de LGD).
+    """Modelo *hurdle* de duas etapas para regressão (típico de alvo).
 
     Combina um **classificador** que estima ``P(y ≥ threshold)`` com uma
     **regressão** treinada apenas no grupo ``y ≥ threshold``; a resposta final é
@@ -505,7 +505,7 @@ class _TwoStageModel:
         E[y | x] = P(≥t|x)·reg(x) + (1 − P(≥t|x))·âncora₀,
 
     onde ``âncora₀`` é a média observada do grupo abaixo do threshold (≈ 0 em
-    LGD). Expõe ``predict`` (a resposta combinada) para se comportar como
+    alvo). Expõe ``predict`` (a resposta combinada) para se comportar como
     qualquer estimador de regressão no restante do pipeline (``score_``, ratings,
     backtest, escoragem). Definido no nível do módulo para ser *picklable*
     (joblib) junto dos dois sub-pipelines em :meth:`ModelSegmenter.save`."""
@@ -581,6 +581,7 @@ class ModelSegmenter:
         sample_col: str | None = None,
         ref_sample: str = "DES",
         feature_labels: dict[str, str] | None = None,
+        problem_label: str | None = None,
         features: list | None = None,
         date_col: str | None = None,
         verbose: bool = True,
@@ -619,6 +620,10 @@ class ModelSegmenter:
         self.ref_sample = ref_sample
         self.date_col = date_col
         self.feature_labels = feature_labels or {}
+        # rótulo do alvo nos gráficos/relatórios: `problem_label` se informado,
+        # senão o nome da coluna alvo (nunca rótulo fixo).
+        self.problem_label = problem_label
+        self._risk_word = problem_label or target
 
         if date_col is not None and date_col not in self.df.columns:
             raise ValueError(f"Coluna de data '{date_col}' não está no DataFrame.")
@@ -647,7 +652,7 @@ class ModelSegmenter:
         self.hyperparams: dict = {}
         self.feature_transform: str = "raw"   # "raw" | "woe" (binagem + WoE/risco do bin)
         self.model_features: list = []
-        # modelo Two-Stage (hurdle de LGD): classificação P(y≥t) + regressão em
+        # modelo Two-Stage (hurdle de alvo): classificação P(y≥t) + regressão em
         # y≥t, combinadas em E[y]. Desligado por padrão; ligado por fit_two_stage.
         self.two_stage: bool = False
         self.two_stage_threshold: float | None = None
@@ -1227,7 +1232,7 @@ class ModelSegmenter:
                            max_n_bins=6, min_bin_size=0.05, min_n=20) -> dict:
         """Diagnóstico de inversão da ordem de risco dos bins de uma variável,
         entre amostras e entre safras. Veredito verde/amarelo/vermelho — análoga
-        à inversão entre folhas-irmãs do PD/LGD, mas sobre os bins de UMA variável."""
+        à inversão entre folhas-irmãs do alvo, mas sobre os bins de UMA variável."""
         bins, _kind = self._resolve_bins(feature, max_n_bins, min_bin_size, sample=sample)
         if len(bins) < 2:
             return {"status": "green", "samples": [], "safras": [], "ordered": [],
@@ -1780,12 +1785,12 @@ class ModelSegmenter:
     def plot_variable_risk_by_safra(self, feature, time_col=None, sample=None,
                                     max_n_bins=5, min_bin_size=0.05, min_n=20,
                                     figsize=(9.0, 3.8), dpi=150, save_path=None, ax=None):
-        """Comportamento da variável ao longo do tempo: o **risco** (event_rate/PD na
+        """Comportamento da variável ao longo do tempo: o **risco** (event_rate/alvo na
         classificação, alvo médio na regressão) de cada bin/categoria por safra.
 
         - **Numérica**: usa os mesmos bins do ranking (``n_bins``) — risco de cada
           faixa por safra.
-        - **Categórica**: traz a **PD por categoria** por safra, sem reagrupar (top
+        - **Categórica**: traz a **alvo por categoria** por safra, sem reagrupar (top
           categorias; respeita os grupos manuais se definidos). Sem ordem de risco
           imposta (categorias não têm ordem intrínseca)."""
         time_col = time_col or self.date_col
@@ -1836,7 +1841,7 @@ class ModelSegmenter:
             series.append((label, ys))
 
         is_clf = self.task_type == "classification"
-        ylabel = "PD" if is_clf else "alvo médio"
+        ylabel = self._risk_word if is_clf else "alvo médio"
         k = len(series)
         if ordered_by_risk:
             cmap = _cmap("RdYlGn_r")
@@ -2157,7 +2162,7 @@ class ModelSegmenter:
     def fit_two_stage(self, threshold, clf_algorithm="logistica", reg_algorithm="linear",
                       clf_hyperparams=None, reg_hyperparams=None, features=None,
                       transform="raw"):
-        """Ajusta um modelo **Two-Stage (hurdle)** para regressão (LGD): binariza o
+        """Ajusta um modelo **Two-Stage (hurdle)** para regressão (alvo): binariza o
         alvo em ``y ≥ threshold`` e treina, na referência (DES):
 
         * **etapa 1 — classificação**: ``P(y ≥ threshold)`` (``clf_algorithm``);
@@ -3427,7 +3432,7 @@ class ModelSegmenter:
         1,96·desvio, por faixa de previsto) e a **cobertura** — % das observações
         (pontos) que caem dentro da banda.
 
-        Eixos na **unidade do alvo** (LGD/PD previsto vs. observado), NÃO na escala
+        Eixos na **unidade do alvo** (valor previsto vs. observado), NÃO na escala
         de score 0–1000: a calibração é sobre o risco previsto casar com o realizado
         (mesma família de ``valor_previsto``/``backtest``). Distribuição e KS é que
         usam a escala de negócio (ranking)."""
@@ -3489,7 +3494,7 @@ class ModelSegmenter:
         lim = [min(ax.get_xlim()[0], ax.get_ylim()[0]), max(ax.get_xlim()[1], ax.get_ylim()[1])]
         ax.plot(lim, lim, color="#bbb", ls="--", lw=1)
         ax.set_xlabel("previsto"); ax.set_ylabel("observado")
-        _pct_axis(ax, "both")                               # unidade do alvo (LGD/PD), em %
+        _pct_axis(ax, "both")                               # unidade do alvo, em %
         ax.set_title(f"Calibração · {sample or self.ref_sample}", fontsize=11,
                      fontweight="bold", color="#15324a")
         ax.grid(alpha=0.15)
@@ -3500,14 +3505,14 @@ class ModelSegmenter:
 
     def plot_residuals(self, sample=None, figsize=(6.6, 4.0), dpi=150, save_path=None, ax=None):
         """Regressão: resíduo (observado − previsto) vs. previsto, na **unidade do
-        alvo** (LGD previsto), não na escala de score 0–1000."""
+        alvo** (alvo previsto), não na escala de score 0–1000."""
         y, sc = self._sample_scores(sample)                 # previsto/observado CRUS (alvo)
         fig, ax = _new_ax(figsize, dpi, ax)
         res = y - sc
         ax.scatter(sc, res, s=10, alpha=0.35, color="#3b6ea5", edgecolors="none")
         ax.axhline(0, color="#d6453e", lw=1)
         ax.set_xlabel("previsto"); ax.set_ylabel("resíduo (obs − prev)")
-        _pct_axis(ax, "both")                               # unidade do alvo (LGD/PD), em %
+        _pct_axis(ax, "both")                               # unidade do alvo, em %
         ax.set_title(f"Resíduos · {sample or self.ref_sample}", fontsize=11,
                      fontweight="bold", color="#15324a")
         ax.grid(alpha=0.15)
@@ -3841,6 +3846,130 @@ class ModelSegmenter:
         ordem = {self.label(f): i for i, f in enumerate(feats)}
         return (out.assign(_o=out["variável"].map(ordem))
                    .sort_values(["safra", "_o"]).drop(columns="_o").reset_index(drop=True))
+
+    def _profile_feats(self, features=None) -> list:
+        """Variáveis do modelo p/ o perfil por safra: as que ENTRARAM no modelo
+        (senão as selecionadas/candidatas), restritas às colunas presentes."""
+        feats = (list(features) if features is not None
+                 else list(self.model_features or self.selected_features() or self.candidates))
+        return [f for f in feats if f in self.df.columns]
+
+    @staticmethod
+    def _profile_grid(n, ncols, dpi):
+        """Cria uma grade (fig, axes 2D, nrows, ncols) com ``ncols`` colunas para
+        ``n`` subplots (um por variável)."""
+        import matplotlib.pyplot as plt
+        ncols = max(1, min(int(ncols), n))
+        nrows = (n + ncols - 1) // ncols
+        fig, axes = plt.subplots(nrows, ncols, figsize=(4.3 * ncols, 2.55 * nrows),
+                                 dpi=dpi, squeeze=False)
+        return fig, axes, nrows, ncols
+
+    @staticmethod
+    def _short(txt, n=28):
+        txt = str(txt)
+        return txt if len(txt) <= n else txt[:n - 1] + "…"
+
+    def plot_variables_missing_by_safra(self, time_col=None, features=None, ncols=3,
+                                        dpi=150, save_path=None):
+        """Grade (``ncols`` colunas) com a **% de missing por safra** de CADA variável
+        do modelo — numéricas e categóricas — sobre toda a população. Um subplot por
+        variável: leitura rápida de buracos/coleta instável ao longo do tempo. Só as
+        variáveis que entraram no modelo. Requer ``date_col``/``time_col``."""
+        import matplotlib.pyplot as plt
+        time_col = time_col or self.date_col
+        if time_col is None or time_col not in self.df.columns:
+            raise ValueError("Informe time_col ou configure date_col.")
+        feats = self._profile_feats(features)
+        if not feats:
+            raise ValueError("Nenhuma variável do modelo disponível (treine ou selecione).")
+        safra = pd.to_datetime(self.df[time_col], errors="coerce").dt.to_period("M")
+        pers = sorted(p for p in safra.dropna().unique())
+        xs = _fmt_safras([str(p) for p in pers]); x = list(range(len(pers)))
+        fig, axes, nrows, ncols = self._profile_grid(len(feats), ncols, dpi)
+        for idx, f in enumerate(feats):
+            ax = axes[idx // ncols][idx % ncols]
+            col = self.df[f]
+            ys = []
+            for p in pers:
+                m = (safra == p).to_numpy()
+                nn = int(m.sum())
+                ys.append(100.0 * int(col[m].isna().sum()) / nn if nn else np.nan)
+            ax.fill_between(x, 0, ys, color="#c0392b", alpha=0.12)
+            ax.plot(x, ys, marker="o", lw=1.7, ms=4, color="#c0392b",
+                    markeredgecolor="#33424f", markeredgewidth=0.4)
+            ax.set_title(self._short(self.label(f)), fontsize=9.5, fontweight="bold",
+                         color="#15324a")
+            ax.set_ylabel("% missing", fontsize=8)
+            ax.set_ylim(bottom=0)
+            ax.set_xticks(x); ax.set_xticklabels(xs, rotation=45, ha="right", fontsize=7)
+            ax.tick_params(axis="y", labelsize=8)
+            ax.grid(axis="y", alpha=0.15)
+        for j in range(len(feats), nrows * ncols):
+            axes[j // ncols][j % ncols].axis("off")
+        fig.suptitle("% de missing por safra — variáveis do modelo",
+                     fontsize=12, fontweight="bold", color="#15324a")
+        fig.tight_layout(rect=(0, 0, 1, 0.97))
+        if save_path:
+            fig.savefig(save_path, bbox_inches="tight", dpi=dpi)
+        plt.close(fig)
+        return fig
+
+    def plot_variables_stats_by_safra(self, time_col=None, features=None, ncols=3,
+                                      top_cat=6, dpi=150, save_path=None):
+        """Grade (``ncols`` colunas) da **dispersão por safra** de cada variável do
+        modelo: **numéricas** mostram **p5 · média · p95** (banda p5–p95 + linha da
+        média); **categóricas** mostram a **proporção das categorias** ao longo do
+        tempo num gráfico de linhas preenchido (área empilhada). Só as variáveis que
+        entraram no modelo. Requer ``date_col``/``time_col``."""
+        import matplotlib.pyplot as plt
+        time_col = time_col or self.date_col
+        if time_col is None or time_col not in self.df.columns:
+            raise ValueError("Informe time_col ou configure date_col.")
+        feats = self._profile_feats(features)
+        if not feats:
+            raise ValueError("Nenhuma variável do modelo disponível (treine ou selecione).")
+        fig, axes, nrows, ncols = self._profile_grid(len(feats), ncols, dpi)
+        for idx, f in enumerate(feats):
+            ax = axes[idx // ncols][idx % ncols]
+            if self._detect_kind(f, self.df) == "num":
+                t = self.variable_by_safra(f, time_col=time_col, all_samples=True)
+                xs = _fmt_safras(list(t["safra"])); x = list(range(len(t)))
+                if len(t):
+                    ax.fill_between(x, t["p5"], t["p95"], color="#4c78a8", alpha=0.16,
+                                    label="p5–p95")
+                    ax.plot(x, t["p5"], color="#4c78a8", lw=1.0, ls="--")
+                    ax.plot(x, t["p95"], color="#4c78a8", lw=1.0, ls="--")
+                    ax.plot(x, t["media"], color="#c0392b", lw=1.8, marker="o", ms=3.5,
+                            label="média")
+                    ax.legend(fontsize=6.5, loc="best", framealpha=0.6)
+            else:
+                sh = self.variable_share_by_safra(f, time_col=time_col, top=top_cat,
+                                                  all_samples=True)
+                cats = [c for c in sh.columns if c != "safra"]
+                xs = _fmt_safras(list(sh["safra"])); x = list(range(len(sh)))
+                if cats:
+                    cmap = _cmap("tab10")
+                    colors = [cmap((i % 10) / 9) for i in range(len(cats))]
+                    ax.stackplot(x, *[sh[c].to_numpy() for c in cats], labels=cats,
+                                 colors=colors, alpha=0.85)
+                    ax.set_ylim(0, 100)
+                    ax.set_ylabel("% categoria", fontsize=8)
+                    ax.legend(fontsize=6, loc="upper left", ncol=2, framealpha=0.55)
+            ax.set_title(self._short(self.label(f)), fontsize=9.5, fontweight="bold",
+                         color="#15324a")
+            ax.set_xticks(x); ax.set_xticklabels(xs, rotation=45, ha="right", fontsize=7)
+            ax.tick_params(axis="y", labelsize=8)
+            ax.grid(axis="y", alpha=0.12)
+        for j in range(len(feats), nrows * ncols):
+            axes[j // ncols][j % ncols].axis("off")
+        fig.suptitle("Dispersão por safra — p5 · média · p95 (num.) · proporção (cat.)",
+                     fontsize=12, fontweight="bold", color="#15324a")
+        fig.tight_layout(rect=(0, 0, 1, 0.97))
+        if save_path:
+            fig.savefig(save_path, bbox_inches="tight", dpi=dpi)
+        plt.close(fig)
+        return fig
 
     # ---- SHAP ----
     def _shap_inputs(self, sample=None, sample_size=2000):
@@ -4232,7 +4361,7 @@ class ModelSegmenter:
 
     def rating_inversion(self, time_col=None, sample=None, min_n=20) -> dict:
         """Inversão da ordem de risco ENTRE ratings (entre amostras e safras) —
-        o estudo de folhas-irmãs do PD/LGD, aplicado às faixas de rating."""
+        o estudo de folhas-irmãs do alvo, aplicado às faixas de rating."""
         rating = self._rating_series()
         labels = self.rating_labels_
         risco_by = {}
@@ -4734,7 +4863,7 @@ class ModelSegmenter:
         ±20% — só referência visual). Os **marcadores vermelhos** destacam as safras
         em ``status='alerta'`` da tabela :meth:`backtest` (|gap| > tol ABSOLUTO,
         default por task_type), para o gráfico e a tabela nunca discordarem.
-        Funciona nos dois ``task_type`` (unidade do alvo: PD/LGD)."""
+        Funciona nos dois ``task_type`` (unidade do alvo)."""
         bt = self.backtest(time_col=time_col, sample=sample)
         fig, ax = _new_ax(figsize, dpi, ax)
         if bt.empty:
@@ -4765,7 +4894,7 @@ class ModelSegmenter:
         ax.set_xticks(x[::step])
         ax.set_xticklabels(labels[::step], rotation=45, ha="right", fontsize=8)
         ax.set_xlabel("safra")
-        ax.set_ylabel("PD" if self.task_type == "classification" else "alvo médio")
+        ax.set_ylabel(self._risk_word if self.task_type == "classification" else "alvo médio")
         _pct_axis(ax, "y")                                  # unidade do alvo, em %
         ax.set_title(f"Backtest · previsto × realizado por safra · "
                      f"{sample or 'todas as amostras'}", fontsize=11,
@@ -4793,7 +4922,7 @@ class ModelSegmenter:
                      col_value="valor_previsto") -> pd.DataFrame:
         """Régua **rating → valor previsto do alvo**: o valor representativo de cada
         rating, definido como a média do alvo observado na amostra de referência
-        (``ref_sample``/DES por padrão). É o "LGD/PD previsto daquele rating", usado
+        (``ref_sample``/DES por padrão). É o "valor previsto daquele rating", usado
         para escorar uma base. Requer :meth:`build_ratings` já chamado.
 
         Devolve um DataFrame ordenado pelos rótulos, com ``col_rating``, ``n`` e
@@ -4822,7 +4951,7 @@ class ModelSegmenter:
 
         Se ``col_value`` for informado (ex.: ``"valor_previsto"``), anexa também o
         **valor previsto do alvo daquele rating** — a régua de :meth:`rating_ruler`
-        calibrada na amostra ``ruler_sample`` (DES por padrão), i.e. o LGD/PD
+        calibrada na amostra ``ruler_sample`` (DES por padrão), i.e. o alvo
         previsto por rating."""
         if self.model is None:
             raise RuntimeError("Ajuste/defina o modelo antes (fit / set_model).")
@@ -5223,6 +5352,7 @@ class ModelSegmenter:
             "meta": {"target": self.target, "task_type": self.task_type,
                      "sample_col": self.sample_col, "ref_sample": self.ref_sample,
                      "date_col": self.date_col, "feature_labels": self.feature_labels,
+                     "problem_label": self.problem_label,
                      "score_scale": self.score_scale, "random_state": self.random_state},
             "candidates": list(self.candidates),
             "included": sorted(self.included),
@@ -5255,6 +5385,7 @@ class ModelSegmenter:
         seg = cls(df, target=meta["target"], task_type=meta["task_type"],
                   sample_col=meta.get("sample_col"), ref_sample=meta.get("ref_sample", "DES"),
                   feature_labels=meta.get("feature_labels"),
+                  problem_label=meta.get("problem_label"),
                   features=data.get("candidates"), date_col=meta.get("date_col"),
                   verbose=verbose, score_scale=meta.get("score_scale", 1000.0),
                   random_state=meta.get("random_state", 42))
@@ -5536,7 +5667,8 @@ class ModelSegmenter:
     # MLflow
     # ------------------------------------------------------------------
     def log_to_mlflow(self, experiment=None, run_name=None, registered_model_name=None,
-                      artifact_path="modelo", registry_uri=None, verbose=True):
+                      artifact_path="modelo", registry_uri=None, save_base=False,
+                      verbose=True):
         """Registra o modelo (mlflow.sklearn), métricas por amostra, a régua de
         ratings e os gráficos SHAP como artefatos. Best-effort."""
         import os
@@ -5590,6 +5722,34 @@ class ModelSegmenter:
                 except Exception as e:
                     if verbose:
                         print(f"[mlflow] SHAP não logado: {e}")
+            # relatório em abas (Resumo/Métricas/Estabilidade) + base opcional
+            try:
+                from .._mlflow_report import log_tabbed_report
+                m_df = self.metrics()
+                p_df = self.psi() if self.sample_col is not None else None
+                val_sample = self._oot_sample() if self.sample_col is not None else None
+                stab = []
+                if p_df is not None:
+                    stab.append(("PSI dos ratings por amostra", p_df))
+                try:
+                    stab.append(("Ratings", self.rating_table()))
+                except Exception:
+                    pass
+                dev_df = oot_df = None
+                if save_base and self.sample_col is not None:
+                    dev_df = self._frame(self.ref_sample)
+                    if val_sample is not None:
+                        oot_df = self._frame(val_sample)
+                log_tabbed_report(
+                    mlflow, run, title=f"ModelSegmenter — {self.task_type}",
+                    subtitle=(f"alvo '{self.target}' · algoritmo {self.algorithm} · "
+                              f"ref. {self.ref_sample}"),
+                    val_sample=val_sample, metrics_df=m_df, psi_df=p_df,
+                    stability_blocks=stab, save_base=save_base,
+                    dev_df=dev_df, oot_df=oot_df, verbose=verbose)
+            except Exception as e:  # pragma: no cover
+                if verbose:
+                    print(f"[mlflow] relatório em abas não gerado: {type(e).__name__}: {e}")
             if verbose:
                 print(f"[mlflow] run_id = {run.info.run_id}")
             return run.info.run_id

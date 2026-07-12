@@ -308,11 +308,12 @@ class ModelSegmenterUI:
     ]
 
     def __init__(self, df, target="target", task_type="classification", sample_col=None,
-                 ref_sample="DES", feature_labels=None, features=None, date_col=None,
+                 ref_sample="DES", feature_labels=None, problem_label=None, features=None, date_col=None,
                  random_state=42):
         self.seg = ModelSegmenter(df, target=target, task_type=task_type,
                                   sample_col=sample_col, ref_sample=ref_sample,
-                                  feature_labels=feature_labels, features=features,
+                                  feature_labels=feature_labels, problem_label=problem_label,
+                                  features=features,
                                   date_col=date_col, random_state=random_state, verbose=False)
         self.df = df
         self.task_type = task_type
@@ -745,7 +746,7 @@ class ModelSegmenterUI:
         self.out_mono_hint = W.HTML(
             "<div style='font-size:11.5px;color:var(--muted);margin:2px 0 0 2px;line-height:1.5'>"
             "<b>exigir monotonia</b>: no <i>Auto-selecionar</i> / <i>Auto-categorizar</i>, "
-            "só mantém a variável quando o risco (PD na classificação · alvo médio na "
+            "só mantém a variável quando o risco (taxa de evento na classificação · alvo médio na "
             "regressão) é <b>monotônico</b> entre as faixas do binning — sobe ou desce de "
             "forma consistente, sem inversões. Quem inverte vai para <i>revisar</i> / "
             "<i>descartar</i>. Desmarcado, a monotonia não entra no critério.</div>")
@@ -1100,7 +1101,6 @@ class ModelSegmenterUI:
         self.out_model_b = W.HTML()
         self.out_model_c = W.HTML()
         self.out_shap = W.HTML()
-        self.out_shap_bar = W.HTML()
         self.out_shap_rel = W.HTML()       # importância relativa por variável (categóricas agregadas)
         self.btn_fit.on_click(self._on_fit)
         self.btn_shap.on_click(self._on_shap)
@@ -1112,7 +1112,7 @@ class ModelSegmenterUI:
         for _hp in (self.sl_n_est, self.sl_max_depth, self.tx_C, self.tx_lr):
             _hp.observe(lambda c: self._mark_dirty(), names="value")
 
-        # --- Two-Stage (hurdle de LGD): opção só para regressão -------------
+        # --- Two-Stage (hurdle): opção só para regressão -------------
         _tgt = pd.to_numeric(self.df[self.seg.target], errors="coerce")
         if _tgt.notna().any():
             _tmin, _tmax = float(np.nanmin(_tgt.to_numpy())), float(np.nanmax(_tgt.to_numpy()))
@@ -1124,7 +1124,7 @@ class ModelSegmenterUI:
         _tmed = min(max(_tmed, _tmin), _tmax)
         _tstep = round((_tmax - _tmin) / 100.0, 6) or 0.01
         self.cb_twostage = W.Checkbox(value=False, indent=False,
-                                      description="Two-Stage (hurdle de LGD)")
+                                      description="Two-Stage (hurdle)")
         self.cb_twostage.tooltip = ("Modela a regressão em DUAS etapas: um classificador para "
                                     "P(y ≥ threshold) e uma regressão no grupo acima; a resposta "
                                     "final é E[y] combinando os dois. O rating usa essa resposta.")
@@ -1228,15 +1228,13 @@ class ModelSegmenterUI:
             self.formula_card,
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>SHAP — beeswarm</div>"), self.out_shap],
                            layout=W.Layout(width="55%")),
-                    W.VBox([W.HTML("<div class='mseg-h'>SHAP — importância</div>"), self.out_shap_bar],
+                    W.VBox([W.HTML("<div class='mseg-h'>SHAP — importância por variável</div>"),
+                            W.HTML("<div class='mseg-legend'>Importância relativa (%) de <b>todas</b> as "
+                                   "variáveis que entraram no modelo, com as <i>dummies</i> de cada "
+                                   "variável categórica somadas numa única barra (uma linha por "
+                                   "variável original).</div>"),
+                            self.out_shap_rel],
                            layout=W.Layout(width="45%"))]),
-            W.VBox([W.HTML("<div class='mseg-h'>SHAP — importância relativa por variável</div>"),
-                    W.HTML("<div class='mseg-legend'>Importância relativa (%) de <b>todas</b> as "
-                           "variáveis que entraram no modelo, com as <i>dummies</i> de cada "
-                           "variável categórica somadas numa única barra (uma linha por variável "
-                           "original). Complementa os gráficos acima, que mostram cada coluna "
-                           "codificada em separado.</div>"),
-                    self.out_shap_rel]),
         ], layout=W.Layout(padding="2px"))
         self._sync_algo_visibility()
 
@@ -1438,7 +1436,7 @@ class ModelSegmenterUI:
                    "(régua)</div>"),
             W.HTML("<div class='mseg-legend'>Devolve <code>score</code> (escala de negócio "
                    "<b>0–1000</b>), <code>rating</code> e o "
-                   "valor previsto do alvo daquele rating (ex.: LGD/PD previsto, na unidade do "
+                   "valor previsto do alvo daquele rating (na unidade do "
                    "alvo). A base só precisa "
                    "das <b>variáveis originais do modelo</b> — binagem/WoE e faixas são recriadas ao "
                    "escorar. <b>Tabela Databricks</b>: <code>catalog.schema.tabela</code> (via Spark; "
@@ -1463,9 +1461,14 @@ class ModelSegmenterUI:
             W.HBox([self.tx_md, self.btn_md]),
             self.out_md,
         ], layout=W.Layout(width="49%")); card_persist.add_class("mseg-card")
+        self.cb_savebase = W.Checkbox(value=False, indent=False,
+                                      description="Salvar base DES + OOT")
+        self.cb_savebase.tooltip = ("Loga as amostras de treino (DES) e validação (OOT) como "
+                                    "artefatos parquet no run (útil p/ auditoria/reprodução).")
         card_mlflow = W.VBox([
             W.HTML("<div class='mseg-h'>Registrar no MLflow / Unity Catalog</div>"),
             W.HBox([self.tx_experiment, self.tx_model, self.btn_mlflow]),
+            W.HBox([self.cb_savebase]),
         ], layout=W.Layout(width="49%")); card_mlflow.add_class("mseg-card")
         tab_export = W.VBox([
             card_score,
@@ -1580,22 +1583,27 @@ class ModelSegmenterUI:
 
         # perfil (estabilidade) de TODAS as variáveis do modelo por safra (dbase)
         self.btn_varprofile = W.Button(description="Perfil das variáveis por safra",
-                                       button_style="primary", icon="table",
+                                       button_style="primary", icon="line-chart",
                                        layout=W.Layout(width="auto", min_width="240px"),
-                                       tooltip="Tabela por safra (dbase) com % de missings, "
-                                               "média (numéricas) e moda de CADA variável do "
-                                               "modelo — estabilidade das variáveis no tempo. "
-                                               "Requer coluna de data.")
-        self.out_adv_varprofile = W.HTML()
+                                       tooltip="Dois gráficos (grade de 3 colunas) por safra, só "
+                                               "com as variáveis que entraram no modelo: % de "
+                                               "missing e dispersão (p5·média·p95; categóricas = "
+                                               "proporção das categorias). Requer coluna de data.")
+        self.out_adv_missing = W.HTML()
+        self.out_adv_stats = W.HTML()
         self.btn_varprofile.on_click(self._on_adv_varprofile)
         card_adv_varprofile = W.VBox([
             W.HTML("<div class='mseg-h'>Perfil das variáveis do modelo por safra</div>"),
-            W.HTML("<div class='mseg-legend'>Para <b>todas as variáveis do modelo</b>, por safra "
-                   "(<i>dbase</i>): <b>% de missings</b>, <b>média</b> (numéricas) e <b>moda</b> "
-                   "(valor mais frequente). Uma única tabela, agrupada por safra — acompanha a "
-                   "estabilidade das variáveis ao longo do tempo. Requer coluna de data.</div>"),
+            W.HTML("<div class='mseg-legend'>Só as <b>variáveis que entraram no modelo</b>, ao "
+                   "longo das safras (<i>dbase</i>), em dois gráficos com <b>grade de 3 colunas</b>. "
+                   "Requer coluna de data.</div>"),
             W.HBox([self.btn_varprofile]),
-            self.out_adv_varprofile,
+            W.HTML("<div class='mseg-h'>① % de missing por safra</div>"),
+            self.out_adv_missing,
+            W.HTML("<div class='mseg-h'>② Dispersão por safra · p5 · média · p95 "
+                   "<span style='font-weight:400'>(categóricas: proporção das categorias em área "
+                   "preenchida)</span></div>"),
+            self.out_adv_stats,
         ]); card_adv_varprofile.add_class("mseg-card")
 
         tab_adv = W.VBox([card_adv_disc, card_adv_safra, card_adv_varprofile, card_adv_bt],
@@ -1775,7 +1783,8 @@ class ModelSegmenterUI:
         self.banner.value = (
             "<div class='mseg-banner'><div class='logo'>MS</div><div>"
             f"<div class='t'>ModelSegmenter — {self.task_type}</div>"
-            f"<div class='s'>alvo '{s.target}' · referência {s.ref_sample}</div></div></div>")
+            f"<div class='s'>Esteira de modelagem de Machine Learning · variáveis → modelo → "
+            f"ratings → validação · alvo '{s.target}' · ref. {s.ref_sample}</div></div></div>")
         # pill do modelo: verde (treinado) · amarela (não treinado) · âmbar com
         # aviso quando variáveis/bins/WoE mudaram DEPOIS do treino (desatualizado)
         if s.score_ is not None and getattr(self, "_dirty_since_fit", False):
@@ -1843,7 +1852,7 @@ class ModelSegmenterUI:
         try:
             cat = self.seg._detect_kind(feat) == "cat"
             if self.seg.date_col:
-                titulo = ("PD por categoria ao longo do tempo" if cat
+                titulo = (f"{self.seg._risk_word} por categoria ao longo do tempo" if cat
                           else "risco dos bins (n_bins) ao longo do tempo")
                 hdr = f"<div class='mseg-h'>Estabilidade no tempo · {titulo}</div>"
             else:
@@ -3109,8 +3118,8 @@ class ModelSegmenterUI:
             return
         try:
             self.out_shap.value = self._fig_html(self.seg.plot_shap_beeswarm(sample_size=800))
-            self.out_shap_bar.value = self._fig_html(self.seg.plot_shap_bar(sample_size=800))
-            # tamanho natural (menor), não esticado à largura do painel como antes
+            # importância por variável (dummies de cada categórica somadas numa única barra),
+            # ao lado do beeswarm — substitui a importância por coluna dummy
             self.out_shap_rel.value = self._fig_html(
                 self.seg.plot_shap_importance_relative(sample_size=800, figsize=(6.0, 3.4)))
             self._log("[shap] gráficos gerados.")
@@ -3802,6 +3811,7 @@ class ModelSegmenterUI:
             try:
                 rid = self.seg.log_to_mlflow(experiment=self.tx_experiment.value or None,
                                              registered_model_name=model_name or None,
+                                             save_base=self.cb_savebase.value,
                                              verbose=False)
                 self._log(f"[mlflow] run_id = {rid}")
             except Exception as e:
@@ -3817,7 +3827,8 @@ class ModelSegmenterUI:
         """Zera as saídas da aba Avançado — chamado ao re-treinar para não deixar
         gráficos/tabelas do modelo ANTIGO na tela."""
         for w in (self.out_adv_cap, self.out_adv_lift, self.out_adv_msafra_tab,
-                  self.out_adv_msafra_fig, self.out_adv_backtest, self.out_adv_varprofile):
+                  self.out_adv_msafra_fig, self.out_adv_backtest,
+                  self.out_adv_missing, self.out_adv_stats):
             w.value = ""
 
     def _on_adv_cap(self, b):
@@ -3898,23 +3909,27 @@ class ModelSegmenterUI:
 
     def _on_adv_varprofile(self, b):
         if not (self.date_col or "").strip():
-            self.out_adv_varprofile.value = ("<div class='mseg-legend'>Informe a coluna de "
-                                             "data (<code>date_col</code>) para o perfil por "
-                                             "safra.</div>"); return
+            self.out_adv_missing.value = ("<div class='mseg-legend'>Informe a coluna de "
+                                          "data (<code>date_col</code>) para o perfil por "
+                                          "safra.</div>")
+            self.out_adv_stats.value = ""; return
         feats = (self.seg.model_features or self.seg.selected_features()
                  or self.seg.candidates)
         if not feats:
-            self.out_adv_varprofile.value = ("<i>Nenhuma variável no modelo — treine ou "
-                                             "selecione variáveis primeiro.</i>"); return
+            self.out_adv_missing.value = ("<i>Nenhuma variável no modelo — treine ou "
+                                          "selecione variáveis primeiro.</i>")
+            self.out_adv_stats.value = ""; return
         with self._busy(self.btn_varprofile,
-                        msg="calculando o perfil das variáveis por safra…"):
+                        msg="gerando o perfil das variáveis por safra…"):
             try:
-                tab = self.seg.variables_profile_by_safra()
-                self.out_adv_varprofile.value = self._df_html(tab, max_height="420px",
-                                                              center=True)
+                self.out_adv_missing.value = self._fig_html(
+                    self.seg.plot_variables_missing_by_safra())
+                self.out_adv_stats.value = self._fig_html(
+                    self.seg.plot_variables_stats_by_safra())
                 self._log(f"[avançado] perfil das variáveis por safra ({len(feats)} variáveis).")
             except Exception as e:
-                self.out_adv_varprofile.value = f"<i>{e}</i>"
+                self.out_adv_missing.value = f"<i>{e}</i>"
+                self.out_adv_stats.value = ""
                 self._log(f"[avançado] erro no perfil das variáveis: {e}")
 
     # ------------------------------------------------------------------ display

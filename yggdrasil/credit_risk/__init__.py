@@ -1,14 +1,14 @@
 """
 yggdrasil.credit_risk
 =====================
-Raiz de domínio para **risco de crédito**: parâmetros regulatórios (PD, LGD, EAD),
-segmentações, réguas e **capital** sob CMN 4.966/2021, 4.557/2017 e IFRS 9.
+Raiz de domínio para **risco de crédito**: parâmetros de risco, segmentações,
+réguas e **capital econômico** de carteira.
 
 Abriga:
 
 * :mod:`yggdrasil.credit_risk.tree` — a **árvore de segmentação unificada**
-  (:class:`TreeSegmenter`), que atende classificação (PD) e regressão (LGD) via
-  ``task_type`` (substitui as antigas classes separadas de PD e LGD).
+  (:class:`TreeSegmenter`), que atende classificação e regressão via
+  ``task_type`` (substitui as antigas classes separadas por tarefa).
 * :mod:`yggdrasil.credit_risk.model` — segmentação **orientada a modelo**, que
   também unifica classificação e regressão via ``task_type``.
 * :mod:`yggdrasil.credit_risk.capital` — **capital econômico** de carteira:
