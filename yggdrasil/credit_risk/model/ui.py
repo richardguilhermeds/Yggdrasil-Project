@@ -871,6 +871,19 @@ class ModelSegmenterUI:
                                style={"description_width": "initial"})
         self.btn_analyze = W.Button(description="Analisar variável", button_style="primary",
                                     icon="search")
+        # padroniza o eixo do alvo médio (risco por faixa) em [0,1] na regressão —
+        # útil na seleção de variáveis de LGD. Default ligado quando é regressão E o
+        # alvo está contido em [0,1]; só aparece na regressão.
+        _tgt = pd.to_numeric(self.df[self.seg.target], errors="coerce")
+        _tgt01 = bool(_tgt.notna().any() and float(_tgt.min()) >= -1e-9
+                      and float(_tgt.max()) <= 1.0 + 1e-9)
+        self.cb_target01 = W.Checkbox(value=(self.task_type == "regression" and _tgt01),
+                                      indent=False, description="eixo do alvo em [0,1]")
+        self.cb_target01.tooltip = ("Fixa o eixo do alvo médio (risco por faixa) em [0,1] na "
+                                    "regressão — padroniza a leitura na seleção de variáveis de "
+                                    "LGD. Não afeta a classificação.")
+        self.cb_target01.layout.display = "" if self.task_type == "regression" else "none"
+        self.cb_target01.observe(lambda c: self._on_analyze(None), names="value")
         # categorização "na mão" dos bins da variável (como nos projetos de árvore)
         self.tg_binmode = W.ToggleButtons(options=["Ótimo", "Manual"], value="Ótimo",
                                           style={"button_width": "auto"},
@@ -962,7 +975,8 @@ class ModelSegmenterUI:
                     "ao longo do tempo (numéricas)</div>"),
              self.out_an_optbin_share], layout=W.Layout(width="100%"))
         tab_an = W.VBox([
-            W.HBox([self.dd_var2, self.dd_sample2, self.tx_time2, self.btn_analyze]),
+            W.HBox([self.dd_var2, self.dd_sample2, self.tx_time2, self.btn_analyze,
+                    self.cb_target01]),
             bin_card,
             row_comport, row_resumo, row2, row3, row_optbin,
         ], layout=W.Layout(padding="2px"))
@@ -1553,13 +1567,26 @@ class ModelSegmenterUI:
         self.out_adv_msafra_tab = W.HTML()
         self.out_adv_msafra_fig = W.HTML()
         self.btn_msafra.on_click(self._on_adv_msafra)
+        # eixo 0–1 na discriminação por safra (útil quando o alvo está em [0,1], ex.: LGD).
+        # Default ligado em regressão com alvo unitário — mesmo critério do checkbox da
+        # análise de variáveis; só aparece na regressão (na classificação KS/AUC já são [0,1]).
+        self.ck_msafra_unit = W.Checkbox(
+            value=(self.task_type == "regression" and _tgt01), indent=False,
+            description="eixo em [0,1]")
+        self.ck_msafra_unit.tooltip = ("Fixa o eixo vertical em [0,1] — padroniza a leitura das "
+                                       "métricas por safra quando o alvo está em [0,1] (ex.: LGD). "
+                                       "Não afeta a classificação.")
+        self.ck_msafra_unit.layout.display = "" if self.task_type == "regression" else "none"
+        self.ck_msafra_unit.observe(
+            lambda c: (self._on_adv_msafra(None) if self.seg.score_ is not None else None),
+            names="value")
         card_adv_safra = W.VBox([
             W.HTML("<div class='mseg-h'>Discriminação por safra</div>"),
             W.HTML("<div class='mseg-legend'>Evolução das métricas do modelo mês a mês — "
                    "queda persistente indica degradação do poder discriminante. Escolha as "
                    "métricas no seletor e a amostra em <b>Amostra:</b> (\"(referência)\" = toda "
                    "a base). Requer coluna de data (<code>date_col</code>).</div>"),
-            W.HBox([self.sm_msafra_metrics, self.btn_msafra]),
+            W.HBox([self.sm_msafra_metrics, self.btn_msafra, self.ck_msafra_unit]),
             self.out_adv_msafra_tab,
             self.out_adv_msafra_fig,
         ]); card_adv_safra.add_class("mseg-card")
@@ -2055,13 +2082,14 @@ class ModelSegmenterUI:
         feat = self.dd_var2.value
         sample = None if self.dd_sample2.value == "(referência)" else self.dd_sample2.value
         tcol = self.tx_time2.value.strip() or None
+        y01 = bool(getattr(self, "cb_target01", None) is not None and self.cb_target01.value)
         _an_ws = (self.out_an_distbad, self.out_an_logodds, self.out_an_table,
                   self.out_an_inv_sample, self.out_an_cards, self.out_an_time,
                   self.out_an_inv_safra, self.out_an_psi, self.out_an_optbin_share)
         # cache das figuras por (feature, amostra, safra, versão de bins): revisitar
         # uma variável já analisada restaura os HTMLs sem re-renderizar/re-encodar os
         # PNGs. _rank_version invalida quando bins/derivadas/amostra mudam.
-        _ck = (feat, sample, tcol, self.seg._rank_version)
+        _ck = (feat, sample, tcol, self.seg._rank_version, y01)
         _cached = self._an_fig_cache.get(_ck)
         if _cached is not None:
             for _w, _v in zip(_an_ws, _cached):
@@ -2076,16 +2104,19 @@ class ModelSegmenterUI:
         try:
             self.out_an_distbad.value = self._fig_html(
                 self.seg.plot_variable_distribution_badrate(feat, sample=sample,
-                                                            figsize=(6.4, 3.4)), tight=False)
+                                                            figsize=(6.4, 3.4),
+                                                            target_ylim01=y01), tight=False)
             self.out_an_logodds.value = self._fig_html(
-                self.seg.plot_variable_logodds(feat, sample=sample, figsize=(6.4, 3.4)),
+                self.seg.plot_variable_logodds(feat, sample=sample, figsize=(6.4, 3.4),
+                                               target_ylim01=y01),
                 tight=False)
             vt = self.seg.variable_table(feat, sample=sample)
             self.out_an_table.value = self._df_html(vt, max_height="240px", center=True)
             # "risco das faixas por amostra" esticado p/ preencher a coluna (menos
             # espaço em branco até o gráfico da direita)
             self.out_an_inv_sample.value = self._fig_html(
-                self.seg.plot_variable_inversion_by_sample(feat, figsize=(7.2, 3.4)),
+                self.seg.plot_variable_inversion_by_sample(
+                    feat, figsize=(7.2, 3.4), target_ylim01=y01),
                 stretch=True)
             summ = self.seg.variable_summary(feat, sample)
             trend = None                       # tendência da média p/ os cards ricos
@@ -2113,7 +2144,8 @@ class ModelSegmenterUI:
                       lambda: self.seg.plot_variable_timeseries(feat, tcol, sample,
                                                                 figsize=_ts, all_samples=True), True),
                      (self.out_an_inv_safra,
-                      lambda: self.seg.plot_variable_inversion_by_safra(feat, tcol, sample), True),
+                      lambda: self.seg.plot_variable_inversion_by_safra(
+                          feat, tcol, sample, target_ylim01=y01), True),
                      (self.out_an_psi,
                       lambda: self.seg.plot_variable_psi_by_safra(feat, tcol, figsize=_ts), True),
                      (self.out_an_optbin_share,
@@ -3880,8 +3912,11 @@ class ModelSegmenterUI:
                                                               max_height="300px", center=True)
                 mets = tuple(self.sm_msafra_metrics.value) or (
                     ("ks", "auc") if self.task_type == "classification" else ("rmse", "mae"))
+                _ylim = ((0.0, 1.0) if getattr(self, "ck_msafra_unit", None) is not None
+                         and self.ck_msafra_unit.value else None)
                 self.out_adv_msafra_fig.value = self._fig_html(
-                    self.seg.plot_metrics_by_safra(sample=self._adv_sample(), metrics=mets),
+                    self.seg.plot_metrics_by_safra(sample=self._adv_sample(),
+                                                   metrics=mets, ylim=_ylim),
                     stretch=True)
                 self._log("[avançado] métricas por safra calculadas.")
             except Exception as e:

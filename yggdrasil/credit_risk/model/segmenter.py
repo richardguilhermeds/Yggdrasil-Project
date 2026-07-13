@@ -1270,9 +1270,13 @@ class ModelSegmenter:
     # Plots de variável
     # ------------------------------------------------------------------
     def plot_variable_logodds(self, feature, sample=None, max_n_bins=6, min_bin_size=0.05,
-                              figsize=(7.6, 3.4), dpi=150, save_path=None, ax=None):
+                              figsize=(7.6, 3.4), dpi=150, save_path=None, ax=None,
+                              target_ylim01=False):
         """Barras de representatividade (%) + linha de **logodds/WoE** (classificação)
-        ou **alvo médio** (regressão) por faixa — leitura de monotonicidade."""
+        ou **alvo médio** (regressão) por faixa — leitura de monotonicidade.
+
+        ``target_ylim01=True`` fixa o eixo do **alvo médio** em [0, 1] na regressão
+        (padroniza a leitura em alvos limitados, ex.: LGD); ignorado na classificação."""
         vt = self.variable_table(feature, sample, max_n_bins, min_bin_size)
         fig, ax = _new_ax(figsize, dpi, ax)
         if vt.empty:
@@ -1296,6 +1300,8 @@ class ModelSegmenter:
         ax2.plot(xs, yline, color="#15324a", lw=2.3, marker="o", ms=5,
                  markeredgecolor="#fff", markeredgewidth=0.6, label=ylabel)
         ax2.set_ylabel(ylabel)
+        if target_ylim01 and self.task_type != "classification":
+            ax2.set_ylim(0.0, 1.0)
         ax.set_xticks(xs); ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8)
         ax.set_xlim(-0.7, len(labels) - 0.3)
         mono = "monotônica" if vt.attrs.get("mono_ok") else "NÃO monotônica"
@@ -1356,10 +1362,13 @@ class ModelSegmenter:
 
     def plot_variable_distribution_badrate(self, feature, sample=None, max_n_bins=6,
                                            min_bin_size=0.05, figsize=(9.0, 3.8), dpi=150,
-                                           save_path=None, ax=None):
+                                           save_path=None, ax=None, target_ylim01=False):
         """Um único gráfico: barras de **distribuição** (% da amostra por faixa) +
         linha do risco por faixa — **% de maus** (event_rate) na classificação ou
-        **alvo médio** na regressão. Faltantes destacados."""
+        **alvo médio** na regressão. Faltantes destacados.
+
+        ``target_ylim01=True`` fixa o eixo do **alvo médio** em [0, 1] na regressão
+        (padroniza a leitura em alvos limitados, ex.: LGD); ignorado na classificação."""
         vt = self.variable_table(feature, sample, max_n_bins, min_bin_size)
         # com muitas faixas (>8) o gráfico fica apertado — aumenta a altura
         if ax is None and len(vt) > 8:
@@ -1394,7 +1403,9 @@ class ModelSegmenter:
                          ha="center", va="bottom", fontsize=7.5, color="crimson")
         ax2.set_ylabel(ylabel, color="crimson"); ax2.tick_params(axis="y", labelcolor="crimson")
         finite = yline[np.isfinite(yline)]
-        if finite.size:
+        if target_ylim01 and not is_clf:
+            ax2.set_ylim(0.0, 1.0)
+        elif finite.size:
             ax2.set_ylim(0, float(np.nanmax(finite)) * 1.25 + (1 if is_clf else 1e-9))
         ax.set_xticks(xs); ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8)
         ax.set_xlim(-0.7, len(labels) - 0.3)
@@ -1720,8 +1731,11 @@ class ModelSegmenter:
         return fig
 
     def plot_variable_inversion_by_sample(self, feature, max_n_bins=6, min_bin_size=0.05,
-                                          figsize=(7.6, 4.0), dpi=150, save_path=None, ax=None):
-        """Risco de cada faixa por amostra; cruzamentos = inversão da ordem de risco."""
+                                          figsize=(7.6, 4.0), dpi=150, save_path=None, ax=None,
+                                          target_ylim01=False):
+        """Risco de cada faixa por amostra; cruzamentos = inversão da ordem de risco.
+
+        ``target_ylim01=True`` fixa o eixo do risco em [0,1] na regressão (LGD)."""
         inv = self.variable_inversion(feature, max_n_bins=max_n_bins, min_bin_size=min_bin_size)
         fig, ax = _new_ax(figsize, dpi, ax)
         s = inv.get("series")
@@ -1738,6 +1752,8 @@ class ModelSegmenter:
                     label=s["labels"][i])
         ax.set_xticks(x); ax.set_xticklabels(xs, fontsize=9)
         ax.set_ylabel("risco médio"); ax.set_xlabel("amostra")
+        if target_ylim01 and self.task_type != "classification":
+            ax.set_ylim(0.0, 1.0)
         ax.set_title(f"'{self.label(feature)}' — risco das faixas por amostra",
                      fontsize=11, fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)
@@ -1749,8 +1765,11 @@ class ModelSegmenter:
 
     def plot_variable_inversion_by_safra(self, feature, time_col=None, sample=None,
                                          max_n_bins=6, min_bin_size=0.05, min_n=20,
-                                         figsize=(9.6, 4.0), dpi=150, save_path=None, ax=None):
-        """Risco de cada faixa por safra; safras com inversão ficam sombreadas."""
+                                         figsize=(9.6, 4.0), dpi=150, save_path=None, ax=None,
+                                         target_ylim01=False):
+        """Risco de cada faixa por safra; safras com inversão ficam sombreadas.
+
+        ``target_ylim01=True`` fixa o eixo do risco em [0,1] na regressão (LGD)."""
         inv = self.variable_inversion(feature, time_col, sample, max_n_bins,
                                       min_bin_size, min_n)
         fig, ax = _new_ax(figsize, dpi, ax)
@@ -1772,6 +1791,8 @@ class ModelSegmenter:
                     markeredgecolor="#33424f", markeredgewidth=0.5, label=s["labels"][i])
         ax.set_xticks(x); ax.set_xticklabels(_fmt_safras(xs), rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("risco médio"); ax.set_xlabel("safra")
+        if target_ylim01 and self.task_type != "classification":
+            ax.set_ylim(0.0, 1.0)
         ax.set_title(f"'{self.label(feature)}' — risco das faixas por safra"
                      "  ·  faixas vermelhas = inversão",
                      fontsize=11, fontweight="bold", color="#15324a")
@@ -3598,10 +3619,12 @@ class ModelSegmenter:
         lado a lado), em barras agrupadas — uma métrica por grupo, uma barra por
         amostra, com os valores **em %**. Sobre cada grupo, anota a **variação
         DES→OOT** (seta + %; verde = melhora, vermelho = piora). Classificação:
-        **AUC, Gini, KS** (↑ maior = melhor, eixo único). Regressão: **RMSE, MAE**
-        (erro, eixo esquerdo, ↓ menor = melhor) e **R²** (eixo direito com escala
-        própria, ↑ maior = melhor). Referência (DES) em steelblue e comparação (OOT)
-        em crimson (safra de estabilidade em teal). Usa :meth:`metrics`."""
+        **AUC, Gini, KS** (↑ maior = melhor). Regressão: **RMSE, MAE** (↓ menor =
+        melhor) e **R²** (↑ maior = melhor) — com alvo em [0,1] (ex.: LGD) as três
+        ficam no MESMO eixo em %, idêntico à classificação; só um alvo de magnitude
+        grande leva o R² a um eixo à direita. Referência (DES) em steelblue e
+        comparação (OOT) em crimson (safra de estabilidade em teal). Usa
+        :meth:`metrics`."""
         from matplotlib.patches import Patch
         from matplotlib.ticker import PercentFormatter
 
@@ -3612,13 +3635,26 @@ class ModelSegmenter:
             m = pd.DataFrame()
         samples = [a for a in self._samples() if a in m.index] if not m.empty else []
 
+        def _val(x):
+            return (float(x) if isinstance(x, (int, float, np.integer, np.floating))
+                    and np.isfinite(x) else np.nan)
+
         # plano: (coluna, rótulo, maior_é_melhor?, no_eixo_direito?)
         if self.task_type == "classification":
             plano = [("auc", "AUC", True, False), ("gini", "Gini", True, False),
                      ("ks", "KS", True, False)]
+            unit_scale = True
         else:
+            # Eixo ÚNICO, idêntico à classificação, quando o alvo é unitário: em LGD/[0,1]
+            # o RMSE/MAE ficam ~[0,1] e cabem no mesmo eixo do R² (tudo em %). Só quando o
+            # alvo tem magnitude grande (erro ≫ 1) o R² vai a um eixo à direita — senão
+            # sumiria esmagado pela escala do erro.
+            _errs = [v for c in ("rmse", "mae") if c in m.columns
+                     for v in (_val(m.loc[a, c]) for a in samples)]
+            _errs = [v for v in _errs if np.isfinite(v)]
+            unit_scale = (not _errs) or all(abs(v) <= 1.5 for v in _errs)
             plano = [("rmse", "RMSE", False, False), ("mae", "MAE", False, False),
-                     ("r2", "R²", True, True)]
+                     ("r2", "R²", True, not unit_scale)]
         plano = [p for p in plano if p[0] in m.columns]
         if not plano or not samples:
             ax.text(0.5, 0.5, "sem métricas para comparar", ha="center", va="center",
@@ -3642,10 +3678,6 @@ class ModelSegmenter:
         ref, oot = self.ref_sample, self._oot_sample()
         tem_oot = (ref in samples and oot in samples and oot != ref)
 
-        def _val(x):
-            return (float(x) if isinstance(x, (int, float, np.integer, np.floating))
-                    and np.isfinite(x) else np.nan)
-
         left_vals, right_vals = [], []
         for gi, (col, _lab, up, right) in enumerate(plano):
             axis = ax2 if right else ax
@@ -3656,7 +3688,8 @@ class ModelSegmenter:
                          alpha=0.9, edgecolor="#33424f", linewidth=0.5)
                 if np.isfinite(v):
                     (right_vals if right else left_vals).append(v)
-                    axis.text(xi, v, f"{v * 100:.1f}%", ha="center",
+                    lbl = f"{v * 100:.1f}%" if (unit_scale or right) else f"{v:,.3g}"
+                    axis.text(xi, v, lbl, ha="center",
                               va="bottom" if v >= 0 else "top", fontsize=9.5,
                               color="#15324a", fontweight="bold")
             # variação DES→OOT sobre o grupo (topo do eixo; verde melhora / vermelho piora)
@@ -3676,8 +3709,13 @@ class ModelSegmenter:
         lmax = max(left_vals + [0.0]); lmin = min(left_vals + [0.0])
         ax.set_ylim(lmin * 1.12 if lmin < 0 else 0.0, lmax * 1.30 if lmax > 0 else 1.0)
         # eixo em %: 1 casa quando os valores são pequenos (erro de regressão ~0.01),
-        # senão inteiro (AUC/Gini/KS/R²).
-        ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=1 if lmax < 0.1 else 0))
+        # senão inteiro (AUC/Gini/KS/R²). Alvo não-unitário (magnitude grande) usa
+        # escala numérica simples no eixo esquerdo.
+        if unit_scale:
+            ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=1 if lmax < 0.1 else 0))
+        else:
+            from matplotlib.ticker import ScalarFormatter
+            ax.yaxis.set_major_formatter(ScalarFormatter())
         ax.tick_params(axis="y", labelsize=10)
         if ax2 is not None:
             rmax = max(right_vals + [0.0]); rmin = min(right_vals + [0.0])
@@ -3690,8 +3728,8 @@ class ModelSegmenter:
         labels = [f"{lab} {'↑' if up else '↓'}" for _c, lab, up, _r in plano]
         ax.set_xticks(np.arange(len(plano)) + (len(samples) - 1) * w / 2)
         ax.set_xticklabels(labels, fontsize=12)
-        ax.set_ylabel("erro · % do alvo (RMSE · MAE)"
-                      if self.task_type == "regression" else "métrica (%)", fontsize=11)
+        ax.set_ylabel("erro (RMSE · MAE)" if (self.task_type == "regression"
+                      and not unit_scale) else "métrica (%)", fontsize=11)
         ax.set_title("Principais métricas por amostra", fontsize=13,
                      fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)
@@ -3764,10 +3802,13 @@ class ModelSegmenter:
 
     def plot_metrics_by_safra(self, sample=None, metrics=("ks", "auc"),
                               time_col=None, figsize=(9.6, 4.2), dpi=150,
-                              save_path=None, ax=None):
+                              save_path=None, ax=None, ylim=None):
         """Evolução das métricas do modelo por safra (linhas), a partir de
         :meth:`metrics_by_safra`. ``metrics`` que não existirem para o
-        ``task_type`` são ignoradas (default de regressão: ``mae``/``rmse``)."""
+        ``task_type`` são ignoradas (default de regressão: ``mae``/``rmse``).
+        ``ylim=(lo, hi)`` fixa o eixo vertical (ex.: ``(0, 1)`` para padronizar a
+        leitura quando o alvo está em [0,1]); tem precedência sobre a heurística
+        que fixa [0,1] para métricas de discriminação."""
         ms = self.metrics_by_safra(sample, time_col)
         cols = [m for m in metrics if m in ms.columns and m not in ("safra", "n")]
         if not cols:                        # default de clf pedido em regressão
@@ -3782,9 +3823,12 @@ class ModelSegmenter:
         for i, c in enumerate(cols):
             ax.plot(x, ms[c], marker="o", lw=2.0, ms=4.5, color=cores[i % len(cores)],
                     markeredgecolor="#33424f", markeredgewidth=0.5, label=c.upper())
-        # métricas de discriminação (KS/AUC/Gini/…) ⇒ eixo fixo em 0–1 (comparável);
-        # regressão (rmse/mae) autoescala. Todas as plotadas partilham o MESMO eixo.
-        if all(c in _UNIT_METRICS for c in cols):
+        # eixo Y: override explícito (ylim) tem precedência; senão, métricas de
+        # discriminação (KS/AUC/Gini/…) ⇒ 0–1 comparável; regressão autoescala.
+        # Todas as plotadas partilham o MESMO eixo.
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+        elif all(c in _UNIT_METRICS for c in cols):
             ax.set_ylim(0.0, 1.0)
         # rótulos mmm/aa; com muitas safras, afina os ticks p/ não sobrepor
         labels = _fmt_safras(ms["safra"])
