@@ -808,7 +808,7 @@ class TreeSegmenterUI:
                                 "Salva a estrutura da árvore num arquivo JSON", "save")
         self.btn_load_json = mk("Carregar árvore (JSON)", "info",
                                 "Carrega uma árvore salva e reaplica ao DataFrame atual", "upload")
-        # --- confirmação de sobrescrita INLINE (aba Histórico, sob os campos de
+        # --- confirmação de sobrescrita INLINE (aba Exportar, sob os campos de
         # caminho): aviso + botões criados UMA vez e reutilizados a cada chamada
         # (antes o diálogo era desenhado no console e 2 botões novos vazavam por
         # chamada) — ver _confirm_overwrite.
@@ -1461,10 +1461,12 @@ class TreeSegmenterUI:
                                             justify_content="space-between"))
         # validação regulatória vai para a aba "Avançado" (abaixo) — a aba principal
         # de exportação não sobrecarrega a decisão do analista com as checagens.
-        tab_valid = W.VBox([sep_exp, card_export_df, export_row])
+        # A aba Exportar (tab_valid) é montada mais abaixo, já incorporando a seção
+        # de Histórico & persistência (que deixou de ser uma aba própria).
 
         # ================================================================
-        # ABA ⑤ HISTÓRICO — persistência (JSON) · imagem da árvore (lado a lado)
+        # SEÇÃO HISTÓRICO & PERSISTÊNCIA (agora no FIM da aba Exportar):
+        #   JSON · imagem da árvore · confirmação de sobrescrita · relatório PDF
         # ================================================================
         sep_hist = W.HTML("<div class='treeui-band'>Histórico &amp; persistência</div>")
         card_json = W.VBox([
@@ -1495,7 +1497,9 @@ class TreeSegmenterUI:
             self.out_pdf,
         ])
         card_pdf.add_class("treeui-card")
-        tab_hist = W.VBox([sep_hist, hist_row, self.box_confirm, card_pdf])
+        # a antiga aba "Histórico" virou uma SEÇÃO no fim da aba Exportar
+        tab_valid = W.VBox([sep_exp, card_export_df, export_row,
+                            sep_hist, hist_row, self.box_confirm, card_pdf])
 
         # ================================================================
         # ABA ② ANÁLISE DE VARIÁVEL — perfil, distribuição e estabilidade
@@ -1625,9 +1629,9 @@ class TreeSegmenterUI:
             sep_val, card_validacao])
 
         # ---- montagem das abas (Análise de variável vem em 2º) ----------
-        tabs = W.Tab(children=[tab_build, tab_var, tab_diag, tab_valid, tab_avancado, tab_hist])
+        tabs = W.Tab(children=[tab_build, tab_var, tab_diag, tab_valid, tab_avancado])
         for i, titulo in enumerate(["Construir", "Análise de variáveis", "Diagnóstico",
-                                    "Exportar", "Avançado", "Histórico"]):
+                                    "Exportar", "Avançado"]):
             tabs.set_title(i, titulo)
         tabs.add_class("treeui-tabs")
         # a tabela de IV (optbinning de TODAS as variáveis na folha) é o item mais
@@ -4373,7 +4377,7 @@ class TreeSegmenterUI:
     # Persistência: salvar / carregar a árvore em JSON
     # ==================================================================
     def _confirm_overwrite(self, path, do_save):
-        """Se ``path`` já existir, mostra a confirmação INLINE (aba Histórico, sob
+        """Se ``path`` já existir, mostra a confirmação INLINE (aba Exportar, sob
         os campos de caminho) e só executa ``do_save()`` no clique em 'Sobrescrever'.
         Sem conflito (ou ``path`` vazio), salva direto. O diálogo inline não é
         apagado por ``clear_output`` do console (o antigo se perdia no rodapé)."""

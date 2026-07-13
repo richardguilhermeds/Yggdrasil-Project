@@ -3942,7 +3942,8 @@ class ModelSegmenter:
                     ax.plot(x, t["p95"], color="#4c78a8", lw=1.0, ls="--")
                     ax.plot(x, t["media"], color="#c0392b", lw=1.8, marker="o", ms=3.5,
                             label="média")
-                    ax.legend(fontsize=6.5, loc="best", framealpha=0.6)
+                    if idx == 0:                         # legenda só no 1º subplot
+                        ax.legend(fontsize=6.5, loc="upper left", framealpha=0.6)
             else:
                 sh = self.variable_share_by_safra(f, time_col=time_col, top=top_cat,
                                                   all_samples=True)
@@ -3955,7 +3956,8 @@ class ModelSegmenter:
                                  colors=colors, alpha=0.85)
                     ax.set_ylim(0, 100)
                     ax.set_ylabel("% categoria", fontsize=8)
-                    ax.legend(fontsize=6, loc="upper left", ncol=2, framealpha=0.55)
+                    if idx == 0:                         # legenda só no 1º subplot
+                        ax.legend(fontsize=6, loc="upper left", ncol=2, framealpha=0.55)
             ax.set_title(self._short(self.label(f)), fontsize=9.5, fontweight="bold",
                          color="#15324a")
             ax.set_xticks(x); ax.set_xticklabels(xs, rotation=45, ha="right", fontsize=7)
