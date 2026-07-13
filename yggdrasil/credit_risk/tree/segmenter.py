@@ -3970,7 +3970,7 @@ class TreeSegmenter:
 
     def plot_sibling_value_by_sample(self, parent_sid, leaves=None,
                                   figsize=(7.6, 4.0), dpi=150,
-                                  save_path=None, ax=None):
+                                  save_path=None, ax=None, title=None):
         """Linhas da alvo médio das folhas-irmãs por amostra (DES, OOT, …). Onde
         as linhas se cruzam há INVERSÃO da ordem de risco entre as irmãs."""
         try:
@@ -3992,11 +3992,13 @@ class TreeSegmenter:
         ax.set_xticks(x); ax.set_xticklabels(xs, fontsize=9)
         ax.set_xlim(-0.25, len(xs) - 0.75 + 0.5)
         ax.set_ylabel(self._risk_mean); ax.set_xlabel("amostra")
-        ax.set_title(f"{self._risk_mean} das folhas-irmãs por amostra",
+        ax.set_title(title or f"{self._risk_mean} das folhas-irmãs por amostra",
                      fontsize=11, fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)
+        # headroom no topo p/ a legenda FIXA (canto superior esquerdo) não cobrir linhas
+        _y0, _y1 = ax.get_ylim(); ax.set_ylim(_y0, _y1 + (_y1 - _y0) * 0.22)
         ax.legend(fontsize=8, ncol=max(1, min(len(ordered), 4)),
-                  loc="best", framealpha=0.85)
+                  loc="upper left", framealpha=0.9)
         fig.tight_layout()
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
@@ -4005,7 +4007,7 @@ class TreeSegmenter:
     def plot_sibling_value_by_safra(self, parent_sid, time_col=None, sample=None,
                                  leaves=None, min_n: int = 1,
                                  figsize=(9.6, 4.0), dpi=150,
-                                 save_path=None, ax=None):
+                                 save_path=None, ax=None, title=None):
         """Linhas da alvo médio das folhas-irmãs por safra ao longo do tempo. As
         safras em que a ordem de risco inverte (vs. DES) ficam sombreadas em
         vermelho — leitura rápida de instabilidade temporal."""
@@ -4036,12 +4038,231 @@ class TreeSegmenter:
         ax.set_xlim(-0.7, len(xs) - 0.3)
         ax.set_ylabel(self._risk_mean); ax.set_xlabel("safra")
         sfx = f" · {sample}" if sample else " · todas as amostras"
-        ax.set_title(f"{self._risk_mean} das folhas-irmãs por safra{sfx}"
-                     "  ·  faixas vermelhas = inversão",
+        ax.set_title(title or (f"{self._risk_mean} das folhas-irmãs por safra{sfx}"
+                     "  ·  faixas vermelhas = inversão"),
                      fontsize=11, fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)
+        # headroom no topo p/ a legenda FIXA (canto superior esquerdo) não cobrir linhas
+        _y0, _y1 = ax.get_ylim(); ax.set_ylim(_y0, _y1 + (_y1 - _y0) * 0.22)
         ax.legend(fontsize=8, ncol=max(1, min(len(ordered), 4)),
-                  loc="best", framealpha=0.85)
+                  loc="upper left", framealpha=0.9)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    # ------------------------------------------------------------------
+    # DIAGNÓSTICO POR AMOSTRA/SAFRA: métricas por amostra, PSI da segmentação
+    #   ao longo do tempo e concentração das folhas entre amostras — análogos
+    #   aos gráficos do ModelSegmenter (barras).
+    # ------------------------------------------------------------------
+    def _sample_bar_color(self, a) -> str:
+        """Cor da barra por amostra: referência = azul · estabilidade = teal ·
+        demais = vermelho."""
+        if a == self.ref_sample:
+            return "#4c78a8"
+        if str(a).upper().startswith("ESTAB"):
+            return "#2a9d8f"
+        return "#c0392b"
+
+    def psi_by_safra(self, time_col=None, eps: float = 1e-6) -> pd.DataFrame:
+        """PSI da **segmentação** (folhas como bins) por safra vs a referência
+        (DES): a distribuição das linhas entre as folhas em cada mês comparada à
+        distribuição na DES. Colunas: ``safra, n, psi, classificacao``. Requer
+        ``sample_col`` e uma coluna de tempo (``time_col``/``date_col``)."""
+        if self.sample_col is None:
+            raise ValueError("PSI por safra requer sample_col (referência DES).")
+        time_col = time_col or self.date_col
+        if time_col is None or time_col not in self.df.columns:
+            raise ValueError("Informe time_col ou configure date_col.")
+        leaf_ids = [sid for sid, s in self.segments.items() if s["is_leaf"]]
+        if not leaf_ids:
+            raise ValueError("Nenhuma folha — cresça a segmentação antes do PSI.")
+        leaf_id = self._leaf_id_series(leaf_ids)
+        ref_mask = self._sample_masks.get(self.ref_sample)
+        ref_series = leaf_id[ref_mask] if ref_mask is not None else leaf_id
+        n_ref = float(len(ref_series))
+        vc_ref = ref_series.value_counts()
+        ref_pct = {sid: max((float(vc_ref.get(sid, 0.0)) / n_ref) if n_ref else 0.0, eps)
+                   for sid in leaf_ids}
+        safra = pd.to_datetime(self.df[time_col], errors="coerce").dt.to_period("M")
+        rows = []
+        for per, g in leaf_id.groupby(safra):
+            if pd.isna(per):
+                continue
+            n_g = int(len(g)); vc = g.value_counts()
+            psi = 0.0
+            for sid in leaf_ids:
+                p_cur = max((float(vc.get(sid, 0.0)) / n_g) if n_g else 0.0, eps)
+                psi += (p_cur - ref_pct[sid]) * np.log(p_cur / ref_pct[sid])
+            rows.append({"safra": str(per), "n": n_g, "psi": round(psi, 4),
+                         "classificacao": _classifica_psi(psi)})
+        return (pd.DataFrame(rows, columns=["safra", "n", "psi", "classificacao"])
+                .sort_values("safra").reset_index(drop=True))
+
+    def plot_psi_by_safra(self, time_col=None, figsize=(8.4, 4.0), dpi=150,
+                          save_path=None, ax=None):
+        """Gráfico de **barras** do PSI da segmentação ao longo do tempo (vs DES).
+        Verde &lt; 0.10 (estável) · amarelo &lt; 0.25 (atenção) · vermelho ≥ 0.25
+        (instável); linhas-guia em 0.10 e 0.25."""
+        import matplotlib.pyplot as plt  # noqa: F401
+        ps = self.psi_by_safra(time_col)
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        if ps.empty:
+            ax.text(0.5, 0.5, "sem dados por safra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        x = list(range(len(ps)))
+        cor = ["#1aa64b" if p < 0.10 else "#caa000" if p < 0.25 else "#d6453e"
+               for p in ps["psi"]]
+        ax.bar(x, ps["psi"], color=cor, width=0.78, edgecolor="#33424f", linewidth=0.4)
+        for xi, p in zip(x, ps["psi"]):
+            ax.annotate(f"{p:.2f}", (xi, p), textcoords="offset points", xytext=(0, 3),
+                        ha="center", fontsize=7, color="#33424f")
+        ax.axhline(0.10, color="#caa000", lw=1.0, ls="--", alpha=0.7)
+        ax.axhline(0.25, color="#d6453e", lw=1.0, ls="--", alpha=0.7)
+        ax.set_xticks(x)
+        ax.set_xticklabels(_fmt_safras(ps["safra"]), rotation=45, ha="right", fontsize=8)
+        ax.set_ylabel("PSI"); ax.set_xlabel("safra"); ax.set_ylim(bottom=0)
+        ax.set_title(f"PSI da segmentação por safra vs {self.ref_sample}",
+                     fontsize=11, fontweight="bold", color="#15324a")
+        ax.grid(axis="y", alpha=0.15)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def plot_metrics_comparison(self, figsize=(6.6, 4.6), dpi=150, save_path=None, ax=None):
+        """Compara as **principais métricas entre amostras** (DES vs OOT lado a lado)
+        em barras agrupadas — uma métrica por grupo, uma barra por amostra, com os
+        valores anotados e a **variação DES→OOT** (seta + %) no topo de cada grupo.
+        clf: **KS · AUC · Gini** (eixo único, em %). reg: **RMSE · MAE** (erro, na
+        escala do alvo, eixo esquerdo) e **R²** (eixo direito próprio, em %).
+        Referência em steelblue, comparação em crimson (estabilidade em teal).
+        Mesmo padrão visual do ModelSegmenter; valores negativos (Gini de OOT
+        invertida, R² pior que a média) aparecem abaixo do zero, nunca somem."""
+        import matplotlib.pyplot as plt  # noqa: F401
+        from matplotlib.patches import Patch
+        from matplotlib.ticker import PercentFormatter
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        m = self.metrics()
+        m = m.set_index("amostra") if "amostra" in getattr(m, "columns", []) else pd.DataFrame()
+        samples = ([self.ref_sample] if self.ref_sample in m.index else []) \
+            + [a for a in m.index if a != self.ref_sample]
+        # plano: (coluna, rótulo, maior_é_melhor?, eixo_direito?, em_%?)
+        if self._is_clf:
+            plano = [("KS", "KS", True, False, True), ("AUC", "AUC", True, False, True),
+                     ("Gini", "Gini", True, False, True)]
+        else:
+            plano = [("RMSE", "RMSE", False, False, False),
+                     ("MAE", "MAE", False, False, False), ("R2", "R²", True, True, True)]
+        plano = [p for p in plano if p[0] in m.columns]
+        if not plano or not samples:
+            ax.text(0.5, 0.5, "sem métricas para comparar", ha="center", va="center",
+                    transform=ax.transAxes, color="#8891a0", fontsize=12)
+            ax.axis("off"); fig.tight_layout()
+            if save_path:
+                fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+            return fig
+        cores = {a: self._sample_bar_color(a) for a in samples}
+        w = 0.8 / max(len(samples), 1)
+        ax2 = ax.twinx() if any(p[3] for p in plano) else None
+        ref = self.ref_sample
+        oot = next((a for a in samples if a != ref), None)
+
+        def _val(x):
+            try:
+                v = float(x)
+                return v if np.isfinite(v) else np.nan
+            except (TypeError, ValueError):
+                return np.nan
+
+        left_vals, right_vals = [], []
+        for gi, (col, lab, up, right, pct) in enumerate(plano):
+            axis = ax2 if right else ax
+            vg = {}
+            for k, a in enumerate(samples):
+                v = _val(m.loc[a, col]); xi = gi + k * w; vg[a] = v
+                axis.bar(xi, v if np.isfinite(v) else 0.0, width=w, color=cores[a],
+                         alpha=0.9, edgecolor="#33424f", linewidth=0.5)
+                if np.isfinite(v):
+                    (right_vals if right else left_vals).append(v)
+                    axis.text(xi, v, f"{v * 100:.1f}%" if pct else f"{v:.3g}",
+                              ha="center", va="bottom" if v >= 0 else "top",
+                              fontsize=9, fontweight="bold", color="#15324a")
+            dref, doot = vg.get(ref, np.nan), vg.get(oot, np.nan)
+            if oot is not None and np.isfinite(dref) and np.isfinite(doot) and abs(dref) > 1e-9:
+                delta = doot - dref; rel = 100.0 * delta / abs(dref)
+                piora = (delta < 0) if up else (delta > 0)
+                xc = gi + (len(samples) - 1) * w / 2
+                axis.text(xc, 0.96, f"{'▼' if delta < 0 else '▲'} {abs(rel):.1f}%",
+                          transform=axis.get_xaxis_transform(), ha="center", va="top",
+                          fontsize=10, fontweight="bold",
+                          color="#d6453e" if piora else "#1aa64b")
+
+        # folga no topo (32%) p/ os rótulos de valor e a variação não colidirem
+        lmax = max(left_vals + [0.0]); lmin = min(left_vals + [0.0])
+        ax.set_ylim(lmin * 1.15 if lmin < 0 else 0.0, lmax * 1.32 if lmax > 0 else 1.0)
+        ax.axhline(0, color="#33424f", lw=0.7, alpha=0.5)
+        if self._is_clf:
+            ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
+        ax.tick_params(axis="y", labelsize=10)
+        if ax2 is not None:
+            rmax = max(right_vals + [0.0]); rmin = min(right_vals + [0.0])
+            ax2.set_ylim(rmin * 1.15 if rmin < 0 else 0.0, max(rmax * 1.32, 1.0))
+            ax2.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
+            ax2.tick_params(axis="y", labelsize=10)
+            ax2.set_ylabel("R² (eixo direito)", fontsize=10.5, color="#15324a")
+        ax.set_xticks(np.arange(len(plano)) + (len(samples) - 1) * w / 2)
+        ax.set_xticklabels([f"{lab} {'↑' if up else '↓'}" for _c, lab, up, _r, _p in plano],
+                           fontsize=11.5)
+        ax.set_ylabel("erro (escala do alvo)" if not self._is_clf else "métrica (%)",
+                      fontsize=10.5)
+        ax.set_title("Principais métricas por amostra", fontsize=12.5,
+                     fontweight="bold", color="#15324a")
+        ax.grid(axis="y", alpha=0.15)
+        # legenda por amostra ABAIXO (não colide com a variação no topo nem com as barras)
+        fig.tight_layout(rect=(0, 0.09, 1, 1))
+        fig.legend(handles=[Patch(color=cores[a], label=str(a)) for a in samples],
+                   loc="lower center", ncol=min(len(samples), 3), fontsize=9.5,
+                   framealpha=0.85, bbox_to_anchor=(0.5, 0.0))
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def plot_leaf_concentration(self, figsize=(8.4, 4.2), dpi=150, save_path=None, ax=None):
+        """Barras agrupadas da **concentração das folhas entre amostras**:
+        representatividade (%) de cada folha DENTRO de cada amostra (DES, OOT, …).
+        Análogo à distribuição dos ratings por amostra do ModelSegmenter."""
+        import matplotlib.pyplot as plt  # noqa: F401
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        if self.sample_col is None:
+            ax.text(0.5, 0.5, "requer coluna de amostra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        lv = self.leaves(with_psi=True)
+        if len(lv) == 0:
+            ax.text(0.5, 0.5, "sem folhas", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
+        notas = lv["nota"].tolist()
+        all_samples = [self.ref_sample] + [a for a in self.df[self.sample_col].dropna().unique()
+                                           if a != self.ref_sample]
+        cols = [(a, f"repr_{a}_%") for a in all_samples if f"repr_{a}_%" in lv.columns]
+        x = np.arange(len(notas)); n_s = max(len(cols), 1); w = 0.8 / n_s
+        for k, (a, col) in enumerate(cols):
+            ax.bar(x + (k - (n_s - 1) / 2.0) * w, lv[col].to_numpy(dtype="float64"),
+                   width=w, label=str(a), color=self._sample_bar_color(a),
+                   edgecolor="#33424f", linewidth=0.3)
+        ax.set_xticks(x); ax.set_xticklabels([str(n) for n in notas])
+        ax.set_ylabel("% da amostra"); ax.set_xlabel("folha")
+        ax.set_ylim(0, 100)
+        ax.set_title("Concentração das folhas entre amostras", fontsize=11,
+                     fontweight="bold", color="#15324a")
+        if cols:
+            ax.legend(fontsize=8, loc="upper left", framealpha=0.9,
+                      ncol=max(1, min(len(cols), 3)))
+        ax.grid(axis="y", alpha=0.15)
         fig.tight_layout()
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")

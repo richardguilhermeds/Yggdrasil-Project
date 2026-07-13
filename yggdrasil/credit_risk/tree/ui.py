@@ -776,7 +776,7 @@ class TreeSegmenterUI:
                                   layout=full, style=dstyle,
                                   placeholder="coluna de safra p/ o backtest (ex.: dt_ref)")
         self.btn_validate = mk("Validar (monoton. · calibração · backtest)", "info",
-                               "Mostra monotonicidade das notas, calibração prevista×realizada e "
+                               "Mostra monotonicidade das folhas, calibração prevista×realizada e "
                                "backtest por safra", "check-square-o")
         self.tx_report_path = W.Text(description="relatório", value="relatorio_validacao.md",
                                      layout=full, style=dstyle, placeholder="caminho .md")
@@ -788,6 +788,10 @@ class TreeSegmenterUI:
                           "Curva ROC da régua por amostra, com a AUC e o Gini", "line-chart")
         self.btn_ks = mk("Curva KS", "info",
                          "Curva KS — distribuições acumuladas de bons e maus pelo score", "area-chart")
+        # --- estabilidade: métricas por amostra · PSI da segmentação no tempo · concentração ---
+        self.btn_estab = mk("Estabilidade & concentração", "info",
+                            "Principais métricas por amostra, PSI da segmentação ao longo do "
+                            "tempo e concentração das folhas entre amostras", "bar-chart")
 
         # --- undo/redo, auto-merge e persistência da árvore (JSON) ---
         self.btn_undo = mk("◀ Desfazer", "", "Desfaz a última alteração na árvore", "undo")
@@ -843,7 +847,7 @@ class TreeSegmenterUI:
         self.tx_spark_out = W.Text(description="saída", layout=spark_lay, style=dstyle,
                                    placeholder="opcional: grava o resultado nesta tabela")
         self.btn_spark_apply = mk("Reconstruir folhas (Spark)", "primary",
-                                  f"Aplica a régua à tabela Spark (segmento, nota e {self._risk_label} por linha), "
+                                  f"Aplica a régua à tabela Spark (segmento, folha e {self._risk_label} por linha), "
                                   "desde que as colunas tenham o mesmo nome", "table")
         # --- controles da aba "Análise de variáveis" ---
         # opções com o NOME DE EXIBIÇÃO (feature_labels) — valor = nome da coluna
@@ -934,6 +938,7 @@ class TreeSegmenterUI:
         self.btn_diag.on_click(self._on_diag)
         self.btn_diag_hide.on_click(self._on_diag_hide)
         self.btn_sib.on_click(self._on_sib_analyze)
+        self.btn_estab.on_click(self._on_estab)
         # amostras p/ a análise por safra das folhas-irmãs (fixas — não mudam
         # com a árvore): "todas" + a referência (DES) + as demais com alvo.
         sib_samples = [("todas as amostras", "__all__")]
@@ -1011,6 +1016,8 @@ class TreeSegmenterUI:
         self.out_validate = W.HTML()
         self.out_discrim = W.HTML()    # ROC/KS (clf) · boxplot/histograma do alvo (reg)
         self.out_sib = W.HTML()     # comparação de folhas-irmãs (inversão)
+        self.out_estab = W.HTML()   # métricas por amostra | PSI da segmentação no tempo
+        self.out_conc = W.HTML()    # concentração das folhas entre amostras
         self.out_diag = W.HTML()    # placar de saúde do modelo (Diagnóstico)
         self.out_log = W.Output(layout=W.Layout(max_height="320px", overflow="auto"))
         self.out_preview_chart = W.HTML()   # distribuição da variável + cortes (ao lado do histograma)
@@ -1403,9 +1410,24 @@ class TreeSegmenterUI:
                         else "dispersão do alvo (boxplot)")
         sep_diag2 = W.HTML("<div class='treeui-band treeui-band-muted'>Evidência detalhada · "
                            f"folhas · {_diag_detail} · métricas · IC bootstrap</div>")
+        # ---- estabilidade: métricas por amostra | PSI da segmentação no tempo · concentração ----
+        card_estab = W.VBox([
+            W.HTML("<div class='treeui-h'>Estabilidade · métricas por amostra · PSI no tempo · "
+                   "concentração das folhas</div>"),
+            W.HTML("<div class='treeui-legend'>À esquerda as <b>principais métricas por amostra</b> "
+                   f"({_diag_metrics}); à direita o <b>PSI da segmentação ao longo do tempo</b> "
+                   "(folhas como bins, vs DES · requer coluna de data); abaixo a <b>concentração "
+                   "das folhas entre amostras</b> (representatividade de cada folha em cada "
+                   "amostra).</div>"),
+            W.HBox([self.btn_estab]),
+            self.out_estab,
+            self.out_conc,
+        ], layout=W.Layout(width="100%"))
+        card_estab.add_class("treeui-card")
         tab_diag = W.VBox([sep_diag, card_score, sep_diag2,
-                           card_metrics, card_table, card_sib, card_discrim,
-                           card_boot])
+                           card_metrics, card_table, card_sib,
+                           card_estab,
+                           card_discrim, card_boot])
 
         # ================================================================
         # ABA ④ VALIDAR & EXPORTAR — duas faixas: validação · exportar/registrar
@@ -1414,7 +1436,7 @@ class TreeSegmenterUI:
                          "monotonicidade · calibração · backtest</div>")
         valid_legend = W.HTML(
             f"<div class='treeui-legend'>Roda as três checagens: <b>monotonicidade</b> do {_rl} nas "
-            f"notas ({_ref} e demais amostras), <b>calibração</b> prevista ({_ref}) × realizada (OOT) por "
+            f"folhas ({_ref} e demais amostras), <b>calibração</b> prevista ({_ref}) × realizada (OOT) por "
             f"folha, e <b>backtest</b> do {_rl} previsto × realizado por safra (informe a coluna de "
             "tempo). O <b>relatório</b> reúne tudo num Markdown com as imagens.</div>")
         card_validacao = W.VBox([
@@ -1434,7 +1456,7 @@ class TreeSegmenterUI:
         card_export_df = W.VBox([
             W.HTML("<div class='treeui-h'>Exportar DataFrame rotulado</div>"),
             W.HTML("<div class='treeui-legend'>Gera <b>ui.result</b> (pandas) com a coluna de "
-                   "segmento e a nota (folha) por linha.</div>"),
+                   "segmento e a folha por linha.</div>"),
             W.HBox([self.btn_export]),
         ], layout=W.Layout(width="100%"))
         card_export_df.add_class("treeui-card")
@@ -1449,7 +1471,7 @@ class TreeSegmenterUI:
         card_mlflow.add_class("treeui-card")
         card_spark = W.VBox([
             W.HTML("<div class='treeui-h'>Reconstruir folhas em tabela Spark</div>"),
-            W.HTML("<div class='treeui-legend'>Aplica a régua a uma tabela Spark (segmento, nota e "
+            W.HTML("<div class='treeui-legend'>Aplica a régua a uma tabela Spark (segmento, folha e "
                    "valor por linha), gravando opcionalmente o resultado.</div>"),
             self.tx_spark_in, self.tx_spark_out,
             W.Box([], layout=W.Layout(flex="1 1 auto")),   # alinha "Reconstruir folhas" com "Salvar no MLflow"
@@ -1614,7 +1636,7 @@ class TreeSegmenterUI:
         card_diff = W.VBox([
             W.HTML("<div class='treeui-h'>Comparar duas árvores (versões)</div>"),
             W.HTML("<div class='treeui-legend'>Carrega outra árvore salva em JSON e compara com a "
-                   "atual: migração de notas, concordância e métricas lado a lado.</div>"),
+                   "atual: migração de folhas, concordância e métricas lado a lado.</div>"),
             W.HBox([self.tx_diff_path, self.btn_diff]), self.out_diff]); card_diff.add_class("treeui-card")
         card_sug.layout.width = "36%"
         card_merge.layout.width = "32%"
@@ -2853,10 +2875,10 @@ class TreeSegmenterUI:
             mig = d["migracao"].copy()
             mig.index = [f"A·{i}" for i in mig.index]
             mig.columns = [f"B·{c}" for c in mig.columns]
-            html = (f"<div class='treeui-legend'>Concordância de notas (A=B): "
+            html = (f"<div class='treeui-legend'>Concordância de folhas (A=B): "
                     f"<b>{d['concordancia']:.1%}</b></div>"
                     + self._df_html(d["resumo"], center=True)
-                    + "<div class='treeui-h' style='margin-top:8px'>Migração de notas "
+                    + "<div class='treeui-h' style='margin-top:8px'>Migração de folhas "
                       "(linhas = árvore A · colunas = árvore B)</div>"
                     + mig.to_html(border=0))
             self.out_diff.value = html
@@ -2966,7 +2988,7 @@ class TreeSegmenterUI:
             except Exception as e:
                 print(f"Não foi possível ler a tabela '{name}':", type(e).__name__, e); return
             try:
-                out = self.seg.apply_spark(sdf)
+                out = self.seg.apply_spark(sdf, col_nota="folha")
             except ValueError as e:                 # colunas faltando / árvore vazia
                 print("⚠", e); return
             except Exception as e:
@@ -2976,17 +2998,17 @@ class TreeSegmenterUI:
             out_name = self.tx_spark_out.value.strip()
             if out_name:
                 try:
-                    # mergeSchema: evolui o schema (colunas novas: segmento/nota/
+                    # mergeSchema: evolui o schema (colunas novas: segmento/folha/
                     # valor_regua) ao sobrescrever a base se ela já existir.
                     (out.write.mode("overwrite").option("mergeSchema", "true")
                         .saveAsTable(out_name))
-                    print(f"✓ tabela '{out_name}' gravada (segmento, nota, valor_regua).")
+                    print(f"✓ tabela '{out_name}' gravada (segmento, folha, valor_regua).")
                 except Exception as e:
                     print(f"Régua aplicada, mas falhou ao gravar '{out_name}':",
                           type(e).__name__, e)
             print(f"✓ régua aplicada em '{name}'. Spark DataFrame em  ui.spark_result.")
             try:
-                dist = out.groupBy("nota").count().orderBy("nota").toPandas()
+                dist = out.groupBy("folha").count().orderBy("folha").toPandas()
                 display(dist)
             except Exception as e:
                 print("(não consegui resumir a distribuição:", type(e).__name__, e, ")")
@@ -3680,14 +3702,16 @@ class TreeSegmenterUI:
         self._refresh()
 
     def _on_export(self, _):
-        self.result = self.seg.assign("segmento")
+        # chamamos de "folha" na UI (não "nota"): renomeia as colunas de nota do assign
+        self.result = self.seg.assign("segmento").rename(
+            columns={"segmento_nota": "folha", "segmento_desc": "folha_desc"})
         with self.out_log:
             self.out_log.clear_output(wait=True)
             print("DataFrame rotulado em  ui.result  · shape", self.result.shape)
             try:
-                display(self.result["segmento_nota"].value_counts().sort_index())
+                display(self.result["folha"].value_counts().sort_index())
             except Exception as e:
-                print(f"(distribuição de notas indisponível: {e})")
+                print(f"(distribuição de folhas indisponível: {e})")
 
     def _boot_forest_html(self, bc):
         """Forest plot: barra de IC por folha + marcador do ponto (DES) e do alvo OOT."""
@@ -3956,21 +3980,44 @@ class TreeSegmenterUI:
             ev += (f"<div class='treeui-h' style='margin-top:14px'>Calibração · {_rl} previsto (DES) × "
                    "realizado por folha</div>" + self._df_html(calib[cols], max_height="240px",
                                                                center=True))
-        # estrutura: monotonicidade + nº de inversões e QUAIS folhas invertem
-        def _inv_str(inv):
-            if not inv:
-                return "—"
-            return " · ".join(f"folha {a} ▸ folha {b}" for a, b in inv)
-        mono_disp = mono[["amostra", "monotonico", "n_inversoes"]].copy()
-        mono_disp["folhas que invertem"] = mono["inversoes"].apply(_inv_str)
-        mono_disp = mono_disp.rename(columns={"monotonico": "monotônico",
-                                              "n_inversoes": "nº inversões"})
+        # estrutura: monotonicidade — MESMA leitura visual das FOLHAS-IRMÃS,
+        # comparando SÓ as folhas que invertem no alvo (não só as sob mesmo pai).
+        # Mapeia os pares de NOTAS de mono["inversoes"] para os sids das folhas.
+        lv_m = self.seg.leaves()
+        nota2sid = dict(zip(lv_m["nota"], lv_m["segmento"]))
+        notas_inv = set()
+        for inv in mono["inversoes"]:
+            for a, b in inv:
+                notas_inv.update((int(a), int(b)))
+        leaves_inv = [nota2sid[n] for n in sorted(notas_inv) if n in nota2sid]
         ev += (f"<div class='treeui-h' style='margin-top:14px'>Estrutura · monotonicidade do "
-               f"{_rl} por amostra</div>"
-               f"<div class='treeui-legend'>Cada inversão é um par de folhas adjacentes (pela "
-               f"ordem da régua) cujo {_rl} está fora de ordem — <b>folha a ▸ folha b</b> indica "
-               f"que a folha <b>a</b> tem {_rl} maior que a <b>b</b>, que deveria ser ≥.</div>"
-               + self._df_html(mono_disp, center=True))
+               f"{_rl} por amostra</div>")
+        if not leaves_inv:
+            ev += ("<div class='treeui-legend'>✅ Sem inversões de monotonicidade — o "
+                   f"{_rl} cresce com a folha (na ordem de risco) em todas as amostras.</div>")
+        else:
+            ev += (f"<div class='treeui-legend'><b>{len(leaves_inv)} folha(s)</b> envolvidas em "
+                   f"inversão da monotonicidade. Mesma leitura das folhas-irmãs: cada linha é uma "
+                   f"folha, ordenada pelo {_rl} na {self.ref_sample}; onde as linhas se "
+                   f"<b>cruzam</b> há inversão da ordem de risco. Faixas vermelhas (por safra) = "
+                   f"safras com inversão.</div>")
+            try:
+                tcol = (self.tx_sib_time.value or "").strip() or self.date_col
+                _t1 = f"{self.seg._risk_mean} das folhas que invertem · por amostra"
+                h1 = self._fig_html(self.seg.plot_sibling_value_by_sample(
+                    None, leaves=leaves_inv, title=_t1), full_width=True)
+                if tcol and tcol in self.df.columns:
+                    _t2 = f"{self.seg._risk_mean} das folhas que invertem · por safra"
+                    h2 = self._fig_html(self.seg.plot_sibling_value_by_safra(
+                        None, leaves=leaves_inv, time_col=tcol, title=_t2), full_width=True)
+                    ev += ("<div style='display:flex;gap:10px;align-items:flex-start'>"
+                           f"<div style='flex:76 1 0;min-width:0'>{h1}</div>"
+                           f"<div style='flex:96 1 0;min-width:0'>{h2}</div></div>")
+                else:
+                    ev += h1
+            except Exception as e:
+                ev += (f"<div style='color:var(--bad-tx);font-size:12px'>Gráficos de inversão "
+                       f"não gerados: {type(e).__name__}</div>")
         return scorecard + calib_ajuda + ev
 
     # ==================================================================
@@ -4052,19 +4099,25 @@ class TreeSegmenterUI:
     # ==================================================================
     # Discriminação (ROC · KS) e qualidade dos segmentos
     # ==================================================================
-    def _fig_html(self, fig, border=False, full_width=False):
+    def _fig_html(self, fig, border=False, full_width=False, tight=True):
         """Converte uma figura matplotlib em <img> base64 (string HTML).
 
         ``full_width=True`` faz a imagem ESTICAR até a largura do container
         (``width:100%``) em vez de só limitar (``max-width:100%``) — elimina o
-        espaço em branco à direita em cartões largos."""
+        espaço em branco à direita em cartões largos.
+
+        ``tight=False`` salva o PNG EXATAMENTE em ``figsize×dpi`` (sem recorte por
+        conteúdo, ``bbox_inches=None``): duas figuras de MESMA altura de figsize saem
+        com a MESMA altura na tela em colunas lado a lado (o ``bbox_inches='tight'``
+        recorta cada figura ao seu conteúdo e distorce a razão de aspecto)."""
         import base64
         import io as _io
         buf = _io.BytesIO()
         # dpi limitado a 110 nas prévias inline (export usa save_path nos plot_*):
         # corta o PNG/base64 ~40% sem perda visual perceptível, aliviando o comm.
         buf_dpi = min(int(fig.get_dpi()), 110)
-        fig.savefig(buf, format="png", dpi=buf_dpi, bbox_inches="tight")
+        fig.savefig(buf, format="png", dpi=buf_dpi,
+                    bbox_inches="tight" if tight else None)
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         # fecha a figura: sem isso o pyplot retém TODA figura gerada (Gcf.figs) e a
         # RAM cresce sem limite numa sessão interativa (dezenas de plots por ação).
@@ -4170,6 +4223,50 @@ class TreeSegmenterUI:
         except Exception as e:
             self.out_discrim.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro no "
                                       f"histograma: {type(e).__name__}: {e}</div>")
+
+    def _on_estab(self, _):
+        # métricas por amostra (esq) | PSI da segmentação no tempo (dir) · concentração (abaixo)
+        if self.sample_col is None:
+            self.out_estab.value = ("<div class='treeui-legend'>Requer coluna de amostra "
+                                    "(DES/OOT…) para estas análises.</div>")
+            self.out_conc.value = ""
+            return
+
+        def _err(what, e):
+            return (f"<div style='color:var(--bad-tx);font-size:12px'>({what} não gerado: "
+                    f"{type(e).__name__})</div>")
+        # MESMA altura de figura (4.6) + tight=False → os dois saem com a MESMA altura
+        # nas colunas proporcionais 66:84 (larguras 6.6 : 8.4).
+        try:
+            h_m = self._fig_html(self.seg.plot_metrics_comparison(figsize=(6.6, 4.6)),
+                                 full_width=True, tight=False)
+        except Exception as e:
+            h_m = _err("métricas", e)
+        tcol = (self.tx_sib_time.value or "").strip() or self.date_col
+        if not tcol or tcol not in self.df.columns:
+            h_psi = ("<div class='treeui-legend'>Informe a coluna de tempo (no card de "
+                     "folhas-irmãs, acima) para o PSI ao longo do tempo.</div>")
+        else:
+            try:
+                h_psi = self._fig_html(
+                    self.seg.plot_psi_by_safra(time_col=tcol, figsize=(8.4, 4.6)),
+                    full_width=True, tight=False)
+            except Exception as e:
+                h_psi = _err("PSI no tempo", e)
+        # colunas proporcionais às larguras das figuras (6.6 : 8.4) → mesma altura
+        self.out_estab.value = (
+            "<div style='display:flex;gap:10px;align-items:flex-start'>"
+            f"<div style='flex:66 1 0;min-width:0'>"
+            f"<div class='treeui-h'>Principais métricas por amostra</div>{h_m}</div>"
+            f"<div style='flex:84 1 0;min-width:0'>"
+            f"<div class='treeui-h'>PSI da segmentação ao longo do tempo</div>{h_psi}</div></div>")
+        try:
+            h_c = self._fig_html(self.seg.plot_leaf_concentration(figsize=(9.0, 4.0)),
+                                 full_width=True)
+        except Exception as e:
+            h_c = _err("concentração", e)
+        self.out_conc.value = ("<div class='treeui-h' style='margin-top:10px'>Concentração das "
+                               f"folhas entre amostras</div>{h_c}")
 
     # ==================================================================
     # Folhas-irmãs: inversão do alvo entre amostras e safras
