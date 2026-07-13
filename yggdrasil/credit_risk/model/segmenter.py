@@ -3914,6 +3914,25 @@ class ModelSegmenter:
         txt = str(txt)
         return txt if len(txt) <= n else txt[:n - 1] + "…"
 
+    def _sample_boundaries(self, safras, time_col=None):
+        """Índices no eixo X (= ``range(len(safras))``) onde a AMOSTRA dominante
+        muda entre safras consecutivas. ``safras`` é a sequência de safras (Period
+        ou str 'YYYY-MM') na MESMA ordem do subplot. Retorna ``[]`` se não houver
+        ``sample_col`` (usado p/ marcar a troca de amostra com linha pontilhada)."""
+        if self.sample_col is None:
+            return []
+        time_col = time_col or self.date_col
+        if time_col is None or time_col not in self.df.columns:
+            return []
+        saf = pd.to_datetime(self.df[time_col], errors="coerce").dt.to_period("M").astype(str)
+        samp_by = (self.df.assign(_saf=saf)
+                   .dropna(subset=[self.sample_col])
+                   .groupby("_saf")[self.sample_col]
+                   .agg(lambda s: s.mode().iat[0] if not s.mode().empty else None))
+        seq = [samp_by.get(str(p)) for p in safras]
+        return [i for i in range(1, len(seq))
+                if seq[i] is not None and seq[i - 1] is not None and seq[i] != seq[i - 1]]
+
     def plot_variables_missing_by_safra(self, time_col=None, features=None, ncols=3,
                                         dpi=150, save_path=None):
         """Grade (``ncols`` colunas) com a **% de missing por safra** de CADA variável
@@ -3945,7 +3964,7 @@ class ModelSegmenter:
             ax.set_title(self._short(self.label(f)), fontsize=9.5, fontweight="bold",
                          color="#15324a")
             ax.set_ylabel("% missing", fontsize=8)
-            ax.set_ylim(bottom=0)
+            ax.set_ylim(0, 100)
             ax.set_xticks(x); ax.set_xticklabels(xs, rotation=45, ha="right", fontsize=7)
             ax.tick_params(axis="y", labelsize=8)
             ax.grid(axis="y", alpha=0.15)
@@ -3974,11 +3993,13 @@ class ModelSegmenter:
         if not feats:
             raise ValueError("Nenhuma variável do modelo disponível (treine ou selecione).")
         fig, axes, nrows, ncols = self._profile_grid(len(feats), ncols, dpi)
+        num_legend_done = False              # legenda p5/média: no 1º subplot NUMÉRICO
         for idx, f in enumerate(feats):
             ax = axes[idx // ncols][idx % ncols]
             if self._detect_kind(f, self.df) == "num":
                 t = self.variable_by_safra(f, time_col=time_col, all_samples=True)
-                xs = _fmt_safras(list(t["safra"])); x = list(range(len(t)))
+                safras_sub = list(t["safra"])
+                xs = _fmt_safras(safras_sub); x = list(range(len(t)))
                 if len(t):
                     ax.fill_between(x, t["p5"], t["p95"], color="#4c78a8", alpha=0.16,
                                     label="p5–p95")
@@ -3986,13 +4007,15 @@ class ModelSegmenter:
                     ax.plot(x, t["p95"], color="#4c78a8", lw=1.0, ls="--")
                     ax.plot(x, t["media"], color="#c0392b", lw=1.8, marker="o", ms=3.5,
                             label="média")
-                    if idx == 0:                         # legenda só no 1º subplot
+                    if not num_legend_done:              # legenda p5/média no 1º subplot numérico
                         ax.legend(fontsize=6.5, loc="upper left", framealpha=0.6)
+                        num_legend_done = True
             else:
                 sh = self.variable_share_by_safra(f, time_col=time_col, top=top_cat,
                                                   all_samples=True)
                 cats = [c for c in sh.columns if c != "safra"]
-                xs = _fmt_safras(list(sh["safra"])); x = list(range(len(sh)))
+                safras_sub = list(sh["safra"])
+                xs = _fmt_safras(safras_sub); x = list(range(len(sh)))
                 if cats:
                     cmap = _cmap("tab10")
                     colors = [cmap((i % 10) / 9) for i in range(len(cats))]
@@ -4000,8 +4023,12 @@ class ModelSegmenter:
                                  colors=colors, alpha=0.85)
                     ax.set_ylim(0, 100)
                     ax.set_ylabel("% categoria", fontsize=8)
-                    if idx == 0:                         # legenda só no 1º subplot
-                        ax.legend(fontsize=6, loc="upper left", ncol=2, framealpha=0.55)
+                    # legenda em CADA subplot categórico: as categorias mudam por
+                    # variável, então cada gráfico precisa identificar as suas.
+                    ax.legend(fontsize=6, loc="upper left", ncol=2, framealpha=0.85)
+            # faixas verticais pontilhadas onde a AMOSTRA muda ao longo das safras
+            for bx in self._sample_boundaries(safras_sub, time_col):
+                ax.axvline(bx - 0.5, ls=":", lw=1.0, color="#33424f", alpha=0.7)
             ax.set_title(self._short(self.label(f)), fontsize=9.5, fontweight="bold",
                          color="#15324a")
             ax.set_xticks(x); ax.set_xticklabels(xs, rotation=45, ha="right", fontsize=7)

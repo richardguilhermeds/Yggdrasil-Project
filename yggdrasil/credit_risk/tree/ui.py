@@ -792,6 +792,10 @@ class TreeSegmenterUI:
         self.btn_estab = mk("Estabilidade & concentração", "info",
                             "Principais métricas por amostra, PSI da segmentação ao longo do "
                             "tempo e concentração das folhas entre amostras", "bar-chart")
+        self.btn_varprofile = mk("Perfil das variáveis por safra", "info",
+                                 "Grade por variável da árvore: % de missing (0–100%) e dispersão "
+                                 "p5·média·p95 por safra (categóricas: área empilhada com legenda)",
+                                 "chart-area")
 
         # --- undo/redo, auto-merge e persistência da árvore (JSON) ---
         self.btn_undo = mk("◀ Desfazer", "", "Desfaz a última alteração na árvore", "undo")
@@ -939,6 +943,7 @@ class TreeSegmenterUI:
         self.btn_diag_hide.on_click(self._on_diag_hide)
         self.btn_sib.on_click(self._on_sib_analyze)
         self.btn_estab.on_click(self._on_estab)
+        self.btn_varprofile.on_click(self._on_varprofile)
         # amostras p/ a análise por safra das folhas-irmãs (fixas — não mudam
         # com a árvore): "todas" + a referência (DES) + as demais com alvo.
         sib_samples = [("todas as amostras", "__all__")]
@@ -1018,6 +1023,8 @@ class TreeSegmenterUI:
         self.out_sib = W.HTML()     # comparação de folhas-irmãs (inversão)
         self.out_estab = W.HTML()   # métricas por amostra | PSI da segmentação no tempo
         self.out_conc = W.HTML()    # concentração das folhas entre amostras
+        self.out_varprof_missing = W.HTML()   # % missing por safra (grade de variáveis da árvore)
+        self.out_varprof_stats = W.HTML()     # dispersão p5·média·p95 · proporção cat. por safra
         self.out_diag = W.HTML()    # placar de saúde do modelo (Diagnóstico)
         self.out_log = W.Output(layout=W.Layout(max_height="320px", overflow="auto"))
         self.out_preview_chart = W.HTML()   # distribuição da variável + cortes (ao lado do histograma)
@@ -1424,9 +1431,21 @@ class TreeSegmenterUI:
             self.out_conc,
         ], layout=W.Layout(width="100%"))
         card_estab.add_class("treeui-card")
+        # ---- perfil das variáveis (que entraram na árvore) por safra ----
+        card_varprof = W.VBox([
+            W.HTML("<div class='treeui-h'>Perfil das variáveis por safra</div>"),
+            W.HTML("<div class='treeui-legend'>Para cada variável que ENTROU na árvore: "
+                   "<b>% de missing por safra</b> (eixo 0–100%) e a <b>dispersão p5·média·p95</b> "
+                   "(categóricas como área empilhada, com legenda por gráfico). Faixas verticais "
+                   "pontilhadas marcam a troca de amostra (DES→OOT). Requer coluna de data.</div>"),
+            W.HBox([self.btn_varprofile]),
+            self.out_varprof_missing,
+            self.out_varprof_stats,
+        ], layout=W.Layout(width="100%"))
+        card_varprof.add_class("treeui-card")
         tab_diag = W.VBox([sep_diag, card_score, sep_diag2,
                            card_metrics, card_table, card_sib,
-                           card_estab,
+                           card_estab, card_varprof,
                            card_discrim, card_boot])
 
         # ================================================================
@@ -4267,6 +4286,35 @@ class TreeSegmenterUI:
             h_c = _err("concentração", e)
         self.out_conc.value = ("<div class='treeui-h' style='margin-top:10px'>Concentração das "
                                f"folhas entre amostras</div>{h_c}")
+
+    def _on_varprofile(self, _):
+        # grade por variável da árvore: % missing por safra (0–100%) · dispersão p5·média·p95
+        # (num.) / proporção das categorias (cat.), com faixas de troca de amostra.
+        tcol = (self.tx_sib_time.value or "").strip() or self.date_col
+        if not tcol or tcol not in self.df.columns:
+            self.out_varprof_missing.value = ("<div class='treeui-legend'>Informe a coluna de "
+                "tempo (no card de folhas-irmãs, acima) para o perfil por safra.</div>")
+            self.out_varprof_stats.value = ""
+            return
+        if not self.seg.regua_features():
+            self.out_varprof_missing.value = ("<div class='treeui-legend'>Nenhuma variável "
+                "entrou na árvore — crie ao menos um split.</div>")
+            self.out_varprof_stats.value = ""
+            return
+
+        def _err(what, e):
+            return (f"<div style='color:var(--bad-tx);font-size:12px'>({what} não gerado: "
+                    f"{type(e).__name__})</div>")
+        try:
+            self.out_varprof_missing.value = self._fig_html(
+                self.seg.plot_variables_missing_by_safra(time_col=tcol), full_width=True)
+        except Exception as e:
+            self.out_varprof_missing.value = _err("% missing", e)
+        try:
+            self.out_varprof_stats.value = self._fig_html(
+                self.seg.plot_variables_stats_by_safra(time_col=tcol), full_width=True)
+        except Exception as e:
+            self.out_varprof_stats.value = _err("dispersão", e)
 
     # ==================================================================
     # Folhas-irmãs: inversão do alvo entre amostras e safras
