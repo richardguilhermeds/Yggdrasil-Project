@@ -81,3 +81,78 @@ def test_on_analyze_noop_sem_paineis():
     from yggdrasil.credit_risk.model import ModelSegmenterUI
     obj = ModelSegmenterUI.__new__(ModelSegmenterUI)   # sem __init__/_build
     obj._on_analyze(None)              # não deve levantar
+
+
+def _build_reg(df=None):
+    pytest.importorskip("ipywidgets")
+    pytest.importorskip("optbinning")
+    import matplotlib
+    matplotlib.use("Agg")
+    from yggdrasil.credit_risk.model import ModelSegmenterUI
+    if df is None:
+        rng = np.random.default_rng(1)
+        n = 2500
+        X = {f"x{k}": rng.normal(size=n) for k in range(4)}
+        lin = sum((k + 1) * 0.1 * X[f"x{k}"] for k in range(4))
+        df = pd.DataFrame(X)
+        df["target"] = np.clip(0.5 + 0.1 * lin + rng.normal(0, 0.1, n), 0, 1)
+        meses = pd.date_range("2023-01-01", periods=8, freq="MS")
+        df["dt_ref"] = rng.choice(meses, size=n)
+        df["amostra"] = np.where(df["dt_ref"] >= meses[6], "OOT", "DES")
+    with contextlib.redirect_stdout(io.StringIO()):
+        return ModelSegmenterUI(df, target="target", task_type="regression",
+                                sample_col="amostra", ref_sample="DES", date_col="dt_ref")
+
+
+@pytest.mark.parametrize("task", ["classification", "regression"])
+def test_backward_cache_invalidado_no_retreino(task):
+    """Retreinar o modelo deve DESCARTAR o resultado cacheado do backward elimination.
+
+    Bug: `_backelim_result`/`_backelim_optimal` não eram invalidados no retreino, então
+    a 'escolha ótima'/'aplicar Nº' reaplicava a seleção calculada sobre o modelo ANTERIOR
+    (a guarda de identidade só olhava features+amostra, ignorando o algoritmo). Ocorria
+    tanto em classificação quanto em regressão.
+    """
+    ui = _build() if task == "classification" else _build_reg()
+    feats0 = list(ui.seg.selected_features() or ui.seg.model_features or ui.seg.candidates)
+    assert len(feats0) >= 2
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.seg.fit(features=feats0)
+        ui._backelim_result = ui.seg.backward_elimination(
+            sample=ui.dd_backelim_sample.value, min_features=1, features=feats0)
+        assert ui._backelim_result is not None
+        ui._on_fit(None)                       # retreino via UI dispara a invalidação
+    assert ui._backelim_result is None, "o cache do backward deveria ser invalidado no retreino"
+    assert getattr(ui, "_backelim_optimal", None) is None
+
+
+def test_backward_guarda_por_algoritmo():
+    """A guarda de reuso da 'escolha ótima' deve rejeitar um resultado de OUTRO algoritmo
+    (mesmas features e amostra) — senão reusaria a ordem/métricas do modelo antigo."""
+    ui = _build()
+    feats0 = list(ui.seg.selected_features() or ui.seg.model_features or ui.seg.candidates)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.seg.fit(algorithm="logistica", features=feats0)
+        res = ui.seg.backward_elimination(sample=ui.dd_backelim_sample.value,
+                                          min_features=1, features=feats0)
+        ui.seg.fit(algorithm="random_forest", features=feats0)   # troca só o algoritmo
+    feats_now = list(ui.seg.selected_features() or ui.seg.model_features or ui.seg.candidates)
+    same = (res is not None and len(res)
+            and set(res.attrs.get("feats0", [])) == set(feats_now)
+            and res.attrs.get("eval_sample") == ui.dd_backelim_sample.value
+            and res.attrs.get("algorithm") == ui.seg.algorithm
+            and res.attrs.get("transform") == ui.seg.feature_transform
+            and res.attrs.get("hyperparams") == dict(ui.seg.hyperparams or {}))
+    assert same is False, "não deveria reusar um backward de 'logistica' num modelo 'random_forest'"
+
+
+def test_backward_bloqueado_em_two_stage():
+    """Rodar o backward num modelo Two-Stage (hurdle) não deve crashar — bloqueia com aviso
+    (antes: ValueError 'Algoritmo desconhecido: two_stage:...' dentro do worker)."""
+    ui = _build_reg()
+    feats0 = list(ui.seg.selected_features() or ui.seg.model_features or ui.seg.candidates)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.seg.fit_two_stage(threshold=0.5, features=feats0)
+        ui._on_backelim(None)              # não deve iniciar a execução nem levantar
+    assert "Two-Stage" in ui.out_backelim_status.value
+    assert ui._backelim_thread is None

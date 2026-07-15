@@ -1946,6 +1946,12 @@ class ModelSegmenterUI:
         if getattr(self, "_backelim_thread", None) is not None and self._backelim_thread.is_alive():
             self._log("[escolha ótima] backward elimination em andamento — aguarde.")
             return
+        if getattr(self.seg, "two_stage", False):
+            self.out_backelim_apply.value = ("<div class='mseg-legend'>O backward elimination "
+                "não se aplica ao modelo <b>Two-Stage (hurdle)</b>. Treine um modelo de etapa "
+                "única para usá-lo.</div>")
+            self._log("[escolha ótima] indisponível para Two-Stage.")
+            return
         # otimiza a SELEÇÃO VIGENTE (included) — respeita variáveis marcadas depois
         # do treino; cai para model_features/candidates só se não houver seleção.
         feats0 = list(self.seg.selected_features() or self.seg.model_features
@@ -1964,9 +1970,15 @@ class ModelSegmenterUI:
         # contagem) E da MESMA amostra de avaliação — senão o passo ótimo viria de
         # métricas de outra amostra/outro conjunto de variáveis.
         res0 = getattr(self, "_backelim_result", None)
+        # reusa só se o resultado veio do MESMO modelo: mesmas features/amostra E mesma
+        # config de treino (algoritmo/transform/hyperparams). Sem a checagem de config,
+        # trocar de algoritmo mantendo as variáveis reaplicaria a seleção do modelo velho.
         same = (res0 is not None and len(res0)
                 and set(res0.attrs.get("feats0", [])) == set(feats0)
-                and res0.attrs.get("eval_sample") == self.dd_backelim_sample.value)
+                and res0.attrs.get("eval_sample") == self.dd_backelim_sample.value
+                and res0.attrs.get("algorithm") == self.seg.algorithm
+                and res0.attrs.get("transform") == self.seg.feature_transform
+                and res0.attrs.get("hyperparams") == dict(self.seg.hyperparams or {}))
         if same:
             try:
                 _apply(res0)
@@ -3165,6 +3177,12 @@ class ModelSegmenterUI:
         if self._backelim_thread is not None and self._backelim_thread.is_alive():
             self._log("[backward] já há uma execução em andamento.")
             return
+        if getattr(self.seg, "two_stage", False):
+            self.out_backelim_status.value = ("<div class='mseg-legend'>O backward elimination "
+                "não se aplica ao modelo <b>Two-Stage (hurdle)</b> — ele reajusta um estimador "
+                "de etapa única. Treine um modelo de etapa única para usá-lo.</div>")
+            self._log("[backward] indisponível para Two-Stage.")
+            return
         feats0 = (self.seg.model_features or self.seg.selected_features()
                   or self.seg.candidates)
         if len(feats0) < 2:
@@ -3274,6 +3292,21 @@ class ModelSegmenterUI:
         self.out_backelim_table.value = (
             f"<div style='max-height:380px;overflow:auto'>{sty.to_html()}</div>")
         self._sync_backelim_n_options(res, target_n)
+
+    def _invalidate_backelim(self):
+        """Descarta o resultado cacheado do backward elimination (curva + passo ótimo
+        + opções de nº) — chamado a TODO retreino via :meth:`_clear_adv_outputs`. A
+        ordem de remoção e as métricas do backward dependem do modelo (algoritmo,
+        hyperparams, transform, features); reaplicar o resultado de um modelo ANTERIOR
+        escolheria variáveis por métricas que já não são as do modelo vigente."""
+        if getattr(self, "_backelim_result", None) is None:
+            return
+        self._backelim_result = None
+        self.out_backelim_plot.value = ""
+        self._render_backelim_table(None)   # zera tabela, passo ótimo, dd_backelim_n e botões
+        self.out_backelim_status.value = ("<div class='mseg-legend'>Modelo retreinado — rode o "
+                                          "backward elimination de novo para a configuração "
+                                          "atual.</div>")
 
     def _sync_backelim_n_options(self, res, target_n):
         """Popula o seletor manual de nº de variáveis com os passos do backward
@@ -3862,6 +3895,10 @@ class ModelSegmenterUI:
                   self.out_adv_msafra_fig, self.out_adv_backtest,
                   self.out_adv_missing, self.out_adv_stats):
             w.value = ""
+        # o modelo mudou ⇒ o resultado do backward elimination ficou defasado (a ordem
+        # de remoção/métricas vieram do modelo anterior) — descarta o cache p/ não
+        # reaplicar seleção de um modelo que não existe mais.
+        self._invalidate_backelim()
 
     def _on_adv_cap(self, b):
         if self.seg.score_ is None:
