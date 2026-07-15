@@ -662,7 +662,7 @@ class TreeSegmenterUI:
         self.btn_copy_table = W.Button(
             description="Copiar p/ Excel (TSV)", icon="table",
             tooltip="Gera a tabela em TSV — selecione tudo (Ctrl+A), copie (Ctrl+C) "
-                    "e cole no Excel: colunas certas e números em pt-BR",
+                    "e cole no Excel: colunas certas, ponto decimal e % como fração",
             layout=W.Layout(width="auto", margin="6px 0 2px"))
         self.out_table_tsv = W.Textarea(
             value="", layout=W.Layout(width="99%", height="150px", display="none"),
@@ -2405,26 +2405,24 @@ class TreeSegmenterUI:
         self.out_table.value = self._styler_html(sty)
 
     def _leaves_tsv(self):
-        """Tabela de folhas em TSV (tab = coluna, números em pt-BR) — cola direto
-        no Excel: colunas separadas certas e células numéricas de verdade."""
+        """Tabela de folhas em TSV (tab = coluna) — cola direto no Excel como células
+        numéricas de verdade. Números com PONTO decimal; as colunas de % (repr. por
+        amostra) saem como FRAÇÃO (0–1), prontas p/ formatar como % no Excel."""
         lv, cols, headers = self._leaf_table_spec()
-
-        def br(x):   # pt-BR: vírgula decimal (Excel reconhece como número)
-            return str(x).replace(".", ",")
 
         def fmt(col, v):
             if pd.isna(v):
                 return ""                       # vazio (não "—") p/ a célula ficar limpa
-            if col.startswith("pd_"):           # alvo em % (igual à tela)
-                return br(f"{v:.2%}")
-            if col.startswith("psi_"):
-                return br(f"{v:.4f}")
-            if col in ("p_vs_prox", "p_des_oot"):
-                return br(f"{v:.3f}")
             if col == "repr_%" or (col.startswith("repr_") and col.endswith("_%")):
-                return br(f"{v:.1f}")
+                return f"{v / 100:.4f}"         # FRAÇÃO (não multiplicado) — Excel formata como %
+            if col.startswith("pd_"):           # alvo (LGD/PD) — fração 0–1, ponto decimal
+                return f"{v:.4f}"
+            if col.startswith("psi_"):
+                return f"{v:.4f}"
+            if col in ("p_vs_prox", "p_des_oot"):
+                return f"{v:.3f}"
             if isinstance(v, float):
-                return br(f"{v:g}")
+                return f"{v:g}"
             return str(v)
 
         linhas = ["\t".join(headers[c] for c in cols)]
@@ -3525,8 +3523,11 @@ class TreeSegmenterUI:
         # Comportamento: distribuição & risco (logodds/WoE e tabela por faixa
         # removidos a pedido)
         try:
+            # figura mais alta + full_width → o gráfico preenche a altura da box
+            # (ao lado do resumo & estabilidade), sem sobrar espaço em branco
             self.out_var_dist.value = self._fig_html(
-                self.seg.plot_variable_distribution_badrate(feat, sid=sid))
+                self.seg.plot_variable_distribution_badrate(feat, sid=sid, figsize=(8.6, 5.4)),
+                full_width=True)
         except Exception as e:
             self.out_var_dist.value = err("distribuição & risco", e)
         # Inversão da ordem de risco · por amostra
@@ -4295,13 +4296,23 @@ class TreeSegmenterUI:
                 self._estab_psi_html = self._estab_err("PSI no tempo", e)
         self._estab_ready = True
         self._render_estab_metrics()          # gráfico de métricas (respeita seletor/%) + PSI
+        # PSI da segmentação ENTRE amostras (barh, mesmo estilo da concentração) —
+        # resumo de estabilidade acima do detalhe por folha
+        try:
+            h_psi_s = self._fig_html(self.seg.plot_psi_by_sample(figsize=(9.0, 2.9)),
+                                     full_width=True)
+        except Exception as e:
+            h_psi_s = self._estab_err("PSI entre amostras", e)
         try:
             h_c = self._fig_html(self.seg.plot_leaf_concentration(figsize=(9.0, 4.0)),
                                  full_width=True)
         except Exception as e:
             h_c = self._estab_err("concentração", e)
-        self.out_conc.value = ("<div class='treeui-h' style='margin-top:10px'>Concentração das "
-                               f"folhas entre amostras</div>{h_c}")
+        self.out_conc.value = (
+            "<div class='treeui-h' style='margin-top:10px'>PSI da segmentação entre "
+            f"amostras</div>{h_psi_s}"
+            "<div class='treeui-h' style='margin-top:12px'>Concentração das folhas "
+            f"entre amostras</div>{h_c}")
 
     def _render_estab_metrics(self):
         """(Re)renderiza o gráfico 'principais métricas por amostra' com as métricas

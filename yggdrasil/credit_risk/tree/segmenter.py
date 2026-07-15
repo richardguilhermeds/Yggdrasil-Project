@@ -3300,7 +3300,8 @@ class TreeSegmenter:
                     transform=ax.transAxes, color="#889"); ax.axis("off")
             fig.tight_layout(); return fig
         rcol = vt.attrs["risco_label"]
-        labels = vt["faixa"].tolist(); reprs = vt["repr_%"].to_numpy()
+        # rótulos do eixo X = só as FAIXAS (sem repetir "feature: " em cada uma)
+        labels = [s.split(": ", 1)[-1] for s in vt["faixa"]]; reprs = vt["repr_%"].to_numpy()
         xs = list(range(len(labels)))
         cols = ["#c98a8a" if "faltante" in f else "steelblue" for f in labels]
         ax.bar(xs, reprs, color=cols, edgecolor="#2f5d82", alpha=0.85, width=0.7,
@@ -3312,7 +3313,8 @@ class TreeSegmenter:
         is_clf = self._is_clf
         risco = vt[rcol].to_numpy(dtype="float64")
         yline = risco * 100 if is_clf else risco
-        ylabel = "% de maus" if is_clf else "alvo médio"
+        # eixo secundário: "% de maus" (clf) ou o rótulo do problema (reg, ex.: LGD)
+        ylabel = "% de maus" if is_clf else self._risk_word
         ax2 = ax.twinx()
         ax2.plot(xs, yline, color="crimson", lw=2.3, marker="o", ms=5.5,
                  markeredgecolor="#fff", markeredgewidth=0.7, label=ylabel)
@@ -3573,16 +3575,19 @@ class TreeSegmenter:
         ax.stackplot(x, *Y, labels=labels, colors=cores, alpha=0.9,
                      edgecolor="white", linewidth=0.3)
         ax.set_ylim(0, 100); ax.margins(x=0); ax.set_xticks(x)
-        ax.set_xticklabels(_fmt_safras(xs), rotation=45, ha="right", fontsize=8)
-        ax.set_ylabel("% acumulado da safra")
+        ax.set_xticklabels(_fmt_safras(xs), rotation=45, ha="right", fontsize=9.5)
+        ax.set_ylabel("% acumulado da safra", fontsize=10.5)
+        ax.tick_params(axis="y", labelsize=9.5)
         self._draw_sample_dividers(ax, list(xs), time_col)
         ax.set_title(f"'{self.label(feature)}' — distribuição acumulada das faixas do "
                      "optimal binning ao longo do tempo", fontsize=11,
                      fontweight="bold", color="#15324a")
         ax.grid(alpha=0.12, axis="y")
         fig.tight_layout()
-        # legenda ABAIXO por ÚLTIMO (reserva o espaço sem o tight_layout desfazer)
-        self._legend_below(ax, title=f"faixa de '{self.label(feature)}' (optbin)")
+        # legenda ABAIXO por ÚLTIMO (reserva o espaço sem o tight_layout desfazer);
+        # fonte maior — as faixas do optbin são o eixo de leitura do gráfico
+        self._legend_below(ax, title=f"faixa de '{self.label(feature)}' (optbin)",
+                           fontsize=10)
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
@@ -4315,7 +4320,7 @@ class TreeSegmenter:
                                   alpha=0.6))
 
     @staticmethod
-    def _legend_below(ax, title=None, max_label=20):
+    def _legend_below(ax, title=None, max_label=20, fontsize=8):
         """Legenda ABAIXO do eixo, RESERVADA dentro da figura (``subplots_adjust``).
         Vantagens sobre a legenda vertical à direita (que, com rótulos longos,
         achatava o gráfico) e sobre a legenda flutuante embaixo:
@@ -4335,19 +4340,19 @@ class TreeSegmenter:
         mx = max((len(s) for s in short), default=1)
         fw, fh = fig.get_size_inches()
         # nº de colunas que cabem: largura útil / largura aprox. de um item (rótulo +
-        # marcador) a fontsize 8 → mais colunas = legenda mais baixa = gráfico maior
-        item_w = mx * 0.061 + 0.55
+        # marcador), proporcional à fonte → mais colunas = legenda baixa e gráfico maior
+        item_w = mx * 0.0076 * fontsize + 0.55
         ncol = max(1, min(len(short), int((fw - 0.2) / item_w)))
         nrows = math.ceil(len(short) / ncol)
-        # espaço reservado embaixo (polegadas): datas do eixo x + linhas + título
+        # espaço reservado embaixo (polegadas): datas do eixo x + linhas (∝ fonte) + título
         dates_in = 0.62
-        leg_in = 0.17 * nrows + (0.26 if title else 0.10)
-        frac = min(0.62, (dates_in + leg_in) / fh)
+        leg_in = 0.021 * fontsize * nrows + (0.26 if title else 0.10)
+        frac = min(0.66, (dates_in + leg_in) / fh)
         fig.subplots_adjust(bottom=frac)
         # âncora em coords de FIGURA: topo da legenda logo abaixo das datas do eixo x
         ax.legend(handles, short, loc="upper center",
                   bbox_to_anchor=(0.5, max(0.0, frac - dates_in / fh)),
-                  bbox_transform=fig.transFigure, ncol=ncol, fontsize=8,
+                  bbox_transform=fig.transFigure, ncol=ncol, fontsize=fontsize,
                   framealpha=0.9, title=title, borderaxespad=0.2,
                   columnspacing=1.1, handlelength=1.3)
 
@@ -4603,57 +4608,112 @@ class TreeSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
-    def plot_leaf_concentration(self, figsize=(8.4, 4.2), dpi=150, save_path=None, ax=None):
-        """Barras agrupadas da **concentração das folhas entre amostras**:
-        representatividade (%) de cada folha DENTRO de cada amostra (DES, OOT, …).
-        Análogo à distribuição dos ratings por amostra do ModelSegmenter."""
+    def plot_psi_by_sample(self, figsize=(8.4, 3.0), dpi=150, save_path=None, ax=None):
+        """PSI da SEGMENTAÇÃO por AMOSTRA vs DES (barras HORIZONTAIS): estabilidade da
+        distribuição das folhas ENTRE amostras (OOT, ESTABILIDADE, …) — mesmo estilo
+        da concentração das folhas. Eixo X em %, verde &lt;10% · amarelo &lt;25% ·
+        vermelho ≥25%; linhas-guia de atenção (10%) e crítico (25%). Complementa o
+        PSI por safra (ao longo do tempo)."""
         import matplotlib.pyplot as plt  # noqa: F401
+        from matplotlib.ticker import PercentFormatter
         fig, ax = self._new_ax(figsize, dpi, ax)
         if self.sample_col is None:
             ax.text(0.5, 0.5, "requer coluna de amostra", ha="center", va="center",
                     transform=ax.transAxes, color="#889"); ax.axis("off")
             fig.tight_layout(); return fig
+        try:
+            ps = self.psi()
+        except Exception:
+            ps = None
+        if ps is None or ps.empty:
+            ax.text(0.5, 0.5, "sem PSI por amostra (requer amostras além da DES)",
+                    ha="center", va="center", transform=ax.transAxes, color="#889")
+            ax.axis("off"); fig.tight_layout(); return fig
+        amostras = ps["amostra"].tolist()
+        vals = ps["psi"].to_numpy(dtype="float64")
+        y = np.arange(len(amostras))
+        cor = ["#1aa64b" if p < 0.10 else "#caa000" if p < 0.25 else "#d6453e" for p in vals]
+        ax.barh(y, vals, color=cor, edgecolor="#33424f", linewidth=0.4, height=0.62)
+        ax.set_yticks(y); ax.set_yticklabels([str(a) for a in amostras], fontsize=9)
+        ax.invert_yaxis()
+        ax.set_xlabel("PSI (%)"); ax.set_ylabel("amostra")
+        ax.xaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
+        top = max(float(np.nanmax(vals)) * 1.20 if vals.size else 0.0, 0.28)
+        ax.set_xlim(0, top)
+        ax.axvline(0.10, color="#caa000", lw=1.1, ls="--", alpha=0.85)   # atenção
+        ax.axvline(0.25, color="#d6453e", lw=1.1, ls="--", alpha=0.85)   # crítico
+        for yi, p in zip(y, vals):
+            if p < top * 0.98:                  # rótulo à direita (fora barras longas)
+                ax.text(p, yi, f" {p * 100:.1f}%", ha="left", va="center",
+                        fontsize=8, fontweight="bold", color="black")
+        ax.set_title(f"PSI da segmentação por amostra vs {self.ref_sample}", fontsize=11,
+                     fontweight="bold", color="#15324a", loc="left")
+        ax.grid(axis="x", alpha=0.15)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def plot_leaf_concentration(self, figsize=(8.4, 4.2), dpi=150, save_path=None, ax=None):
+        """Barras HORIZONTAIS agrupadas da **concentração das folhas entre amostras**:
+        representatividade (%) de cada folha DENTRO de cada amostra (DES, OOT, …).
+        Folhas no eixo Y, concentração no eixo X — a figura CRESCE em altura com o nº
+        de folhas (em vez de espremer as barras), então os rótulos de % ficam
+        legíveis mesmo com muitas folhas. Análogo à distribuição dos ratings por
+        amostra do ModelSegmenter."""
+        import matplotlib.pyplot as plt  # noqa: F401
+        from matplotlib.ticker import PercentFormatter
+        if self.sample_col is None:
+            fig, ax = self._new_ax(figsize, dpi, ax)
+            ax.text(0.5, 0.5, "requer coluna de amostra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889"); ax.axis("off")
+            fig.tight_layout(); return fig
         lv = self.leaves(with_psi=True)
         if len(lv) == 0:
+            fig, ax = self._new_ax(figsize, dpi, ax)
             ax.text(0.5, 0.5, "sem folhas", ha="center", va="center",
                     transform=ax.transAxes, color="#889"); ax.axis("off")
             fig.tight_layout(); return fig
-        from matplotlib.ticker import PercentFormatter
         notas = lv["nota"].tolist()
         all_samples = [self.ref_sample] + [a for a in self.df[self.sample_col].dropna().unique()
                                            if a != self.ref_sample]
         cols = [(a, f"repr_{a}_%") for a in all_samples if f"repr_{a}_%" in lv.columns]
-        x = np.arange(len(notas)); n_s = max(len(cols), 1); w = 0.8 / n_s
+        n_leaves = len(notas); n_s = max(len(cols), 1)
+        # ALTURA adaptativa ao nº de folhas (≈0.44" por folha, piso = figsize[1],
+        # teto p/ não explodir): a figura cresce e as barras/rótulos mantêm o tamanho
+        if ax is None:
+            h = min(46.0, max(figsize[1], 1.4 + 0.44 * n_leaves))
+            fig, ax = self._new_ax((figsize[0], h), dpi, ax)
+        else:
+            fig = ax.figure
+        y = np.arange(n_leaves); bw = 0.82 / n_s
         conts, vmax = [], 0.0
         for k, (a, col) in enumerate(cols):
             vals = lv[col].to_numpy(dtype="float64")
             vmax = max(vmax, float(np.nanmax(vals)) if vals.size else 0.0)
-            conts.append(ax.bar(x + (k - (n_s - 1) / 2.0) * w, vals,
-                                width=w, label=str(a), color=self._sample_bar_color(a),
-                                edgecolor="#33424f", linewidth=0.3))
-        ax.set_xticks(x); ax.set_xticklabels([str(n) for n in notas])
-        ax.set_ylabel("concentração (% da amostra)"); ax.set_xlabel("folha")
-        ax.yaxis.set_major_formatter(PercentFormatter(xmax=100, decimals=0))
-        # eixo JUSTO aos dados (não 0–100% fixo): com muitas folhas cada folha
-        # concentra pouco e as barras somem no eixo cheio. Autoescala + folga no
-        # topo p/ os rótulos de % não estourarem (mais folga quando rotacionados).
-        # rótulos HORIZONTAIS (sem rotação); a fonte encolhe conforme a largura de
-        # cada barra (mais amostras/folhas ⇒ barra mais estreita) p/ o rótulo não
-        # sobrepor o do vizinho, com um piso de legibilidade
-        fs = max(4.0, min(7.5, 13.0 * figsize[0] / (n_s * max(len(notas), 1))))
-        ax.set_ylim(0, max(vmax * 1.16, 1.0))                      # folga p/ os rótulos
+            conts.append(ax.barh(y + (k - (n_s - 1) / 2.0) * bw, vals,
+                                 height=bw, label=str(a), color=self._sample_bar_color(a),
+                                 edgecolor="#33424f", linewidth=0.3))
+        ax.set_yticks(y); ax.set_yticklabels([str(n) for n in notas], fontsize=8)
+        ax.invert_yaxis()                          # folha de menor nota no topo
+        ax.set_xlabel("concentração (% da amostra)"); ax.set_ylabel("folha")
+        ax.xaxis.set_major_formatter(PercentFormatter(xmax=100, decimals=0))
+        ax.set_xlim(0, max(vmax * 1.18, 1.0))      # folga à direita p/ os rótulos
+        # título à ESQUERDA p/ dar lugar à legenda (topo-direito, fora do eixo)
         ax.set_title("Concentração das folhas entre amostras", fontsize=11,
-                     fontweight="bold", color="#15324a")
-        # rótulo da % em cima de CADA barra (só oculta as nulas — sem massa naquela
-        # amostra), em PRETO e NEGRITO p/ destaque
+                     fontweight="bold", color="#15324a", loc="left")
+        # rótulo de % à DIREITA de cada barra (só oculta as nulas — sem massa naquela
+        # amostra), em PRETO e NEGRITO; fonte fixa e legível (as barras não se
+        # espremem mais — a figura é que cresce)
         for cont in conts:
-            labels = [f"{h:.1f}%" if h > 0 else "" for h in (r.get_height() for r in cont)]
-            ax.bar_label(cont, labels=labels, fontsize=fs, rotation=0,
-                         padding=1.5, color="black", fontweight="bold")
+            labels = [f"{v:.1f}%" if v > 0 else "" for v in (r.get_width() for r in cont)]
+            ax.bar_label(cont, labels=labels, fontsize=7, padding=2,
+                         color="black", fontweight="bold")
         if cols:
-            ax.legend(fontsize=8, loc="best", framealpha=0.9,
-                      ncol=max(1, min(len(cols), 3)))
-        ax.grid(axis="y", alpha=0.15)
+            # legenda ACIMA do eixo (topo-direito) — não cobre nenhuma barra
+            ax.legend(fontsize=8, loc="lower right", bbox_to_anchor=(1.0, 1.003),
+                      ncol=max(1, min(len(cols), 3)), framealpha=0.9, borderaxespad=0.2)
+        ax.grid(axis="x", alpha=0.15)
         fig.tight_layout()
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
