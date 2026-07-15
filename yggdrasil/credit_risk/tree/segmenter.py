@@ -245,6 +245,15 @@ class TreeSegmenter:
     ótimo/manual, poda e PSI. O comportamento por tipo de alvo é escolhido por
     ``task_type`` ("classification" p/ alvo · "regression" p/ alvo)."""
 
+    # PREVIEW interativo (plot_tree_hitmap): a figura da árvore cresce ∝ nº de
+    # folhas (X_GAP por folha), então uma árvore grande vira um PNG gigantesco
+    # (~80 folhas ≈ 180" → 27000 px @150 dpi) cujo *encode* domina a renderização
+    # a CADA _refresh. Capamos a largura do PNG do preview reduzindo o dpi efetivo
+    # (mantendo um piso de legibilidade): a geometria — e o hit-map, que escala
+    # junto — fica idêntica, e o front reamostra a imagem de qualquer forma.
+    _PREVIEW_MAX_PX = 5200        # teto de largura do PNG do preview (px)
+    _PREVIEW_MIN_DPI = 40.0       # piso de dpi (não deixa o texto virar borrão)
+
     def __init__(
         self,
         df: pd.DataFrame,
@@ -288,6 +297,10 @@ class TreeSegmenter:
         # _load_segments reconstruía toda máscara via _match_conditions_pandas a
         # cada desfazer/refazer; agora os segmentos inalterados são cache-hit.
         self._mask_cache_by_conds: dict = {}
+        # amostra dominante por safra (moda) — função PURA do df (imutável): as
+        # linhas/bandas DES/OOT/… por safra são desenhadas em MUITOS gráficos (e por
+        # subplot nos grids); cacheado por time_col p/ não regroupar a df toda a cada.
+        self._samp_by_cache: dict = {}
         # classe de optbinning e nome do kwarg de diferença mínima por tipo de alvo
         self._OptBin = OptimalBinning if self._is_clf else ContinuousOptimalBinning
         self._diff_kwarg = "min_event_rate_diff" if self._is_clf else "min_mean_diff"
@@ -435,6 +448,17 @@ class TreeSegmenter:
         if b["kind"] == "num":
             return f"{feature}: ({_fmt(b['lo'])}, {_fmt(b['hi'])}]"
         return f"{feature}: {{{', '.join(map(str, b['cats']))}}}"
+
+    @staticmethod
+    def _bin_label_short(b):
+        """Rótulo do bin SEM o prefixo da variável — p/ legendas onde o nome da
+        variável já está no título (evita repetir 'feat: ' em cada item e o
+        truncamento no meio do número). Ex.: '(-inf, 0.62]', '(faltante)'."""
+        if b["kind"] == "na":
+            return "(faltante)"
+        if b["kind"] == "num":
+            return f"({_fmt(b['lo'])}, {_fmt(b['hi'])}]"
+        return "{" + ", ".join(map(str, b["cats"])) + "}"
 
     @staticmethod
     def _bin_condition(feature, b):
@@ -1643,8 +1667,12 @@ class TreeSegmenter:
         ``items``: lista de ``(texto, meia_largura, meia_altura)`` em coordenadas de
         dados, centradas na posição do texto.
         """
+        # ``get_renderer()`` (Agg) basta para medir texto — não precisa rasterizar a
+        # figura inteira com ``canvas.draw()``. Evitar esse render completo corta um
+        # terço do custo de plot_tree/plot_tree_hitmap em árvores grandes; as
+        # extents medidas são idênticas às do draw (só afetam o fontsize, não a
+        # geometria das caixas).
         try:
-            fig.canvas.draw()
             renderer = fig.canvas.get_renderer()
         except Exception:        # pragma: no cover - backend sem renderer
             return
@@ -1677,8 +1705,15 @@ class TreeSegmenter:
         import io as _io
         fig = self.plot_tree(ascending=ascending, cmap=cmap,
                              show_samples=show_samples, title=title, dpi=dpi)
+        # capa a largura do PNG do preview (ver _PREVIEW_MAX_PX): reduz o dpi efetivo
+        # quando a árvore é larga demais, mantendo a geometria (o hit-map abaixo
+        # escala junto) e um piso de legibilidade — o encode do PNG deixa de dominar.
+        w_in = fig.get_size_inches()[0]
+        if w_in > 0 and w_in * fig.dpi > self._PREVIEW_MAX_PX:
+            fig.set_dpi(max(self._PREVIEW_MIN_DPI, self._PREVIEW_MAX_PX / w_in))
         canvas = fig.canvas
-        canvas.draw()
+        # sem canvas.draw() aqui: as caixas (patches) têm extent estável e
+        # get_renderer() já as posiciona; o único render real é o savefig abaixo.
         renderer = canvas.get_renderer()
         width, height = canvas.get_width_height()
         ax = fig.axes[0]                      # eixo principal (axes[1] é a colorbar)
@@ -3437,6 +3472,7 @@ class TreeSegmenter:
                     markeredgecolor="#33424f", markeredgewidth=0.5, label=s["labels"][i])
         ax.set_xticks(x); ax.set_xticklabels(_fmt_safras(xs), rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("risco médio"); ax.set_xlabel("safra")
+        self._draw_sample_dividers(ax, list(xs), time_col)
         ax.set_title(f"'{self.label(feature)}' — risco das faixas por safra"
                      "  ·  faixas vermelhas = inversão",
                      fontsize=11, fontweight="bold", color="#15324a")
@@ -3510,7 +3546,7 @@ class TreeSegmenter:
             ax.text(0.5, 0.5, "sem faixas do optbin", ha="center", va="center",
                     transform=ax.transAxes, color="#889"); ax.axis("off")
             fig.tight_layout(); return fig
-        labels = [self._bin_label(feature, b) for b in bins]
+        labels = [self._bin_label_short(b) for b in bins]   # sem repetir 'feat:' na legenda
         base_all = self.df[mask0]                 # distribuição sobre toda a folha
         safra = pd.to_datetime(base_all[tcol], errors="coerce").dt.to_period("M")
         xs, Y = [], [[] for _ in bins]
@@ -3539,13 +3575,14 @@ class TreeSegmenter:
         ax.set_ylim(0, 100); ax.margins(x=0); ax.set_xticks(x)
         ax.set_xticklabels(_fmt_safras(xs), rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("% acumulado da safra")
-        ax.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5),
-                  framealpha=0.9, title="faixa (optbin)")
+        self._draw_sample_dividers(ax, list(xs), time_col)
         ax.set_title(f"'{self.label(feature)}' — distribuição acumulada das faixas do "
                      "optimal binning ao longo do tempo", fontsize=11,
                      fontweight="bold", color="#15324a")
         ax.grid(alpha=0.12, axis="y")
         fig.tight_layout()
+        # legenda ABAIXO por ÚLTIMO (reserva o espaço sem o tight_layout desfazer)
+        self._legend_below(ax, title=f"faixa de '{self.label(feature)}' (optbin)")
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
@@ -3618,13 +3655,14 @@ class TreeSegmenter:
         ax.set_xticks(x)
         ax.set_xticklabels(_fmt_safras(sh["safra"]), rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("% da safra")
-        # legenda à DIREITA (vertical) — não colide com as datas do eixo x
-        ax.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5),
-                  framealpha=0.9, title="categoria")
+        self._draw_sample_dividers(ax, list(sh["safra"]), time_col)
         rot = self.feature_labels.get(feature, feature)
         ax.set_title(f"'{rot}' ao longo do tempo — representatividade por categoria",
                      fontsize=11, fontweight="bold", color="#15324a")
         fig.tight_layout()
+        # legenda ABAIXO por ÚLTIMO: reserva o espaço embaixo (subplots_adjust) sem o
+        # tight_layout desfazer a reserva (categorias de nome longo achatavam o gráfico)
+        self._legend_below(ax, title="categoria")
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
@@ -3635,7 +3673,7 @@ class TreeSegmenter:
         Variável CATEGÓRICA: representatividade de cada categoria por safra."""
         if self._detect_kind(self.df[self._leaf_mask(sid)], feature, None) == "cat":
             return self.plot_variable_share_timeseries(
-                feature, time_col, sid=sid, sample=sample, figsize=(figsize[0], 3.6),
+                feature, time_col, sid=sid, sample=sample, figsize=figsize,
                 save_path=save_path, dpi=dpi, ax=ax)
         bs = self.variable_by_safra(feature, time_col, sid=sid, sample=sample)
         fig, ax = self._new_ax(figsize, dpi, ax)
@@ -3654,6 +3692,7 @@ class TreeSegmenter:
         ax.margins(x=0)                                   # sem respiro lateral (eixo x)
         ax.set_xticks(x)
         ax.set_xticklabels(_fmt_safras(bs["safra"]), rotation=45, ha="right", fontsize=8)
+        self._draw_sample_dividers(ax, list(bs["safra"]), time_col)
         ax.legend(fontsize=8, ncol=3, framealpha=0.9, loc="upper left")
         rot = self.feature_labels.get(feature, feature)
         ax.set_title(f"'{rot}' ao longo do tempo — percentis por safra",
@@ -3678,13 +3717,12 @@ class TreeSegmenter:
                for p in ps["psi"]]
         ax.bar(x, ps["psi"], color=cor, alpha=0.92, width=0.78)
         for x0, p in zip(x, ps["psi"]):
-            ax.text(x0, p, f"{p:.2f}", ha="center", va="bottom", fontsize=7, color="#555")
-        ax.axhline(0.10, color="#caa000", lw=0.8, ls="--")
-        ax.axhline(0.25, color="#d6453e", lw=0.8, ls="--")
+            if p < 0.98:      # barra (e o rótulo acima) que passaria de 100% fica sem texto
+                ax.text(x0, p, f"{p * 100:.1f}%", ha="center", va="bottom", fontsize=7, color="#555")
         ax.set_xticks(x); ax.set_xticklabels(_fmt_safras(ps["safra"]), rotation=45, ha="right", fontsize=8)
         ax.set_xlim(-0.7, len(ps) - 0.3)                          # respiro nas bordas (eixo x)
-        ax.set_ylim(0, float(np.nanmax(ps["psi"])) * 1.16 + 0.05)  # espaço p/ os rótulos
-        ax.set_ylabel("PSI")
+        self._psi_pct_axis(ax)                                    # PSI em %, eixo 0–100% + linhas
+        self._draw_sample_dividers(ax, list(ps["safra"]), time_col)
         rot = self.feature_labels.get(feature, feature)
         ax.set_title(f"PSI de '{rot}' por safra vs DES (bins fixados na DES)",
                      fontsize=11, fontweight="bold", color="#15324a")
@@ -3968,11 +4006,60 @@ class TreeSegmenter:
         return {sid: cmap(i / (k - 1) if k > 1 else 0.5)
                 for i, sid in enumerate(ordered)}
 
+    @staticmethod
+    def _tight_ylim(values, pad_frac: float = 0.03, floor: float = 0.003):
+        """Faixa de Y JUSTA aos valores finitos (zoom): revela cruzamentos/diferenças
+        que o eixo cheio comprime. ``(baixo, alto)`` em fração, ou ``None`` sem dados."""
+        v = np.asarray([x for x in np.ravel(list(values))
+                        if x is not None and np.isfinite(x)], dtype=float)
+        if v.size == 0:
+            return None
+        lo, hi = float(v.min()), float(v.max())
+        pad = max((hi - lo) * pad_frac, floor)
+        return (max(0.0, lo - pad), hi + pad)
+
+    @classmethod
+    def _apply_zoom_ylim(cls, ax, values, ylim=None, auto_zoom=False) -> bool:
+        """Aplica limites de Y: ``ylim=(lo, hi)`` (fração) tem precedência; lados
+        ``None`` (ou ``auto_zoom=True``) são preenchidos pelo zoom justo aos dados.
+        Sem ``ylim`` nem ``auto_zoom``, não mexe. Devolve ``True`` se alterou o eixo."""
+        if ylim is None and not auto_zoom:
+            return False
+        lo = hi = None
+        if ylim is not None:
+            lo, hi = ylim
+        if auto_zoom or lo is None or hi is None:
+            tight = cls._tight_ylim(values)
+            if tight is not None:
+                lo = tight[0] if lo is None else lo
+                hi = tight[1] if hi is None else hi
+        if lo is not None or hi is not None:
+            ax.set_ylim(bottom=lo, top=hi)
+            return True
+        return False
+
+    def _finish_sibling_axes(self, ax, n_lines, values, ylim, auto_zoom, pct):
+        """Fecha o eixo Y dos gráficos de folhas-irmãs (estabilidade): aplica o zoom
+        (auto/manual) ou, sem zoom, dá headroom no topo p/ a legenda não cobrir as
+        linhas; formata em % se ``pct``; posiciona a legenda."""
+        zoomed = self._apply_zoom_ylim(ax, values, ylim, auto_zoom)
+        if not zoomed:                          # eixo padrão: espaço p/ a legenda fixa
+            _y0, _y1 = ax.get_ylim(); ax.set_ylim(_y0, _y1 + (_y1 - _y0) * 0.22)
+        if pct:
+            from matplotlib.ticker import PercentFormatter
+            ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
+            ax.set_ylabel(f"{self._risk_mean} (%)")
+        ax.legend(fontsize=8, ncol=max(1, min(n_lines, 4)),
+                  loc="best" if zoomed else "upper left", framealpha=0.9)
+
     def plot_sibling_value_by_sample(self, parent_sid, leaves=None,
                                   figsize=(7.6, 4.0), dpi=150,
-                                  save_path=None, ax=None, title=None):
+                                  save_path=None, ax=None, title=None,
+                                  ylim=None, auto_zoom=False, pct=False):
         """Linhas da alvo médio das folhas-irmãs por amostra (DES, OOT, …). Onde
-        as linhas se cruzam há INVERSÃO da ordem de risco entre as irmãs."""
+        as linhas se cruzam há INVERSÃO da ordem de risco entre as irmãs.
+        ``auto_zoom``/``ylim`` dão zoom no eixo Y (revela cruzamentos comprimidos);
+        ``pct=True`` mostra o eixo em % (alvo em [0,1], ex.: LGD)."""
         try:
             import matplotlib.pyplot as plt  # noqa: F401
         except ImportError as e:  # pragma: no cover
@@ -3995,10 +4082,8 @@ class TreeSegmenter:
         ax.set_title(title or f"{self._risk_mean} das folhas-irmãs por amostra",
                      fontsize=11, fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)
-        # headroom no topo p/ a legenda FIXA (canto superior esquerdo) não cobrir linhas
-        _y0, _y1 = ax.get_ylim(); ax.set_ylim(_y0, _y1 + (_y1 - _y0) * 0.22)
-        ax.legend(fontsize=8, ncol=max(1, min(len(ordered), 4)),
-                  loc="upper left", framealpha=0.9)
+        self._finish_sibling_axes(ax, len(ordered),
+                                  [series[sid] for sid in ordered], ylim, auto_zoom, pct)
         fig.tight_layout()
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
@@ -4007,10 +4092,12 @@ class TreeSegmenter:
     def plot_sibling_value_by_safra(self, parent_sid, time_col=None, sample=None,
                                  leaves=None, min_n: int = 1,
                                  figsize=(9.6, 4.0), dpi=150,
-                                 save_path=None, ax=None, title=None):
+                                 save_path=None, ax=None, title=None,
+                                 ylim=None, auto_zoom=False, pct=False):
         """Linhas da alvo médio das folhas-irmãs por safra ao longo do tempo. As
         safras em que a ordem de risco inverte (vs. DES) ficam sombreadas em
-        vermelho — leitura rápida de instabilidade temporal."""
+        vermelho — leitura rápida de instabilidade temporal.
+        ``auto_zoom``/``ylim`` dão zoom no eixo Y; ``pct=True`` mostra-o em %."""
         try:
             import matplotlib.pyplot as plt  # noqa: F401
         except ImportError as e:  # pragma: no cover
@@ -4037,15 +4124,14 @@ class TreeSegmenter:
         ax.set_xticks(x); ax.set_xticklabels(_fmt_safras(xs), rotation=45, ha="right", fontsize=8)
         ax.set_xlim(-0.7, len(xs) - 0.3)
         ax.set_ylabel(self._risk_mean); ax.set_xlabel("safra")
+        self._draw_sample_dividers(ax, list(xs), time_col)
         sfx = f" · {sample}" if sample else " · todas as amostras"
         ax.set_title(title or (f"{self._risk_mean} das folhas-irmãs por safra{sfx}"
                      "  ·  faixas vermelhas = inversão"),
                      fontsize=11, fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)
-        # headroom no topo p/ a legenda FIXA (canto superior esquerdo) não cobrir linhas
-        _y0, _y1 = ax.get_ylim(); ax.set_ylim(_y0, _y1 + (_y1 - _y0) * 0.22)
-        ax.legend(fontsize=8, ncol=max(1, min(len(ordered), 4)),
-                  loc="upper left", framealpha=0.9)
+        self._finish_sibling_axes(ax, len(ordered),
+                                  [series[sid] for sid in ordered], ylim, auto_zoom, pct)
         fig.tight_layout()
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
@@ -4117,13 +4203,14 @@ class TreeSegmenter:
                for p in ps["psi"]]
         ax.bar(x, ps["psi"], color=cor, width=0.78, edgecolor="#33424f", linewidth=0.4)
         for xi, p in zip(x, ps["psi"]):
-            ax.annotate(f"{p:.2f}", (xi, p), textcoords="offset points", xytext=(0, 3),
-                        ha="center", fontsize=7, color="#33424f")
-        ax.axhline(0.10, color="#caa000", lw=1.0, ls="--", alpha=0.7)
-        ax.axhline(0.25, color="#d6453e", lw=1.0, ls="--", alpha=0.7)
+            if p < 0.98:      # barra (e o rótulo acima) que passaria de 100% fica sem texto
+                ax.annotate(f"{p * 100:.1f}%", (xi, p), textcoords="offset points", xytext=(0, 3),
+                            ha="center", fontsize=7, color="#33424f")
         ax.set_xticks(x)
         ax.set_xticklabels(_fmt_safras(ps["safra"]), rotation=45, ha="right", fontsize=8)
-        ax.set_ylabel("PSI"); ax.set_xlabel("safra"); ax.set_ylim(bottom=0)
+        ax.set_xlabel("safra")
+        self._psi_pct_axis(ax)                                    # PSI em %, eixo 0–100% + linhas
+        self._draw_sample_dividers(ax, list(ps["safra"]), time_col)
         ax.set_title(f"PSI da segmentação por safra vs {self.ref_sample}",
                      fontsize=11, fontweight="bold", color="#15324a")
         ax.grid(axis="y", alpha=0.15)
@@ -4155,24 +4242,128 @@ class TreeSegmenter:
         txt = str(txt)
         return txt if len(txt) <= n else txt[:n - 1] + "…"
 
+    def _sample_dominante_por_safra(self, time_col=None):
+        """Amostra dominante (moda) por safra (mês) — ``Series`` indexada por
+        'YYYY-MM'. Função PURA do df: cacheada por ``time_col`` (o groupby varre a df
+        inteira, e as linhas/bandas por safra são pedidas em muitos gráficos)."""
+        time_col = time_col or self.date_col
+        if self.sample_col is None or time_col is None or time_col not in self.df.columns:
+            return None
+        if time_col not in self._samp_by_cache:
+            saf = pd.to_datetime(self.df[time_col], errors="coerce").dt.to_period("M").astype(str)
+            self._samp_by_cache[time_col] = (
+                self.df.assign(_saf=saf)
+                .dropna(subset=[self.sample_col])
+                .groupby("_saf")[self.sample_col]
+                .agg(lambda s: s.mode().iat[0] if not s.mode().empty else None))
+        return self._samp_by_cache[time_col]
+
+    def _sample_seq(self, safras, time_col=None):
+        """Amostra dominante de cada safra em ``safras``, na MESMA ordem — lista com
+        o nome da amostra por posição (ou ``None``). ``[]`` sem ``sample_col``/tempo.
+        Base das linhas e bandas DES/OOT/… por safra."""
+        samp_by = self._sample_dominante_por_safra(time_col)
+        if samp_by is None:
+            return []
+        return [samp_by.get(str(p)) for p in safras]
+
     def _sample_boundaries(self, safras, time_col=None):
         """Índices no eixo X (= ``range(len(safras))``) onde a AMOSTRA dominante
         muda entre safras consecutivas. ``safras`` é a sequência de safras (Period
         ou str 'YYYY-MM') na MESMA ordem do subplot. Retorna ``[]`` se não houver
         ``sample_col`` (usado p/ marcar a troca de amostra com linha pontilhada)."""
-        if self.sample_col is None:
-            return []
-        time_col = time_col or self.date_col
-        if time_col is None or time_col not in self.df.columns:
-            return []
-        saf = pd.to_datetime(self.df[time_col], errors="coerce").dt.to_period("M").astype(str)
-        samp_by = (self.df.assign(_saf=saf)
-                   .dropna(subset=[self.sample_col])
-                   .groupby("_saf")[self.sample_col]
-                   .agg(lambda s: s.mode().iat[0] if not s.mode().empty else None))
-        seq = [samp_by.get(str(p)) for p in safras]
+        seq = self._sample_seq(safras, time_col)
         return [i for i in range(1, len(seq))
                 if seq[i] is not None and seq[i - 1] is not None and seq[i] != seq[i - 1]]
+
+    def _sample_bands(self, safras, time_col=None):
+        """Trechos contíguos de safras com a MESMA amostra dominante:
+        ``[(i_ini, i_fim, amostra), ...]`` (índices inclusivos no eixo X) — base dos
+        rótulos DES/OOT/ESTAB por período do tempo."""
+        seq = self._sample_seq(safras, time_col)
+        bands, i, n = [], 0, len(seq)
+        while i < n:
+            if seq[i] is None:
+                i += 1
+                continue
+            j = i
+            while j + 1 < n and seq[j + 1] == seq[i]:
+                j += 1
+            bands.append((i, j, seq[i]))
+            i = j + 1
+        return bands
+
+    def _draw_sample_dividers(self, ax, safras, time_col=None, label=True,
+                              fontsize=7.5):
+        """Num gráfico com safras no eixo X, desenha as **linhas verticais que
+        separam as amostras** (DES · OOT · ESTABILIDADE …) e, com ``label=True``,
+        rotula cada trecho com o nome da amostra no topo. Best-effort: sem
+        ``sample_col``/tempo não faz nada. Compartilhado por todos os gráficos por
+        safra (análise de variáveis e estabilidade das folhas)."""
+        for bx in self._sample_boundaries(safras, time_col):
+            ax.axvline(bx - 0.5, ls=":", lw=1.1, color="#33424f", alpha=0.75, zorder=1.6)
+        if not label:
+            return
+        for i0, i1, a in self._sample_bands(safras, time_col):
+            ab = "ESTAB" if str(a).upper().startswith("ESTAB") else str(a)
+            ax.annotate(ab, xy=((i0 + i1) / 2.0, 1.0),
+                        xycoords=("data", "axes fraction"),
+                        xytext=(0, -2), textcoords="offset points",
+                        ha="center", va="top", fontsize=fontsize, fontweight="bold",
+                        color="#33424f", zorder=4, clip_on=True,
+                        bbox=dict(boxstyle="round,pad=0.14", fc="white", ec="none",
+                                  alpha=0.6))
+
+    @staticmethod
+    def _legend_below(ax, title=None, max_label=20):
+        """Legenda ABAIXO do eixo, RESERVADA dentro da figura (``subplots_adjust``).
+        Vantagens sobre a legenda vertical à direita (que, com rótulos longos,
+        achatava o gráfico) e sobre a legenda flutuante embaixo:
+        - o eixo mantém a largura cheia — nunca é espremido;
+        - fica DENTRO do ``figsize``, então não é recortada mesmo salvando sem
+          ``bbox_inches='tight'`` (necessário p/ alinhar alturas de gráficos lado a
+          lado — ver o par percentis×PSI da aba de variáveis);
+        - usa QUANTAS COLUNAS couberem na largura da figura → legenda baixa e o
+          gráfico continua visível (grande).
+        Trunca rótulos longos p/ caber mais colunas."""
+        import math
+        fig = ax.figure
+        handles, labels = ax.get_legend_handles_labels()
+        if not labels:
+            return
+        short = [s if len(s) <= max_label else s[:max_label - 1] + "…" for s in labels]
+        mx = max((len(s) for s in short), default=1)
+        fw, fh = fig.get_size_inches()
+        # nº de colunas que cabem: largura útil / largura aprox. de um item (rótulo +
+        # marcador) a fontsize 8 → mais colunas = legenda mais baixa = gráfico maior
+        item_w = mx * 0.061 + 0.55
+        ncol = max(1, min(len(short), int((fw - 0.2) / item_w)))
+        nrows = math.ceil(len(short) / ncol)
+        # espaço reservado embaixo (polegadas): datas do eixo x + linhas + título
+        dates_in = 0.62
+        leg_in = 0.17 * nrows + (0.26 if title else 0.10)
+        frac = min(0.62, (dates_in + leg_in) / fh)
+        fig.subplots_adjust(bottom=frac)
+        # âncora em coords de FIGURA: topo da legenda logo abaixo das datas do eixo x
+        ax.legend(handles, short, loc="upper center",
+                  bbox_to_anchor=(0.5, max(0.0, frac - dates_in / fh)),
+                  bbox_transform=fig.transFigure, ncol=ncol, fontsize=8,
+                  framealpha=0.9, title=title, borderaxespad=0.2,
+                  columnspacing=1.1, handlelength=1.3)
+
+    @staticmethod
+    def _psi_pct_axis(ax):
+        """Eixo Y do PSI em PERCENTUAL, FIXO em 0–100%, com as linhas-guia de
+        **atenção** (10%, amarelo) e **crítico** (25%, vermelho). O PSI segue na
+        escala fração (0–1) nos dados; só a EXIBIÇÃO vira %. Escala fixa dá leitura
+        comparável entre variáveis/safras e garante que as duas linhas apareçam. As
+        linhas não são rotuladas (a cor indica) — o texto batia nas barras."""
+        from matplotlib.ticker import PercentFormatter
+        ax.set_ylim(0, 1.0)
+        ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
+        ax.set_ylabel("PSI (%)")
+        ax.axhline(0.10, color="#caa000", lw=1.1, ls="--", alpha=0.85)   # atenção
+        ax.axhline(0.25, color="#d6453e", lw=1.1, ls="--", alpha=0.85)   # crítico
 
     def plot_variables_missing_by_safra(self, time_col=None, features=None, ncols=3,
                                         dpi=150, save_path=None):
@@ -4208,6 +4399,8 @@ class TreeSegmenter:
             ax.set_xticks(x); ax.set_xticklabels(xs, rotation=45, ha="right", fontsize=7)
             ax.tick_params(axis="y", labelsize=8)
             ax.grid(axis="y", alpha=0.15)
+            # linhas verticais onde a amostra muda no tempo (grid: só linhas)
+            self._draw_sample_dividers(ax, [str(p) for p in pers], time_col, label=False)
         for j in range(len(feats), nrows * ncols):
             axes[j // ncols][j % ncols].axis("off")
         fig.suptitle("% de missing por safra — variáveis da árvore",
@@ -4268,9 +4461,9 @@ class TreeSegmenter:
                     # legenda em CADA subplot categórico: as categorias mudam por
                     # variável, então cada gráfico precisa identificar as suas.
                     ax.legend(fontsize=6, loc="upper left", ncol=2, framealpha=0.85)
-            # faixas verticais pontilhadas onde a AMOSTRA muda ao longo das safras
-            for bx in self._sample_boundaries(safras_sub, time_col):
-                ax.axvline(bx - 0.5, ls=":", lw=1.0, color="#33424f", alpha=0.7)
+            # linhas verticais onde a amostra muda no tempo (grid: sem rótulo p/ não
+            # colidir com a legenda de categorias dos subplots)
+            self._draw_sample_dividers(ax, safras_sub, time_col, label=False)
             ax.set_title(self._short(self.label(f)), fontsize=9.5, fontweight="bold",
                          color="#15324a")
             ax.set_xticks(x); ax.set_xticklabels(xs, rotation=45, ha="right", fontsize=7)
@@ -4286,15 +4479,28 @@ class TreeSegmenter:
         plt.close(fig)
         return fig
 
-    def plot_metrics_comparison(self, figsize=(6.6, 4.6), dpi=150, save_path=None, ax=None):
+    @staticmethod
+    def metrics_comparison_options(task_type: str) -> list:
+        """Métricas disponíveis no gráfico 'principais métricas por amostra', na
+        ordem, para o tipo de alvo — alimenta o seletor da UI (nomes = colunas de
+        :meth:`metrics`)."""
+        return (["KS", "AUC", "Gini"] if task_type == "classification"
+                else ["RMSE", "MAE", "R2"])
+
+    def plot_metrics_comparison(self, figsize=(6.6, 4.6), dpi=150, save_path=None, ax=None,
+                                metrics=None, pct=None):
         """Compara as **principais métricas entre amostras** (DES vs OOT lado a lado)
         em barras agrupadas — uma métrica por grupo, uma barra por amostra, com os
         valores anotados e a **variação DES→OOT** (seta + %) no topo de cada grupo.
         clf: **KS · AUC · Gini** (eixo único, em %). reg: **RMSE · MAE** (erro, na
         escala do alvo, eixo esquerdo) e **R²** (eixo direito próprio, em %).
         Referência em steelblue, comparação em crimson (estabilidade em teal).
-        Mesmo padrão visual do ModelSegmenter; valores negativos (Gini de OOT
-        invertida, R² pior que a média) aparecem abaixo do zero, nunca somem."""
+
+        ``metrics``: subconjunto/ordem das métricas a exibir (nomes de coluna, ex.:
+        ``["KS", "AUC"]``); ``None`` = todas. ``pct``: ``True`` força TODAS em %
+        (útil p/ alvo em [0,1]), ``False`` força valor bruto, ``None`` = padrão por
+        métrica. Valores negativos (Gini de OOT invertida, R²<0) aparecem abaixo do
+        zero, nunca somem."""
         import matplotlib.pyplot as plt  # noqa: F401
         from matplotlib.patches import Patch
         from matplotlib.ticker import PercentFormatter
@@ -4311,6 +4517,14 @@ class TreeSegmenter:
             plano = [("RMSE", "RMSE", False, False, False),
                      ("MAE", "MAE", False, False, False), ("R2", "R²", True, True, True)]
         plano = [p for p in plano if p[0] in m.columns]
+        # subconjunto/ordem escolhido pelo usuário (por nome de coluna, sem caixa)
+        if metrics is not None:
+            order = [str(x).upper() for x in metrics]
+            plano = sorted((p for p in plano if p[0].upper() in order),
+                           key=lambda p: order.index(p[0].upper()))
+        # toggle de %: força todas em % (True) ou todas em bruto (False)
+        if pct is not None:
+            plano = [(c, l, up, right, bool(pct)) for (c, l, up, right, _p) in plano]
         if not plano or not samples:
             ax.text(0.5, 0.5, "sem métricas para comparar", ha="center", va="center",
                     transform=ax.transAxes, color="#8891a0", fontsize=12)
@@ -4358,19 +4572,24 @@ class TreeSegmenter:
         lmax = max(left_vals + [0.0]); lmin = min(left_vals + [0.0])
         ax.set_ylim(lmin * 1.15 if lmin < 0 else 0.0, lmax * 1.32 if lmax > 0 else 1.0)
         ax.axhline(0, color="#33424f", lw=0.7, alpha=0.5)
-        if self._is_clf:
+        # cada eixo é formatado em % se TODAS as suas métricas estão em % (ver `pct`)
+        left_pct = any(not p[3] for p in plano) and all(p[4] for p in plano if not p[3])
+        right_pct = any(p[3] for p in plano) and all(p[4] for p in plano if p[3])
+        if left_pct:
             ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
         ax.tick_params(axis="y", labelsize=10)
         if ax2 is not None:
             rmax = max(right_vals + [0.0]); rmin = min(right_vals + [0.0])
             ax2.set_ylim(rmin * 1.15 if rmin < 0 else 0.0, max(rmax * 1.32, 1.0))
-            ax2.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
+            if right_pct:
+                ax2.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
             ax2.tick_params(axis="y", labelsize=10)
             ax2.set_ylabel("R² (eixo direito)", fontsize=10.5, color="#15324a")
         ax.set_xticks(np.arange(len(plano)) + (len(samples) - 1) * w / 2)
         ax.set_xticklabels([f"{lab} {'↑' if up else '↓'}" for _c, lab, up, _r, _p in plano],
                            fontsize=11.5)
-        ax.set_ylabel("erro (escala do alvo)" if not self._is_clf else "métrica (%)",
+        ax.set_ylabel("métrica (%)" if left_pct
+                      else ("erro (escala do alvo)" if not self._is_clf else "métrica"),
                       fontsize=10.5)
         ax.set_title("Principais métricas por amostra", fontsize=12.5,
                      fontweight="bold", color="#15324a")
@@ -4399,22 +4618,40 @@ class TreeSegmenter:
             ax.text(0.5, 0.5, "sem folhas", ha="center", va="center",
                     transform=ax.transAxes, color="#889"); ax.axis("off")
             fig.tight_layout(); return fig
+        from matplotlib.ticker import PercentFormatter
         notas = lv["nota"].tolist()
         all_samples = [self.ref_sample] + [a for a in self.df[self.sample_col].dropna().unique()
                                            if a != self.ref_sample]
         cols = [(a, f"repr_{a}_%") for a in all_samples if f"repr_{a}_%" in lv.columns]
         x = np.arange(len(notas)); n_s = max(len(cols), 1); w = 0.8 / n_s
+        conts, vmax = [], 0.0
         for k, (a, col) in enumerate(cols):
-            ax.bar(x + (k - (n_s - 1) / 2.0) * w, lv[col].to_numpy(dtype="float64"),
-                   width=w, label=str(a), color=self._sample_bar_color(a),
-                   edgecolor="#33424f", linewidth=0.3)
+            vals = lv[col].to_numpy(dtype="float64")
+            vmax = max(vmax, float(np.nanmax(vals)) if vals.size else 0.0)
+            conts.append(ax.bar(x + (k - (n_s - 1) / 2.0) * w, vals,
+                                width=w, label=str(a), color=self._sample_bar_color(a),
+                                edgecolor="#33424f", linewidth=0.3))
         ax.set_xticks(x); ax.set_xticklabels([str(n) for n in notas])
-        ax.set_ylabel("% da amostra"); ax.set_xlabel("folha")
-        ax.set_ylim(0, 100)
+        ax.set_ylabel("concentração (% da amostra)"); ax.set_xlabel("folha")
+        ax.yaxis.set_major_formatter(PercentFormatter(xmax=100, decimals=0))
+        # eixo JUSTO aos dados (não 0–100% fixo): com muitas folhas cada folha
+        # concentra pouco e as barras somem no eixo cheio. Autoescala + folga no
+        # topo p/ os rótulos de % não estourarem (mais folga quando rotacionados).
+        # rótulos HORIZONTAIS (sem rotação); a fonte encolhe conforme a largura de
+        # cada barra (mais amostras/folhas ⇒ barra mais estreita) p/ o rótulo não
+        # sobrepor o do vizinho, com um piso de legibilidade
+        fs = max(4.0, min(7.5, 13.0 * figsize[0] / (n_s * max(len(notas), 1))))
+        ax.set_ylim(0, max(vmax * 1.16, 1.0))                      # folga p/ os rótulos
         ax.set_title("Concentração das folhas entre amostras", fontsize=11,
                      fontweight="bold", color="#15324a")
+        # rótulo da % em cima de CADA barra (só oculta as nulas — sem massa naquela
+        # amostra), em PRETO e NEGRITO p/ destaque
+        for cont in conts:
+            labels = [f"{h:.1f}%" if h > 0 else "" for h in (r.get_height() for r in cont)]
+            ax.bar_label(cont, labels=labels, fontsize=fs, rotation=0,
+                         padding=1.5, color="black", fontweight="bold")
         if cols:
-            ax.legend(fontsize=8, loc="upper left", framealpha=0.9,
+            ax.legend(fontsize=8, loc="best", framealpha=0.9,
                       ncol=max(1, min(len(cols), 3)))
         ax.grid(axis="y", alpha=0.15)
         fig.tight_layout()
@@ -4581,7 +4818,14 @@ class TreeSegmenter:
         A importância de uma variável é a soma, sobre os nós internos divididos
         por ela, de ``representatividade_do_nó × IV_da_variável_no_nó`` (ganho de
         IV ponderado pela população). Só lista variáveis que entraram na árvore;
-        ``normalize=True`` devolve em % do total."""
+        ``normalize=True`` devolve em % do total.
+
+        Memoizado por versão da árvore: recalcula o IV (optbinning) de cada nó
+        interno, então reabrir o Diagnóstico sem mexer na árvore não paga de novo."""
+        return self._agg_memo(("feature_importance", bool(normalize)),
+                              lambda: self._compute_feature_importance(normalize))
+
+    def _compute_feature_importance(self, normalize: bool = True) -> pd.DataFrame:
         n_total = len(self.df)
         filhos: dict = {}
         for sid, s in self.segments.items():

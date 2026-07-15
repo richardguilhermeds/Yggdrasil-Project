@@ -771,6 +771,23 @@ class TreeSegmenterUI:
         self.btn_sib = mk("Analisar folhas-irmãs (inversão)", "primary",
                           f"Compara a {self._risk_mean} das folhas de mesmo pai por amostra e por "
                           "safra e sinaliza inversões da ordem de risco", "exchange")
+        # zoom do eixo Y + eixo em % nos gráficos de ESTABILIDADE (folhas-irmãs):
+        # o eixo cheio comprime as linhas quando a diferença entre folhas é pequena.
+        self._sib_zoom = False
+        _sib_zlay = W.Layout(width="80px")
+        self.btn_sib_zoom = W.Button(description="🔍 Zoom", layout=W.Layout(width="92px"),
+                                     tooltip="Aperta o eixo Y aos dados (revela cruzamentos "
+                                             "comprimidos no eixo cheio)")
+        self.btn_sib_reset = W.Button(description="Reset", layout=W.Layout(width="72px"),
+                                      tooltip="Volta ao eixo cheio e limpa mín/máx")
+        self.tx_sib_ymin = W.Text(value="", placeholder="mín", layout=_sib_zlay,
+                                  tooltip="Limite inferior do eixo Y (na unidade exibida: % se "
+                                          "'eixo em %' estiver ligado, senão a escala do alvo)")
+        self.tx_sib_ymax = W.Text(value="", placeholder="máx", layout=_sib_zlay,
+                                  tooltip="Limite superior do eixo Y")
+        self.ck_sib_pct = W.Checkbox(value=False, indent=False, description="eixo em %",
+                                     tooltip="Mostra o eixo Y em % — útil quando o alvo está em "
+                                             "[0,1] (ex.: LGD)")
         # --- validação regulatória (monotonicidade, calibração, backtest) e relatório ---
         self.tx_time_col = W.Text(description="coluna tempo", value="dt_ref",
                                   layout=full, style=dstyle,
@@ -792,6 +809,17 @@ class TreeSegmenterUI:
         self.btn_estab = mk("Estabilidade & concentração", "info",
                             "Principais métricas por amostra, PSI da segmentação ao longo do "
                             "tempo e concentração das folhas entre amostras", "bar-chart")
+        # seletor de métricas + eixo em % do gráfico "principais métricas por amostra"
+        _mc_opts = ["KS", "AUC", "Gini"] if self._is_clf else ["RMSE", "MAE", "R2"]
+        self.sm_estab_metrics = W.SelectMultiple(
+            options=_mc_opts, value=tuple(_mc_opts), rows=3, description="Métricas:",
+            style={"description_width": "initial"},
+            layout=W.Layout(width="auto", min_width="130px"))
+        self.sm_estab_metrics.tooltip = ("Quais métricas mostrar no gráfico 'principais "
+                                         "métricas por amostra' (nenhuma marcada = todas).")
+        self.ck_estab_pct = W.Checkbox(value=False, indent=False, description="métricas em %")
+        self.ck_estab_pct.tooltip = ("Mostra TODAS as métricas do gráfico em % (útil p/ alvo "
+                                     "em [0,1], ex.: LGD). Desmarcado = padrão por métrica.")
         self.btn_varprofile = mk("Perfil das variáveis por safra", "info",
                                  "Grade por variável da árvore: % de missing (0–100%) e dispersão "
                                  "p5·média·p95 por safra (categóricas: área empilhada com legenda)",
@@ -942,7 +970,15 @@ class TreeSegmenterUI:
         self.btn_diag.on_click(self._on_diag)
         self.btn_diag_hide.on_click(self._on_diag_hide)
         self.btn_sib.on_click(self._on_sib_analyze)
+        self.btn_sib_zoom.on_click(self._on_sib_zoom)
+        self.btn_sib_reset.on_click(self._on_sib_reset)
+        self.tx_sib_ymin.observe(lambda c: self._render_sib_charts(), names="value")
+        self.tx_sib_ymax.observe(lambda c: self._render_sib_charts(), names="value")
+        self.ck_sib_pct.observe(lambda c: self._render_sib_charts(), names="value")
         self.btn_estab.on_click(self._on_estab)
+        # re-renderiza o gráfico de métricas ao mudar seletor/% (só se já foi gerado)
+        self.sm_estab_metrics.observe(lambda c: self._render_estab_metrics(), names="value")
+        self.ck_estab_pct.observe(lambda c: self._render_estab_metrics(), names="value")
         self.btn_varprofile.on_click(self._on_varprofile)
         # amostras p/ a análise por safra das folhas-irmãs (fixas — não mudam
         # com a árvore): "todas" + a referência (DES) + as demais com alvo.
@@ -1032,10 +1068,8 @@ class TreeSegmenterUI:
         self.out_table = W.HTML()
         # aba "Análise de variável"
         self.out_var_dist = W.HTML()          # distribuição & badrate (comportamento)
-        self.out_var_logodds = W.HTML()       # logodds/WoE por faixa
         self.out_var_time = W.HTML()          # percentis por safra
         self.out_var_psi = W.HTML()           # PSI por safra
-        self.out_var_table = W.HTML()         # tabela por faixa
         self.out_var_cards = W.HTML()         # resumo & estabilidade
         self.out_var_inv_s = W.HTML()         # inversão por amostra
         self.out_var_inv_t = W.HTML()         # inversão por safra
@@ -1331,6 +1365,10 @@ class TreeSegmenterUI:
             W.HBox([self.tx_sib_time, self.dd_sib_sample],
                    layout=W.Layout(width="100%")),
             W.HBox([self.btn_sib]),
+            # zoom do eixo Y (auto/mín-máx) + eixo em % dos gráficos de estabilidade
+            W.HBox([self.btn_sib_zoom, self.btn_sib_reset, self.tx_sib_ymin,
+                    self.tx_sib_ymax, self.ck_sib_pct],
+                   layout=W.Layout(align_items="center", flex_flow="row wrap")),
             self.out_sib,
         ], layout=W.Layout(width="100%"))
         card_sib.add_class("treeui-card")
@@ -1426,7 +1464,8 @@ class TreeSegmenterUI:
                    "(folhas como bins, vs DES · requer coluna de data); abaixo a <b>concentração "
                    "das folhas entre amostras</b> (representatividade de cada folha em cada "
                    "amostra).</div>"),
-            W.HBox([self.btn_estab]),
+            W.HBox([self.btn_estab, self.sm_estab_metrics, self.ck_estab_pct],
+                   layout=W.Layout(align_items="center", flex_flow="row wrap")),
             self.out_estab,
             self.out_conc,
         ], layout=W.Layout(width="100%"))
@@ -1562,28 +1601,18 @@ class TreeSegmenterUI:
                                    width="100%")),
         ])
         var_controls.add_class("treeui-card")
-        # ---- aba unificada (mesmas seções do ModelSegmenterUI): comportamento,
-        # resumo & estabilidade, tabela por faixa, inversão, tempo, optbin ----
+        # ---- topo: comportamento (distribuição & risco) AO LADO do resumo &
+        # estabilidade. Logodds/WoE e a tabela por faixa foram removidos a pedido
+        # (aba mais enxuta — e menos plots por análise) ----
         card_var_dist = W.VBox([
             W.HTML("<div class='treeui-h'>Comportamento da variável · distribuição &amp; risco</div>"),
-            self.out_var_dist], layout=W.Layout(width="52%"))
+            self.out_var_dist], layout=W.Layout(width="49%"))   # 49/49 p/ alinhar com as demais linhas
         card_var_dist.add_class("treeui-card")
-        card_var_logodds = W.VBox([
-            W.HTML("<div class='treeui-h'>Logodds / WoE por faixa</div>"),
-            self.out_var_logodds], layout=W.Layout(width="46%"))
-        card_var_logodds.add_class("treeui-card")
-        var_row_a = W.HBox([card_var_dist, card_var_logodds],
-                           layout=W.Layout(justify_content="space-between",
-                                           align_items="stretch", width="100%"))
         card_var_cards = W.VBox([
             W.HTML("<div class='treeui-h'>Resumo &amp; estabilidade</div>"),
-            self.out_var_cards], layout=W.Layout(width="46%"))
+            self.out_var_cards], layout=W.Layout(width="49%"))
         card_var_cards.add_class("treeui-card")
-        card_var_table = W.VBox([
-            W.HTML("<div class='treeui-h'>Tabela por faixa</div>"),
-            self.out_var_table], layout=W.Layout(width="52%"))
-        card_var_table.add_class("treeui-card")
-        var_row_b = W.HBox([card_var_table, card_var_cards],
+        var_row_a = W.HBox([card_var_dist, card_var_cards],
                            layout=W.Layout(justify_content="space-between",
                                            align_items="stretch", width="100%"))
         card_inv_s = W.VBox([
@@ -1597,6 +1626,8 @@ class TreeSegmenterUI:
         var_row_inv = W.HBox([card_inv_s, card_inv_t],
                              layout=W.Layout(justify_content="space-between",
                                              align_items="stretch", width="100%"))
+        # colunas IGUAIS (49%/49%): com o mesmo figsize (handler), percentis e PSI
+        # saem exatamente do mesmo tamanho lado a lado (par renderizado com tight=False)
         card_var_time = W.VBox([
             W.HTML("<div class='treeui-h'>Ao longo do tempo · percentis/share por safra</div>"),
             self.out_var_time], layout=W.Layout(width="49%"))
@@ -1613,7 +1644,7 @@ class TreeSegmenterUI:
                    "binning · por safra (numéricas)</div>"),
             self.out_var_optbin])
         card_var_optbin.add_class("treeui-card")
-        tab_var = W.VBox([var_controls, var_row_a, var_row_b, var_row_inv,
+        tab_var = W.VBox([var_controls, var_row_a, var_row_inv,
                           var_row_time, card_var_optbin])
 
         # ---- ABA AVANÇADO: sugerir splits · auto-merge · importância · SQL · diff ----
@@ -3454,8 +3485,8 @@ class TreeSegmenterUI:
         feat = self.dd_var.value
         sid = self.dd_var_leaf.value
         tcol = self.tx_var_time.value.strip()
-        for o in (self.out_var_dist, self.out_var_logodds, self.out_var_time,
-                  self.out_var_psi, self.out_var_table, self.out_var_inv_s,
+        for o in (self.out_var_dist, self.out_var_time,
+                  self.out_var_psi, self.out_var_inv_s,
                   self.out_var_inv_t, self.out_var_optbin):
             o.value = ""                       # HTML widgets: limpa via .value
         self.out_var_cards.value = ""
@@ -3491,26 +3522,13 @@ class TreeSegmenterUI:
                   + ".")
         # Resumo & estabilidade
         self.out_var_cards.value = self._var_cards_html(summ, trend)
-        # Comportamento: distribuição & risco + logodds/WoE
+        # Comportamento: distribuição & risco (logodds/WoE e tabela por faixa
+        # removidos a pedido)
         try:
             self.out_var_dist.value = self._fig_html(
                 self.seg.plot_variable_distribution_badrate(feat, sid=sid))
         except Exception as e:
             self.out_var_dist.value = err("distribuição & risco", e)
-        try:
-            self.out_var_logodds.value = self._fig_html(
-                self.seg.plot_variable_logodds(feat, sid=sid))
-        except Exception as e:
-            self.out_var_logodds.value = err("logodds", e)
-        # Tabela por faixa
-        try:
-            vt = self.seg.variable_table(feat, sid=sid)
-            self.out_var_table.value = (
-                "<div style='font-size:12px;color:var(--sub-ink)'>sem faixas para esta "
-                "variável nesta folha.</div>" if vt.empty
-                else self._df_html(vt.round(4), max_height="360px", center=True))
-        except Exception as e:
-            self.out_var_table.value = err("tabela por faixa", e)
         # Inversão da ordem de risco · por amostra
         if self.sample_col is not None:
             try:
@@ -3523,15 +3541,22 @@ class TreeSegmenterUI:
                                         "inversão por amostra requer amostras (DES/OOT).</div>")
         # Ao longo do tempo (percentis · PSI · inversão por safra · optbin)
         if tcol and tcol in self.df.columns:
+            # percentis/share (esq) e PSI (dir) com o MESMO figsize (8.6×4.2) +
+            # tight=False → PNGs de dimensão IDÊNTICA, que em colunas iguais (49%/49%,
+            # abaixo) ficam exatamente do mesmo tamanho e alinhados. A legenda do
+            # share fica DENTRO do figsize (_legend_below), então tight=False não corta.
+            _fs_par = (8.6, 4.2)
             try:
                 self.out_var_time.value = self._fig_html(
-                    self.seg.plot_variable_timeseries(feat, tcol, sid=sid), full_width=True)
+                    self.seg.plot_variable_timeseries(feat, tcol, sid=sid, figsize=_fs_par),
+                    full_width=True, tight=False)
             except Exception as e:
                 self.out_var_time.value = err("série temporal", e)
             try:
                 if self.sample_col is not None:
                     self.out_var_psi.value = self._fig_html(
-                        self.seg.plot_variable_psi_by_safra(feat, tcol, sid=sid))
+                        self.seg.plot_variable_psi_by_safra(feat, tcol, sid=sid, figsize=_fs_par),
+                        full_width=True, tight=False)
                 else:
                     self.out_var_psi.value = ("<div style='font-size:12px;color:var(--sub-ink)'>"
                                               "PSI por safra requer amostras (DES/OOT).</div>")
@@ -4243,49 +4268,64 @@ class TreeSegmenterUI:
             self.out_discrim.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro no "
                                       f"histograma: {type(e).__name__}: {e}</div>")
 
+    @staticmethod
+    def _estab_err(what, e):
+        return (f"<div style='color:var(--bad-tx);font-size:12px'>({what} não gerado: "
+                f"{type(e).__name__})</div>")
+
     def _on_estab(self, _):
         # métricas por amostra (esq) | PSI da segmentação no tempo (dir) · concentração (abaixo)
         if self.sample_col is None:
             self.out_estab.value = ("<div class='treeui-legend'>Requer coluna de amostra "
                                     "(DES/OOT…) para estas análises.</div>")
             self.out_conc.value = ""
+            self._estab_ready = False
             return
-
-        def _err(what, e):
-            return (f"<div style='color:var(--bad-tx);font-size:12px'>({what} não gerado: "
-                    f"{type(e).__name__})</div>")
-        # MESMA altura de figura (4.6) + tight=False → os dois saem com a MESMA altura
-        # nas colunas proporcionais 66:84 (larguras 6.6 : 8.4).
-        try:
-            h_m = self._fig_html(self.seg.plot_metrics_comparison(figsize=(6.6, 4.6)),
-                                 full_width=True, tight=False)
-        except Exception as e:
-            h_m = _err("métricas", e)
+        # PSI ao longo do tempo (não muda com o seletor de métricas) — renderiza 1×
         tcol = (self.tx_sib_time.value or "").strip() or self.date_col
         if not tcol or tcol not in self.df.columns:
-            h_psi = ("<div class='treeui-legend'>Informe a coluna de tempo (no card de "
-                     "folhas-irmãs, acima) para o PSI ao longo do tempo.</div>")
+            self._estab_psi_html = ("<div class='treeui-legend'>Informe a coluna de tempo (no "
+                                    "card de folhas-irmãs, acima) para o PSI ao longo do tempo.</div>")
         else:
             try:
-                h_psi = self._fig_html(
+                self._estab_psi_html = self._fig_html(
                     self.seg.plot_psi_by_safra(time_col=tcol, figsize=(8.4, 4.6)),
                     full_width=True, tight=False)
             except Exception as e:
-                h_psi = _err("PSI no tempo", e)
-        # colunas proporcionais às larguras das figuras (6.6 : 8.4) → mesma altura
+                self._estab_psi_html = self._estab_err("PSI no tempo", e)
+        self._estab_ready = True
+        self._render_estab_metrics()          # gráfico de métricas (respeita seletor/%) + PSI
+        try:
+            h_c = self._fig_html(self.seg.plot_leaf_concentration(figsize=(9.0, 4.0)),
+                                 full_width=True)
+        except Exception as e:
+            h_c = self._estab_err("concentração", e)
+        self.out_conc.value = ("<div class='treeui-h' style='margin-top:10px'>Concentração das "
+                               f"folhas entre amostras</div>{h_c}")
+
+    def _render_estab_metrics(self):
+        """(Re)renderiza o gráfico 'principais métricas por amostra' com as métricas
+        escolhidas e o toggle de %, ao lado do PSI já gerado. Ignora se a aba de
+        estabilidade ainda não foi aberta."""
+        if not getattr(self, "_estab_ready", False):
+            return
+        metrics = list(self.sm_estab_metrics.value) or None    # nada marcado ⇒ todas
+        pct = True if self.ck_estab_pct.value else None         # marcado ⇒ tudo em %
+        try:
+            # MESMA altura de figura (4.6) + tight=False → alinha com o PSI nas
+            # colunas proporcionais 66:84 (larguras 6.6 : 8.4).
+            h_m = self._fig_html(
+                self.seg.plot_metrics_comparison(figsize=(6.6, 4.6), metrics=metrics, pct=pct),
+                full_width=True, tight=False)
+        except Exception as e:
+            h_m = self._estab_err("métricas", e)
         self.out_estab.value = (
             "<div style='display:flex;gap:10px;align-items:flex-start'>"
             f"<div style='flex:66 1 0;min-width:0'>"
             f"<div class='treeui-h'>Principais métricas por amostra</div>{h_m}</div>"
             f"<div style='flex:84 1 0;min-width:0'>"
-            f"<div class='treeui-h'>PSI da segmentação ao longo do tempo</div>{h_psi}</div></div>")
-        try:
-            h_c = self._fig_html(self.seg.plot_leaf_concentration(figsize=(9.0, 4.0)),
-                                 full_width=True)
-        except Exception as e:
-            h_c = _err("concentração", e)
-        self.out_conc.value = ("<div class='treeui-h' style='margin-top:10px'>Concentração das "
-                               f"folhas entre amostras</div>{h_c}")
+            "<div class='treeui-h'>PSI da segmentação ao longo do tempo</div>"
+            f"{getattr(self, '_estab_psi_html', '')}</div></div>")
 
     def _on_varprofile(self, _):
         # grade por variável da árvore: % missing por safra (0–100%) · dispersão p5·média·p95
@@ -4368,6 +4408,7 @@ class TreeSegmenterUI:
         key = self.dd_sib_group.value
         g = getattr(self, "_sib_group_map", {}).get(key) if key is not None else None
         if not g:
+            self._sib_ctx = None
             self.out_sib.value = ("<div style='font-size:12px;color:var(--sub-ink)'>Nenhum grupo de "
                                   "folhas-irmãs adjacentes — faça ao menos um split que deixe "
                                   "≥2 folhas terminais contíguas sob o mesmo pai.</div>")
@@ -4387,23 +4428,72 @@ class TreeSegmenterUI:
             ind = self._sib_indicator_html(summ)
         except Exception as e:
             ind = err("indicador de inversão", e)
+        # guarda o contexto p/ os controles de zoom/% re-renderizarem sem reanalisar
+        self._sib_ctx = {"pid": pid, "leaves": leaves, "tcol": tcol, "samp": samp, "ind": ind}
+        self._render_sib_charts()
+
+    def _read_sib_ylim(self):
+        """(lo, hi) do zoom manual dos gráficos de estabilidade, na escala do alvo.
+        Campos vazios viram ``None``; se 'eixo em %' está ligado, o valor digitado é
+        lido como % (÷100). ``None`` se ambos vazios."""
+        def _p(tx):
+            s = (tx.value or "").strip().replace("%", "").replace(",", ".")
+            if not s:
+                return None
+            try:
+                v = float(s)
+            except ValueError:
+                return None
+            return v / 100.0 if self.ck_sib_pct.value else v
+        lo, hi = _p(self.tx_sib_ymin), _p(self.tx_sib_ymax)
+        return None if (lo is None and hi is None) else (lo, hi)
+
+    def _render_sib_charts(self):
+        """(Re)renderiza os 2 gráficos de estabilidade das folhas-irmãs respeitando
+        o estado dos controles (zoom automático, mín/máx manual, eixo em %)."""
+        ctx = getattr(self, "_sib_ctx", None)
+        if not ctx:
+            return
+        pid, leaves, tcol, samp, ind = (ctx["pid"], ctx["leaves"], ctx["tcol"],
+                                        ctx["samp"], ctx["ind"])
+        ylim = self._read_sib_ylim()
+        pct = self.ck_sib_pct.value
+
+        def err(what, e):
+            return (f"<div style='font-size:11px;color:var(--bad-tx)'>({what} não gerado: "
+                    f"{type(e).__name__}: {e})</div>")
+
         try:
             # full_width + colunas proporcionais à largura das figuras (7.6 : 9.6),
             # ambas com a MESMA altura de figura (4.0) → os dois gráficos saem com a
             # MESMA altura na tela (a escala largura-coluna/largura-figura é igual).
-            h1 = self._fig_html(self.seg.plot_sibling_value_by_sample(pid, leaves=leaves),
-                                full_width=True)
+            h1 = self._fig_html(self.seg.plot_sibling_value_by_sample(
+                pid, leaves=leaves, ylim=ylim, auto_zoom=self._sib_zoom, pct=pct),
+                full_width=True)
         except Exception as e:
             h1 = err("gráfico por amostra", e)
         try:
             h2 = self._fig_html(self.seg.plot_sibling_value_by_safra(
-                pid, time_col=tcol, sample=samp, leaves=leaves), full_width=True)
+                pid, time_col=tcol, sample=samp, leaves=leaves,
+                ylim=ylim, auto_zoom=self._sib_zoom, pct=pct), full_width=True)
         except Exception as e:
             h2 = err("gráfico por safra", e)
         charts = ("<div style='display:flex;gap:10px;align-items:flex-start'>"
                   f"<div style='flex:76 1 0;min-width:0'>{h1}</div>"
                   f"<div style='flex:96 1 0;min-width:0'>{h2}</div></div>")
         self.out_sib.value = ind + charts
+
+    def _on_sib_zoom(self, _):
+        self._sib_zoom = True
+        self.btn_sib_zoom.button_style = "info"
+        self._render_sib_charts()
+
+    def _on_sib_reset(self, _):
+        self._sib_zoom = False
+        self.btn_sib_zoom.button_style = ""
+        self.tx_sib_ymin.value = ""
+        self.tx_sib_ymax.value = ""
+        self._render_sib_charts()
 
     # ==================================================================
     # Undo / redo de splits (e demais alterações estruturais da árvore)

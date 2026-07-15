@@ -190,6 +190,7 @@ Todos centralizados em **[`notebooks/tutoriais/`](https://github.com/richardguil
 | 02 | [EDA de features](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/02_tutorial_eda_features.ipynb) |
 | 03 | [Seleção de features (PySpark)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/03_tutorial_feature_selection.ipynb) |
 | 04 | [Árvore de segmentação unificada (classificação & regressão por `task_type`)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/04_tutorial_tree_segmenter.ipynb) |
+| 05 | [Instalação e carregamento das interfaces (árvore + model segmenter)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/05_tutorial_instalacao_e_interfaces.ipynb) |
 | 06 | [Construtor de modelos (UI)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/06_tutorial_model_segmenter.ipynb) |
 | 07 | [Esteira ML + MLflow](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/07_tutorial_esteira_ml_mlflow.ipynb) |
 | 08 | [Capital econômico (ASRF, Monte Carlo, alocação de Euler)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/08_tutorial_capital_economico.ipynb) |
