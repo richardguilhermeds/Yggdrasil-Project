@@ -1107,6 +1107,33 @@ class ModelSegmenterUI:
         # alternar o WoE com modelo já treinado deixa o modelo desatualizado
         self.cb_woe.observe(lambda c: (self._sync_woe_hint(), self._mark_dirty()),
                             names="value")
+        # --- balanceamento de classes (só classificação) --------------------
+        # taxa de evento da referência AO LADO do toggle: contexto p/ decidir se
+        # o balanceamento é necessário (desbalanceio forte → toggle útil).
+        self.cb_balance = W.Checkbox(value=False, indent=False,
+                                     description="balancear classes")
+        self.cb_balance.tooltip = (
+            "Compensa o desbalanceio do alvo no TREINO, traduzido por algoritmo: "
+            "class_weight='balanced' (logística/florestas/HistGB), scale_pos_weight "
+            "= n_neg/n_pos (XGBoost/LightGBM), auto_class_weights (CatBoost); o "
+            "Gradient Boosting clássico usa sample_weight balanceado no fit. No "
+            "tuning (Optuna): desligado, a opção entra no espaço de busca; ligado, "
+            "fica fixa em todos os trials.")
+        _ev_txt = ""
+        if self.task_type == "classification":
+            _yref = pd.to_numeric(self.seg._frame(self.seg.ref_sample)[self.seg.target],
+                                  errors="coerce")
+            if _yref.notna().any():
+                _ev_txt = (f"taxa de evento ({self.seg.ref_sample}): "
+                           f"<b>{float(_yref.mean()) * 100:.2f}%</b>")
+        self.lb_balance = W.HTML(
+            f"<span style='font-size:12px;color:var(--sub-ink);padding-left:6px'>"
+            f"{_ev_txt}</span>")
+        self.cb_balance.observe(lambda c: self._mark_dirty(), names="value")
+        self.row_balance = W.HBox([self.cb_balance, self.lb_balance],
+                                  layout=W.Layout(align_items="center"))
+        if self.task_type != "classification":
+            self.row_balance.layout.display = "none"
         self.out_algo_help = W.HTML()   # tutorial do algoritmo/parâmetros selecionado
         self.out_metrics = W.HTML()
         self.out_metric_compare = W.HTML()   # barras: principais métricas por amostra (DES vs OOT)
@@ -1185,6 +1212,7 @@ class ModelSegmenterUI:
         train_card = W.VBox([
             W.HTML("<div class='mseg-h'>Treinar (ou usar modelo pré-ajustado via set_model)</div>"),
             self.row_algo,
+            self.row_balance,
             self.row_twostage, self.box_twostage,
             self.box_logit, self.box_ensemble, self.box_lr, self.box_adv,
             self.box_tuning_space,
@@ -1591,6 +1619,50 @@ class ModelSegmenterUI:
             self.out_adv_msafra_fig,
         ]); card_adv_safra.add_class("mseg-card")
 
+        # métricas e distribuição de ratings por SEGMENTO arbitrário: quebra por
+        # uma coluna categórica de CONTEXTO (não-feature: produto, canal, UF…).
+        _grp_opts = self._group_col_options()
+        self.dd_group_col = W.Dropdown(
+            options=_grp_opts or [("(nenhuma coluna de contexto)", None)],
+            description="Coluna:", style={"description_width": "initial"},
+            layout=W.Layout(width="auto", min_width="220px"))
+        self.dd_group_col.tooltip = ("Coluna categórica do DataFrame que NÃO é variável "
+                                     "do modelo (contexto: produto, canal, região…).")
+        self.tx_group_minn = W.BoundedIntText(
+            value=30, min=2, max=1000000, description="min n:",
+            style={"description_width": "initial"}, layout=W.Layout(width="130px"))
+        self.tx_group_minn.tooltip = ("Mínimo de linhas por grupo para reportar as métricas "
+                                      "de discriminação/erro — grupos menores ficam NaN "
+                                      "com nota (métrica em grupo minúsculo engana).")
+        self.btn_group_metrics = W.Button(description="Métricas por grupo",
+                                          button_style="primary", icon="table",
+                                          tooltip="KS/AUC/Gini (classificação) ou RMSE/MAE/R² "
+                                                  "(regressão) por grupo da coluna escolhida, "
+                                                  "na amostra do seletor Amostra:.")
+        self.btn_group_rating = W.Button(description="Ratings por grupo", icon="bar-chart",
+                                         tooltip="Distribuição (%) dos ratings dentro de cada "
+                                                 "grupo da coluna escolhida. Requer a régua "
+                                                 "de ratings construída.")
+        self.out_adv_group_metrics = W.HTML()
+        self.out_adv_group_rating = W.HTML()
+        self.btn_group_metrics.on_click(self._on_adv_group_metrics)
+        self.btn_group_rating.on_click(self._on_adv_group_rating)
+        card_adv_group = W.VBox([
+            W.HTML("<div class='mseg-h'>Métricas e ratings por segmento (coluna de "
+                   "contexto)</div>"),
+            W.HTML("<div class='mseg-legend'>Quebra as métricas do modelo e a distribuição "
+                   "dos ratings por uma coluna <b>categórica de contexto</b> do DataFrame "
+                   "que <b>não é variável do modelo</b> (ex.: produto, canal, região). "
+                   "Grupos com menos de <b>min n</b> linhas não têm métricas reportadas "
+                   "(a coluna <i>nota</i> explica). A amostra segue o seletor "
+                   "<b>Amostra:</b> no topo da aba.</div>"),
+            W.HBox([self.dd_group_col, self.tx_group_minn, self.btn_group_metrics,
+                    self.btn_group_rating],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            self.out_adv_group_metrics,
+            self.out_adv_group_rating,
+        ]); card_adv_group.add_class("mseg-card")
+
         self.tx_tol_adv = W.BoundedFloatText(value=20.0, min=0.0, max=100.0, step=5.0,
                                              description="Tolerância (%):",
                                              style={"description_width": "initial"},
@@ -1633,7 +1705,8 @@ class ModelSegmenterUI:
             self.out_adv_stats,
         ]); card_adv_varprofile.add_class("mseg-card")
 
-        tab_adv = W.VBox([card_adv_disc, card_adv_safra, card_adv_varprofile, card_adv_bt],
+        tab_adv = W.VBox([card_adv_disc, card_adv_safra, card_adv_group,
+                          card_adv_varprofile, card_adv_bt],
                          layout=W.Layout(padding="2px"))
 
         # ---------- Aba: Importância (Backward Elimination) ----------
@@ -2824,8 +2897,13 @@ class ModelSegmenterUI:
                     f"✓ Two-Stage treinado (threshold={thr:.4f}) · "
                     f"{len(self.seg.model_features)} variáveis.</span></div>")
             else:
-                self.seg.fit(algo, hyperparams=self._collect_hyperparams(algo), transform=transform)
+                balance = (self.task_type == "classification"
+                           and bool(self.cb_balance.value))
+                self.seg.fit(algo, hyperparams=self._collect_hyperparams(algo),
+                             transform=transform, class_balance=balance)
                 modo = "WoE/bins" if transform == "woe" else "valores crus"
+                if balance:
+                    modo += " · classes balanceadas"
                 self._log(f"[fit] {algo} treinado com {len(self.seg.model_features)} "
                           f"variáveis ({modo}).")
                 self.out_fit_status.value = (
@@ -2888,6 +2966,11 @@ class ModelSegmenterUI:
         search_space = self._collect_search_space(algo)     # limites escolhidos na gaveta
         experiment = self.tx_experiment.value or None
         model_name = self.tx_model.value or None
+        # toggle "balancear classes": ligado ⇒ FIXO em todos os trials; desligado
+        # ⇒ a opção entra no espaço de busca do Optuna (class_balance=None).
+        # Fora da classificação o parâmetro é ignorado pelo tune_optuna.
+        class_balance = (True if (self.task_type == "classification"
+                                  and self.cb_balance.value) else None)
 
         # O tuning roda numa thread de FUNDO para a UI seguir responsiva — assim o
         # botão "Cancelar" (que chama seg.cancel_tuning()) é processado enquanto o
@@ -2902,7 +2985,8 @@ class ModelSegmenterUI:
                                            mlflow_experiment=experiment,
                                            search_space=search_space,
                                            register_model=log_mlflow,
-                                           mlflow_model_name=model_name)
+                                           mlflow_model_name=model_name,
+                                           class_balance=class_balance)
             except Exception as e:
                 self.pb_tune.bar_style = "danger"
                 self.out_tune.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro no "
@@ -2968,6 +3052,13 @@ class ModelSegmenterUI:
         self._log(f"[tune] {algo}: melhor {res['metric']}={res['best_value']:.4f} "
                   f"em {res['n_trials']} trials; modelo re-treinado com os melhores."
                   + _mlflow_msg)
+        # espelha o balanceamento escolhido pelo estudo no toggle (o fit_best já
+        # o aplicou; sem isso um novo "Treinar" divergiria do modelo tunado).
+        if self.task_type == "classification" and getattr(self, "cb_balance", None) is not None:
+            try:
+                self.cb_balance.value = bool(getattr(self.seg, "class_balance", False))
+            except Exception:  # noqa: BLE001 - cosmético
+                pass
         self._render_metrics()
         self._render_model_plots()
         self._render_formula()
@@ -3836,6 +3927,12 @@ class ModelSegmenterUI:
         l2 = _l2_param_for(self.dd_algo.value)   # nome do L2 varia por algoritmo
         if l2:
             _set(self.fl_l2, l2, float, self.cb_l2)
+        # balanceamento de classes do modelo carregado (persistido no to_dict)
+        if self.task_type == "classification" and getattr(self, "cb_balance", None) is not None:
+            try:
+                self.cb_balance.value = bool(getattr(self.seg, "class_balance", False))
+            except Exception:               # noqa: BLE001 - cosmético
+                pass
 
     def _sync_twostage_widgets(self):
         """Reflete o estado Two-Stage do modelo (após load/set_model) nos controles:
@@ -3893,7 +3990,8 @@ class ModelSegmenterUI:
         gráficos/tabelas do modelo ANTIGO na tela."""
         for w in (self.out_adv_cap, self.out_adv_lift, self.out_adv_msafra_tab,
                   self.out_adv_msafra_fig, self.out_adv_backtest,
-                  self.out_adv_missing, self.out_adv_stats):
+                  self.out_adv_missing, self.out_adv_stats,
+                  self.out_adv_group_metrics, self.out_adv_group_rating):
             w.value = ""
         # o modelo mudou ⇒ o resultado do backward elimination ficou defasado (a ordem
         # de remoção/métricas vieram do modelo anterior) — descarta o cache p/ não
@@ -3978,6 +4076,69 @@ class ModelSegmenterUI:
             except Exception as e:
                 self.out_adv_backtest.value = f"<i>{e}</i>"
                 self._log(f"[avançado] erro no backtest gráfico: {e}")
+
+    def _group_col_options(self):
+        """Colunas categóricas de CONTEXTO (não-features) do df, para as quebras
+        por segmento da aba Avançado: fora das candidatas e do alvo, sem colunas
+        de data; numéricas só entram com baixa cardinalidade (≤ 20 níveis)."""
+        seg = self.seg
+        cand = set(seg.candidates)
+        out = []
+        for c in seg.df.columns:
+            if c == seg.target or c in cand:
+                continue
+            col = seg.df[c]
+            try:
+                if pd.api.types.is_datetime64_any_dtype(col):
+                    continue
+                if (pd.api.types.is_numeric_dtype(col)
+                        and not pd.api.types.is_bool_dtype(col)
+                        and col.nunique(dropna=True) > 20):
+                    continue
+            except Exception:               # noqa: BLE001 - coluna exótica ⇒ fora
+                continue
+            out.append(c)
+        return out
+
+    def _on_adv_group_metrics(self, b):
+        if self.seg.score_ is None:
+            self.out_adv_group_metrics.value = "<i>Treine o modelo primeiro.</i>"; return
+        col = self.dd_group_col.value
+        if not col:
+            self.out_adv_group_metrics.value = (
+                "<div class='mseg-legend'>Nenhuma coluna categórica de contexto "
+                "(não-feature) disponível no DataFrame.</div>"); return
+        with self._busy(self.btn_group_metrics, self.btn_group_rating,
+                        msg="calculando métricas por grupo…"):
+            try:
+                mg = self.seg.metrics_by_group(col, sample=self._adv_sample(),
+                                               min_n=int(self.tx_group_minn.value))
+                self.out_adv_group_metrics.value = self._df_html(
+                    mg.round(4), max_height="320px", center=True)
+                self._log(f"[avançado] métricas por grupo de '{col}' calculadas.")
+            except Exception as e:
+                self.out_adv_group_metrics.value = f"<i>{e}</i>"
+                self._log(f"[avançado] erro nas métricas por grupo: {e}")
+
+    def _on_adv_group_rating(self, b):
+        if getattr(self.seg, "rating_", None) is None:
+            self.out_adv_group_rating.value = ("<i>Gere os ratings primeiro "
+                                               "(aba Ratings &amp; Score).</i>"); return
+        col = self.dd_group_col.value
+        if not col:
+            self.out_adv_group_rating.value = (
+                "<div class='mseg-legend'>Nenhuma coluna categórica de contexto "
+                "(não-feature) disponível no DataFrame.</div>"); return
+        with self._busy(self.btn_group_metrics, self.btn_group_rating,
+                        msg="calculando ratings por grupo…"):
+            try:
+                rg = self.seg.rating_distribution_by_group(col, sample=self._adv_sample())
+                self.out_adv_group_rating.value = self._df_html(
+                    rg, max_height="320px", center=True)
+                self._log(f"[avançado] distribuição de ratings por grupo de '{col}'.")
+            except Exception as e:
+                self.out_adv_group_rating.value = f"<i>{e}</i>"
+                self._log(f"[avançado] erro nos ratings por grupo: {e}")
 
     def _on_adv_varprofile(self, b):
         if not (self.date_col or "").strip():

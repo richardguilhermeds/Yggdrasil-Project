@@ -1521,3 +1521,147 @@ def test_ui_two_stage_oculto_em_classificacao():
         ui = ModelSegmenterUI(df, target="target", task_type="classification",
                               sample_col="amostra", ref_sample="DES")
     assert ui.row_twostage.layout.display == "none"         # sem two-stage em classificação
+
+
+# ----------------------------------------------------------------------
+# Balanceamento de classes (fit/tune) + métricas e ratings por segmento
+# ----------------------------------------------------------------------
+def _seg_com_contexto(task, seed=0):
+    """Segmenter com uma coluna categórica de CONTEXTO ('canal', fora das
+    features via ``features=``) para as quebras por grupo — inclui um grupo
+    minúsculo ('RARO') para exercitar o ``min_n``."""
+    df = _synthetic(task, seed=seed)
+    rng = np.random.default_rng(seed)
+    df["canal"] = rng.choice(["APP", "AGENCIA"], size=len(df), p=[0.6, 0.4]).astype(object)
+    df.loc[df.index[:5], "canal"] = "RARO"
+    feats = [c for c in df.columns if c.startswith("feat_")]
+    return ModelSegmenter(df, target="target", task_type=task, sample_col="amostra",
+                          ref_sample="DES", date_col="dt_ref", features=feats,
+                          verbose=False)
+
+
+def test_metrics_by_group(task):
+    seg = _seg_com_contexto(task)
+    seg.fit(_default_algo(task))
+    mg = seg.metrics_by_group("canal")
+    assert {"grupo", "n", "nota"} <= set(mg.columns)
+    if task == "classification":
+        assert {"taxa_evento", "auc", "ks", "gini"} <= set(mg.columns)
+    else:
+        assert {"previsto_medio", "realizado_medio", "mae", "rmse", "r2"} <= set(mg.columns)
+    assert set(mg["grupo"]) == {"APP", "AGENCIA", "RARO"}
+    met = "auc" if task == "classification" else "rmse"
+    idx = mg.set_index("grupo")
+    # grupo minúsculo (< min_n): métricas suprimidas (NaN) com nota explicando
+    assert np.isnan(idx.loc["RARO", met]) and "n <" in idx.loc["RARO", "nota"]
+    # grupos grandes têm métrica reportada
+    assert np.isfinite(idx.loc["APP", met])
+    # restrição por amostra: menos linhas que a base toda
+    mg_des = seg.metrics_by_group("canal", sample="DES")
+    assert int(mg_des["n"].sum()) < int(mg["n"].sum())
+
+
+def test_metrics_by_group_validacao(task):
+    seg = _seg_com_contexto(task)
+    seg.fit(_default_algo(task))
+    with pytest.raises(ValueError, match="não existe"):
+        seg.metrics_by_group("nao_existe")
+    with pytest.raises(ValueError, match="candidata"):
+        seg.metrics_by_group("feat_00")     # feature do modelo não vale
+    with pytest.raises(ValueError, match="data"):
+        seg.metrics_by_group("dt_ref")      # coluna de data → metrics_by_safra
+    s2 = _seg_com_contexto(task, seed=1)    # sem fit → erro amigável
+    with pytest.raises(RuntimeError):
+        s2.metrics_by_group("canal")
+
+
+def test_rating_distribution_by_group(task):
+    seg = _seg_com_contexto(task)
+    seg.fit(_default_algo(task))
+    seg.build_ratings(method="quantil", n_ratings=4)
+    rd = seg.rating_distribution_by_group("canal")
+    assert list(rd.columns[:2]) == ["grupo", "n"]
+    pct_cols = [c for c in rd.columns if c.startswith("%_")]
+    assert len(pct_cols) == len(seg.rating_labels_)
+    soma = rd[pct_cols].sum(axis=1)
+    assert ((soma > 99.0) & (soma < 101.0)).all()   # cada grupo fecha ~100%
+    # sem ratings construídos → erro amigável
+    seg2 = _seg_com_contexto(task, seed=1)
+    seg2.fit(_default_algo(task))
+    with pytest.raises(RuntimeError):
+        seg2.rating_distribution_by_group("canal")
+
+
+def test_fit_class_balance_traducao_sklearn():
+    df = _synthetic("classification")
+    seg = ModelSegmenter(df, target="target", task_type="classification",
+                         sample_col="amostra", ref_sample="DES", verbose=False)
+    seg.fit("logistica", class_balance=True)
+    assert seg.class_balance is True
+    assert seg.model.named_steps["est"].class_weight == "balanced"
+    assert seg.score_ is not None
+    # balancear sobe a média do score (upweight da classe minoritária ~25%)
+    m_bal = float(seg.score_.mean())
+    seg.fit("logistica", class_balance=False)
+    assert seg.class_balance is False
+    assert seg.model.named_steps["est"].class_weight is None
+    assert m_bal > float(seg.score_.mean())
+    # florestas e HistGB também ganham class_weight='balanced'
+    seg.fit("random_forest", hyperparams={"n_estimators": 20}, class_balance=True)
+    assert seg.model.named_steps["est"].class_weight == "balanced"
+    seg.fit("hist_gradient_boosting", hyperparams={"n_estimators": 30},
+            class_balance=True)
+    assert seg.model.named_steps["est"].class_weight == "balanced"
+
+
+def test_fit_class_balance_gradient_boosting_sample_weight():
+    """GradientBoosting clássico não tem class_weight — o balanceamento entra
+    como sample_weight no fit e não pode quebrar o treino."""
+    df = _synthetic("classification")
+    seg = ModelSegmenter(df, target="target", task_type="classification",
+                         sample_col="amostra", ref_sample="DES", verbose=False)
+    seg.fit("gradient_boosting", hyperparams={"n_estimators": 30, "max_depth": 2},
+            class_balance=True)
+    assert seg.class_balance is True and seg.score_ is not None
+    assert "class_weight" not in seg.model.named_steps["est"].get_params()
+
+
+def test_fit_class_balance_via_hyperparams_e_persistencia():
+    """'class_balance' embutido nos hyperparams (ex.: best_params do Optuna) é
+    extraído — não vaza para o estimador — e a flag persiste no to_dict."""
+    df = _synthetic("classification")
+    seg = ModelSegmenter(df, target="target", task_type="classification",
+                         sample_col="amostra", ref_sample="DES", verbose=False)
+    seg.fit("logistica", hyperparams={"class_balance": True, "C": 0.5})
+    assert seg.class_balance is True
+    assert "class_balance" not in seg.hyperparams
+    assert seg.model.named_steps["est"].class_weight == "balanced"
+    d = seg.to_dict()
+    assert d["class_balance"] is True
+    seg2 = ModelSegmenter.from_dict(d, df)
+    assert seg2.class_balance is True
+
+
+def test_class_balance_regressao_erro():
+    df = _synthetic("regression")
+    seg = ModelSegmenter(df, target="target", task_type="regression",
+                         sample_col="amostra", ref_sample="DES", verbose=False)
+    with pytest.raises(ValueError, match="classification"):
+        seg.fit("linear", class_balance=True)
+
+
+def test_tune_optuna_class_balance_no_espaco():
+    """class_balance=None (default) inclui o balanceamento no espaço de busca;
+    True/False fixa a opção (não vira parâmetro do estudo)."""
+    pytest.importorskip("optuna")
+    df = _synthetic("classification", n=1200)
+    seg = ModelSegmenter(df, target="target", task_type="classification",
+                         sample_col="amostra", ref_sample="DES", verbose=False)
+    res = seg.tune_optuna(algorithm="logistica", n_trials=4, verbose=False)
+    assert any("class_balance" in t.params for t in seg.study_.trials)
+    assert res["n_trials"] >= 1
+    res2 = seg.tune_optuna(algorithm="logistica", n_trials=2, verbose=False,
+                           class_balance=True)
+    assert all("class_balance" not in t.params for t in seg.study_.trials)
+    assert res2["n_trials"] >= 1
+    assert seg.class_balance is True          # fit_best repassa o valor fixado

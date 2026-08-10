@@ -156,3 +156,56 @@ def test_backward_bloqueado_em_two_stage():
         ui._on_backelim(None)              # não deve iniciar a execução nem levantar
     assert "Two-Stage" in ui.out_backelim_status.value
     assert ui._backelim_thread is None
+
+
+def test_toggle_balancear_classes_clf():
+    """Classificação: o toggle aparece com a taxa de evento da referência ao lado
+    e o fit via UI repassa class_balance ao segmenter (class_weight='balanced')."""
+    ui = _build()
+    assert ui.row_balance.layout.display != "none"
+    assert "taxa de evento" in ui.lb_balance.value
+    ui.cb_balance.value = True
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_fit(None)
+    assert ui.seg.class_balance is True
+    assert getattr(ui.seg.model.named_steps["est"], "class_weight", None) == "balanced"
+    assert "classes balanceadas" in ui.out_fit_status.value
+
+
+def test_toggle_balancear_classes_oculto_na_regressao():
+    """Regressão: o toggle fica oculto e o fit segue sem balanceamento."""
+    ui = _build_reg()
+    assert ui.row_balance.layout.display == "none"
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_fit(None)
+    assert getattr(ui.seg, "class_balance", False) is False
+
+
+def test_grupo_avancado_metricas_e_ratings():
+    """Aba Avançado: dropdown de colunas de contexto (não-features) + botões de
+    métricas e ratings por grupo renderizam tabelas; ratings exigem a régua."""
+    ui = _build()
+    # 'amostra' (sample_col) é coluna categórica de contexto; features ficam fora
+    assert "amostra" in list(ui.dd_group_col.options)
+    assert "score" not in list(ui.dd_group_col.options)
+    ui.dd_group_col.value = "amostra"
+    # sem modelo treinado → aviso amigável
+    ui._on_adv_group_metrics(None)
+    assert "Treine o modelo" in ui.out_adv_group_metrics.value
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.seg.fit()
+        ui._on_adv_group_metrics(None)
+    assert "<table" in ui.out_adv_group_metrics.value
+    assert "DES" in ui.out_adv_group_metrics.value
+    # ratings por grupo exigem a régua construída
+    ui._on_adv_group_rating(None)
+    assert "Gere os ratings" in ui.out_adv_group_rating.value
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.seg.build_ratings(method="quantil", n_ratings=4)
+        ui._on_adv_group_rating(None)
+    assert "<table" in ui.out_adv_group_rating.value
+    # re-treinar limpa as saídas da aba Avançado (modelo antigo fora da tela)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_fit(None)
+    assert ui.out_adv_group_metrics.value == ""
+    assert ui.out_adv_group_rating.value == ""

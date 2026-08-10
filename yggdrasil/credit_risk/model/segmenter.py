@@ -347,8 +347,19 @@ def _require(module: str, algorithm: str):
         ) from e
 
 
+def _balanced_sample_weight(y) -> np.ndarray:
+    """Pesos amostrais no esquema ``class_weight='balanced'`` do sklearn —
+    ``w_c = n / (k · n_c)`` — para algoritmos SEM ``class_weight`` no construtor
+    (GradientBoosting clássico): o chamador passa o resultado como
+    ``sample_weight`` no ``fit``."""
+    arr = np.asarray(y, dtype="float64")
+    classes, counts = np.unique(arr, return_counts=True)
+    w = {c: arr.size / (classes.size * n) for c, n in zip(classes, counts)}
+    return np.asarray([w[v] for v in arr], dtype="float64")
+
+
 def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None,
-                     random_state: int | None = None):
+                     random_state: int | None = None, class_counts=None):
     """Instancia o estimador do algoritmo escolhido (registry extensível).
 
     sklearn é sempre disponível; LightGBM/XGBoost/CatBoost são pacotes opcionais
@@ -357,7 +368,16 @@ def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None,
     ``random_state`` semeia os estimadores estocásticos (florestas/boosting) para
     reprodutibilidade; ``None`` cai no default histórico 42. Via ``setdefault``, uma
     seed explícita em ``hyperparams`` (usuário/Optuna) vence. Logística/linear não
-    aceitam seed (não são estocásticas); CatBoost usa ``random_seed``."""
+    aceitam seed (não são estocásticas); CatBoost usa ``random_seed``.
+
+    ``class_counts`` (só classificação): tupla ``(n_neg, n_pos)`` da amostra de
+    treino — quando informada, liga o **balanceamento de classes**, traduzido para
+    o parâmetro próprio de cada algoritmo (``setdefault``: um valor explícito em
+    ``hyperparams`` vence): ``class_weight='balanced'`` (logística, florestas,
+    HistGB), ``scale_pos_weight=n_neg/n_pos`` (XGBoost, LightGBM) e
+    ``auto_class_weights='Balanced'`` (CatBoost). O GradientBoosting clássico não
+    tem ``class_weight`` no construtor — o chamador aplica ``sample_weight``
+    balanceado no ``fit`` (ver :func:`_balanced_sample_weight`)."""
     hp = dict(hyperparams or {})
     seed = 42 if random_state is None else int(random_state)
     if algorithm not in ALGORITHMS:
@@ -368,10 +388,17 @@ def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None,
             f"Algoritmo {algorithm!r} não suporta task_type={task_type!r} "
             f"(suporta {ALGORITHMS[algorithm]['tasks']}).")
     is_clf = task_type == "classification"
+    balance = is_clf and class_counts is not None
+    spw = 1.0
+    if balance:
+        n_neg, n_pos = int(class_counts[0]), int(class_counts[1])
+        spw = n_neg / max(n_pos, 1)
 
     if algorithm == "logistica":
         from sklearn.linear_model import LogisticRegression
         hp.setdefault("max_iter", 1000)
+        if balance:
+            hp.setdefault("class_weight", "balanced")
         return LogisticRegression(**hp)
     if algorithm == "linear":
         from sklearn.linear_model import LinearRegression
@@ -381,17 +408,23 @@ def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None,
         RF = RandomForestClassifier if is_clf else RandomForestRegressor
         hp.setdefault("n_estimators", 200)
         hp.setdefault("random_state", seed)
+        if balance:
+            hp.setdefault("class_weight", "balanced")
         return RF(**hp)
     if algorithm == "extra_trees":
         from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
         ET = ExtraTreesClassifier if is_clf else ExtraTreesRegressor
         hp.setdefault("n_estimators", 200)
         hp.setdefault("random_state", seed)
+        if balance:
+            hp.setdefault("class_weight", "balanced")
         return ET(**hp)
     if algorithm == "gradient_boosting":
         from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
         GB = GradientBoostingClassifier if is_clf else GradientBoostingRegressor
         hp.setdefault("random_state", seed)
+        # sem class_weight no construtor: o balanceamento é via sample_weight no
+        # fit (responsabilidade do chamador — ver _balanced_sample_weight).
         return GB(**hp)
     if algorithm == "hist_gradient_boosting":
         from sklearn.ensemble import (HistGradientBoostingClassifier,
@@ -400,6 +433,8 @@ def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None,
         if "n_estimators" in hp:                       # nome unificado na UI → max_iter
             hp["max_iter"] = hp.pop("n_estimators")
         hp.setdefault("random_state", seed)
+        if balance:                                    # class_weight no sklearn >= 1.2
+            hp.setdefault("class_weight", "balanced")
         return HGB(**hp)
     if algorithm == "lightgbm":
         lgb = _require("lightgbm", algorithm)
@@ -408,6 +443,8 @@ def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None,
         hp.setdefault("learning_rate", 0.05)
         hp.setdefault("random_state", seed)
         hp.setdefault("verbose", -1)
+        if balance:
+            hp.setdefault("scale_pos_weight", spw)
         return Est(**hp)
     if algorithm == "xgboost":
         xgb = _require("xgboost", algorithm)
@@ -417,6 +454,8 @@ def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None,
         hp.setdefault("random_state", seed)
         hp.setdefault("verbosity", 0)
         hp.setdefault("tree_method", "hist")
+        if balance:
+            hp.setdefault("scale_pos_weight", spw)
         return Est(**hp)
     if algorithm == "catboost":
         cb = _require("catboost", algorithm)
@@ -427,6 +466,8 @@ def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None,
             hp["depth"] = min(int(hp.pop("max_depth")), 16)  # teto do CatBoost
         if "subsample" in hp:            # subsample só vale com bootstrap amostral
             hp.setdefault("bootstrap_type", "Bernoulli")
+        if balance:
+            hp.setdefault("auto_class_weights", "Balanced")
         hp.setdefault("iterations", 300)
         hp.setdefault("learning_rate", 0.05)
         hp.setdefault("random_seed", seed)
@@ -652,6 +693,9 @@ class ModelSegmenter:
         self.algorithm: str | None = None
         self.hyperparams: dict = {}
         self.feature_transform: str = "raw"   # "raw" | "woe" (binagem + WoE/risco do bin)
+        # balanceamento de classes do último fit (só classificação; ver fit) —
+        # traduzido por algoritmo em _build_estimator.
+        self.class_balance: bool = False
         self.model_features: list = []
         # modelo Two-Stage (hurdle de alvo): classificação P(y≥t) + regressão em
         # y≥t, combinadas em E[y]. Desligado por padrão; ligado por fit_two_stage.
@@ -2113,7 +2157,8 @@ class ModelSegmenter:
             fallback = float(mean_global) if np.isfinite(mean_global) else 0.0
         return {"kind": kind, "bins": enc_bins, "fallback": fallback}
 
-    def _build_pipeline(self, features, algorithm, hyperparams, transform="raw", task=None):
+    def _build_pipeline(self, features, algorithm, hyperparams, transform="raw", task=None,
+                        class_counts=None):
         from sklearn.compose import ColumnTransformer
         from sklearn.impute import SimpleImputer
         from sklearn.pipeline import Pipeline
@@ -2121,8 +2166,11 @@ class ModelSegmenter:
         # ``task`` permite forçar classificação/regressão (usado pelo Two-Stage,
         # que constrói um classificador e uma regressão a partir de um segmenter
         # de regressão); por padrão segue o task_type do segmenter.
+        # ``class_counts=(n_neg, n_pos)`` liga o balanceamento de classes no
+        # estimador (ver :func:`_build_estimator`).
         task = task or self.task_type
-        est = _build_estimator(algorithm, task, hyperparams, random_state=self.random_state)
+        est = _build_estimator(algorithm, task, hyperparams, random_state=self.random_state,
+                               class_counts=class_counts)
         if transform == "woe":
             # variáveis transformadas no estilo scorecard (binagem + WoE/risco do bin)
             encodings = {f: self._bin_encoding(f) for f in features}
@@ -2144,7 +2192,8 @@ class ModelSegmenter:
         pre = ColumnTransformer(transformers, remainder="drop")
         return Pipeline([("pre", pre), ("est", est)])
 
-    def fit(self, algorithm=None, hyperparams=None, features=None, transform="raw"):
+    def fit(self, algorithm=None, hyperparams=None, features=None, transform="raw",
+            class_balance=False):
         """Treina um modelo na amostra de referência (DES) com as variáveis
         selecionadas (ou ``features``). ``algorithm`` default: logística
         (classificação) / linear (regressão). Calcula ``score_`` para todas as linhas.
@@ -2152,16 +2201,33 @@ class ModelSegmenter:
         ``transform``: ``"raw"`` usa os valores originais (numéricas + one-hot das
         categóricas); ``"woe"`` transforma cada variável no WoE do seu bin
         (classificação) ou no risco médio do bin (regressão), reaproveitando os
-        bins/grupos definidos na análise univariada — estilo *scorecard*."""
+        bins/grupos definidos na análise univariada — estilo *scorecard*.
+
+        ``class_balance=True`` (só classificação) compensa o desbalanceio do alvo
+        no treino, traduzido por algoritmo em :func:`_build_estimator`:
+        ``class_weight='balanced'`` (logística, florestas, HistGB),
+        ``scale_pos_weight=n_neg/n_pos`` (XGBoost, LightGBM),
+        ``auto_class_weights='Balanced'`` (CatBoost); o GradientBoosting clássico
+        (sem ``class_weight``) recebe ``sample_weight`` balanceado no ``fit``.
+        Um ``"class_balance"`` dentro de ``hyperparams`` (ex.: ``best_params`` do
+        Optuna) tem precedência sobre o argumento."""
         if algorithm is None:
             algorithm = "logistica" if self.task_type == "classification" else "linear"
+        hp = dict(hyperparams or {})
+        # "class_balance" pode vir embutido nos hyperparams (pseudo-parâmetro
+        # nosso, não do estimador — ex.: best_params do tuning): extrai antes.
+        class_balance = bool(hp.pop("class_balance", class_balance))
+        if class_balance and self.task_type != "classification":
+            raise ValueError("Balanceamento de classes só se aplica a "
+                             "task_type='classification'.")
         feats = list(features) if features is not None else self.selected_features()
         if not feats:
             feats = list(self.candidates)
         self.model_features = feats
         self.algorithm = algorithm
-        self.hyperparams = dict(hyperparams or {})
+        self.hyperparams = dict(hp)
         self.feature_transform = transform
+        self.class_balance = class_balance
         self.two_stage = False                 # fit "normal" desliga o modo hurdle
         self.two_stage_threshold = None
 
@@ -2171,8 +2237,17 @@ class ModelSegmenter:
         y = fit_df[self.target]
         if self.task_type == "classification":
             y = y.astype(int)
-        self.model = self._build_pipeline(feats, algorithm, hyperparams, transform=transform)
-        self.model.fit(X, y)
+        counts = None
+        fit_kwargs = {}
+        if class_balance:
+            if algorithm == "gradient_boosting":   # sem class_weight no construtor
+                fit_kwargs["est__sample_weight"] = _balanced_sample_weight(y)
+            else:
+                n_pos = int((y == 1).sum())
+                counts = (int(len(y)) - n_pos, n_pos)
+        self.model = self._build_pipeline(feats, algorithm, hp, transform=transform,
+                                          class_counts=counts)
+        self.model.fit(X, y, **fit_kwargs)
         self.score_ = self._compute_score(self.df)
         self._shap_cache = {}
         return self
@@ -2240,6 +2315,7 @@ class ModelSegmenter:
                             "reg_hyperparams": dict(reg_hyperparams or {}),
                             "anchor0": anchor0}
         self.feature_transform = "raw"
+        self.class_balance = False             # hurdle não usa o balanceamento do fit
         self.score_ = self._compute_score(self.df)
         self._shap_cache = {}
         self._metrics_cache = None
@@ -2296,7 +2372,7 @@ class ModelSegmenter:
                     timeout=None, random_state=None, fit_best=True, verbose=False,
                     progress_callback=None, log_mlflow=False, mlflow_experiment=None,
                     mlflow_run_name=None, search_space=None, register_model=False,
-                    mlflow_model_name=None):
+                    mlflow_model_name=None, class_balance=None):
         """Otimização bayesiana de hiperparâmetros com **Optuna** (dependência
         core). Treina na referência (DES) e avalia no OOT (se houver alvo;
         senão, num split 75/25 do DES), maximizando **AUC** (classificação) ou
@@ -2308,6 +2384,12 @@ class ModelSegmenter:
         buscados e seus intervalos — dict ``{nome: {type, low, high, log?, step?,
         choices?}}`` (ver :data:`OPTUNA_SEARCH_SPACE` e :func:`_optuna_space`).
         ``None`` usa o catálogo padrão do algoritmo.
+
+        ``class_balance`` (só classificação): ``None`` (default) inclui o
+        **balanceamento de classes** no espaço de busca — o Optuna testa ligado ×
+        desligado como um parâmetro categórico ``class_balance``; ``True``/``False``
+        fixa a opção em todos os trials. O melhor valor é aplicado no re-ajuste
+        final (``fit_best``). Ignorado na regressão. Ver :meth:`fit`.
 
         Cada trial guarda, em ``trial.user_attrs``, dois grupos de métricas —
         ``modelagem`` (AUC/KS/Gini ou RMSE/MAE/R² na validação) e ``monitoramento``
@@ -2364,12 +2446,32 @@ class ModelSegmenter:
         # um OOT de <50 linhas cairia no holdout do DES mas seria rotulado como OOT
         # (tag MLflow enganosa para governança).
         val_sample = oot if used_oot else "split"
+        # contagens (n_neg, n_pos) do TREINO do estudo, p/ o balanceamento de
+        # classes (scale_pos_weight etc.) quando o trial o ligar.
+        n_pos_tr = int((ytr == 1).sum()) if is_clf else 0
+        n_neg_tr = (int(len(ytr)) - n_pos_tr) if is_clf else 0
 
         def objective(trial):
             from ...monitoring import psi as _psi_num
             hp = _optuna_space(trial, algorithm, search_space)
-            pipe = self._build_pipeline(feats, algorithm, hp, transform=transform)
-            pipe.fit(Xtr, ytr)
+            # balanceamento de classes: entra no espaço de busca (class_balance
+            # =None) ou fica fixo em todos os trials (True/False). Pseudo-
+            # parâmetro nosso — traduzido em _build_estimator, não vai direto ao
+            # estimador (GradientBoosting usa sample_weight balanceado no fit).
+            cb_flag = False
+            if is_clf:
+                cb_flag = (bool(trial.suggest_categorical("class_balance", [False, True]))
+                           if class_balance is None else bool(class_balance))
+            counts = None
+            fit_kw = {}
+            if cb_flag:
+                if algorithm == "gradient_boosting":
+                    fit_kw["est__sample_weight"] = _balanced_sample_weight(ytr)
+                else:
+                    counts = (n_neg_tr, n_pos_tr)
+            pipe = self._build_pipeline(feats, algorithm, hp, transform=transform,
+                                        class_counts=counts)
+            pipe.fit(Xtr, ytr, **fit_kw)
             s = self._predict_score_array(pipe, Xva)
             s_tr = self._predict_score_array(pipe, Xtr)
             # grupo MODELAGEM (qualidade na validação) + o valor-objetivo
@@ -2449,8 +2551,11 @@ class ModelSegmenter:
                 print("[tune_optuna] aviso: todos os trials produziram métrica inválida "
                       "(AUC/R² não-finito) — modelo NÃO reajustado.")
             if fit_best and n_ok and not cancelled and not degenerate:
+                # "class_balance" (se buscado) vem dentro de best_params e o fit
+                # o extrai; se foi FIXADO por argumento, repassa o valor fixo.
+                cb_fixed = bool(class_balance) if (is_clf and class_balance is not None) else False
                 self.fit(algorithm=algorithm, hyperparams=study.best_params,
-                         features=feats, transform=transform)
+                         features=feats, transform=transform, class_balance=cb_fixed)
 
         # --- MLflow: run-pai + um run aninhado por trial (opcional) ----------
         if log_mlflow:
@@ -2678,6 +2783,8 @@ class ModelSegmenter:
         # escoragem consistente. (Se o modelo externo já espera WoE, passe um
         # pipeline que faça isso internamente.)
         self.feature_transform = "raw"
+        # modelo externo: não sabemos se veio balanceado — limpa a flag do fit.
+        self.class_balance = False
         self.score_ = self._compute_score(self.df)
         self._shap_cache = {}
         return self
@@ -3841,6 +3948,109 @@ class ModelSegmenter:
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
+
+    # ---- discriminação / ratings por segmento arbitrário (coluna de contexto) ----
+    def _check_group_col(self, col) -> None:
+        """Valida a coluna de quebra POR GRUPO (:meth:`metrics_by_group` /
+        :meth:`rating_distribution_by_group`): precisa existir no df e ser uma
+        coluna de **contexto** — o alvo, as variáveis candidatas do modelo e
+        colunas de data (use :meth:`metrics_by_safra`) não valem."""
+        if col not in self.df.columns:
+            raise ValueError(f"Coluna '{col}' não existe no DataFrame.")
+        if col == self.target:
+            raise ValueError("A coluna de grupo não pode ser o próprio alvo.")
+        if col in set(self.candidates):
+            raise ValueError(
+                f"'{col}' é variável candidata do modelo — a quebra por grupo é "
+                f"para colunas de CONTEXTO (não-features), ex.: produto/canal/região.")
+        if pd.api.types.is_datetime64_any_dtype(self.df[col]):
+            raise ValueError(f"'{col}' é uma coluna de data — para quebras "
+                             f"temporais use metrics_by_safra.")
+
+    def metrics_by_group(self, col, sample=None, min_n=30) -> pd.DataFrame:
+        """Métricas do modelo **por grupo** de uma coluna categórica de contexto
+        do df (que **não** é variável do modelo — ex.: produto, canal, região):
+        a mesma leitura de :meth:`metrics_by_safra`, trocando a safra pelo grupo.
+
+        Classificação: ``grupo, n, taxa_evento, auc, ks, gini``. Regressão:
+        ``grupo, n, previsto_medio, realizado_medio, mae, rmse, r2``. Grupos com
+        menos de ``min_n`` linhas válidas **não** têm as métricas de
+        discriminação/erro reportadas (ficam NaN) — a coluna ``nota`` explica;
+        taxas/médias descritivas continuam reportadas. Grupos de classe única
+        também ganham nota (AUC/KS/Gini indefinidos).
+
+        ``sample=None`` usa toda a base; informe uma amostra (ex.: OOT) para
+        restringir. Saída ordenada por ``n`` decrescente."""
+        if self.score_ is None:
+            raise RuntimeError("Ajuste o modelo antes (fit / set_model / load).")
+        self._check_group_col(col)
+        base = self._frame(sample) if sample else self.df
+        is_clf = self.task_type == "classification"
+        sc_full = self.score_.reindex(base.index)
+        met_cols = (["taxa_evento", "auc", "ks", "gini"] if is_clf
+                    else ["previsto_medio", "realizado_medio", "mae", "rmse", "r2"])
+        min_n = max(int(min_n), 2)
+        rows = []
+        for gname, g in base.groupby(base[col], observed=True):  # dropna: NaN fora
+            y = g[self.target].to_numpy(dtype="float64")
+            sc = sc_full.reindex(g.index).to_numpy(dtype="float64")
+            ok = ~np.isnan(y) & ~np.isnan(sc)
+            y, sc = y[ok], sc[ok]
+            row = {"grupo": str(gname), "n": int(y.size), "nota": ""}
+            row.update({c: float("nan") for c in met_cols})
+            if is_clf:
+                row["taxa_evento"] = self._risco(y)
+            else:
+                row["previsto_medio"] = float(np.mean(sc)) if sc.size else float("nan")
+                row["realizado_medio"] = self._risco(y)
+            if y.size < min_n:
+                row["nota"] = f"n < {min_n} — métricas não reportadas"
+            elif is_clf:
+                if len(np.unique(y)) == 2:
+                    try:
+                        m = classification_metrics(y, sc)
+                        row.update({c: m.get(c, float("nan"))
+                                    for c in ("auc", "ks", "gini")})
+                    except Exception:  # noqa: BLE001 - grupo degenerado ⇒ NaN
+                        row["nota"] = "grupo degenerado — métricas indisponíveis"
+                else:
+                    row["nota"] = "classe única no grupo — AUC/KS/Gini indefinidos"
+            else:
+                try:
+                    m = regression_metrics(y, sc)
+                    row.update({c: m.get(c, float("nan"))
+                                for c in ("mae", "rmse", "r2")})
+                except Exception:  # noqa: BLE001 - grupo degenerado ⇒ NaN
+                    row["nota"] = "grupo degenerado — métricas indisponíveis"
+            rows.append(row)
+        return (pd.DataFrame(rows, columns=["grupo", "n"] + met_cols + ["nota"])
+                .sort_values("n", ascending=False, kind="stable")
+                .reset_index(drop=True))
+
+    def rating_distribution_by_group(self, col, sample=None) -> pd.DataFrame:
+        """Distribuição (%) dos ratings **por grupo** de uma coluna categórica de
+        contexto (não-feature): uma linha por grupo — ``n`` e o % do grupo em cada
+        rating, na ordem da régua (colunas ``%_<rating>``). Complementa
+        :meth:`plot_rating_distribution` (por amostra) para segmentações
+        arbitrárias (produto/canal/região). Requer os ratings construídos
+        (:meth:`build_ratings`); ``sample=None`` usa toda a base. Saída ordenada
+        por ``n`` decrescente."""
+        rating = self._rating_series()
+        self._check_group_col(col)
+        base = self._frame(sample) if sample else self.df
+        r = rating.reindex(base.index)
+        labels = list(self.rating_labels_)
+        rows = []
+        for gname, g in base.groupby(base[col], observed=True):
+            rr = r.reindex(g.index)
+            n = int(len(g))
+            row = {"grupo": str(gname), "n": n}
+            for lab in labels:
+                row[f"%_{lab}"] = round(100.0 * int((rr == lab).sum()) / max(n, 1), 1)
+            rows.append(row)
+        return (pd.DataFrame(rows, columns=["grupo", "n"] + [f"%_{l}" for l in labels])
+                .sort_values("n", ascending=False, kind="stable")
+                .reset_index(drop=True))
 
     def variables_profile_by_safra(self, time_col=None, features=None,
                                     all_samples=True) -> pd.DataFrame:
@@ -5428,6 +5638,7 @@ class ModelSegmenter:
             "algorithm": self.algorithm,
             "hyperparams": self.hyperparams,
             "feature_transform": self.feature_transform,
+            "class_balance": self.class_balance,
             "model_features": list(self.model_features),
             "rating_config": self.rating_config,
             "two_stage": self.two_stage,
@@ -5462,6 +5673,7 @@ class ModelSegmenter:
         seg.algorithm = data.get("algorithm")
         seg.hyperparams = data.get("hyperparams", {})
         seg.feature_transform = data.get("feature_transform", "raw")
+        seg.class_balance = bool(data.get("class_balance", False))
         seg.model_features = data.get("model_features", [])
         seg.rating_config = data.get("rating_config", {})
         seg.two_stage = bool(data.get("two_stage", False))
