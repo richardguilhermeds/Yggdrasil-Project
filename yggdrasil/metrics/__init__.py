@@ -1,4 +1,5 @@
-"""Métricas de avaliação de modelos (classificação e regressão), calibração e shifts."""
+"""Métricas de avaliação de modelos (classificação e regressão), calibração,
+lift/CAP e shifts."""
 
 from .calibration import (
     binomial_ci,
@@ -11,6 +12,7 @@ from .classification import (
     ks_optimal_cutoff,
     ks_statistic,
 )
+from .lift import accuracy_ratio, cap_curve, lift_table
 from .regression import regression_metrics, robust_mape, smape
 from .shift import (
     compute_metrics,
@@ -23,6 +25,9 @@ __all__ = [
     "classification_metrics",
     "ks_statistic",
     "ks_optimal_cutoff",
+    "lift_table",
+    "cap_curve",
+    "accuracy_ratio",
     "regression_metrics",
     "robust_mape",
     "smape",

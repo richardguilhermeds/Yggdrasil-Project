@@ -2,9 +2,9 @@
 
 Centraliza o logging de um run: parâmetros, métricas por amostra (DES/OOT),
 shifts, PSI (agregado e séries temporais por rating), performance por período
-(discriminação/erro ao longo do tempo), relatórios por grupo, dashboard, SHAP
-e o próprio modelo. Estende o padrão ``log_credit_model`` da referência de
-MLflow do projeto.
+(discriminação/erro ao longo do tempo), tabela de lift por amostra
+(classificação), relatórios por grupo, dashboard, SHAP e o próprio modelo.
+Estende o padrão ``log_credit_model`` da referência de MLflow do projeto.
 """
 
 from __future__ import annotations
@@ -18,7 +18,8 @@ import pandas as pd
 
 from ..config import ColumnConfig
 from ..interpretability import shap_report
-from ..metrics import calibration_in_the_large, calibration_slope_intercept
+from ..metrics import (calibration_in_the_large, calibration_slope_intercept,
+                       lift_table)
 from ..monitoring import (metric_over_time, plot_metric_over_time,
                           psi_rating_over_time, psi_score_over_time)
 from ..reporting import group_reports_to_html, save_dashboard
@@ -180,6 +181,19 @@ def log_pipeline_run(
                 perf, m, save_path=os.path.join(perf_dir, f"{m}_over_time.png"))
             plt.close(fig)
         mlflow.log_artifacts(perf_dir, artifact_path="performance")
+
+        # ── artefatos: tabela de lift por amostra (classificação) ───────
+        if problem_type == "classification":
+            lift_dir = os.path.join(tmp, "lift")
+            os.makedirs(lift_dir, exist_ok=True)
+            for amostra in metrics_by_sample:
+                sub = df_scored[df_scored[cfg.sample_col] == amostra]
+                if len(sub) == 0:
+                    continue
+                lift_table(sub[cfg.target_col], sub[cfg.score_col]).to_csv(
+                    os.path.join(lift_dir, f"lift_table_{amostra.lower()}.csv"),
+                    index=False)
+            mlflow.log_artifacts(lift_dir, artifact_path="lift")
 
         # ── artefato: dashboard ─────────────────────────────────────────
         dash_path = os.path.join(tmp, "dashboard.png")

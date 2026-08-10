@@ -1,7 +1,8 @@
 """Métricas de discriminação/calibração para modelos de classificação.
 
-Inclui KS, AUC, Gini, Acurácia, F1, precisão, recall, Brier e log loss.
-KS e Gini seguem o padrão de mercado em risco de crédito.
+Inclui KS, AUC, Gini (e o Accuracy Ratio, equivalente), Acurácia, F1,
+precisão, recall, Brier e log loss. KS e Gini seguem o padrão de mercado em
+risco de crédito.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import numpy as np
 HIGHER_IS_BETTER = {
     "auc": True,
     "gini": True,
+    "accuracy_ratio": True,
     "ks": True,
     "accuracy": True,
     "f1": True,
@@ -127,6 +129,9 @@ def classification_metrics(
     metrics = {
         "auc": auc,
         "gini": gini,
+        # AR da curva CAP ≡ 2·AUC − 1 (igualdade exata sem empates de score;
+        # ver metrics/lift.py) — reportado sob o nome próprio, sem custo extra.
+        "accuracy_ratio": gini,
         "ks": ks,
         "ks_cutoff": corte,
         "accuracy": accuracy_score(y_true, y_pred),
