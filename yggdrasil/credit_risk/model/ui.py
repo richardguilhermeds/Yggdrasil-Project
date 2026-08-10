@@ -7,7 +7,8 @@ do ``LGDSegmenterUI`` (abas, IV, inversão, placar), porém para um fluxo orient
 a modelo:
 
 * **Variáveis** — analisa cada variável (logodds/WoE, IV, inversão) e decide
-  o que entra no modelo (incluir/categorizar; auto-seleção por IV/PSI/monotonia);
+  o que entra no modelo (incluir/categorizar; auto-seleção por IV/PSI/monotonia;
+  análise de multicolinearidade com sugestão de poda e VIF);
 * **Análise de variáveis** — mergulho por variável: logodds por faixa,
   distribuição, inversão entre amostras/safras, série temporal e PSI por safra;
 * **Modelo** — escolhe o algoritmo (Logística/Linear, RandomForest, ExtraTrees,
@@ -803,6 +804,39 @@ class ModelSegmenterUI:
         self.out_vars = W.HTML()
         self.out_var_preview_h = W.HTML("<div class='mseg-h'>Estabilidade da variável no tempo</div>")
         self.out_var_preview = W.HTML()
+        # --- Multicolinearidade: card ao lado do auto-selecionar ---
+        self.fl_redund_thr = W.BoundedFloatText(value=0.85, min=0.30, max=1.0, step=0.05,
+                                                description="limiar:",
+                                                style={"description_width": "initial"},
+                                                layout=W.Layout(width="118px"))
+        self.btn_redund = W.Button(description="Analisar redundância", icon="search",
+                                   button_style="info",
+                                   layout=W.Layout(width="auto", min_width="196px"),
+                                   tooltip="Spearman entre numéricas e V de Cramér entre "
+                                           "categóricas das variáveis selecionadas: lista os "
+                                           "pares acima do limiar com a sugestão de poda "
+                                           "(manter a de maior IV) + heatmap; com modelo "
+                                           "linear/logístico treinado, inclui o VIF.")
+        self.btn_redund_drop = W.Button(description="Excluir redundantes", icon="minus",
+                                        button_style="warning", disabled=True,
+                                        layout=W.Layout(width="auto", min_width="188px"),
+                                        tooltip="Aplica a sugestão de poda da última análise: "
+                                                "exclui do modelo a variável de MENOR IV de "
+                                                "cada par redundante (fluxo normal de "
+                                                "inclusão/exclusão).")
+        self.out_redund = W.HTML()
+        self._redund_report = None          # última análise (base do 'Excluir redundantes')
+        redund_card = W.VBox([
+            W.HTML("<div class='mseg-h'>Multicolinearidade (redundância)</div>"),
+            W.HTML("<div class='mseg-legend'>Duas variáveis muito associadas carregam a mesma "
+                   "informação — infla os coeficientes e atrapalha a leitura. Pares com "
+                   "associação ≥ <b>limiar</b> são sinalizados; a sugestão é manter a de "
+                   "<b>maior IV</b> de cada par.</div>"),
+            W.HBox([self.fl_redund_thr, self.btn_redund, self.btn_redund_drop]),
+            self.out_redund,
+        ])
+        redund_card.add_class("mseg-card")
+        self._redund_card = redund_card
         # --- Feature 1: definir a seleção de variáveis (escolha ótima × manual) ---
         self.btn_feat_optimal = W.Button(
             description="Escolha ótima (backward)", button_style="primary", icon="star",
@@ -831,6 +865,8 @@ class ModelSegmenterUI:
 
         self.btn_auto.on_click(self._on_auto_select)
         self.btn_auto_cat.on_click(self._on_auto_categorize)
+        self.btn_redund.on_click(self._on_redund)
+        self.btn_redund_drop.on_click(self._on_redund_drop)
         self.btn_include.on_click(self._on_include_var)
         self.btn_exclude.on_click(self._on_exclude_var)
         self.btn_set_cat.on_click(self._on_set_cat)
@@ -863,9 +899,13 @@ class ModelSegmenterUI:
 
         tab_vars = W.VBox([
             W.HTML("<div class='mseg-h'>Seleção & categorização de variáveis</div>"),
-            W.HBox([self.sl_min_iv, self.sl_max_psi, self.cb_require_mono,
-                    self.btn_auto, self.btn_auto_cat]),
-            self.out_mono_hint,
+            # auto-seleção à esquerda · card de multicolinearidade ao lado
+            W.HBox([W.VBox([W.HBox([self.sl_min_iv, self.sl_max_psi, self.cb_require_mono]),
+                            W.HBox([self.btn_auto, self.btn_auto_cat]),
+                            self.out_mono_hint],
+                           layout=W.Layout(width="54%")),
+                    W.VBox([redund_card], layout=W.Layout(width="45%"))],
+                   layout=W.Layout(justify_content="space-between", width="99%")),
             # incluir/excluir UMA variável por vez — a escolhida em 'Variável:'
             W.HBox([self.dd_var, self.btn_include, self.btn_exclude]),
             W.VBox([self.sel_included,
@@ -2400,6 +2440,92 @@ class ModelSegmenterUI:
             self._log(f"[auto-categoria] {resumo} (veja a coluna 'motivo' no ranking)")
         except Exception as e:
             self._log(f"[auto-categoria] erro: {e}")
+
+    def _on_redund(self, b):
+        """Card de multicolinearidade: analisa a redundância entre as variáveis
+        selecionadas (pares Spearman/Cramér acima do limiar + heatmap + sugestão
+        de poda por maior IV); com modelo linear/logístico treinado, anexa o VIF
+        da matriz de desenho. Habilita 'Excluir redundantes' quando há poda."""
+        tem_poda = False
+        with self._busy(self.btn_redund, self.btn_redund_drop, status=self.out_redund,
+                        msg="analisando redundância…"):
+            try:
+                thr = float(self.fl_redund_thr.value)
+                rep = self.seg.correlation_report(threshold=thr)
+                self._redund_report = rep
+                poda = list(rep.attrs.get("poda_sugerida", []))
+                tem_poda = bool(poda)
+                partes = []
+                if len(rep):
+                    tbl = rep.copy()
+                    for c in ("variavel_1", "variavel_2", "manter", "remover"):
+                        tbl[c] = tbl[c].map(self.seg.label)
+                    tbl["metodo"] = tbl["metodo"].map(
+                        {"spearman": "Spearman", "cramers_v": "V de Cramér"})
+                    nomes = ", ".join(self.seg.label(f) for f in poda)
+                    partes.append(
+                        f"<div class='mseg-legend'><b>{len(rep)}</b> par(es) com associação "
+                        f"≥ {thr:g} · poda sugerida (menor IV de cada par): "
+                        f"<b>{len(poda)}</b> variável(is) — {nomes}.</div>")
+                    partes.append(self._df_html(tbl, max_height="220px"))
+                else:
+                    partes.append(
+                        f"<div class='mseg-legend'>Nenhum par com associação ≥ {thr:g} "
+                        "entre as variáveis selecionadas — sem redundância a podar.</div>")
+                fig = self.seg.plot_correlation_heatmap(report=rep)
+                partes.append(self._fig_html(fig))
+                # VIF: leitura complementar quando há modelo linear/logístico vigente
+                if (self.seg.model is not None
+                        and self.seg.algorithm in ("logistica", "linear")):
+                    try:
+                        vif = self.seg.vif_table()
+                        vif["vif"] = vif["vif"].map(
+                            lambda v: "∞" if v == np.inf
+                            else ("" if pd.isna(v) else f"{float(v):.2f}"))
+                        partes.append("<div class='mseg-h' style='margin-top:6px'>VIF — "
+                                      "matriz de desenho do modelo (&lt;5 ok · 5–10 atenção "
+                                      "· &gt;10 alto)</div>")
+                        partes.append(self._df_html(vif, max_height="180px"))
+                    except Exception as e:      # noqa: BLE001 — VIF é best-effort
+                        partes.append(f"<div class='mseg-legend'>VIF indisponível: {e}</div>")
+                self.out_redund.value = "".join(partes)
+                self._log(f"[redundância] {len(rep)} par(es) ≥ {thr:g} · poda sugerida: "
+                          f"{len(poda)} variável(is).")
+            except Exception as e:
+                self.out_redund.value = f"<div style='color:var(--bad-tx)'>Erro: {e}</div>"
+                self._log(f"[redundância] erro: {e}")
+        # depois do _busy (o finally re-habilita os botões): só há o que excluir com poda
+        self.btn_redund_drop.disabled = not tem_poda
+
+    def _on_redund_drop(self, b):
+        """Aplica a sugestão de poda da última análise de redundância: EXCLUI do
+        modelo a variável de menor IV de cada par, pelo fluxo normal de exclusão
+        (sincroniza a lista, invalida o estado e marca o modelo desatualizado)."""
+        rep = getattr(self, "_redund_report", None)
+        poda = list(rep.attrs.get("poda_sugerida", [])) if rep is not None else []
+        if not poda:
+            self._log("[redundância] rode 'Analisar redundância' antes de excluir.")
+            return
+        alvo = [f for f in poda if f in self.seg.included]
+        if not alvo:
+            self.btn_redund_drop.disabled = True
+            self._log("[redundância] nada a excluir (variáveis já fora do modelo).")
+            return
+        # parceira mantida de cada removida (para documentar o motivo no ranking)
+        par_de = {r["remover"]: r["manter"] for _, r in rep.iloc[::-1].iterrows()}
+        for f in alvo:
+            self.seg.exclude(f)
+            self.seg.set_category(f, "descartar")
+            self.seg.var_meta[f]["motivo"] = (
+                f"redundante (associada a {self.seg.label(par_de.get(f, '?'))})")
+        self._sync_sel(); self._refresh_vars(); self._mark_dirty(); self._refresh_bar()
+        self.btn_redund_drop.disabled = True
+        nomes = ", ".join(self.seg.label(f) for f in alvo)
+        self.out_redund.value += (
+            f"<div class='mseg-legend'>✂ Poda aplicada: <b>{len(alvo)}</b> variável(is) "
+            f"excluída(s) do modelo — {nomes}.</div>")
+        self._log(f"[redundância] excluída(s): {nomes} · "
+                  f"{len(self.seg.included)} no modelo.")
 
     def _on_include_var(self, b):
         feat = self.dd_var.value

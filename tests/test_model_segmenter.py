@@ -292,6 +292,61 @@ def test_auto_categorize_apply_selection(seg):
     assert seg.included == mantidas
 
 
+def test_correlation_report_par_colinear_e_vif():
+    """Par numérico 0.99-correlacionado + par categórico espelhado: o relatório
+    detecta ambos (Spearman / V de Cramér), a sugestão de poda mantém a variável
+    de MAIOR IV, e o VIF da matriz de desenho explode no par colinear (com o
+    fallback sklearn dando os mesmos valores do statsmodels)."""
+    rng = np.random.default_rng(42)
+    df = _synthetic("classification", com_cat=True)
+    df["feat_dup"] = df["feat_00"] + rng.normal(0, 0.01, len(df))     # ρ ≈ 0.99+
+    df["feat_cat_dup"] = df["feat_cat"].map({"A": "x", "B": "y", "C": "z", "D": "w"})
+    seg = ModelSegmenter(df, target="target", task_type="classification",
+                         sample_col="amostra", ref_sample="DES", date_col="dt_ref",
+                         verbose=False)
+    rep = seg.correlation_report(threshold=0.95)
+    assert list(rep.columns) == ["variavel_1", "variavel_2", "metodo", "associacao",
+                                 "iv_1", "iv_2", "manter", "remover"]
+
+    def _par(a, b):
+        m = (((rep["variavel_1"] == a) & (rep["variavel_2"] == b))
+             | ((rep["variavel_1"] == b) & (rep["variavel_2"] == a)))
+        assert m.any(), f"par {a}×{b} não detectado"
+        return rep[m].iloc[0]
+
+    r_num = _par("feat_00", "feat_dup")
+    assert r_num["metodo"] == "spearman" and r_num["associacao"] >= 0.95
+    r_cat = _par("feat_cat", "feat_cat_dup")
+    assert r_cat["metodo"] == "cramers_v" and r_cat["associacao"] >= 0.95
+    # a sugestão mantém a de maior IV; a removida entra na poda gulosa
+    ivs = seg.variable_iv(features=["feat_00", "feat_dup"], with_psi=False)
+    iv_map = dict(zip(ivs["variavel"], ivs["iv"]))
+    assert iv_map[r_num["manter"]] >= iv_map[r_num["remover"]]
+    poda = rep.attrs["poda_sugerida"]
+    assert r_num["remover"] in poda and r_num["manter"] not in poda
+    assert r_cat["remover"] in poda and r_cat["manter"] not in poda
+    # heatmap smoke: dois blocos (numéricas + categóricas)
+    fig = seg.plot_correlation_heatmap(report=rep)
+    assert len(fig.axes) >= 2
+    # VIF sobre a matriz de desenho (mesmo caminho dos coeficientes): o par
+    # colinear explode; sem modelo, o método exige o fit antes
+    with pytest.raises(RuntimeError, match="Ajuste o modelo"):
+        seg.vif_table()
+    seg.clear_features()
+    for f in ("feat_00", "feat_dup", "feat_01"):
+        seg.include(f)
+    seg.fit("logistica", transform="raw")
+    vif = seg.vif_table(use_labels=False)
+    assert list(vif.columns) == ["termo", "vif", "avaliacao"]
+    v = dict(zip(vif["termo"], vif["vif"]))
+    assert v["feat_00"] > 10 and v["feat_dup"] > 10          # par colinear
+    assert vif.iloc[0]["avaliacao"] == "alto"
+    # fallback sem statsmodels: 1/(1−R²) via sklearn dá os MESMOS valores
+    X = np.column_stack([df["feat_00"], df["feat_dup"], df["feat_01"]])
+    np.testing.assert_allclose(ModelSegmenter._vif_values(X),
+                               ModelSegmenter._vif_values_sklearn(X), rtol=1e-6)
+
+
 # ----------------------------------------------------------------------
 # Modelo
 # ----------------------------------------------------------------------

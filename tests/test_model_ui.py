@@ -496,6 +496,41 @@ def test_card_calibracao_aplica_remove_e_retreino_limpa():
     assert ui.out_calib_table.value == "" and ui.out_calib_plot.value == ""
 
 
+def test_card_redundancia():
+    """Aba Variáveis · card de multicolinearidade: 'Analisar redundância' lista o
+    par quase-duplicado (tabela + heatmap) e habilita a poda; 'Excluir
+    redundantes' exclui do modelo a variável de menor IV do par pelo fluxo
+    normal (lista sincronizada, categoria 'descartar'); com modelo logístico
+    treinado, a análise anexa a tabela de VIF."""
+    df = make_df()
+    rng = np.random.default_rng(7)
+    df["score_dup"] = df["score"] + rng.normal(0, 0.005, len(df))   # ρ ≈ 1
+    ui = _build(df=df)
+    assert ui.btn_redund_drop.disabled is True          # sem análise ainda
+    ui.fl_redund_thr.value = 0.95
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_redund(None)
+    html = ui.out_redund.value
+    assert "<table" in html and "<img" in html          # pares + heatmap
+    assert "VIF" not in html                            # sem modelo treinado
+    assert ui.btn_redund_drop.disabled is False
+    poda = list(ui._redund_report.attrs["poda_sugerida"])
+    assert len(poda) == 1 and poda[0] in ("score", "score_dup")
+    incl_antes = set(ui.seg.included)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_redund_drop(None)
+    assert set(ui.seg.included) == incl_antes - set(poda)
+    assert ui.seg.var_meta[poda[0]]["categoria"] == "descartar"
+    assert "redundante" in ui.seg.var_meta[poda[0]]["motivo"]
+    assert ui.btn_redund_drop.disabled is True          # poda já aplicada
+    assert "Poda aplicada" in ui.out_redund.value
+    # com modelo logístico vigente, a análise passa a incluir o VIF
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.seg.fit("logistica")
+        ui._on_redund(None)
+    assert "VIF" in ui.out_redund.value
+
+
 def test_toggle_monotonicidade_ignorado_sem_suporte():
     """Toggle marcado + algoritmo sem suporte: o fit via UI NÃO repassa a opção
     (nem aviso, nem restrição) — a linha fica oculta, mas o valor persiste."""

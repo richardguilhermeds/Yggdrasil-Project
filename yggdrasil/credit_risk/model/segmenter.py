@@ -2191,6 +2191,162 @@ class ModelSegmenter:
         rk["motivo"] = motivos
         return rk
 
+    # ---- multicolinearidade (redundância entre variáveis selecionadas) ----
+    @staticmethod
+    def _cramers_v(x: pd.Series, y: pd.Series) -> float:
+        """V de Cramér entre duas séries categóricas (0 = independentes · 1 =
+        associação perfeita), via qui-quadrado da tabela de contingência (sem
+        correção de continuidade). ``NaN`` quando alguma delas tem menos de 2
+        categorias observadas."""
+        from scipy.stats import chi2_contingency
+        m = x.notna() & y.notna()
+        if not bool(m.any()):
+            return float("nan")
+        tab = pd.crosstab(x[m].astype(str), y[m].astype(str))
+        if tab.shape[0] < 2 or tab.shape[1] < 2:
+            return float("nan")
+        chi2 = float(chi2_contingency(tab, correction=False)[0])
+        n = float(tab.to_numpy().sum())
+        k = min(tab.shape) - 1
+        return float(np.sqrt(chi2 / (n * k))) if n > 0 else float("nan")
+
+    def correlation_report(self, threshold=0.85, features=None, sample=None) -> pd.DataFrame:
+        """Relatório de **multicolinearidade** entre as variáveis selecionadas
+        (default: as da lista de incluídas; sem seleção, todas as candidatas):
+        **Spearman** entre as numéricas e **V de Cramér** entre as categóricas,
+        na amostra de referência (ou em ``sample``).
+
+        Devolve um par redundante por linha — associação ≥ ``threshold`` (no
+        Spearman vale o |ρ|) — com a sugestão de poda: ``manter`` = a variável
+        de **maior IV** do par e ``remover`` = a redundante. Colunas: ``variavel_1,
+        variavel_2, metodo, associacao, iv_1, iv_2, manter, remover``.
+
+        ``.attrs`` traz as matrizes completas (``corr_num``/``corr_cat``), o
+        ``threshold`` e ``poda_sugerida`` — a lista de variáveis a excluir por
+        uma poda **gulosa** (pares em ordem decrescente de associação; par já
+        resolvido por uma remoção anterior não remove ninguém), pronta para
+        aplicar via :meth:`exclude`. Heatmap: :meth:`plot_correlation_heatmap`."""
+        base = (list(features) if features is not None
+                else (self.selected_features() or list(self.candidates)))
+        feats, vistos = [], set()
+        for f in base:                       # dedup preservando a ordem
+            if f in self.df.columns and f not in vistos:
+                feats.append(f); vistos.add(f)
+        sub = self._frame(sample)
+        num = [f for f in feats if self._detect_kind(f, sub) == "num"]
+        cat = [f for f in feats if self._detect_kind(f, sub) == "cat"]
+        corr_num = (sub[num].corr(method="spearman") if len(num) >= 2
+                    else pd.DataFrame(np.eye(len(num)), index=num, columns=num))
+        if len(cat) >= 2:
+            vals = np.eye(len(cat))
+            for i in range(len(cat)):
+                for j in range(i + 1, len(cat)):
+                    v = self._cramers_v(sub[cat[i]], sub[cat[j]])
+                    vals[i, j] = vals[j, i] = v
+            corr_cat = pd.DataFrame(vals, index=cat, columns=cat)
+        else:
+            corr_cat = pd.DataFrame(np.eye(len(cat)), index=cat, columns=cat)
+        pares = []
+        for mat, metodo in ((corr_num, "spearman"), (corr_cat, "cramers_v")):
+            cols = list(mat.columns)
+            for i in range(len(cols)):
+                for j in range(i + 1, len(cols)):
+                    v = float(mat.iloc[i, j])
+                    if np.isfinite(v) and abs(v) >= float(threshold):
+                        pares.append((cols[i], cols[j], metodo, abs(v)))
+        pares.sort(key=lambda t: -t[3])
+        # IV só das variáveis ENVOLVIDAS em algum par (evita binar as demais)
+        envolvidas = sorted({f for p in pares for f in p[:2]})
+        iv_map = {}
+        if envolvidas:
+            rk = self.variable_iv(features=envolvidas, with_psi=False)
+            iv_map = dict(zip(rk["variavel"], rk["iv"]))
+        removidas, rows = set(), []
+        for f1, f2, metodo, a in pares:
+            iv1 = float(iv_map.get(f1, np.nan)); iv2 = float(iv_map.get(f2, np.nan))
+            # mantém a de MAIOR IV (empate ou ambos sem IV: mantém a 1ª)
+            if np.isnan(iv2) or (not np.isnan(iv1) and iv1 >= iv2):
+                manter, remover = f1, f2
+            else:
+                manter, remover = f2, f1
+            rows.append({"variavel_1": f1, "variavel_2": f2, "metodo": metodo,
+                         "associacao": round(a, 4), "iv_1": iv1, "iv_2": iv2,
+                         "manter": manter, "remover": remover})
+            # poda gulosa: par já resolvido por remoção anterior não remove mais
+            if f1 in removidas or f2 in removidas:
+                continue
+            removidas.add(remover)
+        out = pd.DataFrame(rows, columns=["variavel_1", "variavel_2", "metodo",
+                                          "associacao", "iv_1", "iv_2",
+                                          "manter", "remover"])
+        out.attrs.update(threshold=float(threshold), corr_num=corr_num,
+                         corr_cat=corr_cat,
+                         poda_sugerida=[f for f in feats if f in removidas])
+        return out
+
+    def plot_correlation_heatmap(self, threshold=0.85, features=None, sample=None,
+                                 report=None, figsize=None, dpi=150, save_path=None):
+        """Heatmap das associações do :meth:`correlation_report`: Spearman entre
+        as numéricas (−1..+1) e V de Cramér entre as categóricas (0..1), lado a
+        lado. Células fora da diagonal com |associação| ≥ ``threshold`` ganham
+        contorno (par redundante). ``report`` reaproveita um relatório já
+        computado (evita recalcular as matrizes)."""
+        rep = report if report is not None else self.correlation_report(
+            threshold=threshold, features=features, sample=sample)
+        thr = float(rep.attrs.get("threshold", threshold))
+        mats = []
+        cn = rep.attrs.get("corr_num"); cc = rep.attrs.get("corr_cat")
+        if cn is not None and len(cn.columns) >= 2:
+            mats.append(("Spearman (numéricas)", cn, "RdBu_r", -1.0, 1.0))
+        if cc is not None and len(cc.columns) >= 2:
+            mats.append(("V de Cramér (categóricas)", cc, "Blues", 0.0, 1.0))
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+        from matplotlib.patches import Rectangle
+        if not mats:
+            fig = Figure(figsize=figsize or (6.4, 2.0), dpi=dpi)
+            FigureCanvasAgg(fig)
+            ax = fig.subplots()
+            ax.text(0.5, 0.5, "menos de 2 variáveis por tipo — sem matriz a exibir",
+                    ha="center", va="center", transform=ax.transAxes, color="#889")
+            ax.axis("off"); fig.tight_layout()
+            return fig
+        larguras = [len(m.columns) for _, m, *_ in mats]
+        if figsize is None:
+            figsize = (min(2.4 + 0.62 * sum(larguras), 13.5),
+                       min(2.0 + 0.5 * max(larguras), 8.0))
+        fig = Figure(figsize=figsize, dpi=dpi)
+        FigureCanvasAgg(fig)
+        axes = fig.subplots(1, len(mats), squeeze=False,
+                            gridspec_kw={"width_ratios": larguras})[0]
+        for ax, (titulo, mat, cmap, vmin, vmax) in zip(axes, mats):
+            vals = mat.to_numpy(dtype="float64")
+            im = ax.imshow(vals, cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
+            labels = [self.label(c) for c in mat.columns]
+            k = len(labels)
+            ax.set_xticks(range(k))
+            ax.set_xticklabels(labels, rotation=40, ha="right", fontsize=7.5)
+            ax.set_yticks(range(k)); ax.set_yticklabels(labels, fontsize=7.5)
+            for i in range(k):
+                for j in range(k):
+                    v = vals[i, j]
+                    if not np.isfinite(v):
+                        continue
+                    if k <= 12:              # anota só quando a matriz é legível
+                        ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=7,
+                                color="#fff" if abs(v) >= 0.65 else "#15324a")
+                    if i != j and abs(v) >= thr:   # par redundante em destaque
+                        ax.add_patch(Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False,
+                                               edgecolor="#b3392f", lw=1.6))
+            ax.set_title(titulo, fontsize=10, fontweight="bold", color="#15324a")
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+        fig.suptitle(f"Associação entre variáveis · limiar {thr:g}",
+                     fontsize=10.5, fontweight="bold", color="#15324a")
+        fig.tight_layout(rect=(0, 0, 1, 0.94))           # reserva a faixa do suptitle
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
     # ------------------------------------------------------------------
     # C) Modelo
     # ------------------------------------------------------------------
@@ -3312,6 +3468,91 @@ class ModelSegmenter:
                 pass
         out = out.reindex(out["coef"].abs().sort_values(ascending=False).index).reset_index(drop=True)
         out.attrs["intercept"] = round(intercept, 6)
+        return out
+
+    def vif_table(self, use_labels=True) -> pd.DataFrame:
+        """VIF (fator de inflação de variância) de cada termo da **matriz de
+        desenho pós-transformação** do modelo vigente — a mesma dos coeficientes
+        (:meth:`model_coefficients`): WoE/risco do bin por variável em
+        ``transform='woe'`` ou imputação + one-hot em ``transform='raw'``.
+        Leitura clássica de multicolinearidade para modelos lineares/logísticos:
+        ``VIF = 1/(1−R²)`` da regressão de cada termo sobre os demais (com
+        intercepto). Regra de bolso: < 5 ok · 5–10 atenção · > 10 alto.
+
+        Usa ``statsmodels`` quando disponível (dependência **opcional** — a
+        mesma do pacote econométrico); sem ele, cai para o cálculo equivalente
+        via ``sklearn.LinearRegression``. Devolve ``termo, vif, avaliacao``
+        ordenado do maior para o menor VIF (``inf`` = colinearidade perfeita)."""
+        if self.model is None:
+            raise RuntimeError("Ajuste o modelo antes (fit / set_model).")
+        pre = (self.model.named_steps.get("pre")
+               if hasattr(self.model, "named_steps") else None)
+        fit_df = self._frame(self.ref_sample)
+        fit_df = fit_df[fit_df[self.target].notna()]
+        Xd = pre.transform(fit_df[self.model_features]) if pre is not None \
+            else fit_df[self.model_features].to_numpy(dtype="float64")
+        Xd = Xd.toarray() if hasattr(Xd, "toarray") else np.asarray(Xd, dtype="float64")
+        names = self._design_feature_names(pre, use_labels=use_labels)
+        if len(names) != Xd.shape[1]:                    # robustez a divergências
+            names = [f"x{i}" for i in range(Xd.shape[1])]
+        vifs = self._vif_values(Xd)
+        out = pd.DataFrame({
+            "termo": names,
+            "vif": [round(v, 3) if np.isfinite(v) else v for v in vifs]})
+        out["avaliacao"] = ["—" if np.isnan(v)
+                            else "alto" if v > 10 else "atenção" if v >= 5 else "ok"
+                            for v in vifs]
+        return (out.sort_values("vif", ascending=False, na_position="last")
+                .reset_index(drop=True))
+
+    @staticmethod
+    def _vif_values(X) -> list:
+        """VIF por coluna de ``X``: tenta ``statsmodels`` (import lazy — lib
+        opcional); ausente, usa :meth:`_vif_values_sklearn` (mesmos valores)."""
+        X = np.asarray(X, dtype="float64")
+        X = X[~np.isnan(X).any(axis=1)]                  # modelo externo sem imputação
+        n, k = X.shape
+        if k == 0 or n < 2:
+            return []
+        if k == 1:
+            return [1.0]
+        try:
+            from statsmodels.stats.outliers_influence import variance_inflation_factor
+        except ImportError:
+            return ModelSegmenter._vif_values_sklearn(X)
+        Xc = np.column_stack([np.ones(n), X])            # intercepto (VIF clássico)
+        out = []
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")              # colinear perfeito → divisão por 0
+            for i in range(k):
+                try:
+                    out.append(float(variance_inflation_factor(Xc, i + 1)))
+                except Exception:                        # noqa: BLE001 — termo degenerado
+                    out.append(float("nan"))
+        return out
+
+    @staticmethod
+    def _vif_values_sklearn(X) -> list:
+        """Fallback do VIF sem ``statsmodels``: ``1/(1−R²)`` da regressão de cada
+        coluna sobre as demais via ``sklearn.LinearRegression`` (com intercepto —
+        equivalente ao VIF clássico do statsmodels)."""
+        from sklearn.linear_model import LinearRegression
+        X = np.asarray(X, dtype="float64")
+        X = X[~np.isnan(X).any(axis=1)]
+        n, k = X.shape
+        if k == 0 or n < 2:
+            return []
+        if k == 1:
+            return [1.0]
+        out = []
+        for i in range(k):
+            y = X[:, i]
+            if float(np.std(y)) == 0.0:                  # termo constante: indefinido
+                out.append(float("nan"))
+                continue
+            resto = np.delete(X, i, axis=1)
+            r2 = float(LinearRegression().fit(resto, y).score(resto, y))
+            out.append(float("inf") if r2 >= 1.0 - 1e-12 else 1.0 / (1.0 - r2))
         return out
 
     def model_formula(self, use_labels=True) -> dict:
