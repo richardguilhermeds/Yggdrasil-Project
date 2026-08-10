@@ -1,6 +1,7 @@
 """Fixtures de dados sintéticos para os testes da esteira."""
 
 import os
+import sys
 
 os.environ.setdefault("MPLBACKEND", "Agg")  # sem display nos testes
 
@@ -36,6 +37,51 @@ def _synthetic(problem: str, n: int = 2000, seed: int = 0) -> pd.DataFrame:
     # Algumas linhas scoring-only (não devem entrar na análise).
     df.loc[df.sample(frac=0.05, random_state=1).index, "amostra"] = "SIMUL"
     return df
+
+
+@pytest.fixture(autouse=True)
+def _isola_estado_mlflow():
+    """Impede que um teste que troca o *tracking* do MLflow contamine os seguintes.
+
+    Vários testes apontam o tracking para um ``tmp_path`` e alguns não restauram o
+    valor anterior. Pior: ``set_experiment()`` fixa o experimento ativo em DOIS
+    lugares globais — a variável de ambiente ``MLFLOW_EXPERIMENT_ID`` e o cache de
+    módulo ``fluent._active_experiment_id``. Um ``start_run()`` sem experimento
+    explícito, num teste posterior, tenta reusar esse ID, que só existia no
+    diretório temporário (já apagado) do teste anterior, e falha com
+    ``Could not find experiment with ID`` / ``does not exist in the tracking
+    server``. Restaurar tracking + experimento ativo deixa a suíte independente da
+    ordem de execução.
+
+    Só age quando o MLflow já foi importado — quem não usa MLflow não paga nada.
+    """
+    _VARS = ("MLFLOW_EXPERIMENT_ID", "MLFLOW_EXPERIMENT_NAME", "MLFLOW_TRACKING_URI")
+    mlflow = sys.modules.get("mlflow")
+    uri = mlflow.get_tracking_uri() if mlflow is not None else None
+    fluent = sys.modules.get("mlflow.tracking.fluent")
+    exp = getattr(fluent, "_active_experiment_id", None) if fluent is not None else None
+    env = {k: os.environ.get(k) for k in _VARS}
+    try:
+        yield
+    finally:
+        for k, v in env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        mod = sys.modules.get("mlflow")
+        if mod is None:
+            return
+        if uri is not None:
+            mod.set_tracking_uri(uri)
+        fl = sys.modules.get("mlflow.tracking.fluent")
+        if fl is not None:
+            # None = "sem experimento ativo": o próximo start_run() resolve o
+            # experimento no store VIGENTE em vez de reusar o ID do anterior.
+            try:
+                fl._active_experiment_id = exp
+            except Exception:                     # pragma: no cover - API interna
+                pass
 
 
 @pytest.fixture
