@@ -719,3 +719,31 @@ def test_apply_spark_roundtrip(task):
         assert {"segmento", "nota", "valor_regua"}.issubset(out.columns)
     finally:
         spark.stop()
+
+
+def test_apply_table_pandas_progresso(seg):
+    """`apply_table` no caminho pandas puro (sem Spark), de ponta a ponta: aplica
+    a régua num DataFrame em memória, devolve ``(saida, resumo)`` com o resumo
+    por folha calculado no mesmo passo e o ``progress_callback`` registra as
+    etapas — e, mesmo QUEBRANDO, não derruba a aplicação (progresso é
+    cosmético)."""
+    seg.grow("score", splits=[0.8])
+    eventos = []
+
+    def cb(key, label, status, detail=""):
+        eventos.append((key, status))
+        raise RuntimeError("callback quebrado não pode derrubar a aplicação")
+
+    novo = make_df(seg.task_type, n=400, seed=21)
+    out, resumo = seg.apply_table(novo, progress_callback=cb)
+    # saída pandas: a base original + as colunas da régua, mesmo nº de linhas
+    assert {"segmento", "nota", "valor_regua"}.issubset(out.columns)
+    assert set(novo.columns).issubset(out.columns) and len(out) == len(novo)
+    assert out["nota"].notna().all()               # cobertura total neste desenho
+    # resumo por folha: contagem cobre todas as linhas e a fração soma 1
+    assert list(resumo.columns) == ["nota", "linhas", "pct"]
+    assert int(resumo["linhas"].sum()) == len(novo)
+    assert float(resumo["pct"].sum()) == pytest.approx(1.0)
+    # etapas na ordem run→ok, sem as etapas Spark (ler tabela / gravar)
+    assert eventos == [("aplicar", "run"), ("aplicar", "ok"),
+                       ("resumo", "run"), ("resumo", "ok"), ("done", "ok")]

@@ -294,6 +294,21 @@ def _aplicar_regua_pandas(regua, df, col_seg="segmento",
 _FALLBACK_OMITIDO = object()
 
 
+def _emit_progress(cb, key: str, label: str, status: str, detail: str = "") -> None:
+    """Dispara um evento de progresso (aplicação da régua) para a UI, se houver
+    callback.
+
+    ``status``: ``"run"`` (iniciando a etapa), ``"ok"`` (concluída) ou ``"err"``.
+    Nunca derruba a ação — o progresso é cosmético (mesma política do
+    ``ModelSegmenter``)."""
+    if cb is None:
+        return
+    try:
+        cb(key, label, status, detail)
+    except Exception:  # noqa: BLE001 - progresso é cosmético
+        pass
+
+
 # ======================================================================
 # Classe principal
 # ======================================================================
@@ -6126,17 +6141,22 @@ class TreeSegmenter:
     # ------------------------------------------------------------------
     def apply_spark(self, sdf, col_seg: str = "segmento",
                     col_nota: str = "nota", col_valor: str = "valor_regua",
-                    fallback=_FALLBACK_OMITIDO):
+                    fallback=_FALLBACK_OMITIDO, progress_callback=None):
         """Aplica a régua num Spark DataFrame (segmento, nota e alvo).
 
         ``fallback`` roteia as linhas órfãs (sem rota) para a folha escolhida
         (``'pior_nota'``/nota int) em vez de deixá-las nulas; omitido, vale o
-        persistido em ``self.fallback``."""
+        persistido em ``self.fallback``.
+
+        ``progress_callback`` (opcional): ``cb(key, label, status, detail)``
+        chamado ao montar o plano — ver :func:`_emit_progress`."""
         try:
             from pyspark.sql import functions as F
         except ImportError as e:  # pragma: no cover
             raise ImportError("apply_spark requer pyspark — use: pip install pyspark") from e
 
+        _emit_progress(progress_callback, "aplicar",
+                       "Aplicar a régua (montar o plano Spark)", "run")
         regua = self._regua_dict()
         if not regua["leaves"]:
             raise ValueError("Árvore sem folhas — cresça a segmentação antes de aplicar.")
@@ -6200,9 +6220,104 @@ class TreeSegmenter:
         else:
             o_seg, o_nota, o_val = (F.lit(fb["id"]), F.lit(fb["nota"]),
                                     F.lit(fb["pd"]))
-        return (sdf.withColumn(col_seg, seg_col.otherwise(o_seg))
-                   .withColumn(col_nota, nota_col.otherwise(o_nota))
-                   .withColumn(col_valor, pd_col.otherwise(o_val)))
+        out = (sdf.withColumn(col_seg, seg_col.otherwise(o_seg))
+                  .withColumn(col_nota, nota_col.otherwise(o_nota))
+                  .withColumn(col_valor, pd_col.otherwise(o_val)))
+        _emit_progress(progress_callback, "aplicar",
+                       "Aplicar a régua (montar o plano Spark)", "ok",
+                       f"{len(regua['leaves'])} folhas")
+        return out
+
+    # ------------------------------------------------------------------
+    # APPLY_TABLE: aplica a régua numa TABELA (nome Databricks, Spark DataFrame
+    #   ou pandas em memória) com progresso por etapa e resumo por folha —
+    #   fachada usada pelo card "Reconstruir folhas" da UI.
+    # ------------------------------------------------------------------
+    def apply_table(self, data, col_seg: str = "segmento",
+                    col_nota: str = "nota", col_valor: str = "valor_regua",
+                    fallback=_FALLBACK_OMITIDO, output_table=None,
+                    mode: str = "overwrite", spark=None,
+                    progress_callback=None):
+        """Aplica a régua numa tabela e devolve ``(saida, resumo)``.
+
+        ``data`` pode ser o **nome** de uma tabela do Databricks
+        (``catalogo.schema.tabela``), um **Spark DataFrame** ou um **pandas
+        DataFrame** em memória:
+
+        - nome de tabela ou Spark DataFrame → ``saida`` é um **Spark DataFrame**
+          com as colunas da régua (e grava em ``output_table`` quando
+          informado, ``mode='overwrite'`` por padrão);
+        - pandas DataFrame → ``saida`` é **pandas** (a base + segmento, nota e
+          valor), sem exigir Spark.
+
+        ``resumo`` é um ``pandas.DataFrame`` com a distribuição por folha
+        (``col_nota`` · ``linhas`` · ``pct``), calculado SEM reexecutar o plano
+        Spark: quando a saída é gravada, ele é lido da própria tabela já
+        materializada; sem gravação, a contagem é a única ação executada.
+
+        ``progress_callback`` (opcional): ``cb(key, label, status, detail)``
+        chamado a cada etapa (ler tabela → aplicar régua → gravar → resumo) —
+        útil p/ uma tabela de progresso na UI. Ver :func:`_emit_progress`."""
+        cb = progress_callback
+        if isinstance(data, str):                       # nome de tabela Databricks
+            try:
+                from pyspark.sql import SparkSession
+            except ImportError as e:  # pragma: no cover
+                raise ImportError(
+                    "aplicar por nome de tabela requer pyspark — no Databricks "
+                    "já vem no cluster; fora dele: pip install pyspark") from e
+            _emit_progress(cb, "load", f"Ler a tabela '{data}'", "run")
+            spark = (spark or SparkSession.getActiveSession()
+                     or SparkSession.builder.getOrCreate())
+            data = spark.table(data)
+            _emit_progress(cb, "load", "Ler a tabela", "ok")
+        if hasattr(data, "toPandas"):                   # Spark DataFrame
+            out = self.apply_spark(data, col_seg=col_seg, col_nota=col_nota,
+                                   col_valor=col_valor, fallback=fallback,
+                                   progress_callback=cb)
+            base_resumo = out
+            if output_table:
+                _emit_progress(cb, "save", f"Gravar em '{output_table}'", "run")
+                # mergeSchema: evolui o schema (colunas novas: segmento/nota/
+                # valor) ao sobrescrever a base se ela já existir.
+                (out.write.mode(mode).option("mergeSchema", "true")
+                    .saveAsTable(output_table))
+                _emit_progress(cb, "save", f"Gravar em '{output_table}'", "ok")
+                # resumo sobre a tabela GRAVADA (já materializada) — evita
+                # reexecutar o plano lazy inteiro só para contar por folha
+                sess = spark or getattr(out, "sparkSession", None)
+                if sess is None:  # pragma: no cover - Spark antigo sem o atributo
+                    from pyspark.sql import SparkSession
+                    sess = SparkSession.getActiveSession()
+                if sess is not None:
+                    base_resumo = sess.table(output_table)
+            _emit_progress(cb, "resumo", "Resumir a distribuição por folha", "run")
+            resumo = (base_resumo.groupBy(col_nota).count()
+                      .orderBy(col_nota).toPandas()
+                      .rename(columns={"count": "linhas"}))
+            resumo["pct"] = resumo["linhas"] / max(int(resumo["linhas"].sum()), 1)
+            _emit_progress(cb, "resumo", "Resumir a distribuição por folha", "ok",
+                           f"{int(resumo['linhas'].sum()):,} linhas".replace(",", "."))
+            _emit_progress(cb, "done", "Aplicação concluída", "ok")
+            return out, resumo
+        # --- pandas puro (sem Spark): base em memória ---
+        pdf = pd.DataFrame(data)
+        _emit_progress(cb, "aplicar", "Aplicar a régua (pandas)", "run")
+        extra = self.predict(pdf, col_seg=col_seg, col_nota=col_nota,
+                             col_valor=col_valor, fallback=fallback)
+        out = pdf.copy()
+        for c in extra.columns:            # sobrescreve colisões, como no Spark
+            out[c] = extra[c]
+        _emit_progress(cb, "aplicar", "Aplicar a régua (pandas)", "ok",
+                       f"{len(out):,} linhas".replace(",", "."))
+        _emit_progress(cb, "resumo", "Resumir a distribuição por folha", "run")
+        vc = out[col_nota].value_counts(dropna=False).sort_index()
+        resumo = pd.DataFrame({col_nota: vc.index.to_numpy(),
+                               "linhas": vc.to_numpy()})
+        resumo["pct"] = resumo["linhas"] / max(int(resumo["linhas"].sum()), 1)
+        _emit_progress(cb, "resumo", "Resumir a distribuição por folha", "ok")
+        _emit_progress(cb, "done", "Aplicação concluída", "ok")
+        return out, resumo
 
     # ------------------------------------------------------------------
     # SUGGEST_SPLIT: recomenda a melhor variável para dividir uma folha,

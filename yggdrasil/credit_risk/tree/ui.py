@@ -539,6 +539,9 @@ class TreeSegmenterUI:
         self._pending = None
         self.result = None
         self.spark_result = None      # último Spark DataFrame com a régua aplicada
+        self.score_df = None          # base externa opcional p/ aplicar a régua em
+                                      # memória (ui.score_df = df_novo), como no model
+        self._spark_steps: list = []  # linhas da tabela de progresso do card Spark
         self._undo: list = []        # pilha de estados p/ desfazer splits/fusões
         self._redo: list = []        # pilha de estados p/ refazer
         self._log_lines: list = []   # buffer do console (últimas 40 linhas) — ver _log
@@ -982,9 +985,12 @@ class TreeSegmenterUI:
                                   placeholder="tabela Spark de entrada (catalogo.schema.tabela)")
         self.tx_spark_out = W.Text(description="saída", layout=spark_lay, style=dstyle,
                                    placeholder="opcional: grava o resultado nesta tabela")
-        self.btn_spark_apply = mk("Reconstruir folhas (Spark)", "primary",
+        self.btn_spark_apply = mk("Reconstruir folhas", "primary",
                                   f"Aplica a régua à tabela Spark (segmento, folha e {self._risk_label} por linha), "
-                                  "desde que as colunas tenham o mesmo nome", "table")
+                                  "desde que as colunas tenham o mesmo nome; sem o nome da tabela, "
+                                  "aplica na base em memória (ui.score_df ou a carregada)", "table")
+        self.out_spark_progress = W.HTML()   # tabela de progresso ⏳/✅/❌ por etapa
+        self.out_spark = W.HTML()            # resultado/erro resumido + distribuição por folha
         # --- controles da aba "Análise de variáveis" ---
         # seletor com BUSCA (Combobox) — rótulos de exibição; mapa em _var_by_label
         var_labels, self._var_by_label = self._feature_option_labels(by_iv=False)
@@ -1691,10 +1697,13 @@ class TreeSegmenterUI:
         card_spark = W.VBox([
             W.HTML("<div class='treeui-h'>Reconstruir folhas em tabela Spark</div>"),
             W.HTML("<div class='treeui-legend'>Aplica a régua a uma tabela Spark (segmento, folha e "
-                   "valor por linha), gravando opcionalmente o resultado.</div>"),
+                   "valor por linha), gravando opcionalmente o resultado. Sem o nome da "
+                   "tabela, aplica na base em memória — <code>ui.score_df = df_novo</code> "
+                   "ou a base carregada — e o resultado vai para <code>ui.result</code>.</div>"),
             self.tx_spark_in, self.tx_spark_out,
             W.Box([], layout=W.Layout(flex="1 1 auto")),   # alinha "Reconstruir folhas" com "Salvar no MLflow"
             W.HBox([self.btn_spark_apply]),
+            self.out_spark_progress, self.out_spark,
         ], layout=W.Layout(width="49%"))
         card_spark.add_class("treeui-card")
         export_row = W.HBox([card_mlflow, card_spark],
@@ -3681,52 +3690,123 @@ class TreeSegmenterUI:
         self.out_log.clear_output()       # limpa a área de preview/log
 
     def _on_spark_apply(self, _):
+        """Card 'Reconstruir folhas': com o nome da tabela, aplica via Spark
+        (gravando opcionalmente); sem, aplica na base em memória (``ui.score_df``
+        ou a carregada). O progresso por etapa sai em ``out_spark_progress`` e o
+        erro fica RESUMIDO no card — o detalhe completo vai para o Console."""
         name = self.tx_spark_in.value.strip()
-        if not name:
-            self._log("Informe o nome da tabela Spark de entrada."); return
-        try:
-            from pyspark.sql import SparkSession
-        except ImportError:
-            self._log("PySpark não está disponível neste ambiente. No Databricks já "
-                      "vem no cluster; fora dele: %pip install pyspark."); return
-        with self._busy(self.btn_spark_apply, msg="aplicando a régua via Spark…"):
-            spark = SparkSession.getActiveSession()
-            if spark is None:
-                try:
-                    spark = SparkSession.builder.getOrCreate()
-                except Exception as e:
-                    self._log(f"Nenhuma SparkSession ativa: {type(e).__name__}: {e}"); return
+        out_name = self.tx_spark_out.value.strip() or None
+        self._spark_steps = []                     # zera a tabela de progresso
+        self._render_spark_progress()
+        self.out_spark.value = ""                  # limpa o resultado anterior
+        cb = self._spark_progress_cb
+        with self._busy(self.btn_spark_apply, msg="aplicando a régua…"):
             try:
-                sdf = spark.table(name)
+                if name:                           # tabela Databricks (Spark)
+                    out, resumo = self.seg.apply_table(
+                        name, col_nota="folha", output_table=out_name,
+                        progress_callback=cb)
+                    self.spark_result = out        # Spark DataFrame (lazy)
+                    gravou = (f" Gravado em <code>{_esc(out_name)}</code>." if out_name
+                              else " Spark DataFrame em <code>ui.spark_result</code>.")
+                    self.out_spark.value = (
+                        f"<div class='treeui-legend'>✓ Régua aplicada em "
+                        f"<code>{_esc(name)}</code>.{gravou}</div>"
+                        + self._spark_resumo_html(resumo))
+                    self._log(f"✓ régua aplicada em '{name}'"
+                              + (f" e gravada em '{out_name}'." if out_name
+                                 else ". Spark DataFrame em ui.spark_result."))
+                else:                              # em memória (pandas), sem Spark
+                    base = self.score_df if self.score_df is not None else self.df
+                    origem = ("ui.score_df" if self.score_df is not None
+                              else "base carregada")
+                    out, resumo = self.seg.apply_table(base, col_nota="folha",
+                                                       progress_callback=cb)
+                    self.result = out
+                    self.out_spark.value = (
+                        f"<div class='treeui-legend'>✓ Régua aplicada em memória "
+                        f"({origem}): {out.shape[0]} linhas × {out.shape[1]} colunas, "
+                        f"em <code>ui.result</code>.</div>"
+                        + self._spark_resumo_html(resumo))
+                    self._log(f"✓ régua aplicada em memória ({origem}) → ui.result "
+                              f"({out.shape[0]} linhas).")
             except Exception as e:
-                self._log(f"Não foi possível ler a tabela '{name}': "
-                          f"{type(e).__name__}: {e}"); return
-            try:
-                out = self.seg.apply_spark(sdf, col_nota="folha")
-            except ValueError as e:                 # colunas faltando / árvore vazia
-                self._log(f"⚠ {e}"); return
-            except Exception as e:
-                self._log(f"Erro ao aplicar a régua: {type(e).__name__}: {e}"); return
+                # o erro vai para o CONSOLE; no card fica só o aviso curto e a
+                # etapa que falhou marcada com ❌ na tabela de progresso
+                for row in reversed(self._spark_steps):
+                    if row["status"] == "run":
+                        row["status"] = "err"
+                        row["detail"] = type(e).__name__   # detalhe completo no Console
+                        break
+                self._render_spark_progress()
+                self.out_spark.value = (
+                    "<div class='treeui-legend' style='color:var(--bad-ink)'>✗ Falha ao "
+                    "aplicar a régua — veja o <b>Console</b> (rodapé) para o detalhe."
+                    "</div>")
+                self._log(f"[reconstruir folhas] ERRO: {type(e).__name__}: {e}")
 
-            self.spark_result = out
-            out_name = self.tx_spark_out.value.strip()
-            if out_name:
-                try:
-                    # mergeSchema: evolui o schema (colunas novas: segmento/folha/
-                    # valor_regua) ao sobrescrever a base se ela já existir.
-                    (out.write.mode("overwrite").option("mergeSchema", "true")
-                        .saveAsTable(out_name))
-                    self._log(f"✓ tabela '{out_name}' gravada (segmento, folha, valor_regua).")
-                except Exception as e:
-                    self._log(f"Régua aplicada, mas falhou ao gravar '{out_name}': "
-                              f"{type(e).__name__}: {e}")
-            self._log(f"✓ régua aplicada em '{name}'. Spark DataFrame em  ui.spark_result.")
-            try:
-                dist = out.groupBy("folha").count().orderBy("folha").toPandas()
-                with self.out_log:                  # tabela vai para o console
-                    display(dist)
-            except Exception as e:
-                self._log(f"(não consegui resumir a distribuição: {type(e).__name__}: {e})")
+    def _spark_progress_cb(self, key, label, status, detail=""):
+        """Callback de progresso da aplicação da régua (passado a ``apply_table``):
+        cria ou atualiza a linha da etapa ``key`` e re-renderiza a tabela."""
+        for row in self._spark_steps:
+            if row["key"] == key:
+                row["status"] = status
+                if detail:
+                    row["detail"] = detail
+                break
+        else:
+            self._spark_steps.append({"key": key, "label": label,
+                                      "status": status, "detail": detail})
+        self._render_spark_progress()
+
+    def _render_spark_progress(self):
+        """Renderiza a tabela de progresso da aplicação da régua (ler tabela →
+        aplicar → gravar → resumo), com uma linha ⏳/✅/❌ por etapa."""
+        if not self._spark_steps:
+            self.out_spark_progress.value = ""
+            return
+        icon = {"run": "⏳", "ok": "✅", "err": "❌"}
+        cor = {"run": "var(--warn-ink)", "ok": "var(--ok-ink)", "err": "var(--bad-ink)"}
+        rot = {"run": "processando…", "ok": "concluído", "err": "erro"}
+        trs = ""
+        for r in self._spark_steps:
+            st = r["status"]
+            trs += (f"<tr><td style='padding:4px 10px'>{icon.get(st, '')}</td>"
+                    f"<td style='padding:4px 10px'>{r['label']}</td>"
+                    f"<td style='padding:4px 10px;color:{cor.get(st, 'var(--ink)')};font-weight:600'>"
+                    f"{rot.get(st, st)}</td>"
+                    f"<td style='padding:4px 10px;color:var(--muted)'>{r.get('detail', '')}</td></tr>")
+        self.out_spark_progress.value = (
+            "<div class='treeui-legend' style='margin-top:6px'>Progresso da aplicação</div>"
+            "<table style='border-collapse:collapse;font-size:12px;width:100%;margin:2px 0 8px'>"
+            "<thead><tr style='background:var(--tbl-head-bg)'>"
+            "<th style='padding:4px 10px'></th>"
+            "<th style='padding:4px 10px;text-align:left'>Etapa</th>"
+            "<th style='padding:4px 10px;text-align:left'>Status</th>"
+            "<th style='padding:4px 10px;text-align:left'>Detalhe</th>"
+            f"</tr></thead><tbody>{trs}</tbody></table>")
+
+    def _spark_resumo_html(self, resumo):
+        """Tabela compacta da distribuição por folha (resumo do ``apply_table``,
+        já materializado — nada é recomputado aqui): folha · linhas · %."""
+        if resumo is None or not len(resumo):
+            return ""
+        trs = ""
+        for _, r in resumo.iterrows():
+            folha = "— sem rota" if pd.isna(r.iloc[0]) else r.iloc[0]
+            linhas = f"{int(r['linhas']):,}".replace(",", ".")
+            pct = f"{float(r['pct']):.1%}"
+            trs += (f"<tr><td style='padding:3px 10px'>{folha}</td>"
+                    f"<td style='padding:3px 10px;text-align:right'>{linhas}</td>"
+                    f"<td style='padding:3px 10px;text-align:right;color:var(--muted)'>"
+                    f"{pct}</td></tr>")
+        return ("<div class='treeui-legend' style='margin-top:6px'>Distribuição por folha</div>"
+                "<table style='border-collapse:collapse;font-size:12px;margin:2px 0 6px'>"
+                "<thead><tr style='background:var(--tbl-head-bg)'>"
+                f"<th style='padding:3px 10px;text-align:left'>{_esc(resumo.columns[0])}</th>"
+                "<th style='padding:3px 10px;text-align:right'>linhas</th>"
+                "<th style='padding:3px 10px;text-align:right'>%</th>"
+                f"</tr></thead><tbody>{trs}</tbody></table>")
 
     def _parse_cuts(self, feature, sid):
         sub = self.df[self.seg.segments[sid]["mask"]]

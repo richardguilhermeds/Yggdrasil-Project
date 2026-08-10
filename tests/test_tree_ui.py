@@ -919,3 +919,39 @@ def test_ui_reset_e_prune_pedem_confirmacao_no_botao(task):
         with contextlib.redirect_stdout(io.StringIO()):
             btn.click()
         assert btn.description == "Confirmar?"
+
+
+def test_ui_spark_card_pandas_e_progresso(task):
+    """Card 'Reconstruir folhas': sem o nome da tabela, aplica a régua em
+    memória (pandas puro, sem Spark) usando ``ui.score_df`` quando definido —
+    com a tabela de progresso ✅ por etapa, a distribuição por folha no card e
+    o resultado em ``ui.result``; o _busy re-habilita o botão ao final."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        ui.score_df = make_df(task, n=300, seed=15)
+        ui.tx_spark_in.value = ""                  # sem tabela → caminho pandas
+        ui._on_spark_apply(None)
+    assert isinstance(ui.result, pd.DataFrame) and len(ui.result) == 300
+    assert {"segmento", "folha", "valor_regua"}.issubset(ui.result.columns)
+    assert "ui.score_df" in ui.out_spark.value     # origem citada no card
+    assert "Distribuição por folha" in ui.out_spark.value
+    assert "✅" in ui.out_spark_progress.value     # etapas concluídas
+    assert "❌" not in ui.out_spark_progress.value
+    assert not ui.btn_spark_apply.disabled         # _busy re-habilitou o botão
+
+
+def test_ui_spark_card_erro_resumido_no_card(task):
+    """Erro na aplicação (base em memória sem as colunas da régua): o card mostra
+    só o aviso curto apontando o Console, a etapa que falhou é marcada com ❌ na
+    tabela de progresso e o detalhe completo vai para o Console."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        ui.score_df = pd.DataFrame({"sem_as_colunas": [1.0, 2.0]})
+        ui.tx_spark_in.value = ""
+        ui._on_spark_apply(None)
+    assert "Console" in ui.out_spark.value          # erro resumido no card
+    assert "❌" in ui.out_spark_progress.value      # etapa marcada com erro
+    assert any("ERRO" in l for l in ui._log_lines)  # detalhe no console
+    assert not ui.btn_spark_apply.disabled          # botão re-habilitado
