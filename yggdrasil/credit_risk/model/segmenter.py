@@ -85,6 +85,13 @@ ALGORITHMS: dict[str, dict] = {
 BOOSTING_ALGORITHMS = ("gradient_boosting", "hist_gradient_boosting",
                        "lightgbm", "xgboost", "catboost")
 
+#: Algoritmos com suporte nativo a **restrições de monotonicidade** (ver
+#: ``fit(monotone=...)``): ``monotonic_cst`` no HistGradientBoosting (dict por
+#: NOME de coluna) e ``monotone_constraints`` no LightGBM/XGBoost (vetor
+#: posicional alinhado às colunas pós-transformação). Nos demais algoritmos a
+#: opção é ignorada com aviso.
+MONOTONE_ALGORITHMS = ("hist_gradient_boosting", "lightgbm", "xgboost")
+
 #: Algoritmos com espaço de busca para tuning bayesiano (Optuna).
 TUNABLE_ALGORITHMS = ("logistica", "random_forest", "extra_trees", "gradient_boosting",
                       "hist_gradient_boosting", "lightgbm", "xgboost", "catboost")
@@ -696,6 +703,11 @@ class ModelSegmenter:
         # balanceamento de classes do último fit (só classificação; ver fit) —
         # traduzido por algoritmo em _build_estimator.
         self.class_balance: bool = False
+        # restrições de monotonicidade do último fit: a ESCOLHA ('auto' | dict |
+        # None) e as direções efetivamente aplicadas {variável: ±1} (ver
+        # fit(monotone=...) e MONOTONE_ALGORITHMS).
+        self.monotone = None
+        self.monotone_dirs_: dict = {}
         self.model_features: list = []
         # modelo Two-Stage (hurdle de alvo): classificação P(y≥t) + regressão em
         # y≥t, combinadas em E[y]. Desligado por padrão; ligado por fit_two_stage.
@@ -2157,10 +2169,29 @@ class ModelSegmenter:
             fallback = float(mean_global) if np.isfinite(mean_global) else 0.0
         return {"kind": kind, "bins": enc_bins, "fallback": fallback}
 
-    def _build_pipeline(self, features, algorithm, hyperparams, transform="raw", task=None,
-                        class_counts=None):
+    def _build_raw_preprocessor(self, features):
+        """``ColumnTransformer`` do ``transform='raw'``: imputação (mediana) nas
+        numéricas + imputação (moda) e one-hot nas categóricas. A ordem
+        pós-transformação é o bloco ``num`` primeiro (na ordem de ``features``) e
+        depois as *dummies* do bloco ``cat`` — premissa dos vetores posicionais
+        de monotonicidade (ver :meth:`_monotone_est_params`)."""
         from sklearn.compose import ColumnTransformer
         from sklearn.impute import SimpleImputer
+        from sklearn.pipeline import Pipeline
+
+        num = [f for f in features if self._detect_kind(f) == "num"]
+        cat = [f for f in features if self._detect_kind(f) == "cat"]
+        transformers = []
+        if num:
+            transformers.append(("num", SimpleImputer(strategy="median"), num))
+        if cat:
+            cat_pipe = Pipeline([("imp", SimpleImputer(strategy="most_frequent")),
+                                 ("ohe", _make_ohe())])
+            transformers.append(("cat", cat_pipe, cat))
+        return ColumnTransformer(transformers, remainder="drop")
+
+    def _build_pipeline(self, features, algorithm, hyperparams, transform="raw", task=None,
+                        class_counts=None):
         from sklearn.pipeline import Pipeline
 
         # ``task`` permite forçar classificação/regressão (usado pelo Two-Stage,
@@ -2179,21 +2210,125 @@ class ModelSegmenter:
                                 name_prefix=prefix)
             return Pipeline([("pre", pre), ("est", est)])
 
-        num = [f for f in features if self._detect_kind(f) == "num"]
-        cat = [f for f in features if self._detect_kind(f) == "cat"]
-        transformers = []
-        if num:
-            transformers.append(("num", SimpleImputer(strategy="median"), num))
-        if cat:
-            from sklearn.pipeline import Pipeline as P
-            cat_pipe = P([("imp", SimpleImputer(strategy="most_frequent")),
-                          ("ohe", _make_ohe())])
-            transformers.append(("cat", cat_pipe, cat))
-        pre = ColumnTransformer(transformers, remainder="drop")
-        return Pipeline([("pre", pre), ("est", est)])
+        return Pipeline([("pre", self._build_raw_preprocessor(features)), ("est", est)])
+
+    # ------------------------------------------------------------------
+    # Restrições de monotonicidade (fit/tune_optuna: monotone='auto' | dict)
+    # ------------------------------------------------------------------
+    def monotone_directions(self, features=None) -> dict:
+        """Direção de monotonicidade sugerida para cada variável **numérica**, a
+        partir da tendência univariada do risco por faixa na referência (mesma
+        leitura da coluna ``tendencia`` de :meth:`variable_iv`): ``+1`` = risco
+        cresce com a variável (predição não-decrescente), ``-1`` = decresce e
+        ``0`` = não-monotônica (fica livre). Categóricas ficam de fora (o one-hot
+        não tem ordem). É a base do ``monotone='auto'`` de :meth:`fit` e
+        :meth:`tune_optuna`."""
+        feats = (list(features) if features is not None
+                 else (self.selected_features() or list(self.candidates)))
+        out = {}
+        for f in feats:
+            if f not in self.df.columns or self._detect_kind(f) != "num":
+                continue
+            direction = 0
+            try:
+                vt = self.variable_table(f)
+                trend, _ = _trend(vt.attrs.get("risco_ordenavel") or [])
+                direction = {"crescente": 1, "decrescente": -1}.get(trend, 0)
+            except Exception:  # noqa: BLE001 — variável problemática fica livre
+                pass
+            out[f] = direction
+        return out
+
+    def _resolve_monotone(self, monotone, feats, algorithm, transform):
+        """Resolve a opção ``monotone`` de :meth:`fit`/:meth:`tune_optuna` num
+        dict ``{variável: ±1}`` só com as direções efetivas (sem zeros), ou
+        ``None`` quando não há restrição a aplicar. ``'auto'``/``True`` usa
+        :meth:`monotone_directions`; um dict sobrescreve a direção automática
+        por variável (``0`` libera a variável). Situações sem suporte
+        (``transform!='raw'``, algoritmo fora de :data:`MONOTONE_ALGORITHMS`)
+        são ignoradas com aviso."""
+        if not monotone:
+            return None
+        if transform != "raw":
+            warnings.warn(
+                "Restrições de monotonicidade só se aplicam a transform='raw' — "
+                "com a transformação por bins cada variável entra pelo valor do "
+                "seu bin e a relação com a resposta já segue a direção do próprio "
+                "WoE/risco do bin. Opção ignorada.")
+            return None
+        if algorithm not in MONOTONE_ALGORITHMS:
+            warnings.warn(
+                f"O algoritmo {algorithm!r} não suporta restrições de "
+                f"monotonicidade (suportados: {', '.join(MONOTONE_ALGORITHMS)}). "
+                "Opção ignorada.")
+            return None
+        if not (monotone in ("auto", True) or isinstance(monotone, dict)):
+            raise ValueError("monotone deve ser 'auto', um dict {variável: -1|0|+1} "
+                             f"ou None (recebi {monotone!r}).")
+        dirs = self.monotone_directions(feats)      # base automática (numéricas)
+        if isinstance(monotone, dict):              # override manual por variável
+            for f, d in monotone.items():
+                if f not in dirs:
+                    warnings.warn(f"monotone: variável {f!r} ignorada (não é "
+                                  "numérica ou não está entre as variáveis do "
+                                  "modelo).")
+                    continue
+                d = int(d)
+                if d not in (-1, 0, 1):
+                    raise ValueError(f"monotone[{f!r}] deve ser -1, 0 ou +1 "
+                                     f"(recebi {d}).")
+                dirs[f] = d
+        dirs = {f: d for f, d in dirs.items() if d != 0}
+        if not dirs:
+            warnings.warn("Nenhuma variável numérica com direção monotônica "
+                          "definida — modelo treinado sem restrições de "
+                          "monotonicidade.")
+            return None
+        return dirs
+
+    def _monotone_est_params(self, algorithm, dirs, X, features) -> tuple:
+        """Traduz as direções por variável (``{variável: ±1}``) no parâmetro
+        nativo de monotonicidade do algoritmo. Devolve ``(params, pandas_out)``:
+        ``params`` entra no estimador via ``set_params`` e ``pandas_out=True``
+        indica que o pré-processador precisa emitir DataFrame (nomes de coluna
+        visíveis ao estimador).
+
+        Ajusta um pré-processador DESCARTÁVEL em ``X`` só para descobrir os
+        nomes/ordem REAIS das colunas pós-transformação (``num__<var>`` primeiro,
+        depois as *dummies* ``cat__<var>_<valor>``) — assim um eventual descarte
+        de coluna toda-faltante pelo imputador não desalinha o vetor.
+
+        * ``hist_gradient_boosting``: ``monotonic_cst`` como **dict por nome**
+          (robusto à ordem; exige entrada nomeada, daí o
+          ``set_output(transform='pandas')`` no pré-processador);
+        * ``lightgbm``/``xgboost``: ``monotone_constraints`` **posicional**,
+          alinhado às colunas pós-transformação (0 nas *dummies* one-hot)."""
+        probe = self._build_raw_preprocessor(features)
+        probe.fit(X)
+        names = list(probe.get_feature_names_out())
+        if algorithm == "hist_gradient_boosting":
+            cst = {n: dirs[n[len("num__"):]] for n in names
+                   if n.startswith("num__") and n[len("num__"):] in dirs}
+            return {"monotonic_cst": cst}, True
+        vec = [dirs.get(n[len("num__"):], 0) if n.startswith("num__") else 0
+               for n in names]
+        if algorithm == "lightgbm":
+            return {"monotone_constraints": vec}, False
+        if algorithm == "xgboost":
+            return {"monotone_constraints": tuple(vec)}, False
+        raise ValueError(algorithm)  # pragma: no cover — guardado por MONOTONE_ALGORITHMS
+
+    @staticmethod
+    def _set_monotone_on_pipe(pipe, params, pandas_out):
+        """Aplica no pipeline AINDA não ajustado os parâmetros produzidos por
+        :meth:`_monotone_est_params` (estimador + saída pandas do pré-processador
+        quando o parâmetro é um dict por nome)."""
+        pipe.named_steps["est"].set_params(**params)
+        if pandas_out:      # dict por NOME exige que o estimador veja um DataFrame
+            pipe.named_steps["pre"].set_output(transform="pandas")
 
     def fit(self, algorithm=None, hyperparams=None, features=None, transform="raw",
-            class_balance=False):
+            class_balance=False, monotone=None):
         """Treina um modelo na amostra de referência (DES) com as variáveis
         selecionadas (ou ``features``). ``algorithm`` default: logística
         (classificação) / linear (regressão). Calcula ``score_`` para todas as linhas.
@@ -2210,7 +2345,22 @@ class ModelSegmenter:
         ``auto_class_weights='Balanced'`` (CatBoost); o GradientBoosting clássico
         (sem ``class_weight``) recebe ``sample_weight`` balanceado no ``fit``.
         Um ``"class_balance"`` dentro de ``hyperparams`` (ex.: ``best_params`` do
-        Optuna) tem precedência sobre o argumento."""
+        Optuna) tem precedência sobre o argumento.
+
+        ``monotone`` (opcional): impõe **restrições de monotonicidade** nas
+        variáveis numéricas dos algoritmos que as suportam
+        (:data:`MONOTONE_ALGORITHMS` — ``monotonic_cst`` no HistGradientBoosting,
+        ``monotone_constraints`` no LightGBM/XGBoost). ``'auto'`` usa a direção
+        da tendência univariada de cada variável (risco por faixa na referência
+        — ver :meth:`monotone_directions`): risco crescente → predição
+        não-decrescente na variável; decrescente → não-crescente; variáveis
+        não-monotônicas e categóricas ficam livres. Um dict
+        ``{variável: -1|0|+1}`` sobrescreve a direção automática por variável
+        (``0`` libera). Só se aplica a ``transform='raw'`` — com WoE cada
+        variável entra pelo valor do seu bin e a relação já segue a direção do
+        próprio WoE/risco do bin; algoritmos sem suporte ignoram a opção com
+        aviso. As direções aplicadas ficam em ``monotone_dirs_`` e a escolha é
+        persistida em :meth:`to_dict`."""
         if algorithm is None:
             algorithm = "logistica" if self.task_type == "classification" else "linear"
         hp = dict(hyperparams or {})
@@ -2223,11 +2373,15 @@ class ModelSegmenter:
         feats = list(features) if features is not None else self.selected_features()
         if not feats:
             feats = list(self.candidates)
+        # restrições de monotonicidade (opcional): direções por variável numérica
+        mono_dirs = self._resolve_monotone(monotone, feats, algorithm, transform)
         self.model_features = feats
         self.algorithm = algorithm
         self.hyperparams = dict(hp)
         self.feature_transform = transform
         self.class_balance = class_balance
+        self.monotone = monotone if mono_dirs else None
+        self.monotone_dirs_ = dict(mono_dirs or {})
         self.two_stage = False                 # fit "normal" desliga o modo hurdle
         self.two_stage_threshold = None
 
@@ -2247,6 +2401,9 @@ class ModelSegmenter:
                 counts = (int(len(y)) - n_pos, n_pos)
         self.model = self._build_pipeline(feats, algorithm, hp, transform=transform,
                                           class_counts=counts)
+        if mono_dirs:
+            self._set_monotone_on_pipe(
+                self.model, *self._monotone_est_params(algorithm, mono_dirs, X, feats))
         self.model.fit(X, y, **fit_kwargs)
         self.score_ = self._compute_score(self.df)
         self._shap_cache = {}
@@ -2316,6 +2473,8 @@ class ModelSegmenter:
                             "anchor0": anchor0}
         self.feature_transform = "raw"
         self.class_balance = False             # hurdle não usa o balanceamento do fit
+        self.monotone = None                   # hurdle não aplica monotonicidade
+        self.monotone_dirs_ = {}
         self.score_ = self._compute_score(self.df)
         self._shap_cache = {}
         self._metrics_cache = None
@@ -2372,7 +2531,7 @@ class ModelSegmenter:
                     timeout=None, random_state=None, fit_best=True, verbose=False,
                     progress_callback=None, log_mlflow=False, mlflow_experiment=None,
                     mlflow_run_name=None, search_space=None, register_model=False,
-                    mlflow_model_name=None, class_balance=None):
+                    mlflow_model_name=None, class_balance=None, monotone=None):
         """Otimização bayesiana de hiperparâmetros com **Optuna** (dependência
         core). Treina na referência (DES) e avalia no OOT (se houver alvo;
         senão, num split 75/25 do DES), maximizando **AUC** (classificação) ou
@@ -2390,6 +2549,13 @@ class ModelSegmenter:
         desligado como um parâmetro categórico ``class_balance``; ``True``/``False``
         fixa a opção em todos os trials. O melhor valor é aplicado no re-ajuste
         final (``fit_best``). Ignorado na regressão. Ver :meth:`fit`.
+
+        ``monotone`` (opcional): restrições de monotonicidade aplicadas a TODOS
+        os trials (e ao re-ajuste final) — mesma semântica de :meth:`fit`
+        (``'auto'`` = direção da tendência univariada; dict = override por
+        variável; só ``transform='raw'`` e algoritmos de
+        :data:`MONOTONE_ALGORITHMS`; sem suporte → aviso e opção ignorada).
+        As direções são resolvidas UMA vez, fora do loop de trials.
 
         Cada trial guarda, em ``trial.user_attrs``, dois grupos de métricas —
         ``modelagem`` (AUC/KS/Gini ou RMSE/MAE/R² na validação) e ``monitoramento``
@@ -2450,6 +2616,14 @@ class ModelSegmenter:
         # classes (scale_pos_weight etc.) quando o trial o ligar.
         n_pos_tr = int((ytr == 1).sum()) if is_clf else 0
         n_neg_tr = (int(len(ytr)) - n_pos_tr) if is_clf else 0
+        # restrições de monotonicidade (opcional): resolvidas UMA vez fora do
+        # objective (as direções univariadas e os nomes pós-transformação não
+        # mudam entre trials) e injetadas no estimador de CADA trial.
+        mono_dirs = self._resolve_monotone(monotone, feats, algorithm, transform)
+        mono_params, mono_pandas = ({}, False)
+        if mono_dirs:
+            mono_params, mono_pandas = self._monotone_est_params(algorithm, mono_dirs,
+                                                                 Xtr, feats)
 
         def objective(trial):
             from ...monitoring import psi as _psi_num
@@ -2471,6 +2645,8 @@ class ModelSegmenter:
                     counts = (n_neg_tr, n_pos_tr)
             pipe = self._build_pipeline(feats, algorithm, hp, transform=transform,
                                         class_counts=counts)
+            if mono_params:
+                self._set_monotone_on_pipe(pipe, mono_params, mono_pandas)
             pipe.fit(Xtr, ytr, **fit_kw)
             s = self._predict_score_array(pipe, Xva)
             s_tr = self._predict_score_array(pipe, Xtr)
@@ -2554,8 +2730,11 @@ class ModelSegmenter:
                 # "class_balance" (se buscado) vem dentro de best_params e o fit
                 # o extrai; se foi FIXADO por argumento, repassa o valor fixo.
                 cb_fixed = bool(class_balance) if (is_clf and class_balance is not None) else False
+                # monotone repassado só se foi de fato aplicado nos trials (evita
+                # um segundo aviso quando a opção foi ignorada por falta de suporte)
                 self.fit(algorithm=algorithm, hyperparams=study.best_params,
-                         features=feats, transform=transform, class_balance=cb_fixed)
+                         features=feats, transform=transform, class_balance=cb_fixed,
+                         monotone=(monotone if mono_dirs else None))
 
         # --- MLflow: run-pai + um run aninhado por trial (opcional) ----------
         if log_mlflow:
@@ -2783,8 +2962,11 @@ class ModelSegmenter:
         # escoragem consistente. (Se o modelo externo já espera WoE, passe um
         # pipeline que faça isso internamente.)
         self.feature_transform = "raw"
-        # modelo externo: não sabemos se veio balanceado — limpa a flag do fit.
+        # modelo externo: não sabemos se veio balanceado nem com restrições de
+        # monotonicidade — limpa as flags do fit.
         self.class_balance = False
+        self.monotone = None
+        self.monotone_dirs_ = {}
         self.score_ = self._compute_score(self.df)
         self._shap_cache = {}
         return self
@@ -5639,6 +5821,10 @@ class ModelSegmenter:
             "hyperparams": self.hyperparams,
             "feature_transform": self.feature_transform,
             "class_balance": self.class_balance,
+            # monotonicidade: a escolha ('auto' | dict | None) e as direções
+            # efetivamente aplicadas no último fit (governança/reprodutibilidade)
+            "monotone": self.monotone,
+            "monotone_dirs": self.monotone_dirs_,
             "model_features": list(self.model_features),
             "rating_config": self.rating_config,
             "two_stage": self.two_stage,
@@ -5674,6 +5860,9 @@ class ModelSegmenter:
         seg.hyperparams = data.get("hyperparams", {})
         seg.feature_transform = data.get("feature_transform", "raw")
         seg.class_balance = bool(data.get("class_balance", False))
+        seg.monotone = data.get("monotone")
+        seg.monotone_dirs_ = {k: int(v) for k, v in
+                              (data.get("monotone_dirs") or {}).items()}
         seg.model_features = data.get("model_features", [])
         seg.rating_config = data.get("rating_config", {})
         seg.two_stage = bool(data.get("two_stage", False))

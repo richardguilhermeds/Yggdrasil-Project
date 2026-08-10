@@ -209,3 +209,43 @@ def test_grupo_avancado_metricas_e_ratings():
         ui._on_fit(None)
     assert ui.out_adv_group_metrics.value == ""
     assert ui.out_adv_group_rating.value == ""
+
+def test_toggle_monotonicidade():
+    """A linha 'restrições de monotonicidade' só aparece nos boostings com
+    suporte nativo, e o fit via UI aplica monotonic_cst (dict por nome) com as
+    direções da tendência univariada."""
+    ui = _build()
+    from yggdrasil.credit_risk.model.segmenter import MONOTONE_ALGORITHMS
+    ui.dd_algo.value = "logistica"                    # sem suporte → linha oculta
+    assert ui.row_monotone.layout.display == "none"
+    ui.dd_algo.value = "hist_gradient_boosting"
+    assert "hist_gradient_boosting" in MONOTONE_ALGORITHMS
+    assert ui.row_monotone.layout.display != "none"
+    ui.cb_monotone.value = True
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_fit(None)
+    cst = ui.seg.model.named_steps["est"].monotonic_cst
+    assert cst and all(v in (-1, 1) for v in cst.values())
+    # 'score' tem relação positiva clara com o alvo no make_df
+    assert cst.get("num__score") == 1
+    assert ui.seg.monotone == "auto"
+    assert "monotonicidade" in ui.out_fit_status.value
+
+
+def test_toggle_monotonicidade_ignorado_sem_suporte():
+    """Toggle marcado + algoritmo sem suporte: o fit via UI NÃO repassa a opção
+    (nem aviso, nem restrição) — a linha fica oculta, mas o valor persiste."""
+    ui = _build()
+    ui.dd_algo.value = "hist_gradient_boosting"
+    ui.cb_monotone.value = True
+    ui.dd_algo.value = "logistica"                    # troca esconde a linha
+    assert ui.row_monotone.layout.display == "none"
+    import warnings as _w
+    with contextlib.redirect_stdout(io.StringIO()), \
+            _w.catch_warnings(record=True) as rec:
+        _w.simplefilter("always")
+        ui._on_fit(None)
+    assert not [w for w in rec if "monotonicidade" in str(w.message)]
+    assert "✓" in ui.out_fit_status.value             # fit concluiu normalmente
+    assert ui.seg.algorithm == "logistica"
+    assert ui.seg.monotone is None and ui.seg.monotone_dirs_ == {}

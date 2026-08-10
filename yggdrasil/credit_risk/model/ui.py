@@ -40,7 +40,7 @@ except Exception as e:  # pragma: no cover
     raise ImportError("Este módulo requer ipywidgets e IPython (Jupyter).") from e
 
 from .segmenter import (ADVANCED_HYPERPARAMS, ALGORITHMS, BOOSTING_ALGORITHMS,
-                        OPTUNA_SEARCH_SPACE, ModelSegmenter)
+                        MONOTONE_ALGORITHMS, OPTUNA_SEARCH_SPACE, ModelSegmenter)
 
 #: Ordem e rótulo de exibição dos hiperparâmetros na gaveta de "Ajuste do tuning
 #: (Optuna)" — a união dos parâmetros de :data:`OPTUNA_SEARCH_SPACE`.
@@ -1134,6 +1134,21 @@ class ModelSegmenterUI:
                                   layout=W.Layout(align_items="center"))
         if self.task_type != "classification":
             self.row_balance.layout.display = "none"
+        # --- restrições de monotonicidade (boostings com suporte nativo) ----
+        self.cb_monotone = W.Checkbox(value=False, indent=False,
+                                      description="restrições de monotonicidade (auto)")
+        self.cb_monotone.tooltip = (
+            "Impõe ao modelo a direção da tendência univariada de cada variável "
+            "numérica (risco por faixa na referência): tendência crescente → "
+            "predição não-decrescente na variável; decrescente → não-crescente; "
+            "não-monotônica → livre (categóricas ficam de fora). Disponível nos "
+            "boostings com suporte nativo — Hist Gradient Boosting "
+            "(monotonic_cst), LightGBM e XGBoost (monotone_constraints) — e só "
+            "com valores crus: com WoE a relação já segue a direção do próprio "
+            "WoE/risco do bin. No tuning (Optuna), vale para todos os trials.")
+        self.cb_monotone.observe(lambda c: self._mark_dirty(), names="value")
+        self.row_monotone = W.HBox([self.cb_monotone])
+        self.row_monotone.layout.display = "none"   # revelada por _sync_algo_visibility
         self.out_algo_help = W.HTML()   # tutorial do algoritmo/parâmetros selecionado
         self.out_metrics = W.HTML()
         self.out_metric_compare = W.HTML()   # barras: principais métricas por amostra (DES vs OOT)
@@ -1213,6 +1228,7 @@ class ModelSegmenterUI:
             W.HTML("<div class='mseg-h'>Treinar (ou usar modelo pré-ajustado via set_model)</div>"),
             self.row_algo,
             self.row_balance,
+            self.row_monotone,
             self.row_twostage, self.box_twostage,
             self.box_logit, self.box_ensemble, self.box_lr, self.box_adv,
             self.box_tuning_space,
@@ -2583,6 +2599,7 @@ class ModelSegmenterUI:
         self.box_twostage.layout.display = "" if two else "none"
         if two:
             self.row_algo.layout.display = "none"
+            self.row_monotone.layout.display = "none"
             for _bx in (self.box_logit, self.box_ensemble, self.box_lr, self.box_adv,
                         self.box_tuning_space, self.box_tune, self.formula_card):
                 _bx.layout.display = "none"
@@ -2592,6 +2609,8 @@ class ModelSegmenterUI:
         self.row_algo.layout.display = ""
         self.box_tune.layout.display = ""
         algo = self.dd_algo.value
+        # monotonicidade: só nos boostings com suporte nativo (HistGB/LGBM/XGB)
+        self.row_monotone.layout.display = "" if algo in MONOTONE_ALGORITHMS else "none"
         ensemble = algo not in ("logistica", "linear")
         self.box_logit.layout.display = "" if algo == "logistica" else "none"
         self.box_ensemble.layout.display = "" if ensemble else "none"
@@ -2899,11 +2918,19 @@ class ModelSegmenterUI:
             else:
                 balance = (self.task_type == "classification"
                            and bool(self.cb_balance.value))
+                # monotonicidade só quando o algoritmo suporta — o toggle pode ter
+                # ficado marcado de um algoritmo anterior (a linha fica oculta).
+                monotone = ("auto" if (self.cb_monotone.value
+                                       and algo in MONOTONE_ALGORITHMS) else None)
                 self.seg.fit(algo, hyperparams=self._collect_hyperparams(algo),
-                             transform=transform, class_balance=balance)
+                             transform=transform, class_balance=balance,
+                             monotone=monotone)
                 modo = "WoE/bins" if transform == "woe" else "valores crus"
                 if balance:
                     modo += " · classes balanceadas"
+                if getattr(self.seg, "monotone_dirs_", None):
+                    modo += (" · monotonicidade em "
+                             f"{len(self.seg.monotone_dirs_)} variáveis")
                 self._log(f"[fit] {algo} treinado com {len(self.seg.model_features)} "
                           f"variáveis ({modo}).")
                 self.out_fit_status.value = (
@@ -2971,6 +2998,10 @@ class ModelSegmenterUI:
         # Fora da classificação o parâmetro é ignorado pelo tune_optuna.
         class_balance = (True if (self.task_type == "classification"
                                   and self.cb_balance.value) else None)
+        # monotonicidade: quando marcada (e o algoritmo suporta), vale para TODOS
+        # os trials e para o re-ajuste final com os melhores hiperparâmetros.
+        monotone = ("auto" if (self.cb_monotone.value
+                               and algo in MONOTONE_ALGORITHMS) else None)
 
         # O tuning roda numa thread de FUNDO para a UI seguir responsiva — assim o
         # botão "Cancelar" (que chama seg.cancel_tuning()) é processado enquanto o
@@ -2986,7 +3017,8 @@ class ModelSegmenterUI:
                                            search_space=search_space,
                                            register_model=log_mlflow,
                                            mlflow_model_name=model_name,
-                                           class_balance=class_balance)
+                                           class_balance=class_balance,
+                                           monotone=monotone)
             except Exception as e:
                 self.pb_tune.bar_style = "danger"
                 self.out_tune.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro no "
@@ -3931,6 +3963,12 @@ class ModelSegmenterUI:
         if self.task_type == "classification" and getattr(self, "cb_balance", None) is not None:
             try:
                 self.cb_balance.value = bool(getattr(self.seg, "class_balance", False))
+            except Exception:               # noqa: BLE001 - cosmético
+                pass
+        # restrições de monotonicidade do modelo carregado (persistidas no to_dict)
+        if getattr(self, "cb_monotone", None) is not None:
+            try:
+                self.cb_monotone.value = bool(getattr(self.seg, "monotone", None))
             except Exception:               # noqa: BLE001 - cosmético
                 pass
 

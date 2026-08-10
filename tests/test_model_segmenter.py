@@ -1665,3 +1665,120 @@ def test_tune_optuna_class_balance_no_espaco():
     assert all("class_balance" not in t.params for t in seg.study_.trials)
     assert res2["n_trials"] >= 1
     assert seg.class_balance is True          # fit_best repassa o valor fixado
+
+# ----------------------------------------------------------------------
+# Restrições de monotonicidade (fit/tune: monotone='auto' | dict)
+# ----------------------------------------------------------------------
+def _df_monotonico(n=1600, seed=7):
+    """Relação monotônica CLARA com o alvo: risco cresce com x_up e decresce
+    com x_down; 'seg_cat' é categórica (fica fora das restrições)."""
+    rng = np.random.default_rng(seed)
+    x_up = rng.uniform(0, 1, n)
+    x_down = rng.uniform(0, 1, n)
+    p = np.clip(0.05 + 0.55 * x_up + 0.30 * (1.0 - x_down), 0.01, 0.95)
+    meses = pd.date_range("2023-01-01", periods=6, freq="MS")
+    df = pd.DataFrame({"x_up": x_up, "x_down": x_down,
+                       "seg_cat": rng.choice(list("AB"), n).astype(object),
+                       "target": (rng.uniform(0, 1, n) < p).astype(int)})
+    df["dt_ref"] = rng.choice(meses, size=n)
+    df["amostra"] = np.where(df["dt_ref"] >= meses[4], "OOT", "DES")
+    return df
+
+
+def _seg_monotonico(df=None):
+    df = _df_monotonico() if df is None else df
+    return ModelSegmenter(df, target="target", task_type="classification",
+                          sample_col="amostra", ref_sample="DES",
+                          date_col="dt_ref", verbose=False)
+
+
+def test_monotone_directions_pela_tendencia_univariada():
+    seg = _seg_monotonico()
+    dirs = seg.monotone_directions(["x_up", "x_down", "seg_cat"])
+    assert dirs["x_up"] == 1 and dirs["x_down"] == -1
+    assert "seg_cat" not in dirs                     # categórica fica fora
+
+
+def test_monotone_auto_hist_gradient_boosting():
+    """monotone='auto': monotonic_cst chega como dict por NOME de coluna e as
+    predições parciais respeitam a direção univariada."""
+    df = _df_monotonico()
+    seg = _seg_monotonico(df)
+    seg.fit("hist_gradient_boosting", hyperparams={"max_iter": 60}, monotone="auto")
+    cst = seg.model.named_steps["est"].monotonic_cst
+    assert cst == {"num__x_up": 1, "num__x_down": -1}
+    assert seg.monotone == "auto"
+    assert seg.monotone_dirs_ == {"x_up": 1, "x_down": -1}
+    # varrendo x_up (resto fixo), a média das probabilidades nunca cai
+    base = df[seg.model_features]
+    medias = []
+    for q in np.linspace(0.05, 0.95, 7):
+        g = base.copy()
+        g["x_up"] = float(np.quantile(df["x_up"], q))
+        medias.append(float(seg.model.predict_proba(g)[:, 1].mean()))
+    assert all(b >= a - 1e-9 for a, b in zip(medias, medias[1:]))
+    # persistência: escolha + direções aplicadas fazem round-trip no to_dict
+    d = seg.to_dict()
+    assert d["monotone"] == "auto"
+    assert d["monotone_dirs"] == {"x_up": 1, "x_down": -1}
+    seg2 = ModelSegmenter.from_dict(d, df, verbose=False)
+    assert seg2.monotone == "auto"
+    assert seg2.monotone_dirs_ == {"x_up": 1, "x_down": -1}
+
+
+def test_monotone_dict_override_e_casos_sem_suporte():
+    df = _df_monotonico()
+    seg = _seg_monotonico(df)
+    # dict sobrescreve a direção automática por variável (0 = libera)
+    seg.fit("hist_gradient_boosting", hyperparams={"max_iter": 30},
+            monotone={"x_down": 0})
+    assert seg.model.named_steps["est"].monotonic_cst == {"num__x_up": 1}
+    assert seg.monotone_dirs_ == {"x_up": 1}
+    # valor inválido no dict
+    with pytest.raises(ValueError, match="monotone"):
+        seg.fit("hist_gradient_boosting", hyperparams={"max_iter": 20},
+                monotone={"x_up": 2})
+    # algoritmo sem suporte: aviso e opção ignorada (modelo treina livre)
+    with pytest.warns(UserWarning, match="monotonicidade"):
+        seg.fit("random_forest", hyperparams={"n_estimators": 20}, monotone="auto")
+    assert seg.monotone is None and seg.monotone_dirs_ == {}
+    # WoE: só transform='raw' — aviso e opção ignorada
+    with pytest.warns(UserWarning, match="raw"):
+        seg.fit("hist_gradient_boosting", hyperparams={"max_iter": 20},
+                transform="woe", monotone="auto")
+    assert seg.monotone is None and seg.monotone_dirs_ == {}
+
+
+def test_monotone_vetor_posicional_lightgbm():
+    pytest.importorskip("lightgbm")
+    seg = _seg_monotonico()
+    seg.fit("lightgbm", hyperparams={"n_estimators": 30}, monotone="auto")
+    vec = seg.model.named_steps["est"].get_params()["monotone_constraints"]
+    names = list(seg.model.named_steps["pre"].get_feature_names_out())
+    # vetor alinhado às colunas pós-transformação: bloco num primeiro, dummies=0
+    esperado = [{"num__x_up": 1, "num__x_down": -1}.get(nm, 0) for nm in names]
+    assert list(vec) == esperado and len(vec) == len(names)
+
+
+def test_monotone_vetor_posicional_xgboost():
+    pytest.importorskip("xgboost")
+    seg = _seg_monotonico()
+    seg.fit("xgboost", hyperparams={"n_estimators": 30}, monotone="auto")
+    vec = seg.model.named_steps["est"].get_params()["monotone_constraints"]
+    names = list(seg.model.named_steps["pre"].get_feature_names_out())
+    esperado = tuple({"num__x_up": 1, "num__x_down": -1}.get(nm, 0) for nm in names)
+    assert tuple(vec) == esperado
+
+
+def test_monotone_no_tune_optuna():
+    """monotone='auto' no tuning: os trials e o re-ajuste final saem restritos."""
+    pytest.importorskip("optuna")
+    seg = _seg_monotonico(_df_monotonico(n=900))
+    res = seg.tune_optuna(algorithm="hist_gradient_boosting", n_trials=2,
+                          verbose=False, monotone="auto",
+                          search_space={"max_iter": {"type": "int", "low": 20,
+                                                     "high": 30, "step": 10}})
+    assert res["n_trials"] >= 1
+    cst = seg.model.named_steps["est"].monotonic_cst
+    assert cst == {"num__x_up": 1, "num__x_down": -1}
+    assert seg.monotone == "auto"
