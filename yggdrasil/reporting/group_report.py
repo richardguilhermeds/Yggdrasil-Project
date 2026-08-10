@@ -14,6 +14,7 @@ import pandas as pd
 
 from ..config import ColumnConfig
 from ..data import analysis_samples_present
+from ..metrics.calibration import binomial_ci
 
 
 def group_report(
@@ -23,10 +24,15 @@ def group_report(
     problem_type: str = "regression",
     samples: Optional[Sequence[str]] = None,
     digits: int = 6,
+    alpha: float = 0.05,
 ) -> pd.DataFrame:
     """Tabela analítica por grupo homogêneo de um rating.
 
     Linhas ordenadas pelo score médio crescente (mesma ordem dos rótulos).
+    Ao final saem ``ic_inf``/``ic_sup`` (IC binomial de Jeffreys, nível
+    ``1 - alpha``, da taxa observada do grupo; para alvo contínuo em [0, 1] é
+    uma aproximação pseudo-binomial) e a flag ``calibrado`` (média prevista do
+    grupo dentro do IC).
     """
     samples = list(samples) if samples is not None else analysis_samples_present(df, cfg)
     sc, tg = cfg.score_col, cfg.target_col
@@ -52,6 +58,16 @@ def group_report(
         rep[f"pct_{s}"] = 100 * gs.size() / len(sub)
         rep[f"target_medio_{s}"] = gs[tg].mean()
         rep[f"score_medio_{s}"] = gs[sc].mean()
+
+    # IC binomial da taxa observada por grupo + flag de calibração (aditivo:
+    # colunas novas sempre ao final, sem mexer no schema existente).
+    n_obs = g[tg].count().astype(float)
+    k_obs = g[tg].sum().astype(float)
+    ic_inf, ic_sup = binomial_ci(k_obs.to_numpy(), n_obs.to_numpy(), alpha=alpha)
+    rep["ic_inf"] = pd.Series(ic_inf, index=n_obs.index)
+    rep["ic_sup"] = pd.Series(ic_sup, index=n_obs.index)
+    # Comparação com NaN dá False → grupo sem IC válido sai como não calibrado.
+    rep["calibrado"] = (rep["score_medio"] >= rep["ic_inf"]) & (rep["score_medio"] <= rep["ic_sup"])
 
     rep = rep.sort_values("score_medio").reset_index().rename(columns={rating_col: "rating"})
     # ordem de colunas amigável

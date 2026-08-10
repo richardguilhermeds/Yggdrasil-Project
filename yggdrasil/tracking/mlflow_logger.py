@@ -18,6 +18,7 @@ import pandas as pd
 
 from ..config import ColumnConfig
 from ..interpretability import shap_report
+from ..metrics import calibration_in_the_large, calibration_slope_intercept
 from ..monitoring import (metric_over_time, plot_metric_over_time,
                           psi_rating_over_time, psi_score_over_time)
 from ..reporting import group_reports_to_html, save_dashboard
@@ -113,6 +114,16 @@ def log_pipeline_run(
         # ── shifts e PSI agregado ───────────────────────────────────────
         _log_metric_dict(mlflow, shifts)     # só os valores numéricos
         _log_metric_dict(mlflow, psi_metrics)
+
+        # ── calibração global (amostras de análise) ─────────────────────
+        an = df_scored[df_scored[cfg.sample_col].isin(cfg.analysis_samples)]
+        slope, intercept = calibration_slope_intercept(an[cfg.target_col], an[cfg.score_col])
+        _log_metric_dict(mlflow, {
+            "calibration_in_the_large": calibration_in_the_large(
+                an[cfg.target_col], an[cfg.score_col]),
+            "calibration_slope": slope,          # NaN quando o alvo não é binário
+            "calibration_intercept": intercept,  # (regressão) → ignorado no log
+        })
 
         # ── tags ────────────────────────────────────────────────────────
         base_tags = {

@@ -1,5 +1,11 @@
-"""Métricas de avaliação de modelos (classificação e regressão) e shifts."""
+"""Métricas de avaliação de modelos (classificação e regressão), calibração e shifts."""
 
+from .calibration import (
+    binomial_ci,
+    calibration_in_the_large,
+    calibration_slope_intercept,
+    reliability_table,
+)
 from .classification import (
     classification_metrics,
     ks_optimal_cutoff,
@@ -24,4 +30,8 @@ __all__ = [
     "metric_by_sample",
     "metric_shifts",
     "sample_shifts",
+    "binomial_ci",
+    "calibration_in_the_large",
+    "calibration_slope_intercept",
+    "reliability_table",
 ]

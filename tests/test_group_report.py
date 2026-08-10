@@ -24,6 +24,26 @@ def test_group_report_estrutura(scored_clf, cfg):
     assert len(rep) == df_an[col].nunique()
 
 
+def test_group_report_ic_calibracao(scored_clf, cfg):
+    """Colunas novas de IC/calibração saem ao final, sem quebrar o schema antigo."""
+    df = scored_clf.df_scored
+    col = scored_clf.rating_cols[0]
+    df_an = df[df[cfg.sample_col].isin(cfg.analysis_samples)]
+    rep = group_report(df_an, col, cfg, "classification")
+
+    # schema antigo preservado
+    for c in ["rating", "volume", "pct_volume", "score_medio", "target_medio",
+              "score_min", "score_max", "target_medio_DES", "target_medio_OOT"]:
+        assert c in rep.columns
+    # colunas novas, sempre ao final
+    assert list(rep.columns[-3:]) == ["ic_inf", "ic_sup", "calibrado"]
+    # IC válido: dentro de [0, 1], contém a taxa observada do grupo
+    assert ((rep["ic_inf"] >= 0) & (rep["ic_sup"] <= 1)).all()
+    assert ((rep["ic_inf"] <= rep["target_medio"])
+            & (rep["target_medio"] <= rep["ic_sup"])).all()
+    assert rep["calibrado"].dtype == bool
+
+
 def test_group_report_ignora_scoring_only(scored_clf, cfg):
     """As amostras scoring-only (SIMUL) não devem aparecer como coluna."""
     df = scored_clf.df_scored
