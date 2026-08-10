@@ -391,6 +391,17 @@ class ModelSegmenterUI:
         "atencao": "background-color:var(--warn-bg);color:var(--warn-ink);font-weight:600",
         "ruim":    "background-color:var(--bad-bg);color:var(--bad-ink);font-weight:600"}
 
+    @staticmethod
+    def _semaforo_css(v):
+        """CSS do semáforo dos testes de calibração (backtest/ratings):
+        ok→verde · atencao→âmbar · alerta/resto→vermelho (tokens de tema)."""
+        s = str(v).strip().lower()
+        if s == "ok":
+            return "color:var(--ok-tx);background-color:var(--ok-bg);font-weight:600"
+        if s in ("atencao", "atenção"):
+            return "color:var(--warn-tx);background-color:var(--warn-bg);font-weight:600"
+        return "color:var(--bad-tx);background-color:var(--bad-bg);font-weight:600"
+
     # Dicionário + guia de bolso das métricas. ``dir``: 'up' = maior melhor,
     # 'down' = menor melhor, 'zero' = perto de 0 melhor, 'info' = sem julgamento.
     # ``bands`` = (limiar_bom, limiar_atencao); abaixo/acima ⇒ 'ruim'.
@@ -522,13 +533,9 @@ class ModelSegmenterUI:
                 return (f"color:{fg};background-color:{bg};font-weight:600" if fg else "")
             sty = sty.map(_estab_css, subset=["estabilidade"])
         if color_validation:
-            # backtest/PSI dos ratings: status (ok/alerta), gap, psi e classificacao
+            # backtest/PSI dos ratings: status (ok/atencao/alerta), gap, psi e classificacao
             if "status" in df.columns:
-                def _status_css(v):
-                    return ("color:var(--ok-tx);background-color:var(--ok-bg);font-weight:600"
-                            if str(v).strip().lower() == "ok"
-                            else "color:var(--bad-tx);background-color:var(--bad-bg);font-weight:600")
-                sty = sty.map(_status_css, subset=["status"])
+                sty = sty.map(self._semaforo_css, subset=["status"])
             if "classificacao" in df.columns:
                 def _clf_css(v):
                     fg, bg = self._ESTABILIDADE_COLORS.get(str(v).strip(), ("", ""))
@@ -552,6 +559,9 @@ class ModelSegmenterUI:
                          else "var(--warn-tx)" if a <= 0.10 else "var(--bad-tx)")
                     return f"color:{c};font-weight:600"
                 sty = sty.map(_gap_css, subset=["gap"])
+        if "status_teste" in df.columns:
+            # teste de calibração por rating (Jeffreys/t): semáforo com tokens de tema
+            sty = sty.map(self._semaforo_css, subset=["status_teste"])
         if pct_cols:
             # exibe taxas em % (camada de exibição — o dado segue numérico, então
             # a coloração por valor, ex.: gap, continua funcionando)
@@ -1384,6 +1394,14 @@ class ModelSegmenterUI:
             self.tx_manual,
             self.out_rating_auto,
             W.VBox([W.HTML("<div class='mseg-h'>Régua de ratings (risco por amostra)</div>"),
+                    W.HTML("<div class='mseg-legend'><b>Teste de calibração</b> (na referência): "
+                           "<code>ic_low/ic_high</code> = IC 95% do realizado dado o n do rating "
+                           "(Jeffreys na classificação; teste t na regressão) e "
+                           "<code>status_teste</code> = semáforo — <b>ok</b> se o score médio do "
+                           "rating cai dentro do IC 95%, <b>atencao</b> se fora do 95% mas dentro "
+                           "do 99%, <b>alerta</b> se fora do 99%. Rating pequeno tem IC largo (gap "
+                           "grande pode ser ruído); rating grande, IC estreito (gap pequeno já é "
+                           "significativo).</div>"),
                     self.out_rating_table]),
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Risco por rating</div>"),
                             self.out_rating_badrate], layout=W.Layout(width="50%")),
@@ -1685,9 +1703,10 @@ class ModelSegmenterUI:
                                              layout=W.Layout(width="180px"))
         self.btn_backtest_plot = W.Button(description="Backtest gráfico",
                                           button_style="primary", icon="line-chart",
-                                          tooltip="Previsto × realizado por safra com banda de "
-                                                  "tolerância em torno do previsto; meses fora "
-                                                  "da banda ficam destacados.")
+                                          tooltip="Previsto × realizado por safra com banda "
+                                                  "VISUAL em torno do previsto; os destaques "
+                                                  "âmbar/vermelhos vêm do teste estatístico "
+                                                  "(previsto fora do IC 95%/99% do realizado).")
         self.out_adv_backtest = W.HTML()
         self.btn_backtest_plot.on_click(self._on_adv_backtest)
         card_adv_bt = W.VBox([
@@ -3664,6 +3683,8 @@ class ModelSegmenterUI:
         ``seg`` (usado ao gerar ratings e ao carregar um modelo já ratingado)."""
         rt = self.seg.rating_table().round(4)
         rate_cols = [c for c in rt.columns if c.startswith(("event_rate", "alvo"))]
+        # IC do teste de calibração na mesma unidade do alvo → mesmo formato %
+        rate_cols += [c for c in ("ic_low", "ic_high") if c in rt.columns]
         self.out_rating_table.value = self._df_html(rt, center=True, pct_cols=rate_cols)
         self.out_rating_badrate.value = self._fig_html(self.seg.plot_rating_badrate())
         self.out_rating_dist.value = self._fig_html(self.seg.plot_rating_distribution())

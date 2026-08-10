@@ -210,6 +210,25 @@ def test_grupo_avancado_metricas_e_ratings():
     assert ui.out_adv_group_metrics.value == ""
     assert ui.out_adv_group_rating.value == ""
 
+def test_rating_table_status_teste_colorido():
+    """A tabela de ratings da UI mostra o teste de calibração (ic_low/ic_high/
+    status_teste) com o semáforo pintado pelos tokens semânticos de tema."""
+    ui = _build()
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.seg.fit()
+        ui.seg.build_ratings(method="quantil", n_ratings=5)
+        ui._render_ratings()
+    html = ui.out_rating_table.value
+    assert "status_teste" in html and "ic_low" in html
+    # célula do semáforo pintada com token de tema (nunca hex fixo)
+    assert ("var(--ok-bg)" in html or "var(--warn-bg)" in html
+            or "var(--bad-bg)" in html)
+    # o CSS do semáforo cobre os três estados com os tokens corretos
+    assert "var(--ok-bg)" in ui._semaforo_css("ok")
+    assert "var(--warn-bg)" in ui._semaforo_css("atencao")
+    assert "var(--bad-bg)" in ui._semaforo_css("alerta")
+
+
 def test_toggle_monotonicidade():
     """A linha 'restrições de monotonicidade' só aparece nos boostings com
     suporte nativo, e o fit via UI aplica monotonic_cst (dict por nome) com as

@@ -317,6 +317,23 @@ def _is_stability_sample(name) -> bool:
     return "estab" in str(name).strip().lower()
 
 
+def _jeffreys_ci(k, n, conf=0.95) -> tuple:
+    """Intervalo de credibilidade de **Jeffreys** para uma taxa binomial:
+    quantis equiláteros da posteriori Beta(k+½, n−k+½) (priori de Jeffreys).
+    Convenção usual (Brown–Cai–DasGupta): com ``k=0`` o limite inferior é 0 e
+    com ``k=n`` o superior é 1. Devolve ``(lo, hi)``; ``(nan, nan)`` sem
+    observações válidas."""
+    from scipy.stats import beta as _beta_dist
+    n = int(n)
+    if n <= 0 or k is None or not np.isfinite(k):
+        return (float("nan"), float("nan"))
+    k = float(min(max(k, 0.0), n))
+    a = 0.5 * (1.0 - float(conf))
+    lo = 0.0 if k <= 0 else float(_beta_dist.ppf(a, k + 0.5, n - k + 0.5))
+    hi = 1.0 if k >= n else float(_beta_dist.ppf(1.0 - a, k + 0.5, n - k + 0.5))
+    return (lo, hi)
+
+
 # _fmt_safras vem de credit_risk._common (import acima)
 
 # Métricas limitadas a [0,1] (discriminação/classificação): os eixos que só as
@@ -4785,10 +4802,40 @@ class ModelSegmenter:
     def rating_table(self) -> pd.DataFrame:
         """Por rating (na ordem dos rótulos): n, repr_% (na DES) e o risco
         (event_rate/alvo médio) em **cada amostra** — leitura de monotonicidade e
-        estabilidade da régua entre amostras."""
+        estabilidade da régua entre amostras.
+
+        Inclui também o **teste de calibração** de cada rating na amostra de
+        referência (ver :meth:`_calib_test`): ``ic_low``/``ic_high`` = IC 95% do
+        realizado (Jeffreys na classificação; t pareado na regressão, dado o n
+        do rating) e ``status_teste`` = semáforo ``ok``/``atencao``/``alerta``
+        conforme o score médio do rating cai dentro do IC 95%, só do 99%, ou
+        fora de ambos."""
         rating = self._rating_series()
         labels = self.rating_labels_
         prefix = "event_rate" if self.task_type == "classification" else "alvo"
+        # teste de calibração por rating (na referência) num ÚNICO groupby —
+        # sem máscara full-length por rótulo (ver notas de performance).
+        tests = None
+        if self.score_ is not None:
+            sub_ts = pd.DataFrame({"y": self.df[self.target], "s": self.score_,
+                                   "r": rating})
+            if self.sample_col is not None:
+                sub_ts = sub_ts[self._frame_mask(self.ref_sample)]
+            tests = {lab: self._calib_test(g["y"], g["s"])
+                     for lab, g in sub_ts.groupby("r", observed=True)}
+
+        def _test_cols(row, lab):
+            if tests is None:
+                return row
+            t = tests.get(lab) or {"ic_low": np.nan, "ic_high": np.nan,
+                                   "status": "alerta"}
+            row["ic_low"] = (round(float(t["ic_low"]), 4)
+                             if np.isfinite(t["ic_low"]) else np.nan)
+            row["ic_high"] = (round(float(t["ic_high"]), 4)
+                              if np.isfinite(t["ic_high"]) else np.nan)
+            row["status_teste"] = t["status"]
+            return row
+
         # risco (= nanmean, ver _risco) por (rating, amostra) num ÚNICO groupby, em
         # vez de recriar `(rating==lab) & (sample==a)` full-length por célula.
         if self.sample_col is None:
@@ -4799,10 +4846,11 @@ class ModelSegmenter:
             for lab in labels:
                 n = int(n_by.get(lab, 0))
                 v = risk.get(lab, np.nan)
-                rows.append({"rating": lab, "n": n,
-                             "repr_%": round(100 * n / n_ref_tot, 1),
-                             f"{prefix}_{self.ref_sample}":
-                                 round(float(v), 4) if pd.notna(v) else np.nan})
+                row = {"rating": lab, "n": n,
+                       "repr_%": round(100 * n / n_ref_tot, 1),
+                       f"{prefix}_{self.ref_sample}":
+                           round(float(v), 4) if pd.notna(v) else np.nan}
+                rows.append(_test_cols(row, lab))
             return pd.DataFrame(rows)
 
         risk = self.df.groupby([rating, self.df[self.sample_col]],
@@ -4818,7 +4866,7 @@ class ModelSegmenter:
             for a in self._samples():
                 v = risk.get((lab, a), np.nan)
                 row[f"{prefix}_{a}"] = round(float(v), 4) if pd.notna(v) else np.nan
-            rows.append(row)
+            rows.append(_test_cols(row, lab))
         return pd.DataFrame(rows)
 
     def rating_inversion(self, time_col=None, sample=None, min_n=20) -> dict:
@@ -5284,18 +5332,90 @@ class ModelSegmenter:
                          "inverte_vs_DES": inv_txt})
         return pd.DataFrame(rows)
 
-    def backtest(self, time_col=None, sample=None, tol=None) -> pd.DataFrame:
-        """Risco previsto (score médio) vs realizado (alvo médio) por safra.
+    def _calib_test(self, y, score) -> dict:
+        """Teste estatístico de calibração de uma célula (safra ou rating):
+        compara o **previsto** (score médio) com o **realizado** (alvo médio).
 
-        ``gap = realizado − previsto`` (mesma convenção de ``calibration_table`` e do
-        ``TreeSegmenter``): gap positivo = risco realizado ACIMA do previsto
-        (sub-provisionamento). ``tol`` default é sensível ao ``task_type``
-        (0,03 para classificação / 0,10 para regressão), igual ao TreeSegmenter."""
+        * **classificação** — IC de credibilidade de **Jeffreys** da taxa
+          observada (posteriori Beta(k+½, n−k+½), dado o nº de eventos e o n da
+          célula); o previsto é confrontado com os ICs de 95% e 99%.
+        * **regressão** — teste **t pareado** do gap (alvo − score por linha);
+          os ICs de 95%/99% do realizado usam o erro-padrão das diferenças
+          (previsto fora do IC ⇔ |t| acima do quantil correspondente).
+
+        Semáforo em ``status``: ``ok`` (previsto dentro do IC 95%), ``atencao``
+        (fora do 95%, dentro do 99%), ``alerta`` (fora do 99%, ou célula não
+        testável). Devolve ``{'ic_low','ic_high','p_valor','status'}`` — o IC
+        reportado é o de 95% do realizado; ``p_valor`` é a cauda equilátera da
+        posteriori (classificação, aprox.) ou o p bicaudal do teste t."""
+        y = np.asarray(y, dtype="float64")
+        s = np.asarray(score, dtype="float64")
+        ok = np.isfinite(y) & np.isfinite(s)
+        y, s = y[ok], s[ok]
+        n = int(y.size)
+        out = {"ic_low": float("nan"), "ic_high": float("nan"),
+               "p_valor": float("nan"), "status": "alerta"}
+        if n == 0:
+            return out
+        prev = float(s.mean())
+        if self.task_type == "classification":
+            from scipy.stats import beta as beta_dist
+            k = float(y.sum())
+            lo95, hi95 = _jeffreys_ci(k, n, 0.95)
+            lo99, hi99 = _jeffreys_ci(k, n, 0.99)
+            post = beta_dist(k + 0.5, n - k + 0.5)
+            out["p_valor"] = float(min(1.0, 2.0 * min(post.cdf(prev),
+                                                      post.sf(prev))))
+        else:
+            from scipy.stats import t as t_dist
+            if n < 2:
+                return out
+            real = float(y.mean())
+            d = y - s
+            se = float(np.std(d, ddof=1)) / float(np.sqrt(n))
+            if se == 0.0:                       # gap constante: sem incerteza
+                out.update(ic_low=real, ic_high=real,
+                           p_valor=1.0 if float(d.mean()) == 0.0 else 0.0,
+                           status="ok" if float(d.mean()) == 0.0 else "alerta")
+                return out
+            t95 = float(t_dist.ppf(0.975, n - 1))
+            t99 = float(t_dist.ppf(0.995, n - 1))
+            lo95, hi95 = real - t95 * se, real + t95 * se
+            lo99, hi99 = real - t99 * se, real + t99 * se
+            tstat = float(d.mean()) / se
+            out["p_valor"] = float(2.0 * t_dist.sf(abs(tstat), n - 1))
+        out["ic_low"], out["ic_high"] = lo95, hi95
+        if not np.isfinite(prev):
+            return out
+        out["status"] = ("ok" if lo95 <= prev <= hi95
+                         else "atencao" if lo99 <= prev <= hi99 else "alerta")
+        return out
+
+    def backtest(self, time_col=None, sample=None, tol=None) -> pd.DataFrame:
+        """Risco previsto (score médio) vs realizado (alvo médio) por safra, com
+        **teste estatístico de calibração** por safra.
+
+        ``gap = realizado − previsto`` (mesma convenção do ``TreeSegmenter``):
+        gap positivo = risco realizado ACIMA do previsto (sub-provisionamento).
+
+        O ``status`` é um semáforo estatístico (ver :meth:`_calib_test`):
+
+        * **classificação** — IC de credibilidade de **Jeffreys** da taxa
+          observada da safra (Beta(k+½, n−k+½)); ``ok`` se o previsto cai dentro
+          do IC 95%, ``atencao`` se fora do 95% mas dentro do 99%, ``alerta``
+          se fora do 99%. Safra pequena tem IC largo (gap grande pode ser só
+          ruído); safra grande tem IC estreito (gap pequeno já é significativo).
+        * **regressão** — teste **t pareado** do gap (alvo − score por linha),
+          com os mesmos cortes (5%/1%) expressos como IC do realizado.
+
+        Colunas: ``ic_low``/``ic_high`` (IC 95% do realizado) e ``p_valor``,
+        além das já existentes. **Compat**: informe ``tol`` (número) para voltar
+        ao critério antigo de tolerância fixa — ``status`` binário ok/alerta com
+        ``|gap| > tol`` (os defaults antigos eram 0,03/0,10 por task_type);
+        ``tol=None`` (default) usa o teste estatístico."""
         time_col = time_col or self.date_col
         if time_col is None:
             raise ValueError("Informe time_col ou configure date_col.")
-        if tol is None:                       # tolerância de gap default por tipo de alvo
-            tol = 0.03 if self.task_type == "classification" else 0.10
         if self.score_ is None:
             raise RuntimeError("Gere o score antes (fit / set_model).")
         base = self._frame(sample) if sample else self.df
@@ -5305,25 +5425,89 @@ class ModelSegmenter:
         safra = pd.to_datetime(base[time_col], errors="coerce").dt.to_period("M")
         rows = []
         for per, g in base.groupby(safra):
-            prev = float(sc.reindex(g.index).mean(skipna=True))
+            sg = sc.reindex(g.index)
+            prev = float(sg.mean(skipna=True))
             real = self._risco(g[self.target])
             gap = real - prev if (np.isfinite(prev) and np.isfinite(real)) else np.nan
+            t = self._calib_test(g[self.target], sg)
+            if tol is not None:               # fallback/compat: tolerância fixa
+                status = "ok" if (np.isfinite(gap) and abs(gap) <= tol) else "alerta"
+            else:
+                status = t["status"]
             rows.append({"safra": str(per), "n": len(g),
                          "previsto_medio": round(prev, 4) if np.isfinite(prev) else np.nan,
                          "realizado_medio": round(real, 4) if np.isfinite(real) else np.nan,
                          "gap": round(gap, 4) if np.isfinite(gap) else np.nan,
-                         "status": ("ok" if (np.isfinite(gap) and abs(gap) <= tol)
-                                    else "alerta")})
+                         "ic_low": (round(t["ic_low"], 4)
+                                    if np.isfinite(t["ic_low"]) else np.nan),
+                         "ic_high": (round(t["ic_high"], 4)
+                                     if np.isfinite(t["ic_high"]) else np.nan),
+                         "p_valor": (round(t["p_valor"], 4)
+                                     if np.isfinite(t["p_valor"]) else np.nan),
+                         "status": status})
         return pd.DataFrame(rows).sort_values("safra").reset_index(drop=True)
+
+    def hosmer_lemeshow(self, sample=None, n_groups=10) -> dict:
+        """Teste de **Hosmer–Lemeshow** global da calibração (classificação):
+        agrupa as linhas em ``n_groups`` faixas de score (decis por padrão) e
+        compara eventos observados vs esperados por faixa:
+        ``χ² = Σ (O − E)² / (E·(1 − p̄))``, com ``df = g − 2``. p-valor alto =
+        sem evidência de má calibração global; p-valor baixo = o previsto se
+        afasta do realizado em alguma região do score.
+
+        ``sample=None`` usa todas as linhas (passe uma amostra para restringir,
+        ex.: a fora-do-tempo). Devolve ``{'statistic', 'p_value', 'df',
+        'n_groups', 'table'}`` — a ``table`` tem, por faixa, ``n``, eventos
+        observados/esperados, taxa observada, score médio e a contribuição ao
+        χ². Erro na regressão (use o teste t do :meth:`backtest`)."""
+        if self.task_type != "classification":
+            raise ValueError("hosmer_lemeshow avalia calibração de alvo binário "
+                             "(classificação); na regressão use o backtest "
+                             "(teste t do gap).")
+        if self.score_ is None:
+            raise RuntimeError("Gere o score antes (fit / set_model).")
+        from scipy.stats import chi2
+        base = self._frame(sample) if sample else self.df
+        sc = self.score_.reindex(base.index)
+        y = base[self.target]
+        ok = sc.notna() & y.notna()
+        sc, y = sc[ok], y[ok].astype("float64")
+        if len(sc) == 0:
+            raise ValueError("Sem linhas válidas (score e alvo) para o teste.")
+        grp = pd.qcut(sc, q=int(n_groups), duplicates="drop")
+        rows, stat = [], 0.0
+        for faixa, idx in sc.groupby(grp, observed=True).groups.items():
+            s_g = sc.loc[idx].to_numpy(dtype="float64")
+            y_g = y.loc[idx].to_numpy(dtype="float64")
+            n = int(s_g.size)
+            obs = float(y_g.sum())
+            esp = float(s_g.sum())
+            p_bar = esp / n if n else float("nan")
+            den = esp * (1.0 - p_bar)
+            contrib = ((obs - esp) ** 2 / den) if den > 0 else 0.0
+            stat += contrib
+            rows.append({"faixa": str(faixa), "n": n,
+                         "eventos_obs": int(round(obs)),
+                         "eventos_esp": round(esp, 1),
+                         "taxa_obs": round(obs / n, 4) if n else np.nan,
+                         "score_medio": round(float(s_g.mean()), 4),
+                         "contrib": round(contrib, 3)})
+        g_eff = len(rows)
+        df_hl = max(g_eff - 2, 1)
+        return {"statistic": float(round(stat, 4)),
+                "p_value": float(chi2.sf(stat, df_hl)),
+                "df": int(df_hl), "n_groups": int(g_eff),
+                "table": pd.DataFrame(rows)}
 
     def plot_backtest(self, sample=None, tolerancia=0.2, time_col=None,
                       figsize=(9.6, 4.4), dpi=150, save_path=None, ax=None):
         """Backtest gráfico: previsto × realizado por safra (duas linhas) com uma
         **banda visual** sombreada (``previsto ± tolerancia·previsto``; ``0.2`` =
-        ±20% — só referência visual). Os **marcadores vermelhos** destacam as safras
-        em ``status='alerta'`` da tabela :meth:`backtest` (|gap| > tol ABSOLUTO,
-        default por task_type), para o gráfico e a tabela nunca discordarem.
-        Funciona nos dois ``task_type`` (unidade do alvo)."""
+        ±20% — só referência visual). Os **marcadores** destacam as safras pelo
+        semáforo estatístico da tabela :meth:`backtest` (âmbar = previsto fora do
+        IC 95% do realizado; vermelho = fora do IC 99%), para o gráfico e a
+        tabela nunca discordarem. Funciona nos dois ``task_type`` (unidade do
+        alvo)."""
         bt = self.backtest(time_col=time_col, sample=sample)
         fig, ax = _new_ax(figsize, dpi, ax)
         if bt.empty:
@@ -5341,14 +5525,21 @@ class ModelSegmenter:
                 label="previsto (médio)")
         ax.plot(x, real, color="#1aa64b", lw=2.0, marker="o", ms=4.5,
                 label="realizado (médio)")
-        # marcadores destacados = safras em ALERTA na tabela backtest (|gap| > tol
-        # ABSOLUTO, mesmo critério de backtest()), NÃO a banda relativa visual — assim
-        # os pontos vermelhos batem com o 'status' da tabela.
-        alerta = (bt["status"].to_numpy() == "alerta") & np.isfinite(real) & np.isfinite(prev)
+        # marcadores destacados = semáforo estatístico da tabela backtest (teste de
+        # calibração por safra), NÃO a banda relativa visual — assim os pontos
+        # âmbar/vermelhos batem com o 'status' da tabela.
+        finito = np.isfinite(real) & np.isfinite(prev)
+        status = bt["status"].to_numpy()
+        atencao = (status == "atencao") & finito
+        alerta = (status == "alerta") & finito
+        if atencao.any():
+            xs = [x0 for x0, f in zip(x, atencao) if f]
+            ax.plot(xs, real[atencao], "o", ms=9, mfc="none", mec="#caa000", mew=2.0,
+                    label="atenção (fora do IC 95%)")
         if alerta.any():
             xs = [x0 for x0, f in zip(x, alerta) if f]
             ax.plot(xs, real[alerta], "o", ms=9, mfc="none", mec="#d6453e", mew=2.0,
-                    label="alerta (|gap| > tol)")
+                    label="alerta (fora do IC 99%)")
         labels = _fmt_safras(bt["safra"])
         step = max(1, len(bt) // 18)
         ax.set_xticks(x[::step])

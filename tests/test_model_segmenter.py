@@ -598,10 +598,99 @@ def test_backtest(seg):
     seg.fit(_default_algo(seg.task_type))
     bt = seg.backtest("dt_ref")
     assert {"safra", "n", "previsto_medio", "realizado_medio",
-            "gap", "status"}.issubset(bt.columns)
+            "gap", "ic_low", "ic_high", "p_valor", "status"}.issubset(bt.columns)
     assert int(bt["n"].sum()) == len(seg.df)
+    assert set(bt["status"].unique()) <= {"ok", "atencao", "alerta"}
     with pytest.raises(ValueError):
         seg.backtest("coluna_inexistente")
+
+
+def test_backtest_jeffreys_n_pequeno_vs_grande():
+    """Semáforo estatístico (Jeffreys) do backtest em classificação:
+
+    * safra PEQUENA com gap grande (4/25 = 16% vs previsto 10%, gap 0,06) →
+      IC largo → previsto DENTRO do IC 95% → ``ok`` (o critério antigo de
+      tolerância fixa 0,03 marcaria alerta);
+    * safra GRANDE com gap pequeno (11% vs 10%, gap 0,01, n=20000) → IC
+      estreito → previsto FORA do IC 99% → ``alerta`` (o critério antigo
+      marcaria ok)."""
+    y_peq = [1.0] * 4 + [0.0] * 21                      # taxa 0.16, n=25
+    y_grd = [1.0] * 2200 + [0.0] * 17800                # taxa 0.11, n=20000
+    df = pd.DataFrame({"sc": 0.10,
+                       "target": y_peq + y_grd,
+                       "dt_ref": (["2024-01-15"] * len(y_peq)
+                                  + ["2024-02-15"] * len(y_grd))})
+    seg = ModelSegmenter(df, target="target", task_type="classification",
+                         date_col="dt_ref", verbose=False)
+    seg.set_model(_IdentityModel("sc"), features=["sc"])
+    bt = seg.backtest("dt_ref").set_index("safra")
+    assert bt.loc["2024-01", "status"] == "ok"          # n pequeno: gap é ruído
+    assert bt.loc["2024-02", "status"] == "alerta"      # n grande: gap significa
+    # IC 95% contém a taxa observada e p_valor acompanha o semáforo
+    assert bt.loc["2024-01", "ic_low"] <= 0.16 <= bt.loc["2024-01", "ic_high"]
+    assert bt.loc["2024-01", "p_valor"] >= 0.05
+    assert bt.loc["2024-02", "p_valor"] < 0.01
+    # compat: tol explícito volta ao critério antigo de tolerância fixa do gap
+    bt_tol = seg.backtest("dt_ref", tol=0.03).set_index("safra")
+    assert bt_tol.loc["2024-01", "status"] == "alerta"  # 0.06 > 0.03
+    assert bt_tol.loc["2024-02", "status"] == "ok"      # 0.01 <= 0.03
+
+
+def test_backtest_teste_t_regressao():
+    """Regressão: teste t pareado do gap — safra pequena/ruidosa fica ``ok``;
+    safra grande com viés pequeno mas sistemático dispara ``alerta``."""
+    rng = np.random.default_rng(5)
+    n1, n2 = 8, 5000
+    noise1 = rng.normal(0, 0.30, n1)
+    noise2 = rng.normal(0, 0.05, n2)
+    df = pd.DataFrame({
+        "sc": 0.5,
+        "target": np.concatenate([0.5 + 0.10 + (noise1 - noise1.mean()),
+                                  0.5 + 0.02 + (noise2 - noise2.mean())]),
+        "dt_ref": ["2024-01-15"] * n1 + ["2024-02-15"] * n2})
+    seg = ModelSegmenter(df, target="target", task_type="regression",
+                         date_col="dt_ref", verbose=False)
+    seg.set_model(_IdentityModel("sc"), features=["sc"])
+    bt = seg.backtest("dt_ref").set_index("safra")
+    assert bt.loc["2024-01", "status"] == "ok"          # se grande → t pequeno
+    assert bt.loc["2024-02", "status"] == "alerta"      # viés 0.02 com n=5000
+    assert bt.loc["2024-02", "p_valor"] < 0.01
+
+
+def test_rating_table_status_teste(seg):
+    seg.fit(_default_algo(seg.task_type))
+    seg.build_ratings(method="quantil", n_ratings=5)
+    rt = seg.rating_table()
+    assert {"ic_low", "ic_high", "status_teste"}.issubset(rt.columns)
+    assert set(rt["status_teste"].unique()) <= {"ok", "atencao", "alerta"}
+    fin = rt.dropna(subset=["ic_low", "ic_high"])
+    assert len(fin) and (fin["ic_low"] <= fin["ic_high"]).all()
+
+
+def test_hosmer_lemeshow():
+    df = _synthetic("classification")
+    seg = ModelSegmenter(df, target="target", task_type="classification",
+                         sample_col="amostra", ref_sample="DES",
+                         date_col="dt_ref", verbose=False)
+    seg.fit("logistica")
+    hl = seg.hosmer_lemeshow()
+    assert hl["statistic"] >= 0.0
+    assert 0.0 <= hl["p_value"] <= 1.0
+    assert hl["df"] == max(hl["n_groups"] - 2, 1)
+    assert len(hl["table"]) == hl["n_groups"]
+    assert int(hl["table"]["n"].sum()) == int(seg.df["target"].notna().sum())
+    # restrita a uma amostra: usa só as linhas dela
+    hl_oot = seg.hosmer_lemeshow(sample="OOT")
+    assert int(hl_oot["table"]["n"].sum()) == int((seg.df["amostra"] == "OOT").sum())
+
+
+def test_hosmer_lemeshow_erro_na_regressao():
+    df = _synthetic("regression")
+    seg = ModelSegmenter(df, target="target", task_type="regression",
+                         sample_col="amostra", ref_sample="DES", verbose=False)
+    seg.fit("linear")
+    with pytest.raises(ValueError):
+        seg.hosmer_lemeshow()
 
 
 # ----------------------------------------------------------------------
