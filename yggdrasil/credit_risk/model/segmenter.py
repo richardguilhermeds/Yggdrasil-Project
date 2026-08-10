@@ -754,6 +754,11 @@ class ModelSegmenter:
         self.rating_labels_: list = []
         self.rating_config: dict = {}
         self._shap_cache: dict = {}
+        # snapshots champion × challenger EM MEMÓRIA (ver :meth:`snapshot`):
+        # nome → foto {config, métricas por amostra, Series score_}. Vivem só
+        # nesta sessão (não entram em to_dict/save) e sobrevivem a re-fits —
+        # justamente para comparar o desafiante com o baseline congelado.
+        self.snapshots_: dict = {}
         # sinalizador de cancelamento do tuning (Optuna): setado por
         # :meth:`cancel_tuning` e observado por um callback do estudo, que chama
         # ``study.stop()`` para interromper após o trial em andamento.
@@ -6755,6 +6760,355 @@ class ModelSegmenter:
                                  progress_callback=progress_callback)
         _emit_progress(progress_callback, "done", "Escoragem concluída", "ok")
         return out
+
+    # ------------------------------------------------------------------
+    # CHAMPION × CHALLENGER: snapshot em memória + comparação com modelo salvo
+    #   snapshot/compare_to → foto nomeada (config + métricas + score_) versus o
+    #   modelo VIGENTE; diff_models → outro ModelSegmenter salvo (save/load JSON)
+    #   escorado sobre as MESMAS linhas, com a matriz de migração de ratings.
+    # ------------------------------------------------------------------
+    def snapshot(self, name: str = "baseline") -> dict:
+        """Congela o modelo vigente como um **snapshot nomeado em memória**.
+
+        Guarda a configuração (algoritmo, hiperparâmetros, transformação,
+        variáveis do modelo e derivadas), as métricas por amostra e uma cópia da
+        ``Series`` ``score_`` — o suficiente para :meth:`compare_to` medir deltas,
+        sobrepor ROC e calcular o PSI entre os scores depois de um re-fit. A foto
+        vive só nesta sessão (memória do kernel; não entra em :meth:`to_dict`)
+        e **sobrevive a re-fits** — persistência de verdade é :meth:`save`."""
+        if self.score_ is None:
+            raise RuntimeError("Ajuste o modelo antes (fit / set_model / load).")
+        snap = {
+            "nome": str(name),
+            "task_type": self.task_type,
+            "algorithm": self.algorithm,
+            "hyperparams": dict(self.hyperparams or {}),
+            "feature_transform": self.feature_transform,
+            "class_balance": bool(self.class_balance),
+            "monotone": self.monotone,
+            "monotone_dirs": dict(self.monotone_dirs_ or {}),
+            "model_features": list(self.model_features),
+            "derived": {n: dict(self.var_meta.get(n) or {})
+                        for n in self.derived_features()},
+            "two_stage": bool(self.two_stage),
+            "two_stage_threshold": self.two_stage_threshold,
+            "metrics": self.metrics(),
+            "score": self.score_.copy(),
+            "criado_em": pd.Timestamp.now().isoformat(timespec="seconds"),
+        }
+        self.snapshots_[str(name)] = snap
+        return snap
+
+    def _resolve_snapshot(self, ref) -> dict:
+        """Snapshot a partir do nome (em ``snapshots_``) ou do próprio dict."""
+        if isinstance(ref, dict):
+            return ref
+        snap = self.snapshots_.get(ref)
+        if snap is None:
+            raise KeyError(f"Snapshot '{ref}' não encontrado. Disponíveis: "
+                           f"{sorted(self.snapshots_)} (use snapshot(nome) antes).")
+        return snap
+
+    def score_psi(self, baseline_score, n_bins: int = 10, eps: float = 1e-6) -> pd.DataFrame:
+        """PSI entre a distribuição de um score **baseline** e a do score vigente,
+        por amostra — mede o quanto o modelo novo desloca os scores sobre as
+        MESMAS linhas. Faixas = decis do score baseline dentro da amostra
+        (``n_bins``); PSI clássico via :func:`psi_from_shares`."""
+        if self.score_ is None:
+            raise RuntimeError("Ajuste o modelo antes (fit / set_model / load).")
+        base = pd.Series(baseline_score).reindex(self.df.index).astype("float64")
+        rows = []
+        for a in self._samples():
+            mask = (np.ones(len(self.df), dtype=bool) if self.sample_col is None
+                    else self._frame_mask(a))
+            b = base.to_numpy()[mask]
+            c = self.score_.to_numpy(dtype="float64")[mask]
+            b, c = b[~np.isnan(b)], c[~np.isnan(c)]
+            if b.size == 0 or c.size == 0:
+                continue
+            # cortes internos = quantis do baseline na amostra (dedup p/ score
+            # discreto/constante); bin i = (q_{i-1}, q_i] via searchsorted.
+            qs = np.unique(np.quantile(b, np.linspace(0, 1, n_bins + 1)[1:-1]))
+            cb = np.bincount(np.searchsorted(qs, b, side="left"), minlength=len(qs) + 1)
+            cc = np.bincount(np.searchsorted(qs, c, side="left"), minlength=len(qs) + 1)
+            psi = _psi_from_shares((cb / b.size).tolist(), (cc / c.size).tolist(), eps)
+            rows.append({"amostra": a, "psi": round(float(psi), 4),
+                         "classificacao": _classifica_psi(psi)})
+        return pd.DataFrame(rows, columns=["amostra", "psi", "classificacao"])
+
+    def _baseline_config_frame(self, snap: dict) -> tuple:
+        """Tabelas de diff de CONFIG e de HIPERPARÂMETROS (baseline × atual):
+        DataFrames ``item/parametro · baseline · atual · mudou`` — compartilhadas
+        por :meth:`compare_to` e :meth:`diff_models`."""
+        cfg_pairs = [
+            ("algoritmo", snap.get("algorithm"), self.algorithm),
+            ("transformação", snap.get("feature_transform"), self.feature_transform),
+            ("balanceamento de classes", bool(snap.get("class_balance", False)),
+             bool(self.class_balance)),
+            ("monotonicidade", snap.get("monotone"), self.monotone),
+            ("two-stage", bool(snap.get("two_stage", False)), bool(self.two_stage)),
+            ("nº de variáveis", len(snap.get("model_features") or []),
+             len(self.model_features or [])),
+        ]
+        config = pd.DataFrame([{"item": i, "baseline": b, "atual": a,
+                                "mudou": bool(b != a)} for i, b, a in cfg_pairs])
+        hp_base = dict(snap.get("hyperparams") or {})
+        hp_cur = dict(self.hyperparams or {})
+        hp_rows = [{"parametro": k, "baseline": hp_base.get(k, "—"),
+                    "atual": hp_cur.get(k, "—"),
+                    "mudou": bool(hp_base.get(k, "—") != hp_cur.get(k, "—"))}
+                   for k in sorted(set(hp_base) | set(hp_cur))]
+        hyper = pd.DataFrame(hp_rows,
+                             columns=["parametro", "baseline", "atual", "mudou"])
+        return config, hyper
+
+    def _feature_diff(self, base_feats, cur_feats) -> dict:
+        """Variáveis que entraram/saíram/permaneceram entre dois conjuntos."""
+        b, c = set(base_feats or []), set(cur_feats or [])
+        return {"entraram": sorted(c - b), "sairam": sorted(b - c),
+                "mantidas": sorted(b & c)}
+
+    def _score_ci_map(self, score: pd.Series, metrics, n_boot, alpha, seed) -> dict:
+        """IC bootstrap ``(metrica, amostra) → (ic_low, ic_high)`` para um score
+        qualquer (ex.: o congelado num snapshot) — mesmo protocolo de
+        :meth:`metrics_ci`, sem cache (usado uma vez por comparação)."""
+        def _rmse(yt, ys):
+            return float(np.sqrt(np.mean((yt - ys) ** 2)))
+
+        sc_all = pd.Series(score).reindex(self.df.index).astype("float64")
+        out = {}
+        for a in self._samples():
+            mask = (np.ones(len(self.df), dtype=bool) if self.sample_col is None
+                    else self._frame_mask(a))
+            y = self.df.loc[mask, self.target].to_numpy(dtype="float64")
+            sc = sc_all.to_numpy()[mask]
+            ok = ~np.isnan(y) & ~np.isnan(sc)
+            y, sc = y[ok], sc[ok]
+            if y.size == 0:
+                continue
+            for m in metrics:
+                try:
+                    ci = bootstrap_metric_ci(y, sc, metric=(_rmse if m == "rmse" else m),
+                                             n_boot=int(n_boot), alpha=alpha, seed=seed)
+                    out[(m, a)] = (float(ci["ic_low"]), float(ci["ic_high"]))
+                except Exception:           # métrica não computável na amostra
+                    continue
+        return out
+
+    def compare_to(self, baseline, n_boot: int = 200, alpha: float = 0.05,
+                   seed=None) -> dict:
+        """Compara o modelo VIGENTE com um snapshot (:meth:`snapshot`) — o coração
+        do champion × challenger em memória.
+
+        ``baseline`` é o **nome** do snapshot ou o próprio dict devolvido por
+        :meth:`snapshot`. Devolve um dict com:
+
+        * ``deltas`` — tabela métrica × amostra com ``baseline``, ``atual``,
+          ``delta`` (atual − baseline) e ``veredicto`` (semáforo): *melhorou* /
+          *piorou* pela direção boa da métrica; **empate** quando os ICs
+          bootstrap (:meth:`metrics_ci`; mesmas métricas/protocolo) do baseline
+          e do atual se sobrepõem — diferença dentro do ruído amostral — ou o
+          delta é zero. Métricas sem IC usam só o sinal do delta.
+        * ``psi_score`` — PSI entre o score do baseline e o vigente por amostra
+          (:meth:`score_psi`): o quanto a "régua de scores" deslocou.
+        * ``variaveis`` — ``{entraram, sairam, mantidas}`` entre os dois modelos.
+        * ``config`` / ``hyperparams`` — diffs de configuração e de HPs.
+        * ``metrics_baseline`` / ``metrics_atual`` — tabelas completas.
+
+        A ROC sobreposta (classificação) fica em :meth:`plot_roc_compare`."""
+        snap = self._resolve_snapshot(baseline)
+        if self.score_ is None:
+            raise RuntimeError("Ajuste o modelo antes (fit / set_model / load).")
+        if snap.get("task_type") not in (None, self.task_type):
+            raise ValueError(f"Snapshot de task_type diferente: "
+                             f"{snap.get('task_type')} vs {self.task_type}.")
+        base_m = snap["metrics"].set_index("amostra")
+        cur_m = self.metrics().set_index("amostra")
+        # ICs p/ qualificar o empate (dentro do ruído): atual via metrics_ci
+        # (cacheado por identidade do score_); baseline re-bootstrapado sobre o
+        # score congelado. Mesmo protocolo/seed ⇒ comparação justa.
+        ci_metrics = (("auc", "ks", "gini") if self.task_type == "classification"
+                      else ("r2", "rmse"))
+        if seed is None:
+            seed = self.random_state
+        ci_cur, ci_base = {}, {}
+        try:
+            cur_ci_df = self.metrics_ci(n_boot=n_boot, metrics=ci_metrics,
+                                        alpha=alpha, seed=seed)
+            ci_cur = {(r["metrica"], r["amostra"]): (float(r["ic_low"]),
+                                                     float(r["ic_high"]))
+                      for _, r in cur_ci_df.iterrows()}
+            ci_base = self._score_ci_map(snap["score"], ci_metrics, n_boot, alpha, seed)
+        except Exception:                   # sem IC ⇒ veredicto só pelo sinal
+            ci_cur, ci_base = {}, {}
+
+        # 'n' não é métrica; 'ks_cutoff' é um limiar na escala do score (não
+        # comparável em qualidade) — mesmos descartes de metric_shifts.
+        cols = [c for c in cur_m.columns if c in base_m.columns
+                and c not in ("n", "ks_cutoff")]
+        rows = []
+        for a in [s for s in self._samples() if s in base_m.index and s in cur_m.index]:
+            for m in cols:
+                vb, vc = base_m.loc[a, m], cur_m.loc[a, m]
+                if not (isinstance(vb, (int, float, np.integer, np.floating))
+                        and isinstance(vc, (int, float, np.integer, np.floating))):
+                    continue
+                vb, vc = float(vb), float(vc)
+                if not (np.isfinite(vb) and np.isfinite(vc)):
+                    continue
+                delta = vc - vb
+                sentido = _HIGHER_IS_BETTER.get(m)
+                if sentido is None:                     # viés: magnitude perto de 0
+                    melhor = abs(vc) < abs(vb)
+                else:
+                    melhor = (delta > 0) if sentido else (delta < 0)
+                lb, lc = ci_base.get((m, a)), ci_cur.get((m, a))
+                if delta == 0:
+                    veredicto = "empate"
+                elif (lb is not None and lc is not None
+                        and all(np.isfinite(v) for v in (*lb, *lc))):
+                    disjuntos = lc[0] > lb[1] or lc[1] < lb[0]
+                    veredicto = (("melhorou" if melhor else "piorou")
+                                 if disjuntos else "empate")
+                else:
+                    veredicto = "melhorou" if melhor else "piorou"
+                rows.append({"metrica": m, "amostra": a, "baseline": round(vb, 6),
+                             "atual": round(vc, 6), "delta": round(delta, 6),
+                             "veredicto": veredicto})
+        deltas = pd.DataFrame(rows, columns=["metrica", "amostra", "baseline",
+                                             "atual", "delta", "veredicto"])
+        config, hyper = self._baseline_config_frame(snap)
+        return {
+            "baseline": snap.get("nome"),
+            "criado_em": snap.get("criado_em"),
+            "deltas": deltas,
+            "psi_score": self.score_psi(snap["score"]),
+            "variaveis": self._feature_diff(snap.get("model_features"),
+                                            self.model_features),
+            "config": config,
+            "hyperparams": hyper,
+            "metrics_baseline": snap["metrics"].copy(),
+            "metrics_atual": self.metrics(),
+        }
+
+    def plot_roc_compare(self, baseline, sample=None, figsize=(5.4, 5.0), dpi=150,
+                         save_path=None, ax=None):
+        """ROC **sobreposta** baseline × modelo vigente na mesma amostra
+        (classificação): o desafiante domina quando sua curva envolve a do
+        baseline. ``baseline`` = nome do snapshot ou o dict de :meth:`snapshot`."""
+        if self.task_type != "classification":
+            raise ValueError("plot_roc_compare é exclusivo de classificação; em "
+                             "regressão compare pelas métricas (compare_to).")
+        from sklearn.metrics import roc_curve, roc_auc_score
+        snap = self._resolve_snapshot(baseline)
+        if sample is None:
+            sample = self.ref_sample
+        mask = (pd.Series(True, index=self.df.index) if self.sample_col is None
+                else self.df[self.sample_col] == sample)
+        y_all = self.df.loc[mask, self.target].to_numpy(dtype="float64")
+        base_sc = snap["score"].reindex(self.df.index)[mask].to_numpy(dtype="float64")
+        cur_sc = self.score_[mask].to_numpy(dtype="float64")
+        fig, ax = _new_ax(figsize, dpi, ax)
+        rotulo_base = snap.get("nome") or "baseline"
+        for nome, sc, cor, ls in ((rotulo_base, base_sc, "#889", "--"),
+                                  ("atual", cur_sc, "#15324a", "-")):
+            ok = ~np.isnan(y_all) & ~np.isnan(sc)
+            y, s = y_all[ok], sc[ok]
+            if len(np.unique(y)) < 2:
+                continue
+            fpr, tpr, _ = roc_curve(y, s)
+            auc = roc_auc_score(y, s)
+            ax.plot(fpr, tpr, color=cor, ls=ls, lw=2.0,
+                    label=f"{nome} · AUC={auc:.3f}")
+        ax.plot([0, 1], [0, 1], color="#bbb", ls=":", lw=1)
+        ax.set_xlabel("FPR"); ax.set_ylabel("TPR")
+        _pct_axis(ax, "both")
+        ax.set_title(f"ROC · baseline × atual · {sample}", fontsize=11,
+                     fontweight="bold", color="#15324a")
+        ax.legend(fontsize=9, loc="lower right"); ax.grid(alpha=0.15)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def diff_models(self, other, eps: float = 1e-6) -> dict:
+        """Compara este modelo (A, vigente) com **outro ModelSegmenter salvo** (B)
+        sobre as MESMAS linhas (``self.df``).
+
+        ``other`` pode ser o **caminho do .json** gerado por :meth:`save` (o
+        ``.model.joblib`` ao lado é carregado junto) ou um ``ModelSegmenter`` já
+        construído. Devolve dict com:
+
+        * ``resumo`` — nº de variáveis + métrica-chave (AUC/R²) por amostra,
+          A vs B vs Δ (B−A);
+        * ``migracao`` — **matriz de migração** ``crosstab(rating_A, rating_B)``
+          sobre as mesmas linhas (o número que o comitê pede) e ``concordancia``
+          (fração com o MESMO rating) — ``None``/NaN quando algum dos modelos
+          está sem régua de ratings;
+        * ``variaveis`` (entraram/saíram/mantidas), ``config``/``hyperparams``
+          (diffs), ``psi_score`` (PSI score B × A por amostra) e as tabelas
+          completas ``metrics_a``/``metrics_b``."""
+        import os
+        if isinstance(other, (str, os.PathLike)):
+            # instância "oca" só para reusar load() (correção de sufixo, erros
+            # amigáveis, score + ratings reaplicados) sem clonar df antes da hora:
+            # com df= explícito, load não toca nenhum outro atributo do objeto.
+            alvo = ModelSegmenter.__new__(ModelSegmenter)
+            other = alvo.load(str(other), df=self.df)
+        if not isinstance(other, ModelSegmenter):
+            raise TypeError("other deve ser um caminho de .json salvo ou um "
+                            "ModelSegmenter.")
+        if other.task_type != self.task_type:
+            raise ValueError(f"Modelos de task_type diferentes: {self.task_type} "
+                             f"vs {other.task_type}.")
+        if self.score_ is None or other.score_ is None:
+            raise RuntimeError("Os dois modelos precisam estar ajustados (o salvo "
+                               "deve ter o .model.joblib ao lado do .json).")
+        ma, mb = self.metrics(), other.metrics()
+        key = "auc" if self.task_type == "classification" else "r2"
+        rows = [{"métrica": "nº de variáveis",
+                 "modelo A": len(self.model_features or []),
+                 "modelo B": len(other.model_features or [])}]
+        rows[0]["Δ (B−A)"] = rows[0]["modelo B"] - rows[0]["modelo A"]
+        for am in ma["amostra"]:
+            va = ma.loc[ma["amostra"] == am, key]
+            vb = mb.loc[mb["amostra"] == am, key]
+            if len(va) and len(vb):
+                a, b = float(va.iloc[0]), float(vb.iloc[0])
+                rows.append({"métrica": f"{key.upper()} · {am}",
+                             "modelo A": round(a, 4), "modelo B": round(b, 4),
+                             "Δ (B−A)": round(b - a, 4)})
+        resumo = pd.DataFrame(rows)
+
+        # matriz de migração de ratings A × B nas MESMAS linhas (crosstab)
+        migracao, concordancia, notas = None, float("nan"), []
+        if self.rating_ is not None and other.rating_ is not None:
+            ra, rb = self._rating_series(), other._rating_series()
+            valid = ra.notna() & rb.notna()
+            if bool(valid.any()):
+                migracao = pd.crosstab(ra[valid], rb[valid], dropna=False)
+                migracao.index.name, migracao.columns.name = "rating_A", "rating_B"
+                concordancia = float((ra[valid].astype(str)
+                                      == rb[valid].astype(str)).mean())
+        else:
+            notas.append("migração indisponível: gere os ratings nos dois modelos "
+                         "(build_ratings) para a matriz de migração.")
+        snap_b = {"nome": "modelo B", "task_type": other.task_type,
+                  "algorithm": other.algorithm, "hyperparams": other.hyperparams,
+                  "feature_transform": other.feature_transform,
+                  "class_balance": other.class_balance, "monotone": other.monotone,
+                  "two_stage": other.two_stage,
+                  "model_features": other.model_features}
+        config, hyper = self._baseline_config_frame(snap_b)
+        # no diff A×B o "baseline" das tabelas é o modelo B (salvo) — renomeia
+        config = config.rename(columns={"baseline": "modelo B", "atual": "modelo A"})
+        hyper = hyper.rename(columns={"baseline": "modelo B", "atual": "modelo A"})
+        return {"resumo": resumo, "migracao": migracao, "concordancia": concordancia,
+                "variaveis": self._feature_diff(other.model_features,
+                                                self.model_features),
+                "config": config, "hyperparams": hyper,
+                "psi_score": self.score_psi(other.score_, eps=eps),
+                "metrics_a": ma, "metrics_b": mb, "notas": notas}
 
     def to_dict(self) -> dict:
         """Configuração serializável (sem o modelo binário — ver :meth:`save`)."""

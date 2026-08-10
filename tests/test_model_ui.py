@@ -386,6 +386,72 @@ def test_tuning_cv_e_lambda_na_ui():
     assert "média dos folds" in ui.out_tune.value
 
 
+def test_champion_challenger_card():
+    """Aba Modelo: 'Congelar como baseline' fotografa o modelo em memória; o
+    snapshot SOBREVIVE ao re-treino e 'Comparar com o baseline' renderiza os
+    deltas com semáforo (tokens de tema), PSI dos scores e diff de config; um
+    novo re-treino marca a comparação como obsoleta sem perder o baseline."""
+    ui = _build()
+    # sem modelo: congelar avisa e não cria snapshot
+    ui._on_freeze(None)
+    assert ui.seg.snapshots_ == {}
+    assert "Treine" in ui.out_baseline.value
+    assert ui.btn_compare_base.disabled is True
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.seg.fit()
+        ui._on_freeze(None)
+    assert "baseline" in ui.seg.snapshots_
+    assert "❄" in ui.out_baseline.value
+    assert ui.btn_compare_base.disabled is False
+    # re-treina com OUTRA config via UI — o baseline sobrevive
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.dd_algo.value = "random_forest"
+        ui.sl_n_est.value = 60
+        ui._on_fit(None)
+    assert "baseline" in ui.seg.snapshots_
+    ui._on_compare_baseline(None)
+    html = ui.out_compare_base.value
+    assert "<table" in html and "veredicto" in html
+    assert ("var(--ok-bg)" in html or "var(--bad-bg)" in html
+            or "var(--neutral-bg)" in html)          # semáforo por tokens de tema
+    assert "PSI" in html
+    assert "<img" in html                            # ROC sobreposta (classificação)
+    # novo re-treino: comparação vira nota de obsolescência; baseline permanece
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_fit(None)
+    assert "Comparar com o baseline" in ui.out_compare_base.value
+    assert "<table" not in ui.out_compare_base.value
+    assert "baseline" in ui.seg.snapshots_ and "❄" in ui.out_baseline.value
+
+
+def test_card_comparar_modelo_salvo(tmp_path):
+    """Aba Validar & Exportar: card 'Comparar com modelo salvo' — avisos
+    amigáveis sem caminho/modelo e, com um .json salvo, renderiza concordância,
+    matriz de migração de ratings e as tabelas de diff."""
+    ui = _build()
+    ui._on_diff(None)                                # sem caminho → aviso
+    assert "Informe o caminho" in ui.out_diff.value
+    ui.tx_diff_path.value = "qualquer.json"
+    ui._on_diff(None)                                # sem modelo vigente → aviso
+    assert "Treine" in ui.out_diff.value
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.seg.fit()
+        ui.seg.build_ratings(method="quantil", n_ratings=4)
+        p = tmp_path / "modelo_b.json"
+        ui.seg.save(str(p))
+        ui.tx_diff_path.value = str(p)
+        ui._on_diff(None)
+    html = ui.out_diff.value
+    assert "Concordância" in html
+    assert "Matriz de migração" in html
+    assert "<table" in html
+    # caminho inexistente → erro amigável, sem exceção
+    ui.tx_diff_path.value = str(tmp_path / "nao_existe.json")
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_diff(None)
+    assert "Erro ao comparar" in ui.out_diff.value
+
+
 def test_toggle_monotonicidade_ignorado_sem_suporte():
     """Toggle marcado + algoritmo sem suporte: o fit via UI NÃO repassa a opção
     (nem aviso, nem restrição) — a linha fica oculta, mas o valor persiste."""

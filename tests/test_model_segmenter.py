@@ -2122,3 +2122,111 @@ def test_monotone_no_tune_optuna():
     cst = seg.model.named_steps["est"].monotonic_cst
     assert cst == {"num__x_up": 1, "num__x_down": -1}
     assert seg.monotone == "auto"
+
+
+# ----------------------------------------------------------------------
+# Champion × challenger: snapshot em memória + diff de modelo salvo
+# ----------------------------------------------------------------------
+def test_snapshot_compare_to(seg):
+    """snapshot → refit com outra config → compare_to devolve deltas por
+    métrica/amostra com semáforo, PSI entre os scores e diff de variáveis/HPs."""
+    seg.fit(_default_algo(seg.task_type))
+    snap = seg.snapshot("baseline")
+    assert "baseline" in seg.snapshots_
+    assert snap["algorithm"] == seg.algorithm
+    assert snap["score"] is not seg.score_          # cópia congelada, não alias
+    # refit com OUTRA config (algoritmo + HP) — o snapshot sobrevive
+    seg.fit("random_forest", hyperparams={"n_estimators": 40})
+    assert "baseline" in seg.snapshots_
+    comp = seg.compare_to("baseline", n_boot=50)
+    d = comp["deltas"]
+    assert {"metrica", "amostra", "baseline", "atual", "delta",
+            "veredicto"}.issubset(d.columns)
+    assert len(d) > 0
+    assert set(d["veredicto"]).issubset({"melhorou", "piorou", "empate"})
+    # delta = atual − baseline em todas as linhas
+    assert np.allclose(d["delta"], d["atual"] - d["baseline"], atol=1e-6)
+    # 'n' e 'ks_cutoff' não entram na tabela de deltas
+    assert not set(d["metrica"]) & {"n", "ks_cutoff"}
+    # PSI entre o score do baseline e o vigente, por amostra
+    psi = comp["psi_score"]
+    assert {"amostra", "psi", "classificacao"}.issubset(psi.columns)
+    assert (psi["psi"] >= 0).all()
+    # diff de config/HPs: algoritmo mudou; n_estimators só existe no atual
+    cfg = comp["config"].set_index("item")
+    assert bool(cfg.loc["algoritmo", "mudou"]) is True
+    hp = comp["hyperparams"].set_index("parametro")
+    assert hp.loc["n_estimators", "atual"] == 40
+    assert bool(hp.loc["n_estimators", "mudou"]) is True
+    # mesmas variáveis nos dois fits → nada entrou/saiu
+    assert comp["variaveis"]["entraram"] == [] and comp["variaveis"]["sairam"] == []
+    # ROC sobreposta: só classificação (regressão levanta ValueError)
+    import matplotlib
+    matplotlib.use("Agg")
+    if seg.task_type == "classification":
+        fig = seg.plot_roc_compare("baseline")
+        assert fig is not None
+    else:
+        with pytest.raises(ValueError, match="classificação"):
+            seg.plot_roc_compare("baseline")
+    # comparar o modelo consigo mesmo → todo delta 0 e veredicto 'empate'
+    seg.snapshot("self")
+    comp2 = seg.compare_to("self", n_boot=50)
+    assert np.allclose(comp2["deltas"]["delta"], 0.0)
+    assert (comp2["deltas"]["veredicto"] == "empate").all()
+    assert (comp2["psi_score"]["psi"] < 1e-6).all()
+    # snapshot inexistente → erro amigável com os nomes disponíveis
+    with pytest.raises(KeyError, match="baseline"):
+        seg.compare_to("nao_existe")
+
+
+def test_snapshot_exige_modelo(seg):
+    with pytest.raises(RuntimeError, match="fit"):
+        seg.snapshot("x")
+
+
+def test_diff_models_save_load_roundtrip(seg, tmp_path):
+    """diff_models com round-trip save/load: métricas lado a lado, MATRIZ DE
+    MIGRAÇÃO entre os ratings dos dois modelos sobre as mesmas linhas,
+    variáveis in/out e HPs."""
+    seg.fit(_default_algo(seg.task_type))
+    seg.build_ratings(method="quantil", n_ratings=5)
+    p = tmp_path / "modelo_b.json"
+    seg.save(str(p))
+    # o vigente (A) muda de config; o salvo (B) fica congelado em disco
+    seg.fit("random_forest", hyperparams={"n_estimators": 40})
+    seg.build_ratings(method="quantil", n_ratings=5)
+    d = seg.diff_models(str(p))
+    assert {"resumo", "migracao", "concordancia", "variaveis", "hyperparams",
+            "config", "psi_score", "metrics_a", "metrics_b"}.issubset(d)
+    key = "AUC" if seg.task_type == "classification" else "R2"
+    assert any(str(m).startswith(key) for m in d["resumo"]["métrica"])
+    mig = d["migracao"]
+    assert mig is not None and int(mig.to_numpy().sum()) > 0
+    assert mig.index.name == "rating_A" and mig.columns.name == "rating_B"
+    assert 0.0 <= d["concordancia"] <= 1.0
+    assert (d["psi_score"]["psi"] >= 0).all()
+    # comparado consigo mesmo (salva o A vigente): concordância total e Δ=0
+    p2 = tmp_path / "modelo_a.json"
+    seg.save(str(p2))
+    d2 = seg.diff_models(str(p2))
+    assert d2["concordancia"] == pytest.approx(1.0)
+    assert np.allclose(d2["resumo"]["Δ (B−A)"].astype(float), 0.0)
+    assert (d2["psi_score"]["psi"] < 1e-6).all()
+
+
+def test_diff_models_sem_ratings_e_task_diferente(seg, tmp_path):
+    """Sem régua de ratings em um dos lados a migração sai None (com nota);
+    task_type diferente é rejeitado."""
+    seg.fit(_default_algo(seg.task_type))
+    p = tmp_path / "b.json"
+    seg.save(str(p))                                # B sem ratings
+    d = seg.diff_models(str(p))
+    assert d["migracao"] is None and d["notas"]
+    outro_task = ("regression" if seg.task_type == "classification"
+                  else "classification")
+    df2 = _synthetic(outro_task, n=400, seed=3)
+    outro = ModelSegmenter(df2, target="target", task_type=outro_task,
+                           sample_col="amostra", ref_sample="DES", verbose=False)
+    with pytest.raises(ValueError, match="task_type"):
+        seg.diff_models(outro)

@@ -485,7 +485,8 @@ class ModelSegmenterUI:
 
     def _df_html(self, df, max_height=None, color_categoria=False, center=False,
                  color_forca=False, color_tendencia=False, color_estabilidade=False,
-                 color_validation=False, pct_cols=None, highlight_included=False):
+                 color_validation=False, pct_cols=None, highlight_included=False,
+                 color_veredicto=False):
         sty = (df.style.hide(axis="index").set_table_styles(self._TABLE_STYLES)
                .set_properties(**{"font-size": "12px"}))
         if highlight_included and "incluida" in df.columns:
@@ -532,6 +533,19 @@ class ModelSegmenterUI:
                 fg, bg = self._ESTABILIDADE_COLORS.get(v, ("", ""))
                 return (f"color:{fg};background-color:{bg};font-weight:600" if fg else "")
             sty = sty.map(_estab_css, subset=["estabilidade"])
+        if color_veredicto and "veredicto" in df.columns:
+            # semáforo do champion × challenger: melhorou→verde · piorou→vermelho ·
+            # empate (dentro do ruído)→neutro — sempre tokens de tema
+            def _verd_css(v):
+                s = str(v)
+                if "melhor" in s:
+                    return "color:var(--ok-tx);background-color:var(--ok-bg);font-weight:600"
+                if "pior" in s:
+                    return "color:var(--bad-tx);background-color:var(--bad-bg);font-weight:600"
+                if "empate" in s:
+                    return "color:var(--muted);background-color:var(--neutral-bg);font-weight:600"
+                return ""
+            sty = sty.map(_verd_css, subset=["veredicto"])
         if color_validation:
             # backtest/PSI dos ratings: status (ok/atencao/alerta), gap, psi e classificacao
             if "status" in df.columns:
@@ -1327,9 +1341,53 @@ class ModelSegmenterUI:
             row_compare_dist, row_calib_resid,
         ]); metrics_card.add_class("mseg-card")
 
+        # --- Champion × challenger: baseline congelado em memória ------------
+        # congela o modelo vigente (config + métricas + score) e, após re-treinos/
+        # tuning, compara o desafiante com ele. A foto vive só nesta sessão e
+        # SOBREVIVE aos re-fits (persistência de verdade é Salvar/MLflow).
+        self.tx_baseline_name = W.Text(value="baseline", description="Nome:",
+                                       style={"description_width": "initial"},
+                                       layout=W.Layout(width="230px"))
+        self.btn_freeze = W.Button(description="Congelar como baseline",
+                                   button_style="info", icon="flag",
+                                   layout=W.Layout(width="auto", min_width="210px"),
+                                   tooltip="Fotografa o modelo VIGENTE (config, métricas "
+                                           "por amostra e score) como baseline nomeado em "
+                                           "memória — sobrevive a re-treinos nesta sessão; "
+                                           "não grava em disco.")
+        self.btn_compare_base = W.Button(description="Comparar com o baseline",
+                                         button_style="warning", icon="exchange",
+                                         disabled=True,
+                                         layout=W.Layout(width="auto", min_width="220px"),
+                                         tooltip="Compara o modelo vigente com o baseline "
+                                                 "do nome ao lado: deltas por métrica com "
+                                                 "semáforo, ROC sobreposta (classificação), "
+                                                 "PSI entre os scores e diff de variáveis/"
+                                                 "hiperparâmetros.")
+        self.out_baseline = W.HTML()
+        self.out_compare_base = W.HTML()
+        self.btn_freeze.on_click(self._on_freeze)
+        self.btn_compare_base.on_click(self._on_compare_baseline)
+        champion_card = W.VBox([
+            W.HTML("<div class='mseg-h'>Champion × challenger · baseline em memória</div>"),
+            W.HTML("<div class='mseg-legend'>Congele o modelo vigente como <b>baseline</b> "
+                   "(foto em memória: configuração, métricas e score) e, depois de re-treinar "
+                   "ou tunar, compare o desafiante com ele: <b>deltas por métrica/amostra</b> "
+                   "com semáforo (empate = diferença dentro do ruído dos ICs bootstrap), "
+                   "<b>ROC sobreposta</b> (classificação), <b>PSI entre os scores</b> e o diff "
+                   "de variáveis e hiperparâmetros. A foto vale só nesta sessão e "
+                   "<b>sobrevive aos re-treinos</b>; para comparar com um modelo em disco use "
+                   "a aba <i>Validar &amp; Exportar</i>.</div>"),
+            W.HBox([self.tx_baseline_name, self.btn_freeze, self.btn_compare_base],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            self.out_baseline,
+            self.out_compare_base,
+        ]); champion_card.add_class("mseg-card")
+
         tab_model = W.VBox([
             train_card,
             metrics_card,
+            champion_card,
             self.formula_card,
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>SHAP — beeswarm</div>"), self.out_shap],
                            layout=W.Layout(width="55%")),
@@ -1633,10 +1691,38 @@ class ModelSegmenterUI:
             W.HBox([self.tx_experiment, self.tx_model, self.btn_mlflow]),
             W.HBox([self.cb_savebase]),
         ], layout=W.Layout(width="49%")); card_mlflow.add_class("mseg-card")
+        # --- comparar com modelo salvo em disco (molde do card de diff da árvore) ---
+        self.tx_diff_path = W.Text(description="Modelo B (JSON):",
+                                   placeholder="caminho do .json salvo (Salvar)",
+                                   style={"description_width": "initial"},
+                                   layout=W.Layout(width="60%"))
+        self.btn_diff = W.Button(description="Comparar com modelo salvo",
+                                 button_style="warning", icon="exchange",
+                                 layout=W.Layout(width="auto", min_width="230px"),
+                                 tooltip="Carrega outro ModelSegmenter salvo (.json + "
+                                         ".model.joblib) e compara com o vigente sobre as "
+                                         "mesmas linhas: métricas lado a lado, matriz de "
+                                         "migração entre os ratings, variáveis e "
+                                         "hiperparâmetros.")
+        self.out_diff = W.HTML()
+        self.btn_diff.on_click(self._on_diff)
+        card_diff = W.VBox([
+            W.HTML("<div class='mseg-h'>Comparar com modelo salvo (JSON)</div>"),
+            W.HTML("<div class='mseg-legend'>Carrega outro modelo salvo por <b>Salvar</b> "
+                   "(o <code>.model.joblib</code> ao lado é lido junto) e o escora sobre as "
+                   "<b>mesmas linhas</b> desta base: métricas lado a lado, <b>matriz de "
+                   "migração</b> entre os ratings dos dois modelos (crosstab — o número que "
+                   "o comitê pede), concordância, PSI entre os scores e o diff de variáveis "
+                   "e hiperparâmetros. A migração exige régua de ratings nos dois "
+                   "modelos.</div>"),
+            W.HBox([self.tx_diff_path, self.btn_diff]),
+            self.out_diff,
+        ]); card_diff.add_class("mseg-card")
         tab_export = W.VBox([
             card_score,
             W.HBox([card_persist, card_mlflow],
                    layout=W.Layout(justify_content="space-between", align_items="stretch")),
+            card_diff,
         ], layout=W.Layout(padding="2px"))
 
         # ---------- Aba 6: Avançado ----------
@@ -3502,6 +3588,237 @@ class ModelSegmenterUI:
             except Exception as e:
                 out.value = f"<i>{e}</i>"
 
+    # ------------------------------------------------------------------ Champion × challenger
+    def _baseline_nome(self) -> str:
+        """Nome do baseline no campo do card (default 'baseline')."""
+        return (self.tx_baseline_name.value or "baseline").strip() or "baseline"
+
+    def _on_freeze(self, b):
+        """Congela o modelo VIGENTE como baseline nomeado em memória (snapshot)."""
+        if self.seg.score_ is None:
+            self.out_baseline.value = ("<i>Treine (ou carregue) o modelo antes de "
+                                       "congelar o baseline.</i>")
+            return
+        nome = self._baseline_nome()
+        snap = self.seg.snapshot(nome)
+        self._render_baseline_info()
+        self.out_compare_base.value = ""      # comparação antiga não vale p/ o novo baseline
+        self._log(f"[baseline] '{nome}' congelado — {snap['algorithm']} · "
+                  f"{len(snap['model_features'])} variáveis. Re-treine/tune e clique em "
+                  "'Comparar com o baseline'.")
+
+    def _render_baseline_info(self):
+        """Chips dos baselines congelados (nome · algoritmo · nº de variáveis ·
+        horário) + habilita o botão de comparação."""
+        import html as _h
+        snaps = getattr(self.seg, "snapshots_", None) or {}
+        if getattr(self, "out_baseline", None) is None:
+            return
+        self.btn_compare_base.disabled = not snaps
+        if not snaps:
+            self.out_baseline.value = ""
+            return
+        chips = []
+        for nome, sn in snaps.items():
+            quando = (sn.get("criado_em") or "").replace("T", " ")
+            chips.append(
+                f"<span class='pill pill-green'>❄ {_h.escape(str(nome))}</span> "
+                f"<span style='font-size:12px;color:var(--sub-ink)'>"
+                f"{_h.escape(str(sn.get('algorithm') or '—'))} · "
+                f"{len(sn.get('model_features') or [])} variáveis · {_h.escape(quando)}"
+                f"</span>")
+        self.out_baseline.value = ("<div style='margin-top:4px'>"
+                                   + "<br>".join(chips) + "</div>")
+
+    def _refresh_champion_card(self):
+        """Mantém o card champion × challenger coerente quando o modelo muda
+        (re-treino/tuning/load): o baseline SOBREVIVE, mas uma comparação já
+        renderizada fica obsoleta — vira nota pedindo re-comparação. Pós-load os
+        snapshots (memória da sessão) se perdem e o card é limpo."""
+        if getattr(self, "out_compare_base", None) is None:
+            return
+        self._render_baseline_info()
+        snaps = getattr(self.seg, "snapshots_", None) or {}
+        if not snaps:
+            self.out_compare_base.value = ""
+        elif self.out_compare_base.value:
+            self.out_compare_base.value = (
+                "<div class='mseg-legend'>⚠ <i>o modelo mudou desde a última "
+                "comparação — clique em <b>Comparar com o baseline</b> para "
+                "atualizá-la.</i></div>")
+
+    def _feature_diff_html(self, variaveis) -> str:
+        """Chips de variáveis que entraram (verde) / saíram (vermelho) + contagem
+        das mantidas — só tokens de tema."""
+        import html as _h
+
+        def _chips(nomes, css):
+            return " ".join(f"<span style='{css};border-radius:8px;padding:1px 7px;"
+                            f"font-size:11px;font-weight:600'>"
+                            f"{_h.escape(self.seg.label(n))}</span>" for n in nomes)
+
+        ent = variaveis.get("entraram") or []
+        sai = variaveis.get("sairam") or []
+        man = variaveis.get("mantidas") or []
+        partes = []
+        if ent:
+            partes.append("entraram: " + _chips(
+                ent, "background-color:var(--ok-bg);color:var(--ok-ink)"))
+        if sai:
+            partes.append("saíram: " + _chips(
+                sai, "background-color:var(--bad-bg);color:var(--bad-ink)"))
+        partes.append(f"mantidas: <b>{len(man)}</b>")
+        return ("<div class='mseg-legend'>Variáveis — " + " · ".join(partes)
+                + "</div>")
+
+    def _config_hp_html(self, d, col_a="atual", col_b="baseline") -> str:
+        """Tabelas de diff de configuração e hiperparâmetros num bloco recolhível
+        (linhas alteradas destacadas via coluna ``mudou`` → ≠/=)."""
+        blocos = []
+        for chave, titulo in (("config", "Configuração"),
+                              ("hyperparams", "Hiperparâmetros")):
+            df = d.get(chave)
+            if df is None or not len(df):
+                continue
+            disp = df.copy()
+            if "mudou" in disp.columns:
+                disp["mudou"] = np.where(disp["mudou"].astype(bool), "≠", "=")
+            disp = disp.astype(object).fillna("—").map(str)
+            blocos.append(f"<div class='mseg-h'>{titulo} · {col_b} × {col_a}</div>"
+                          + self._df_html(disp, center=True))
+        if not blocos:
+            return ""
+        return ("<details class='mseg-guide'><summary>⚙ Configuração & "
+                "hiperparâmetros (diff)</summary>" + "".join(blocos) + "</details>")
+
+    def _on_compare_baseline(self, b):
+        """Compara o modelo vigente com o baseline congelado (compare_to)."""
+        seg = self.seg
+        nome = self._baseline_nome()
+        if seg.score_ is None:
+            self.out_compare_base.value = ("<i>Treine (ou carregue) o modelo antes "
+                                           "de comparar.</i>")
+            return
+        if nome not in (getattr(seg, "snapshots_", None) or {}):
+            self.out_compare_base.value = (f"<i>Não há baseline '{nome}' congelado — "
+                                           "clique em 'Congelar como baseline' antes.</i>")
+            return
+        with self._busy(self.btn_compare_base, status=self.out_compare_base,
+                        msg="comparando com o baseline…"):
+            try:
+                comp = seg.compare_to(nome)
+            except Exception as e:
+                self.out_compare_base.value = (
+                    f"<div style='color:var(--bad-tx);font-size:12px'>Erro ao comparar: "
+                    f"{type(e).__name__}: {e}</div>")
+                return
+            self.out_compare_base.value = self._compare_html(comp)
+            n_melhor = int((comp["deltas"]["veredicto"] == "melhorou").sum())
+            n_pior = int((comp["deltas"]["veredicto"] == "piorou").sum())
+            self._log(f"[baseline] comparação com '{nome}': {n_melhor} métrica(s) "
+                      f"melhoraram, {n_pior} pioraram (demais dentro do ruído).")
+
+    def _compare_html(self, comp) -> str:
+        """Renderização da comparação com o baseline (saída de ``compare_to``):
+        deltas com semáforo, ROC sobreposta (classificação), PSI dos scores e
+        diffs de variáveis/configuração."""
+        import html as _h
+        partes = [(f"<div class='mseg-legend'>Baseline <b>{_h.escape(str(comp.get('baseline')))}"
+                   f"</b> (congelado em {_h.escape(str(comp.get('criado_em') or '—'))}) × "
+                   "modelo vigente. <b>empate</b> = diferença dentro do ruído (ICs "
+                   "bootstrap 95% sobrepostos); melhorou/piorou = ICs disjuntos na "
+                   "direção da métrica.</div>")]
+        deltas = comp.get("deltas")
+        if deltas is not None and len(deltas):
+            partes.append(self._df_html(deltas, center=True, color_veredicto=True,
+                                        max_height="340px"))
+        else:
+            partes.append("<i>Sem métricas comparáveis entre o baseline e o atual.</i>")
+        # ROC sobreposta (classificação) — referência e, quando houver, OOT
+        if self.task_type == "classification":
+            figs = []
+            amostras = [self.seg.ref_sample]
+            oot = self.seg._oot_sample()
+            if oot != self.seg.ref_sample:
+                amostras.append(oot)
+            for a in amostras:
+                try:
+                    figs.append(self._fig_html(
+                        self.seg.plot_roc_compare(comp.get("baseline"), sample=a,
+                                                  figsize=(5.4, 5.0))))
+                except Exception:
+                    pass
+            if figs:
+                cols = "".join(f"<div style='flex:0 1 49%'>{f}</div>" for f in figs)
+                partes.append("<div class='mseg-h'>ROC sobreposta · baseline × atual</div>"
+                              f"<div style='display:flex;gap:8px;flex-wrap:wrap'>{cols}</div>")
+        psi = comp.get("psi_score")
+        if psi is not None and len(psi):
+            partes.append("<div class='mseg-h'>PSI · score do baseline × score vigente "
+                          "(mesmas linhas)</div>"
+                          + self._df_html(psi, center=True, color_validation=True))
+        partes.append(self._feature_diff_html(comp.get("variaveis") or {}))
+        partes.append(self._config_hp_html(comp))
+        return "".join(partes)
+
+    # ------------------------------------------------------------------ diff com modelo salvo
+    def _on_diff(self, b):
+        """Compara o modelo vigente (A) com outro salvo em disco (B) — diff_models."""
+        path = (self.tx_diff_path.value or "").strip()
+        if not path:
+            self.out_diff.value = "<i>Informe o caminho do .json salvo do modelo B.</i>"
+            return
+        if self.seg.score_ is None:
+            self.out_diff.value = ("<i>Treine (ou carregue) o modelo vigente antes "
+                                   "de comparar.</i>")
+            return
+        with self._busy(self.btn_diff, status=self.out_diff,
+                        msg="comparando os dois modelos…"):
+            try:
+                d = self.seg.diff_models(path)
+            except Exception as e:
+                self.out_diff.value = (
+                    f"<div style='color:var(--bad-tx);font-size:12px'>Erro ao comparar: "
+                    f"{type(e).__name__}: {e}</div>")
+                return
+            self.out_diff.value = self._diff_html(d)
+            conc = d.get("concordancia")
+            conc_txt = (f"{conc:.1%}" if conc == conc else "—")
+            self._log(f"[diff] comparação concluída — concordância de ratings: {conc_txt}.")
+
+    def _diff_html(self, d) -> str:
+        """Renderização da comparação A (vigente) × B (salvo): resumo de métricas,
+        matriz de migração de ratings (crosstab), PSI dos scores e diffs."""
+        partes = ["<div class='mseg-legend'><b>A</b> = modelo vigente · <b>B</b> = "
+                  "modelo salvo, escorado sobre as MESMAS linhas desta base.</div>"]
+        resumo = d.get("resumo")
+        if resumo is not None and len(resumo):
+            partes.append(self._df_html(resumo.astype(object).fillna("—"), center=True))
+        conc = d.get("concordancia")
+        mig = d.get("migracao")
+        if mig is not None and len(mig):
+            conc_txt = f"{conc:.1%}" if conc == conc else "—"
+            partes.append(f"<div class='mseg-legend'>Concordância de ratings (A=B): "
+                          f"<b>{conc_txt}</b></div>")
+            disp = mig.copy()
+            disp.index = [f"A·{i}" for i in disp.index]
+            disp.columns = [f"B·{c}" for c in disp.columns]
+            disp = disp.reset_index(names="rating")
+            partes.append("<div class='mseg-h'>Matriz de migração de ratings "
+                          "(linhas = modelo A · colunas = modelo B)</div>"
+                          + self._df_html(disp, center=True, max_height="360px"))
+        else:
+            partes.append("<div class='mseg-legend'>⚠ <i>matriz de migração "
+                          "indisponível — gere a régua de ratings nos DOIS modelos "
+                          "(build_ratings) para o crosstab A × B.</i></div>")
+        psi = d.get("psi_score")
+        if psi is not None and len(psi):
+            partes.append("<div class='mseg-h'>PSI · score B × score A (mesmas linhas)"
+                          "</div>" + self._df_html(psi, center=True, color_validation=True))
+        partes.append(self._feature_diff_html(d.get("variaveis") or {}))
+        partes.append(self._config_hp_html(d, col_a="modelo A", col_b="modelo B"))
+        return "".join(partes)
+
     def _on_shap(self, b):
         if self.seg.score_ is None:
             self._log("[shap] treine o modelo primeiro.")
@@ -4431,6 +4748,9 @@ class ModelSegmenterUI:
         # de remoção/métricas vieram do modelo anterior) — descarta o cache p/ não
         # reaplicar seleção de um modelo que não existe mais.
         self._invalidate_backelim()
+        # champion × challenger: o baseline congelado SOBREVIVE ao re-treino, mas a
+        # comparação renderizada ficou obsoleta (vira nota pedindo re-comparação).
+        self._refresh_champion_card()
 
     def _on_adv_cap(self, b):
         if self.seg.score_ is None:
