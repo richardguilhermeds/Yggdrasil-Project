@@ -36,7 +36,8 @@ import numpy as np
 import pandas as pd
 
 from ...config import ColumnConfig
-from ...metrics import classification_metrics, regression_metrics
+from ...metrics import bootstrap_metric_ci, classification_metrics, regression_metrics
+from ...metrics.shift import HIGHER_IS_BETTER as _HIGHER_IS_BETTER
 from ...ratings import RATING_REGISTRY
 # helpers puros compartilhados com o TreeSegmenter (fonte única — sem drift)
 from .._common import (
@@ -680,6 +681,11 @@ class ModelSegmenter:
         # fit/set_model); evita recomputar AUC/KS/ROC por amostra em cada render +
         # metric_shifts no mesmo clique.
         self._metrics_cache: tuple | None = None
+        # cache dos ICs bootstrap (metrics_ci) — mesmo padrão por identidade do
+        # score_, com um dict interno por parâmetros (n_boot/métricas/alpha/seed):
+        # o bootstrap custa segundos e é pedido 2× no mesmo clique (tabela da UI +
+        # qualificação do shift em metric_shifts).
+        self._metrics_ci_cache: tuple | None = None
         self.target = target
         self.task_type = task_type
         self.sample_col = sample_col
@@ -2495,6 +2501,7 @@ class ModelSegmenter:
         self.score_ = self._compute_score(self.df)
         self._shap_cache = {}
         self._metrics_cache = None
+        self._metrics_ci_cache = None
         return self
 
     def _two_stage_sample_mask(self, a):
@@ -3167,8 +3174,69 @@ class ModelSegmenter:
         self._metrics_cache = (self.score_, out)
         return out.copy()
 
-    def metric_shifts(self) -> dict:
-        """Variação de cada métrica DES→OOT (oot − des)."""
+    def metrics_ci(self, n_boot=200, metrics=None, alpha=0.05, seed=None) -> pd.DataFrame:
+        """IC bootstrap das métricas de discriminação por amostra — reamostra o
+        par ``(y, score_)`` JÁ computado (sem re-treino: barato). Na classificação
+        a reamostragem é **estratificada por classe** (preserva a taxa de evento em
+        cada réplica); ver :func:`yggdrasil.metrics.bootstrap_metric_ci`.
+
+        Devolve um DataFrame métrica × amostra com ``valor`` (estimativa pontual),
+        ``ic_low``/``ic_high`` (IC percentil de ``100·(1−alpha)%``) e ``se``
+        (erro-padrão bootstrap). ``metrics`` default: ``('auc', 'ks', 'gini')`` na
+        classificação e ``('r2', 'rmse')`` na regressão. ``seed=None`` herda a seed
+        do segmenter (``random_state``) — mesma seed reproduz o mesmo IC. Cache por
+        identidade do ``score_`` + parâmetros (invalida em fit/set_model, que criam
+        um novo ``score_``)."""
+        if self.score_ is None:
+            raise RuntimeError("Ajuste o modelo antes (fit / set_model / load).")
+        if metrics is None:
+            metrics = (("auc", "ks", "gini") if self.task_type == "classification"
+                       else ("r2", "rmse"))
+        metrics = tuple(metrics)
+        if seed is None:                          # herda a seed do segmenter
+            seed = self.random_state
+        key = (metrics, int(n_boot), float(alpha), seed)
+        if self._metrics_ci_cache is None or self._metrics_ci_cache[0] is not self.score_:
+            self._metrics_ci_cache = (self.score_, {})
+        cached = self._metrics_ci_cache[1].get(key)
+        if cached is not None:
+            return cached.copy()
+
+        def _rmse(yt, ys):                        # métrica sem nome nativo no bootstrap
+            return float(np.sqrt(np.mean((yt - ys) ** 2)))
+
+        rows = []
+        for a in self._samples():
+            mask = (pd.Series(True, index=self.df.index) if self.sample_col is None
+                    else self._frame_mask(a))
+            y = self.df.loc[mask, self.target].to_numpy(dtype="float64")
+            sc = self.score_[mask].to_numpy(dtype="float64")
+            ok = ~np.isnan(y) & ~np.isnan(sc)
+            y, sc = y[ok], sc[ok]
+            if y.size == 0:
+                continue
+            for mname in metrics:
+                ci = bootstrap_metric_ci(y, sc, metric=(_rmse if mname == "rmse" else mname),
+                                         n_boot=int(n_boot), alpha=alpha, seed=seed)
+                rows.append({"metrica": mname, "amostra": a, "n": int(y.size),
+                             "valor": ci["valor"], "ic_low": ci["ic_low"],
+                             "ic_high": ci["ic_high"], "se": ci["se"]})
+        out = pd.DataFrame(rows, columns=["metrica", "amostra", "n", "valor",
+                                          "ic_low", "ic_high", "se"])
+        self._metrics_ci_cache[1][key] = out
+        return out.copy()
+
+    def metric_shifts(self, qualify=False, n_boot=200, alpha=0.05, seed=None) -> dict:
+        """Variação de cada métrica DES→OOT (oot − des).
+
+        Com ``qualify=True``, anexa ``{m}_significancia`` às métricas com IC
+        bootstrap (:meth:`metrics_ci`), qualificando a queda como maior que o
+        ruído amostral ou não: ``'degradacao_real'`` quando o IC do OOT cai
+        **inteiro do lado ruim** do IC do DES (ICs disjuntos na direção ruim da
+        métrica) e ``'dentro_do_ruido'`` quando os ICs se sobrepõem — ou o
+        movimento é na direção boa. ICs não computáveis contam como sobreposição
+        (veredicto conservador). ``n_boot``/``alpha``/``seed`` vão para o
+        bootstrap (cacheado por identidade do ``score_``)."""
         m = self.metrics().set_index("amostra")
         oot = self._oot_sample()
         if self.ref_sample not in m.index or oot not in m.index or oot == self.ref_sample:
@@ -3180,8 +3248,31 @@ class ModelSegmenter:
         def _num(x):     # evita np.isfinite(None)/str → TypeError (não está em try)
             return isinstance(x, (int, float, np.integer, np.floating)) and np.isfinite(x)
 
-        return {c: round(float(m.loc[oot, c] - m.loc[self.ref_sample, c]), 6)
-                for c in cols if _num(m.loc[oot, c]) and _num(m.loc[self.ref_sample, c])}
+        out = {c: round(float(m.loc[oot, c] - m.loc[self.ref_sample, c]), 6)
+               for c in cols if _num(m.loc[oot, c]) and _num(m.loc[self.ref_sample, c])}
+        if not qualify or not out:
+            return out
+        ci = self.metrics_ci(n_boot=n_boot, alpha=alpha, seed=seed)
+        if len(ci) == 0:
+            return out
+        ci_idx = ci.set_index(["metrica", "amostra"])
+        for c in list(out):
+            sentido = _HIGHER_IS_BETTER.get(c)
+            if sentido is None:                   # direção desconhecida/viés: não qualifica
+                continue
+            try:
+                ref, cmp_ = ci_idx.loc[(c, self.ref_sample)], ci_idx.loc[(c, oot)]
+            except KeyError:                      # métrica sem IC calculado
+                continue
+            lims = [float(ref["ic_low"]), float(ref["ic_high"]),
+                    float(cmp_["ic_low"]), float(cmp_["ic_high"])]
+            if not all(np.isfinite(v) for v in lims):
+                out[f"{c}_significancia"] = "dentro_do_ruido"
+                continue
+            piora = (float(cmp_["ic_high"]) < float(ref["ic_low"]) if sentido
+                     else float(cmp_["ic_low"]) > float(ref["ic_high"]))
+            out[f"{c}_significancia"] = "degradacao_real" if piora else "dentro_do_ruido"
+        return out
 
     def backward_elimination(self, sample=None, min_features=1, features=None, algorithm=None,
                              transform=None, hyperparams=None, n_repeats=3,
@@ -5863,6 +5954,7 @@ class ModelSegmenter:
         s._samples_cache = None
         s._rank_cache = {}
         s._metrics_cache = None
+        s._metrics_ci_cache = None
         s._shap_cache = {}
         s.score_ = None
         s.rating_ = None

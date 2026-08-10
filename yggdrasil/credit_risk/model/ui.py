@@ -1161,6 +1161,19 @@ class ModelSegmenterUI:
         self.row_monotone.layout.display = "none"   # revelada por _sync_algo_visibility
         self.out_algo_help = W.HTML()   # tutorial do algoritmo/parâmetros selecionado
         self.out_metrics = W.HTML()
+        # IC bootstrap das métricas (opcional — custa ~segundos): mostra o IC
+        # discreto ao lado do valor na tabela e qualifica a queda DES→OOT como
+        # dentro do ruído × degradação real (metrics_ci/metric_shifts).
+        self.cb_metrics_ci = W.Checkbox(value=False, indent=False,
+                                        description="IC bootstrap (95%) nas métricas")
+        self.cb_metrics_ci.tooltip = (
+            "Estima por bootstrap (200 réplicas; estratificado por classe na "
+            "classificação) o IC 95% de AUC/KS/Gini (ou R²/RMSE) por amostra, "
+            "reamostrando o par (alvo, score) já computado — sem re-treino. "
+            "Mostra o IC ao lado do valor e qualifica a queda DES→OOT como "
+            "dentro do ruído (ICs sobrepostos) ou degradação real (disjuntos). "
+            "Custa alguns segundos; o resultado fica em cache até o retreino.")
+        self.cb_metrics_ci.observe(self._on_toggle_metrics_ci, names="value")
         self.out_metric_compare = W.HTML()   # barras: principais métricas por amostra (DES vs OOT)
         self.out_formula = W.HTML()
         self.out_model_a = W.HTML()
@@ -1286,7 +1299,9 @@ class ModelSegmenterUI:
         self.out_dirty_warn = W.HTML()
         metrics_card = W.VBox([
             self.out_dirty_warn,
-            W.HTML("<div class='mseg-h'>Métricas por amostra</div>"), self.out_metrics,
+            W.HTML("<div class='mseg-h'>Métricas por amostra</div>"),
+            W.HBox([self.cb_metrics_ci]),
+            self.out_metrics,
             row_compare_dist, row_calib_resid,
         ]); metrics_card.add_class("mseg-card")
 
@@ -3139,12 +3154,30 @@ class ModelSegmenterUI:
         self.seg.cancel_tuning()
         self._log("[tune] cancelamento solicitado.")
 
+    def _on_toggle_metrics_ci(self, change):
+        """Liga/desliga o IC bootstrap na tabela de métricas. Sem modelo ainda,
+        nada a re-renderizar (o estado do checkbox vale para o próximo treino)."""
+        if getattr(self.seg, "score_", None) is None:
+            return
+        if change.get("new"):
+            self._log("[métricas] calculando IC bootstrap (200 réplicas)…")
+        self._render_metrics()
+
     def _render_metrics(self):
         if getattr(self.seg, "two_stage", False):
             self._render_metrics_twostage()
         else:
             m = self.seg.metrics().round(4)
-            self.out_metrics.value = (self._metrics_table_html(m)
+            ci = None
+            ci_note = ""
+            if getattr(self, "cb_metrics_ci", None) is not None and self.cb_metrics_ci.value:
+                try:
+                    ci = self.seg.metrics_ci()
+                    ci_note = self._metrics_ci_shift_html()
+                except Exception as e:
+                    self._log(f"[métricas] IC bootstrap indisponível: {e}")
+            self.out_metrics.value = (self._metrics_table_html(m, ci=ci)
+                                      + ci_note
                                       + self._metrics_guide_html(list(m.columns)))
         # comparação das principais métricas por amostra (DES vs OOT lado a lado):
         # AUC/Gini/KS (classificação) ou RMSE/MAE/R² (regressão). O título vem do
@@ -3236,15 +3269,39 @@ class ModelSegmenterUI:
             w.value = ""
         self._refresh_bar()
 
-    def _metrics_table_html(self, m):
+    def _metrics_table_html(self, m, ci=None):
         """Tabela de métricas centralizada e com identificador visual: cada célula
-        ganha cor (verde/amarelo/vermelho) conforme o guia de bolso da métrica."""
+        ganha cor (verde/amarelo/vermelho) conforme o guia de bolso da métrica.
+
+        ``ci`` (opcional — DataFrame de :meth:`ModelSegmenter.metrics_ci`): anexa
+        o IC bootstrap discreto ao lado do valor — ``0.7412 [0.7101–0.7723]`` —
+        nas métricas/amostras cobertas; a cor da célula segue a estimativa
+        pontual (a coluna vira texto, então o nível é lido do frame numérico)."""
         metric_cols = [c for c in m.columns if c in self._METRIC_GUIDE]
         fmt = {c: "{:.4f}" for c in m.columns if c not in ("amostra", "n")}
+        disp = m
+        if ci is not None and len(ci):
+            disp = m.copy()
+            ci_map = {(r["amostra"], r["metrica"]): (r["ic_low"], r["ic_high"])
+                      for _, r in ci.iterrows()}
+            for col in [c for c in ci["metrica"].unique() if c in disp.columns]:
+                vals = []
+                for _, row in m.iterrows():
+                    v = row[col]
+                    lohi = ci_map.get((row["amostra"], col))
+                    if (lohi is None or not np.isfinite(v)
+                            or not all(np.isfinite(float(x)) for x in lohi)):
+                        vals.append(f"{v:.4f}")            # sem IC → só o valor
+                    else:
+                        vals.append(f"{v:.4f} <span style='font-size:10px;"
+                                    f"color:var(--sub-ink)'>[{lohi[0]:.4f}–"
+                                    f"{lohi[1]:.4f}]</span>")
+                disp[col] = vals
+                fmt.pop(col, None)                          # já formatada como texto
         # centraliza cabeçalho E células: as regras `th`/`td` precisam vir DEPOIS do
         # `th, td {text-align:right}` de _TABLE_STYLES e com a mesma especificidade,
         # senão o `#T td` (id+elemento) vence o estilo por célula e volta p/ direita.
-        sty = (m.style.hide(axis="index").set_table_styles(self._TABLE_STYLES)
+        sty = (disp.style.hide(axis="index").set_table_styles(self._TABLE_STYLES)
                .set_table_styles([{"selector": "th", "props": [("text-align", "center")]},
                                   {"selector": "td", "props": [("text-align", "center"),
                                                                ("font-size", "12px")]}],
@@ -3252,11 +3309,43 @@ class ModelSegmenterUI:
                .format(fmt))
 
         def _color(col):
-            return [self._LEVEL_CSS.get(self._metric_level(col.name, v), "") for v in col]
+            # lê o nível sempre do frame NUMÉRICO (com IC a coluna exibida é texto)
+            return [self._LEVEL_CSS.get(self._metric_level(col.name, v), "")
+                    for v in m[col.name]]
 
         if metric_cols:
             sty = sty.apply(_color, axis=0, subset=metric_cols)
         return sty.to_html()
+
+    def _metrics_ci_shift_html(self):
+        """Linha compacta sob a tabela: qualificação da queda DES→OOT de cada
+        métrica com IC (``metric_shifts(qualify=True)``) — <b>degradação real</b>
+        quando os ICs bootstrap são disjuntos na direção ruim da métrica,
+        <b>dentro do ruído</b> quando se sobrepõem. Vazio sem amostra OOT."""
+        try:
+            sh = self.seg.metric_shifts(qualify=True)
+        except Exception:
+            return ""
+        quals = {k[: -len("_significancia")]: v for k, v in sh.items()
+                 if isinstance(v, str) and k.endswith("_significancia")}
+        if not quals:
+            return ""
+        chips = []
+        for mname, q in quals.items():
+            g = self._METRIC_GUIDE.get(mname, {})
+            rotulo = g.get("nome", mname)
+            if q == "degradacao_real":
+                css, txt = ("background-color:var(--bad-bg);color:var(--bad-ink)",
+                            "degradação real")
+            else:
+                css, txt = ("background-color:var(--ok-bg);color:var(--ok-ink)",
+                            "dentro do ruído")
+            chips.append(f"<span style='{css};border-radius:8px;padding:1px 7px;"
+                         f"font-size:11px;font-weight:600'>{rotulo}: {txt}</span>")
+        return ("<div class='mseg-legend' style='margin-top:4px'>Queda DES→OOT × "
+                "ruído amostral (ICs bootstrap 95%): " + " ".join(chips)
+                + " — <i>degradação real</i> = IC do OOT inteiro do lado ruim do "
+                  "IC do DES; <i>dentro do ruído</i> = ICs sobrepostos.</div>")
 
     def _metrics_guide_html(self, cols):
         """Dicionário das métricas + guia de bolso (o que mede, recomendado, quando

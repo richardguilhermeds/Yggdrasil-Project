@@ -281,6 +281,25 @@ def test_toggle_monotonicidade():
     assert "monotonicidade" in ui.out_fit_status.value
 
 
+def test_metrics_ci_na_tabela_por_checkbox():
+    """Checkbox 'IC bootstrap' anexa o IC discreto ao lado do valor na tabela de
+    métricas e a linha de qualificação da queda DES→OOT (dentro do ruído ×
+    degradação real); desmarcar volta à tabela simples. Antes do treino o toggle
+    é inofensivo (nada a renderizar)."""
+    ui = _build()
+    ui.cb_metrics_ci.value = True          # antes do modelo: não pode estourar
+    assert ui.out_metrics.value == ""
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.seg.fit()
+        ui._render_metrics()               # com o checkbox ligado → tabela com IC
+    html = ui.out_metrics.value
+    assert "var(--sub-ink)'>[" in html                     # IC discreto ao lado do valor
+    assert "dentro do ruído" in html or "degradação real" in html
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.cb_metrics_ci.value = False     # observer re-renderiza sem IC
+    assert "var(--sub-ink)'>[" not in ui.out_metrics.value
+
+
 def test_toggle_monotonicidade_ignorado_sem_suporte():
     """Toggle marcado + algoritmo sem suporte: o fit via UI NÃO repassa a opção
     (nem aviso, nem restrição) — a linha fica oculta, mas o valor persiste."""

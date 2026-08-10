@@ -429,6 +429,58 @@ def test_metrics_exige_modelo(seg):
 
 
 # ----------------------------------------------------------------------
+# IC bootstrap das métricas (metrics_ci) + shifts qualificados
+# ----------------------------------------------------------------------
+def test_metrics_ci(seg):
+    seg.fit(_default_algo(seg.task_type))
+    ci = seg.metrics_ci(n_boot=60, seed=123)
+    assert {"metrica", "amostra", "n", "valor", "ic_low", "ic_high"}.issubset(ci.columns)
+    esperadas = ({"auc", "ks", "gini"} if seg.task_type == "classification"
+                 else {"r2", "rmse"})
+    assert set(ci["metrica"]) == esperadas
+    assert set(ci["amostra"]) == {"DES", "OOT"}
+    # o IC contém a estimativa pontual
+    fin = ci.dropna(subset=["valor", "ic_low", "ic_high"])
+    assert len(fin)
+    assert (fin["ic_low"] <= fin["valor"] + 1e-9).all()
+    assert (fin["valor"] <= fin["ic_high"] + 1e-9).all()
+    # reprodutível: mesma seed → mesmo resultado (e o cache devolve uma CÓPIA)
+    ci2 = seg.metrics_ci(n_boot=60, seed=123)
+    pd.testing.assert_frame_equal(ci, ci2)
+    assert ci is not ci2
+
+
+def test_metrics_ci_largura_diminui_com_n():
+    """A largura do IC bootstrap encolhe (~1/√n) com uma amostra maior."""
+    def _width(n):
+        df = _synthetic("classification", n=n, seed=3)
+        s = ModelSegmenter(df, target="target", task_type="classification",
+                           sample_col="amostra", ref_sample="DES", verbose=False)
+        s.fit("logistica")
+        r = s.metrics_ci(n_boot=80, metrics=("auc",), seed=7)
+        r = r[(r["metrica"] == "auc") & (r["amostra"] == "DES")].iloc[0]
+        return float(r["ic_high"] - r["ic_low"])
+
+    assert _width(4000) < _width(400)
+
+
+def test_metrics_ci_exige_modelo(seg):
+    with pytest.raises(RuntimeError):
+        seg.metrics_ci()
+
+
+def test_metric_shifts_qualificado(seg):
+    seg.fit(_default_algo(seg.task_type))
+    sh0 = seg.metric_shifts()                       # default: shape antigo intacto
+    assert all(not k.endswith("_significancia") for k in sh0)
+    sh = seg.metric_shifts(qualify=True, n_boot=40, seed=5)
+    quals = {k: v for k, v in sh.items() if k.endswith("_significancia")}
+    assert quals and set(quals.values()) <= {"dentro_do_ruido", "degradacao_real"}
+    # a parte numérica dos shifts não muda com a qualificação
+    assert {k: v for k, v in sh.items() if not k.endswith("_significancia")} == sh0
+
+
+# ----------------------------------------------------------------------
 # Score → Ratings
 # ----------------------------------------------------------------------
 @pytest.mark.parametrize("method", ["decis", "quantil", "arvore", "optbin"])
