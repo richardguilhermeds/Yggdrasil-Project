@@ -1837,6 +1837,52 @@ class TreeSegmenterUI:
             if status is not None and status.value == busy_html:
                 status.value = ""
 
+    def _delta_snapshot(self):
+        """Métricas compactas do estado ATUAL para a linha de Δ do console:
+        nº de folhas, métrica principal (KS na classificação · R² na regressão)
+        na amostra de comparação (1ª não-referência, ex.: OOT) e PSI máximo.
+
+        Deve ser capturada ANTES da mutação, no mesmo ponto do
+        :meth:`_checkpoint` — como ``metrics()``/``psi()`` são memoizados por
+        versão da árvore (``_agg_memo``), ler o "antes" aqui tem custo ~zero
+        (cache-hit da última renderização)."""
+        snap = {"folhas": sum(s["is_leaf"] for s in self.seg.segments.values()),
+                "metrica": None, "psi_max": None}
+        col = "KS" if self._is_clf else "R2"
+        rotulo = "KS" if self._is_clf else "R²"
+        try:
+            m = self.seg.metrics()
+            # amostra de comparação: 1ª não-referência (ex.: OOT); sem amostras → única
+            row = m.iloc[1] if len(m) > 1 else m.iloc[0]
+            if pd.notna(row.get(col)):
+                snap["metrica"] = (f"{rotulo} {row['amostra']}", float(row[col]))
+        except Exception:
+            pass                            # sem métrica → a linha sai só com folhas
+        try:
+            if self.sample_col is not None:
+                psi = self.seg.psi()["psi"]
+                if len(psi):
+                    snap["psi_max"] = float(psi.max())
+        except Exception:
+            pass
+        return snap
+
+    def _log_delta(self, acao, antes):
+        """Linha compacta no console com o Δ da ação estrutural vs o estado
+        anterior — ex.: ``dividir: folhas 8→10 · KS OOT 0.412→0.428 (+0.016) ·
+        PSI máx 0.06→0.07``. ``antes`` vem de :meth:`_delta_snapshot`."""
+        if not antes:
+            return
+        depois = self._delta_snapshot()
+        partes = [f"folhas {antes['folhas']}→{depois['folhas']}"]
+        m0, m1 = antes.get("metrica"), depois.get("metrica")
+        if m0 and m1 and m0[0] == m1[0]:    # mesma métrica/amostra nos dois estados
+            partes.append(f"{m1[0]} {m0[1]:.3f}→{m1[1]:.3f} ({m1[1] - m0[1]:+.3f})")
+        p0, p1 = antes.get("psi_max"), depois.get("psi_max")
+        if p0 is not None and p1 is not None:
+            partes.append(f"PSI máx {p0:.2f}→{p1:.2f}")
+        self._log(f"{acao}: " + " · ".join(partes))
+
     def _confirm_twice(self, btn, action, timeout=5.0):
         """Confirmação em DOIS cliques para ações destrutivas: o 1º clique arma o
         botão (vira "Confirmar?" em vermelho por ``timeout`` segundos), o 2º
@@ -2689,6 +2735,19 @@ class TreeSegmenterUI:
                                   "clique em <b>Curva ROC</b> ou <b>Curva KS</b> para renderizar.</div>")
         self.out_plot.value = ("<div style='font-size:12px;color:var(--sub-ink)'>Árvore alterada — "
                                "clique em <b>Ver / salvar árvore (imagem)</b> para renderizar.</div>")
+        # o placar de saúde, o SQL gerado e a validação também ficam obsoletos —
+        # mas essas saídas nascem vazias/ocultas: só recebem a tarja âmbar de
+        # desatualizado quando já havia resultado renderizado na tela.
+        stale = ("<div style='font-size:12px;color:var(--warn-tx);background:var(--warn-bg);"
+                 "border-radius:6px;padding:4px 8px;display:inline-block'>⚠️ Árvore alterada — "
+                 "resultado desatualizado. Clique em <b>{botao}</b> para recalcular.</div>")
+        if self.out_diag.value:
+            self.out_diag.value = stale.format(botao="Avaliar modelo (placar)")
+        if self.out_validate.value:
+            self.out_validate.value = stale.format(botao="Validar")
+        if self.out_sql.value.strip():
+            self.out_sql.value = ("-- Árvore alterada — SQL desatualizado. Clique em "
+                                  "'Gerar SQL (CASE WHEN)' para regenerar.")
         # preview interativo aberto: re-renderiza imagem + hit-map (a árvore mudou);
         # fechado, nada a fazer — o próximo "Ver árvore" já desenha o estado novo
         if self._tree_img_visible():
@@ -2820,6 +2879,7 @@ class TreeSegmenterUI:
         if parent is None:
             self._log("Esta folha é a raiz — não há pai para recolher."); return
         redo_bak = list(self._redo)
+        antes = self._delta_snapshot()
         self._checkpoint()
         try:
             self.seg.collapse(parent)
@@ -2831,6 +2891,7 @@ class TreeSegmenterUI:
         self._refresh()
         if parent in [s for s, seg in self.seg.segments.items() if seg["is_leaf"]]:
             self.dd_leaf.value = parent
+        self._log_delta("recolher", antes)
 
     def _on_merge(self, side):
         sid = self._selected_leaf()
@@ -2839,6 +2900,7 @@ class TreeSegmenterUI:
         parent = self.seg.segments[sid]["parent"]
         before = set(self.seg.segments)
         redo_bak = list(self._redo)
+        antes = self._delta_snapshot()
         self._checkpoint()
         try:
             self.seg.merge_leaf(sid, side=side)
@@ -2858,6 +2920,7 @@ class TreeSegmenterUI:
         alvo = (novos[0] if novos else (parent if parent in folhas else None))
         if alvo in folhas:
             self.dd_leaf.value = alvo
+        self._log_delta("unir folhas", antes)
 
     def _on_merge_missing(self, _):
         sid = self._selected_leaf()
@@ -2865,6 +2928,7 @@ class TreeSegmenterUI:
             self._log("Selecione a folha POPULADA de destino."); return
         before = set(self.seg.segments)
         redo_bak = list(self._redo)
+        antes = self._delta_snapshot()
         self._checkpoint()
         self.seg.merge_missing(sid)
         if set(self.seg.segments) == before:
@@ -2880,6 +2944,7 @@ class TreeSegmenterUI:
         folhas = [s for s, seg in self.seg.segments.items() if seg["is_leaf"]]
         if novos and novos[0] in folhas:
             self.dd_leaf.value = novos[0]
+        self._log_delta("juntar missings", antes)
 
     def _on_suggest(self, _):
         sid = self._selected_leaf()
@@ -3033,6 +3098,7 @@ class TreeSegmenterUI:
         with self._busy(self.btn_autofit, self.btn_img_autofit,
                         msg="rodando o auto-fit…"):
             redo_bak = list(self._redo)
+            antes = self._delta_snapshot()
             self._checkpoint()
             try:
                 self.seg.fit_auto(max_depth=depth, min_leaf_repr=cmin, max_bin_repr=cmax,
@@ -3056,6 +3122,7 @@ class TreeSegmenterUI:
             escopo = "nesta folha" if so_folha else "na árvore"
             self._log(f"Auto-fit concluído {escopo}: {n} folhas no total. "
                       "Refine à mão: funda, recolha ou divida onde quiser.")
+            self._log_delta("auto-fit", antes)
 
     def _on_mlflow(self, _):
         exp = self.tx_experiment.value.strip() or None
@@ -3779,6 +3846,7 @@ class TreeSegmenterUI:
                 if not ok:
                     self._log(msg); return
             redo_bak = list(self._redo)
+            antes = self._delta_snapshot()
             self._checkpoint()
             try:
                 self.seg.grow(**self._pending)
@@ -3787,6 +3855,7 @@ class TreeSegmenterUI:
                 self._revert_checkpoint(redo_bak)
                 self._log(f"Erro ao criar segmento: {type(e).__name__}: {e}"); return
             self._refresh()
+            self._log_delta("dividir", antes)
 
     def _on_lock(self, _):
         sid = self._selected_leaf()
@@ -3807,6 +3876,7 @@ class TreeSegmenterUI:
     def _on_prune(self, _):
         with self._busy(self.btn_prune, msg="podando a árvore…"):
             redo_bak = list(self._redo)
+            antes = self._delta_snapshot()
             self._checkpoint()
             try:
                 self.seg.prune(min_repr=self.sl_repr.value, min_valor_gap=self.sl_gap.value,
@@ -3816,16 +3886,19 @@ class TreeSegmenterUI:
                 self._log(f"Erro na poda: {type(e).__name__}: {e}"); return
             self.locked &= set(self.seg.segments)
             self._refresh()
+            self._log_delta("poda", antes)
 
     def _on_reset(self, _):
         with self._busy(self.btn_reset, self.btn_img_reset,
                         msg="reiniciando a árvore…"):
+            antes = self._delta_snapshot()
             self._checkpoint()
             self.seg = TreeSegmenter(self.df, **self._kwargs)
             self.locked.clear()
             self._pending = None
             self._log("Árvore reiniciada.")
             self._refresh()
+            self._log_delta("resetar", antes)
 
     def _on_export(self, _):
         # chamamos de "folha" na UI (não "nota"): renomeia as colunas de nota do assign
@@ -4670,24 +4743,26 @@ class TreeSegmenterUI:
     def _on_undo(self, _):
         if not self._undo:
             return
+        antes = self._delta_snapshot()      # métricas do estado atual (memoizadas)
         prev = self._undo.pop()
         self._redo.append(self._snapshot())
         self._restore(prev)
         self._pending = None
         self._sync_undo_buttons()
-        self._log("↶ desfeito.")
         self._refresh(select=prev.get("selected"))
+        self._log_delta("↶ desfeito", antes)
 
     def _on_redo(self, _):
         if not self._redo:
             return
+        antes = self._delta_snapshot()      # métricas do estado atual (memoizadas)
         nxt = self._redo.pop()
         self._undo.append(self._snapshot())
         self._restore(nxt)
         self._pending = None
         self._sync_undo_buttons()
-        self._log("↷ refeito.")
         self._refresh(select=nxt.get("selected"))
+        self._log_delta("↷ refeito", antes)
 
     # ==================================================================
     # Auto-merge: funde folhas-irmãs indistinguíveis automaticamente
@@ -4697,6 +4772,7 @@ class TreeSegmenterUI:
         import io
         with self._busy(self.btn_automerge, msg="rodando o auto-merge…"):
             n0 = sum(s["is_leaf"] for s in self.seg.segments.values())
+            antes = self._delta_snapshot()
             self._checkpoint()
             try:
                 buf = io.StringIO()
@@ -4717,6 +4793,7 @@ class TreeSegmenterUI:
             self.locked &= set(self.seg.segments)
             self._pending = None
             self._refresh()
+            self._log_delta("auto-merge", antes)
 
     def _on_pdf(self, _):
         path = (self.tx_pdf_path.value or "").strip()
@@ -4807,6 +4884,7 @@ class TreeSegmenterUI:
             if meta.get("target") and meta.get("target") != self.target:
                 self._log(f"⚠ aviso: árvore salva com target='{meta.get('target')}', "
                           f"mas esta UI usa '{self.target}'. Carregando mesmo assim.")
+            antes = self._delta_snapshot()
             self._checkpoint()
             self.seg._load_segments(data["segments"])
             self.locked = set(data.get("_ui", {}).get("locked", [])) & set(self.seg.segments)
@@ -4816,6 +4894,7 @@ class TreeSegmenterUI:
         except Exception as e:
             self._log(f"Erro ao carregar: {type(e).__name__}: {e}"); return
         self._refresh()
+        self._log_delta("carregar JSON", antes)
 
     # ==================================================================
     # Imagem da árvore (matplotlib)
@@ -5089,6 +5168,7 @@ class TreeSegmenterUI:
         if self.seg.segments[sid]["parent"] is None:
             self._log("A raiz não pode ser recolhida — use Resetar para zerar a árvore.")
             return
+        antes = self._delta_snapshot()
         self._checkpoint()
         self.seg.collapse(sid)
         self.locked &= set(self.seg.segments)
@@ -5097,6 +5177,7 @@ class TreeSegmenterUI:
         folhas = [s for s, seg in self.seg.segments.items() if seg["is_leaf"]]
         if sid in folhas:
             self.dd_leaf.value = sid           # o ramo recolhido virou a folha ativa
+        self._log_delta("recolher ramo", antes)
 
     def _on_split_panel_close(self, _):
         """Fecha o painel compacto de divisão do preview."""

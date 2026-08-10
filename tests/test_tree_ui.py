@@ -631,6 +631,64 @@ def test_ui_log_mantem_historico_e_apara_em_40(task):
     assert ui._log_lines == []
 
 
+def test_ui_log_delta_apos_acao_estrutural(task):
+    """Cada ação estrutural imprime no console a linha compacta de Δ vs o estado
+    anterior: nº de folhas, métrica principal na amostra de comparação (KS na
+    classificação · R² na regressão) e PSI máximo; desfazer loga o Δ inverso."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.dd_leaf.value = "root"
+        ui.dd_feature.value = "score"
+        ui.tg_mode.value = "Manual"
+        ui.tx_cuts.value = "0.8"
+        ui._on_preview(None); ui._on_split(None)
+    linha = next(l for l in reversed(ui._log_lines) if l.startswith("dividir:"))
+    assert "folhas 1→2" in linha
+    metr = "KS OOT" if task == "classification" else "R² OOT"
+    assert metr in linha and "→" in linha and "(" in linha    # a→b (±d)
+    assert "PSI máx" in linha
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_undo(None)                       # o desfazer também loga o Δ
+    linha = next(l for l in reversed(ui._log_lines) if "desfeito" in l)
+    assert "folhas 2→1" in linha
+
+
+def test_ui_refresh_invalida_diag_sql_validacao(task):
+    """Regressão (b): após uma mudança estrutural (ex.: merge), o placar de
+    saúde, o SQL gerado e as análises de validação NÃO mantêm o conteúdo antigo
+    — são substituídos pela tarja/mensagem de desatualizado."""
+    ui = _build(task, n=6000, seed=8)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        ui._on_diag(None)
+        ui._on_sql(None)
+    assert "Erro" not in ui.out_diag.value and "CASE" in ui.out_sql.value
+    diag0 = ui.out_diag.value
+    ui.out_validate.value = "<b>análises antigas</b>"   # simula validação renderizada
+    n0 = _nleaf(ui)
+    with contextlib.redirect_stdout(io.StringIO()):     # funde o 1º par de folhas-irmãs
+        for sid in [s for s, v in ui.seg.segments.items() if v["is_leaf"]]:
+            ui.dd_leaf.value = sid
+            ui._on_merge("right")
+            if _nleaf(ui) < n0:
+                break
+            ui._on_merge("left")
+            if _nleaf(ui) < n0:
+                break
+    assert _nleaf(ui) < n0                              # o merge de fato aconteceu
+    assert "desatualizado" in ui.out_diag.value and ui.out_diag.value != diag0
+    assert "var(--warn-bg)" in ui.out_diag.value        # tarja âmbar (token semântico)
+    assert "desatualizado" in ui.out_validate.value
+    assert ui.out_sql.value.startswith("--") and "desatualizado" in ui.out_sql.value
+    assert "THEN" not in ui.out_sql.value               # o corpo do SQL antigo sumiu
+    # saídas que nasceram vazias/ocultas seguem vazias (sem tarja espúria)
+    ui2 = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui2._on_autofit(None)
+    assert ui2.out_diag.value == "" and ui2.out_validate.value == ""
+    assert ui2.out_sql.value == ""
+
+
 def test_ui_reset_e_prune_pedem_confirmacao_no_botao(task):
     """Clicar 1× em Resetar/Podar (inclusive o clone do preview) NÃO muta a
     árvore: o botão só arma o 'Confirmar?'; o 2º clique executa de fato."""
