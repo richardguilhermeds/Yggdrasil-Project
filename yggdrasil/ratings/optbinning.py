@@ -59,3 +59,18 @@ class OptBinningRating(RatingStrategy):
         if self.splits_.size == 0:
             return np.zeros(len(scores), dtype=int)
         return np.searchsorted(self.splits_, np.asarray(scores, dtype=float), side="right")
+
+    def _params_dict(self) -> dict:
+        return {
+            "max_n_bins": self.max_n_bins,
+            "min_prebin_size": self.min_prebin_size,
+            "monotonic_trend": self.monotonic_trend,
+        }
+
+    def _state_dict(self) -> dict:
+        return {"splits": [float(s) for s in np.asarray(self.splits_, dtype=float)]}
+
+    def _load_state(self, state: dict) -> None:
+        # Só os cortes são necessários para o transform; o objeto optbinning
+        # (ob_) não é reconstruído — reaplicação não depende da lib opcional.
+        self.splits_ = np.asarray(state.get("splits", []), dtype=float)

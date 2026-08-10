@@ -37,6 +37,9 @@ class ManualScoreRating(RatingStrategy):
         idx = np.searchsorted(self.edges_, scores, side="right") - 1
         return np.clip(idx, 0, len(self.edges_) - 2)
 
+    def _params_dict(self) -> dict:
+        return {"cuts": [float(c) for c in self.cuts]}
+
 
 class PercentileRating(RatingStrategy):
     """Rating por **percentis** do score na amostra de desenvolvimento.
@@ -59,3 +62,6 @@ class PercentileRating(RatingStrategy):
     def _raw_groups(self, scores: np.ndarray) -> np.ndarray:
         idx = np.searchsorted(self.edges_, scores, side="right") - 1
         return np.clip(idx, 0, len(self.edges_) - 2)
+
+    def _params_dict(self) -> dict:
+        return {"percentiles": [float(p) for p in self.percentiles]}

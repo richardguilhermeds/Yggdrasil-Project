@@ -147,6 +147,7 @@ class MLPipeline:
                 X_train=X_dev,
                 registered_model_name=registered_model_name,
                 log_shap=log_shap,
+                strategies=self.strategies,
             )
 
         return PipelineResult(

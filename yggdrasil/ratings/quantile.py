@@ -28,3 +28,6 @@ class QuantileMonotonicRating(RatingStrategy):
     def _raw_groups(self, scores: np.ndarray) -> np.ndarray:
         idx = np.searchsorted(self.edges_, scores, side="right") - 1
         return np.clip(idx, 0, len(self.edges_) - 2)
+
+    def _params_dict(self) -> dict:
+        return {"step": self.step, "alpha": self.alpha}

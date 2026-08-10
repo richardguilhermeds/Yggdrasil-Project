@@ -24,6 +24,25 @@ from ..utils import idx_para_letra
 from .monotonic import fundir_por_inversao
 
 
+def _num_to_json(v: float):
+    """Float JSON-estrito: ±inf/NaN viram strings (``"inf"``, ``"-inf"``, ``"nan"``).
+
+    ``json.dumps`` padrão emite ``Infinity`` (JSON inválido para parsers
+    estritos); codificar as bordas abertas dos ``edges_`` como string mantém o
+    ``ratings.json`` legível por qualquer parser."""
+    v = float(v)
+    if np.isfinite(v):
+        return v
+    if np.isnan(v):
+        return "nan"
+    return "inf" if v > 0 else "-inf"
+
+
+def _num_from_json(v) -> float:
+    """Inverso de :func:`_num_to_json` (``float`` aceita ``"inf"``/``"-inf"``/``"nan"``)."""
+    return float(v)
+
+
 def quantile_edges(scores_dev: np.ndarray, q: np.ndarray) -> np.ndarray:
     """Cortes de quantil do score com bordas abertas ``[-inf, ..., inf]``.
 
@@ -119,3 +138,67 @@ class RatingStrategy(ABC):
         self, df: pd.DataFrame, cfg: ColumnConfig, problem_type: str = "regression"
     ) -> pd.Series:
         return self.fit(df, cfg, problem_type).transform(df, cfg)
+
+    # -- serialização (to_dict / from_dict) ---------------------------------
+    def _params_dict(self) -> Dict:
+        """Parâmetros de construção da estratégia (kwargs de ``__init__``)."""
+        return {}
+
+    def _state_dict(self) -> Dict:
+        """Estado ajustado específico da estratégia (JSON-serializável).
+
+        Por padrão serializa ``edges_`` (cortes com bordas ``±inf``), o que
+        cobre as estratégias baseadas em ``searchsorted`` sobre cortes.
+        Estratégias com estado próprio (árvore, optbinning) sobrescrevem este
+        método e :meth:`_load_state`.
+        """
+        edges = getattr(self, "edges_", None)
+        if edges is None:
+            return {}
+        return {"edges": [_num_to_json(v) for v in np.asarray(edges, dtype=float)]}
+
+    def _load_state(self, state: Dict) -> None:
+        """Restaura o estado gravado por :meth:`_state_dict`."""
+        if "edges" in state:
+            self.edges_ = np.array(
+                [_num_from_json(v) for v in state["edges"]], dtype=float
+            )
+
+    def to_dict(self) -> Dict:
+        """Serializa a estratégia **ajustada** em um dicionário JSON-estrito.
+
+        Contém o nome da classe (para *dispatch* em
+        :func:`yggdrasil.ratings.rating_from_dict`), os parâmetros de
+        construção, o estado do binner (cortes/limiares), o mapeamento
+        ``raw_to_label_`` e os rótulos finais — tudo o que é necessário para
+        reaplicar os grupos **sem refit** via :meth:`transform`.
+        """
+        if not self._fitted:
+            raise RuntimeError("Estratégia de rating não foi ajustada (chame fit).")
+        return {
+            "classe": type(self).__name__,
+            "name": self.name,
+            "params": self._params_dict(),
+            "estado": self._state_dict(),
+            "raw_to_label": {str(int(k)): v for k, v in self.raw_to_label_.items()},
+            "labels": list(self.labels_),
+            "problem_type": self._problem_type,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "RatingStrategy":
+        """Reconstrói uma estratégia já ajustada a partir de :meth:`to_dict`.
+
+        Não refaz o ``fit``: restaura cortes e mapeamentos e marca a instância
+        como ajustada, pronta para :meth:`transform`.
+        """
+        obj = cls(**(data.get("params") or {}))
+        obj._load_state(data.get("estado") or {})
+        obj.raw_to_label_ = {
+            int(k): str(v) for k, v in (data.get("raw_to_label") or {}).items()
+        }
+        labels = data.get("labels")
+        obj.labels_ = list(labels) if labels else sorted(set(obj.raw_to_label_.values()))
+        obj._problem_type = data.get("problem_type", "regression")
+        obj._fitted = True
+        return obj

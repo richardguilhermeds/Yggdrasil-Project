@@ -18,6 +18,7 @@ import pandas as pd
 
 from ..config import ColumnConfig
 from ..interpretability import shap_report
+from ..ratings import RatingStrategy, ratings_to_dict
 from ..metrics import (calibration_in_the_large, calibration_slope_intercept,
                        lift_table)
 from ..monitoring import (metric_over_time, plot_metric_over_time,
@@ -85,12 +86,17 @@ def log_pipeline_run(
     log_shap: bool = True,
     artifacts_dir: Optional[str] = None,
     perf_min_n: int = 200,
+    strategies: Optional[Sequence[RatingStrategy]] = None,
 ) -> str:
     """Loga um run completo da esteira e retorna o ``run_id``.
 
     ``perf_min_n`` é o tamanho mínimo de período para as métricas de
     performance ao longo do tempo (:func:`~yggdrasil.monitoring.metric_over_time`);
-    períodos menores saem com métricas NaN e nota."""
+    períodos menores saem com métricas NaN e nota.
+
+    ``strategies`` são as estratégias de rating **ajustadas** da esteira; quando
+    informadas, sua serialização vai para o artefato ``ratings.json`` (raiz do
+    run), reaplicável sem refit via :func:`yggdrasil.ratings.apply_ratings`."""
     import mlflow
     from mlflow.models.signature import infer_signature
 
@@ -145,6 +151,10 @@ def log_pipeline_run(
         with open(html_path, "w", encoding="utf-8") as fh:
             fh.write(html)
         mlflow.log_artifacts(tmp, artifact_path="reports")
+
+        # ── artefato: ratings serializados (reaplicação sem refit) ──────
+        if strategies:
+            mlflow.log_dict(ratings_to_dict(list(strategies)), "ratings.json")
 
         # ── artefatos: PSI ao longo do tempo (por rating + score) ───────
         psi_dir = os.path.join(tmp, "psi")

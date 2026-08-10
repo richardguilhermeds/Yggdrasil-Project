@@ -40,6 +40,10 @@ class TreeRating(RatingStrategy):
         self.random_state = random_state
         self.tree_: DecisionTreeRegressor | None = None
         self.leaf_to_rank_: Dict[int, int] = {}
+        # Particionamento 1-D equivalente à árvore: limiares ordenados e o rank
+        # de cada intervalo entre eles (base do transform e da serialização).
+        self.thresholds_: np.ndarray = np.array([])
+        self.interval_rank_: np.ndarray = np.array([0], dtype=int)
 
     def _fit_binner(self, scores_dev: np.ndarray, target_dev: np.ndarray) -> None:
         from sklearn.tree import DecisionTreeRegressor
@@ -68,6 +72,54 @@ class TreeRating(RatingStrategy):
         )
         self.leaf_to_rank_ = {int(folha): rank for rank, folha in enumerate(folha_media.index)}
 
+        # Converte a árvore 1-D em intervalos: percurso em-ordem da estrutura —
+        # cada nó interno (limiar t; x <= t vai à esquerda) separa faixas
+        # (t_k, t_{k+1}], então os limiares em-ordem saem crescentes e as folhas
+        # em-ordem são os intervalos entre eles. Além de vetorizar _raw_groups
+        # (searchsorted em vez de tree.apply + loop), permite serializar a
+        # estratégia sem persistir o objeto sklearn.
+        tt = tree.tree_
+        limiares: list = []
+        ranks: list = []
+
+        def _walk(no: int) -> None:
+            if tt.children_left[no] < 0:               # folha
+                ranks.append(self.leaf_to_rank_.get(int(no), 0))
+                return
+            _walk(int(tt.children_left[no]))
+            limiares.append(float(tt.threshold[no]))
+            _walk(int(tt.children_right[no]))
+
+        _walk(0)
+        self.thresholds_ = np.asarray(limiares, dtype=float)
+        self.interval_rank_ = np.asarray(ranks, dtype=int)
+
     def _raw_groups(self, scores: np.ndarray) -> np.ndarray:
-        leaves = self.tree_.apply(np.asarray(scores, dtype=float).reshape(-1, 1))
-        return np.array([self.leaf_to_rank_.get(int(l), 0) for l in leaves])
+        # Reproduz tree.apply: o sklearn compara em float32 (cast interno do X),
+        # então aplicamos o mesmo cast antes do searchsorted. Convenção da
+        # árvore (x <= limiar vai à esquerda) => side="left": empate no limiar
+        # cai no intervalo anterior.
+        s32 = np.asarray(scores, dtype=np.float32)
+        idx = np.searchsorted(self.thresholds_, s32, side="left")
+        return self.interval_rank_[idx]
+
+    def _params_dict(self) -> dict:
+        return {
+            "max_leaf_nodes": self.max_leaf_nodes,
+            "min_samples_leaf_frac": self.min_samples_leaf_frac,
+            "min_samples_leaf_abs": self.min_samples_leaf_abs,
+            "alpha": self.alpha,
+            "random_state": self.random_state,
+        }
+
+    def _state_dict(self) -> dict:
+        return {
+            "thresholds": [float(t) for t in self.thresholds_],
+            "interval_rank": [int(r) for r in self.interval_rank_],
+        }
+
+    def _load_state(self, state: dict) -> None:
+        # Restaura só o particionamento (limiares + rank por intervalo); o
+        # objeto sklearn (tree_) não é necessário para o transform.
+        self.thresholds_ = np.asarray(state.get("thresholds", []), dtype=float)
+        self.interval_rank_ = np.asarray(state.get("interval_rank", [0]), dtype=int)
