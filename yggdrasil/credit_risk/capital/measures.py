@@ -66,6 +66,28 @@ def _check_alpha(alpha: float) -> float:
     return alpha
 
 
+def _weighted_quantile(values: ArrayLike, weights: ArrayLike, q: float) -> float:
+    """Quantil ``q`` de valores com pesos (inversa da CDF, tipo "lower").
+
+    Base comum do quantil ponderado: distribuições discretas analíticas
+    (CreditRisk+) e amostras de Monte Carlo com pesos de verossimilhança
+    (*importance sampling*). Os pesos são normalizados internamente — não
+    precisam somar 1.
+    """
+    v = np.asarray(values, dtype=float).ravel()
+    w = np.asarray(weights, dtype=float).ravel()
+    order = np.argsort(v)
+    v = v[order]
+    cdf = np.cumsum(w[order])
+    total = cdf[-1]
+    if not (total > 0):
+        raise ValueError("A soma dos pesos deve ser positiva.")
+    # Menor valor cuja CDF acumulada atinge q (quantil tipo "lower").
+    idx = int(np.searchsorted(cdf / total, q, side="left"))
+    idx = min(idx, len(v) - 1)
+    return float(v[idx])
+
+
 # ======================================================================
 # Funções de medida sobre uma amostra empírica de perdas
 # ======================================================================
@@ -187,14 +209,7 @@ class LossDistribution:
     # ------------------------------------------------------------------
     def _weighted_quantile(self, q: float) -> float:
         """Quantil ``q`` de uma distribuição discreta ponderada (inversa da CDF)."""
-        order = np.argsort(self.losses)
-        v = self.losses[order]
-        w = self.weights[order]
-        cdf = np.cumsum(w)
-        # Menor valor cuja CDF acumulada atinge q (quantil tipo "lower").
-        idx = int(np.searchsorted(cdf, q, side="left"))
-        idx = min(idx, len(v) - 1)
-        return float(v[idx])
+        return _weighted_quantile(self.losses, self.weights, q)
 
     @property
     def el(self) -> float:

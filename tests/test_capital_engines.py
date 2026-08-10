@@ -295,6 +295,80 @@ def test_mc_copula_params_validated():
 
 
 # ----------------------------------------------------------------------
+# Monte Carlo: importance sampling (Glasserman–Li) na cauda
+# ----------------------------------------------------------------------
+def test_mc_is_default_off_identical():
+    """Regressão: sem IS (default) nada muda — mesmos sorteios, sem pesos."""
+    port = toy_portfolio()
+    base = port.simulate(20_000, q=0.999, seed=11)
+    off = port.simulate(20_000, q=0.999, seed=11,
+                        importance_sampling=False, tilt="auto")
+    np.testing.assert_array_equal(base.losses, off.losses)
+    assert base.weights is None and off.weights is None
+    assert off.distribution().weights is None
+    assert base.var() == off.var()
+
+
+def test_mc_is_weights_and_unbiased_el():
+    port = toy_portfolio()
+    sim = port.simulate(50_000, q=0.999, seed=21, importance_sampling=True)
+    # pesos por cenário: positivos, um por cenário, propagados à distribuição
+    assert sim.weights is not None and sim.weights.shape == sim.losses.shape
+    assert np.all(sim.weights > 0)
+    assert sim.distribution().weights is not None
+    # estimador ponderado é não-viesado: EL empírica ponderada ≈ EL analítica
+    # (tolerância mais folgada: o tilt otimiza a cauda, não a média)
+    assert float(np.average(sim.losses, weights=sim.weights)) == pytest.approx(
+        port.expected_loss(), rel=0.08)
+    # tilt manual (float) também é não-viesado
+    sim2 = port.simulate(50_000, q=0.999, seed=21, importance_sampling=True, tilt=2.0)
+    assert float(np.average(sim2.losses, weights=sim2.weights)) == pytest.approx(
+        port.expected_loss(), rel=0.05)
+
+
+def test_mc_is_var_converges_with_lower_variance():
+    """VaR 99,9% com IS converge ao valor sem-IS e com menos ruído entre réplicas."""
+    port = toy_portfolio()
+    q = 0.999
+    ref = port.simulate(400_000, q=q, seed=999).var()   # referência (n grande)
+    plain, tilted = [], []
+    for s in range(6):
+        plain.append(port.simulate(15_000, q=q, seed=300 + s).var())
+        tilted.append(port.simulate(15_000, q=q, seed=300 + s,
+                                    importance_sampling=True).var())
+    assert np.mean(tilted) == pytest.approx(ref, rel=0.05)
+    assert np.std(tilted) < np.std(plain)
+
+
+def test_mc_is_euler_identity_weighted():
+    """Aditividade de Euler no caso ponderado: as contribuições somam a métrica."""
+    port = toy_portfolio()
+    sim = port.simulate(60_000, q=0.999, seed=13, importance_sampling=True)
+    # ES: Σ contribuições = ES ponderado da carteira (identidade exata)
+    alloc = sim.allocate(metric="es")
+    assert alloc["contribuicao_risco"].sum() == pytest.approx(sim.es(), rel=1e-6)
+    # Σ capital_alocado = ES − EL empírica ponderada
+    el_emp = float(np.average(sim.losses, weights=sim.weights))
+    assert alloc["capital_alocado"].sum() == pytest.approx(sim.es() - el_emp, rel=1e-6)
+    # métrica VaR: Σ contribuições ≈ VaR ponderado. A janela precisa ser
+    # estreita em relação a 1−q (alpha ≪ 1−q) para a média condicional ficar
+    # colada no quantil — com IS há cenários de sobra nessa vizinhança.
+    alloc_v = sim.allocate(metric="var", alpha=0.001)
+    assert alloc_v["contribuicao_risco"].sum() == pytest.approx(sim.var(), rel=0.05)
+    # benefício de diversificação ponderado continua bem definido e positivo
+    div = sim.diversification_benefit()
+    assert div["beneficio_diversificacao"] > 0
+
+
+def test_mc_is_tilt_validated():
+    port = toy_portfolio()
+    with pytest.raises(ValueError):
+        port.simulate(1_000, seed=0, importance_sampling=True, tilt="errado")
+    with pytest.raises(ValueError):
+        port.simulate(1_000, seed=0, importance_sampling=True, tilt=-1.0)
+
+
+# ----------------------------------------------------------------------
 # Visualizações (matplotlib Agg)
 # ----------------------------------------------------------------------
 def test_report_plots_return_figures():

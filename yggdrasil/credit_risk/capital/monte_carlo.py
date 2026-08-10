@@ -23,9 +23,14 @@ intensidade —, que o Pilar 1 ignora por construção.
 Extensões opcionais de :func:`simulate`: ``copula="t"`` adiciona **dependência
 de cauda** entre os latentes (mistura qui-quadrado — choque de variância comum
 por cenário) e ``lgd_dist="beta"`` troca a LGD normal-clipada por uma **Beta
-com *moment matching***, de suporte natural em ``[0, 1]``. Os defaults
-(``copula="gaussian"``, ``lgd_dist="normal"``) preservam o comportamento
-histórico exato.
+com *moment matching***, de suporte natural em ``[0, 1]``. Já
+``importance_sampling=True`` liga a **amostragem por importância**
+(Glasserman–Li) na cauda: os fatores são sorteados com a média deslocada na
+direção adversa e cada cenário carrega um peso de verossimilhança, propagado
+às medidas de risco e à alocação — mesmo VaR/ES esperados, variância bem
+menor no quantil de cauda. Os defaults (``copula="gaussian"``,
+``lgd_dist="normal"``, ``importance_sampling=False``) preservam o
+comportamento histórico exato.
 
 Validação de sanidade (guia, bloco E): com **um único fator** e carteira
 **granular** (``granular=True``), a simulação reproduz o ASRF analítico.
@@ -37,13 +42,13 @@ independente); aqui a implementação é vetorizada em NumPy, adequada ao nível
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Optional, Union
 
 import numpy as np
 import pandas as pd
 from scipy.stats import beta as beta_dist, norm, t as student_t
 
-from .measures import DEFAULT_CONFIDENCE, LossDistribution
+from .measures import DEFAULT_CONFIDENCE, LossDistribution, _weighted_quantile
 
 if TYPE_CHECKING:
     from .portfolio import Portfolio
@@ -78,6 +83,79 @@ def _safe_cholesky(corr: np.ndarray) -> np.ndarray:
 
 
 # ======================================================================
+# Importance sampling (Glasserman–Li): tilt exponencial do fator sistêmico
+# ======================================================================
+def _tilt_direction(
+    L: np.ndarray,
+    fac_of: np.ndarray,
+    c_gauss: np.ndarray,
+    sqrt_rho: np.ndarray,
+    sqrt_1mrho: np.ndarray,
+    lgds: np.ndarray,
+    eads: np.ndarray,
+    n_factors: int,
+) -> Optional[np.ndarray]:
+    """Direção adversa **unitária** no espaço dos choques independentes ``z``.
+
+    É o gradiente da perda esperada condicional aos fatores (aproximação
+    gaussiana granular, avaliado em ``Y = 0``), mapeado de volta para o espaço
+    dos choques via ``Y = z @ L.T``. Como a perda cresce quando os fatores
+    caem, a direção aponta para fatores negativos. Retorna ``None`` quando não
+    há componente sistêmica (todos os ``rho`` nulos) — o tilt seria inócuo.
+    """
+    # sensibilidade da perda condicional de cada segmento ao seu fator, em Y=0
+    sens = eads * lgds * norm.pdf(c_gauss / sqrt_1mrho) * sqrt_rho / sqrt_1mrho
+    grad_y = np.zeros(n_factors)
+    np.add.at(grad_y, fac_of, sens)                 # agrega por fator
+    d_z = -(L.T @ grad_y)                           # perda cresce quando Y cai
+    nrm = float(np.linalg.norm(d_z))
+    if not np.isfinite(nrm) or nrm <= 0.0:
+        return None
+    return d_z / nrm
+
+
+def _calibrate_tilt(
+    target: float,
+    d_hat: np.ndarray,
+    L: np.ndarray,
+    fac_of: np.ndarray,
+    c_gauss: np.ndarray,
+    sqrt_rho: np.ndarray,
+    sqrt_1mrho: np.ndarray,
+    lgds: np.ndarray,
+    eads: np.ndarray,
+    s_max: float = 12.0,
+) -> float:
+    """Magnitude ``μ`` do tilt mirando o quantil-alvo (heurística documentada).
+
+    Resolve por bisseção o ``μ`` tal que a perda média do cenário **tiltado**
+    — a perda esperada condicional avaliada na média deslocada dos fatores
+    (``Y = μ·d̂ @ Lᵀ``, aproximação gaussiana granular) — iguale ``target``
+    (o VaR de um piloto pequeno sem IS). Assim a massa da simulação se
+    concentra em torno do quantil de interesse. A perda é monótona em ``μ``
+    ao longo da direção adversa; quando o alvo não é atingível o resultado é
+    truncado em ``s_max``.
+    """
+    def loss_at(s: float) -> float:
+        y = ((s * d_hat) @ L.T)[fac_of]
+        p = norm.cdf((c_gauss - sqrt_rho * y) / sqrt_1mrho)
+        return float(np.sum(p * lgds * eads))
+
+    lo, hi = 0.0, 1.0
+    while loss_at(hi) < target and hi < s_max:      # expande até envolver o alvo
+        hi = min(2.0 * hi, s_max)
+    if loss_at(hi) < target:
+        return float(hi)
+    for _ in range(60):                             # bisseção (precisão ~1e-16·s_max)
+        mid = 0.5 * (lo + hi)
+        if loss_at(mid) < target:
+            lo = mid
+        else:
+            hi = mid
+    return float(0.5 * (lo + hi))
+
+
+# ======================================================================
 # Resultado da simulação
 # ======================================================================
 @dataclass
@@ -86,6 +164,11 @@ class SimulationResult:
 
     ``segment_losses`` (``n_scenarios × n_segments``) é o insumo da **alocação de
     Euler** (contribuição condicional à cauda) — ver :mod:`.allocation`.
+
+    ``weights`` carrega os pesos de verossimilhança por cenário quando a
+    simulação rodou com *importance sampling* (``None`` = amostra
+    equiponderada). Os pesos são propagados para a distribuição de perdas,
+    para a alocação de Euler e para o benefício de diversificação.
     """
 
     losses: np.ndarray                    # (n_scenarios,) perda total por cenário
@@ -96,14 +179,20 @@ class SimulationResult:
     n_scenarios: int
     seed: Optional[int] = None
     metric: str = "var"
+    weights: Optional[np.ndarray] = None  # pesos de importância por cenário ou None
     _dist: Optional[LossDistribution] = field(default=None, repr=False)
 
     # ------------------------------------------------------------------
     def distribution(self) -> LossDistribution:
-        """A distribuição de perdas (usa a EL analítica exata como ``el``)."""
+        """A distribuição de perdas (usa a EL analítica exata como ``el``).
+
+        Com *importance sampling*, os pesos de verossimilhança seguem junto —
+        VaR/ES saem do quantil **ponderado**.
+        """
         if self._dist is None:
             self._dist = LossDistribution(
-                self.losses, expected=self.expected_loss, name="monte_carlo")
+                self.losses, weights=self.weights,
+                expected=self.expected_loss, name="monte_carlo")
         return self._dist
 
     def _q(self, q: Optional[float]) -> float:
@@ -139,7 +228,12 @@ class SimulationResult:
         standalone = 0.0
         for j in range(self.segment_losses.shape[1]):
             col = self.segment_losses[:, j]
-            standalone += float(np.quantile(col, qq) - col.mean())
+            if self.weights is None:
+                standalone += float(np.quantile(col, qq) - col.mean())
+            else:
+                # amostra ponderada (importance sampling): quantil e média ponderados
+                standalone += float(_weighted_quantile(col, self.weights, qq)
+                                    - np.average(col, weights=self.weights))
         integrated = self.economic_capital(qq, metric="var")
         return {
             "capital_isolado": standalone,
@@ -183,6 +277,8 @@ def simulate(
     t_dof: float = 8.0,
     lgd_dist: str = "normal",
     antithetic: bool = False,
+    importance_sampling: bool = False,
+    tilt: Union[str, float] = "auto",
     store_segment_losses: bool = True,
     block_size: int = 50_000,
 ) -> SimulationResult:
@@ -244,6 +340,31 @@ def simulate(
     antithetic:
         Variáveis **antitéticas** (redução de variância): metade dos sorteios do
         fator usa ``+z`` e a outra metade ``−z``.
+    importance_sampling:
+        Liga a **amostragem por importância** (Glasserman–Li) no fator
+        sistêmico: a média dos choques gaussianos independentes dos fatores é
+        deslocada na direção adversa (*exponential tilting*, ``z ~ N(μ, I)``)
+        e cada cenário ``i`` carrega o peso de verossimilhança
+        ``w_i = exp(−μ·z_i + ‖μ‖²/2)`` (produto nas dimensões dos fatores),
+        que o :class:`SimulationResult` propaga para a distribuição de
+        perdas, para a alocação de Euler e para o benefício de
+        diversificação. O estimador ponderado permanece **não-viesado**; a
+        variância do quantil de cauda cai porque a região do quantil passa a
+        ser visitada com frequência muito maior. ``False`` (padrão) preserva
+        o comportamento histórico exato — mesmos sorteios, mesmos resultados.
+    tilt:
+        Magnitude ``μ`` do deslocamento ao longo da direção adversa unitária
+        (só usado com ``importance_sampling=True``). ``"auto"`` (padrão)
+        calibra ``μ`` com uma heurística simples: roda um **piloto pequeno**
+        sem IS (até 10 mil cenários, semente derivada de ``seed``), toma o
+        VaR\\ :sub:`q` piloto como alvo e resolve por bisseção o ``μ`` tal que
+        a perda média do cenário tiltado (aproximação gaussiana granular)
+        iguale esse alvo — ver :func:`_calibrate_tilt`. Um ``float >= 0`` usa
+        a magnitude dada diretamente. A direção adversa é o gradiente da
+        perda esperada condicional nos fatores, mapeado para o espaço dos
+        choques independentes (:func:`_tilt_direction`); com ``rho = 0`` em
+        todos os segmentos não há componente sistêmica e o tilt é nulo
+        (pesos 1).
     store_segment_losses:
         Armazena a matriz perda-por-segmento (necessária para alocação de Euler
         e benefício de diversificação). Desligue para poupar memória.
@@ -273,6 +394,14 @@ def simulate(
     lgd_dist = str(lgd_dist).lower()
     if lgd_dist not in ("normal", "beta"):
         raise ValueError(f"lgd_dist deve ser 'normal' ou 'beta'; recebido {lgd_dist!r}.")
+    if importance_sampling:
+        if isinstance(tilt, str):
+            if tilt.lower() != "auto":
+                raise ValueError(f"tilt deve ser 'auto' ou um float >= 0; recebido {tilt!r}.")
+        else:
+            tilt = float(tilt)
+            if not np.isfinite(tilt) or tilt < 0.0:
+                raise ValueError(f"tilt deve ser 'auto' ou um float >= 0; recebido {tilt!r}.")
 
     rng = np.random.default_rng(seed)
 
@@ -310,6 +439,35 @@ def simulate(
         beta_a = np.clip(mu * conc, 1e-12, None)
         beta_b = np.clip((1.0 - mu) * conc, 1e-12, None)
 
+    # ---- importance sampling: direção adversa + magnitude do tilt ---------
+    # Todo o sorteio extra (piloto) usa um gerador próprio: com o IS desligado
+    # o fluxo do RNG principal fica intocado (regressão bit a bit garantida).
+    mu_z: Optional[np.ndarray] = None
+    weights_arr: Optional[np.ndarray] = None
+    mu_half_sq = 0.0
+    if importance_sampling:
+        c_gauss = norm.ppf(pd_clip)                 # direção na aprox. gaussiana
+        d_hat = _tilt_direction(L, fac_of, c_gauss, sqrt_rho, sqrt_1mrho,
+                                lgds, eads, F)
+        if d_hat is None:
+            mu_z = np.zeros(F)                      # sem sistêmico: pesos ficam 1
+        elif isinstance(tilt, str):                 # 'auto': mira o VaR de um piloto
+            n_pilot = int(min(10_000, n_scenarios))
+            pilot_seed = None if seed is None else int(seed) + 202_406
+            pilot = simulate(
+                portfolio, n_scenarios=n_pilot, q=q, seed=pilot_seed,
+                granular=granular, stochastic_lgd=stochastic_lgd,
+                pd_lgd_corr=pd_lgd_corr, rho_default=rho_default,
+                copula=copula, t_dof=t_dof, lgd_dist=lgd_dist,
+                antithetic=antithetic, store_segment_losses=False,
+                block_size=block_size)
+            mu_z = _calibrate_tilt(pilot.var(q), d_hat, L, fac_of, c_gauss,
+                                   sqrt_rho, sqrt_1mrho, lgds, eads) * d_hat
+        else:
+            mu_z = float(tilt) * d_hat
+        mu_half_sq = 0.5 * float(mu_z @ mu_z)
+        weights_arr = np.empty(n_scenarios, dtype=float)
+
     total_losses = np.empty(n_scenarios, dtype=float)
     seg_losses = (np.empty((n_scenarios, n_seg), dtype=float)
                   if store_segment_losses else None)
@@ -324,6 +482,12 @@ def simulate(
             z = np.vstack([z0, -z0])[:m]
         else:
             z = rng.standard_normal((m, F))
+        if mu_z is not None:
+            # tilt exponencial: z ~ N(0, I) → N(μ, I); o peso é a razão de
+            # verossimilhança w = φ(z)/φ_μ(z) = exp(−μ·z + ‖μ‖²/2), produto
+            # nas F dimensões dos choques independentes.
+            z = z + mu_z[None, :]
+            weights_arr[start:start + m] = np.exp(mu_half_sq - z @ mu_z)
         Y = z @ L.T                                     # cov(Y) = factor_corr
         Y_seg = Y[:, fac_of]                            # (m, n_seg) fator de cada segmento
 
@@ -397,6 +561,7 @@ def simulate(
         expected_loss=el,
         n_scenarios=int(n_scenarios),
         seed=seed,
+        weights=weights_arr,
     )
 
 

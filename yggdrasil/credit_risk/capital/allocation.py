@@ -26,6 +26,8 @@ from typing import TYPE_CHECKING, Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 
+from .measures import _weighted_quantile
+
 if TYPE_CHECKING:
     from .monte_carlo import SimulationResult
 
@@ -45,7 +47,11 @@ def euler_allocation(
     ----------
     result:
         Resultado de :func:`~yggdrasil.credit_risk.capital.monte_carlo.simulate`
-        com ``store_segment_losses=True``.
+        com ``store_segment_losses=True``. Se a simulação rodou com
+        *importance sampling* (``result.weights`` preenchido), toda a conta é
+        **ponderada** pelos pesos de verossimilhança: quantis ponderados e
+        contribuições como médias ponderadas condicionais à janela do
+        quantil — a aditividade de Euler continua valendo.
     q:
         Nível de confiança. Se ``None``, usa ``result.q``.
     metric:
@@ -78,34 +84,54 @@ def euler_allocation(
     losses = result.losses
     seg = result.segment_losses                       # (n_scenarios, n_seg)
     n = len(losses)
-    var = float(np.quantile(losses, qq))
+    # Pesos de importância (importance sampling); None = amostra equiponderada.
+    w = getattr(result, "weights", None)
+    if w is not None:
+        w = np.asarray(w, dtype=float).ravel()
+
+    def _quantile(arr: np.ndarray, p) -> np.ndarray:
+        """Quantil da amostra: empírico (interpolado) ou ponderado pela w."""
+        if w is None:
+            return np.quantile(arr, p)
+        if np.ndim(p) == 0:
+            return _weighted_quantile(arr, w, float(p))
+        return np.array([_weighted_quantile(arr, w, float(pi)) for pi in p])
+
+    def _tail_mean(mask: np.ndarray) -> np.ndarray:
+        """Média (ponderada) das perdas por segmento nos cenários da janela."""
+        if w is None:
+            return seg[mask, :].mean(axis=0)
+        return np.average(seg[mask, :], axis=0, weights=w[mask])
+
+    var = float(_quantile(losses, qq))
 
     if metric == "es":
         mask = losses >= var
         if not np.any(mask):                          # degenerado
-            mask = losses >= np.quantile(losses, qq - 1e-6)
-        contrib = seg[mask, :].mean(axis=0)           # E[L_i | L >= VaR]
+            mask = losses >= _quantile(losses, qq - 1e-6)
+        contrib = _tail_mean(mask)                    # E[L_i | L >= VaR]
     elif metric == "var":
         # Faixa de cenários em torno do quantil (janela de ~alpha·n cenários).
         lo = max(qq - alpha / 2.0, 0.0)
         hi = min(qq + alpha / 2.0, 1.0)
-        v_lo, v_hi = np.quantile(losses, [lo, hi])
+        v_lo, v_hi = _quantile(losses, [lo, hi])
         mask = (losses >= v_lo) & (losses <= v_hi)
         if not np.any(mask):                          # janela vazia → vizinhança do VaR
             k = max(int(alpha * n), 1)
             idx = np.argsort(np.abs(losses - var))[:k]
             mask = np.zeros(n, dtype=bool)
             mask[idx] = True
-        contrib = seg[mask, :].mean(axis=0)
+        contrib = _tail_mean(mask)
     else:
         raise ValueError(f"metric deve ser 'es' ou 'var'; recebido {metric!r}.")
 
-    el_seg = seg.mean(axis=0)                          # EL empírica por segmento
+    # EL empírica por segmento (ponderada quando há importance sampling).
+    el_seg = seg.mean(axis=0) if w is None else np.average(seg, axis=0, weights=w)
     capital_aloc = contrib - el_seg                    # capital econômico alocado
 
     # Capital isolado (standalone): CE do segmento como se estivesse sozinho.
     standalone = np.array([
-        np.quantile(seg[:, j], qq) - el_seg[j] for j in range(seg.shape[1])
+        float(_quantile(seg[:, j], qq)) - el_seg[j] for j in range(seg.shape[1])
     ])
 
     total_cap = float(capital_aloc.sum())
