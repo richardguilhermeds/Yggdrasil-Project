@@ -1,5 +1,5 @@
 """Métricas de avaliação de modelos (classificação e regressão), calibração,
-lift/CAP e shifts."""
+lift/CAP, shifts e incerteza (IC bootstrap)."""
 
 from .calibration import (
     binomial_ci,
@@ -19,7 +19,9 @@ from .shift import (
     metric_by_sample,
     metric_shifts,
     sample_shifts,
+    shift_significance,
 )
+from .uncertainty import bootstrap_metric_ci
 
 __all__ = [
     "classification_metrics",
@@ -35,6 +37,8 @@ __all__ = [
     "metric_by_sample",
     "metric_shifts",
     "sample_shifts",
+    "shift_significance",
+    "bootstrap_metric_ci",
     "binomial_ci",
     "calibration_in_the_large",
     "calibration_slope_intercept",
