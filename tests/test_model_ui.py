@@ -671,3 +671,117 @@ def test_card_sql_da_regua_de_ratings():
         assert f"THEN '{lab}'" in sql
     ui._mark_dirty()                       # modelo alterado ⇒ SQL desatualizado
     assert "desatualizado" in ui.out_sql.value
+
+
+# ----------------------------------------------------------------------
+# Aba Variáveis · card "Esteira de seleção"
+# ----------------------------------------------------------------------
+def test_card_esteira_selecao_roda_e_desfaz():
+    """O card monta com as etapas pré-marcadas conforme STEPS_DEFAULT (rótulo em
+    pt-BR + descrição no tooltip); 'Rodar seleção' executa a esteira, aplica a
+    decisão no modelo, preenche progresso/funil/decisões (com as cores semânticas
+    de tema) e é DESFAZÍVEL pelo ↶."""
+    from yggdrasil.credit_risk.model.selection import SELECTION_STEPS, STEPS_DEFAULT
+
+    ui = _build()
+    marcadas = [n for n, cb in ui._sel_step_cbs.items() if cb.value]
+    assert marcadas == list(STEPS_DEFAULT)
+    assert set(ui._sel_step_cbs) == set(SELECTION_STEPS)
+    for nome, cb in ui._sel_step_cbs.items():
+        assert cb.description == SELECTION_STEPS[nome].rotulo
+        assert cb.tooltip == SELECTION_STEPS[nome].descricao
+
+    antes = set(ui.seg.included)
+    n_undo = len(ui._undo)
+    ui.fl_sel_min_iv.value = 0.90            # régua impossível → exclui tudo
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_selection_run(None)
+
+    assert ui.seg.selection_ is not None
+    assert set(ui.seg.included) != antes
+    assert len(ui._undo) == n_undo + 1                     # passou pelo _checkpoint
+    assert "Seleção aplicada" in ui.out_sel_status.value
+    assert "Progresso da esteira" in ui.out_sel_progress.value
+    assert any(r["status"] == "ok" for r in ui._sel_progress)
+    corpo = ui.out_sel_result.value
+    assert "Funil por etapa" in corpo and "Decisão por variável" in corpo
+    assert "<img" in corpo                                 # gráficos do relatório
+    assert "var(--bad-bg)" in corpo                        # decisão pintada por token
+    # nenhuma cor hex fixa no HTML do card (só tokens semânticos de tema) — os
+    # '#T_xxxx' do Styler são seletores de id, não cores
+    import re
+    assert re.search(r"#[0-9a-fA-F]{3,8}\b", corpo.split("base64,")[0]) is None
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_undo(None)
+    assert set(ui.seg.included) == antes
+
+
+def test_esteira_selecao_modo_simular_nao_muda_nada():
+    """'apenas simular' roda a esteira e mostra o resultado sem tocar no
+    segmentador (seleção intacta e nada empilhado no desfazer)."""
+    ui = _build()
+    antes = set(ui.seg.included)
+    cats = {f: (ui.seg.var_meta[f] or {}).get("categoria") for f in ui.seg.candidates}
+    n_undo = len(ui._undo)
+    ui.cb_sel_simular.value = True
+    ui.fl_sel_min_iv.value = 0.90
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_selection_run(None)
+
+    assert set(ui.seg.included) == antes
+    assert {f: (ui.seg.var_meta[f] or {}).get("categoria")
+            for f in ui.seg.candidates} == cats
+    assert len(ui._undo) == n_undo                          # simulação não é ponto de retorno
+    assert "Simulação" in ui.out_sel_status.value
+    assert ui.seg.selection_.politica["aplicado"] is False
+    assert "Decisão por variável" in ui.out_sel_result.value
+
+
+def test_esteira_selecao_sem_etapa_marcada():
+    """Nenhuma etapa marcada: aviso no card e nada é executado."""
+    ui = _build()
+    for cb in ui._sel_step_cbs.values():
+        cb.value = False
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_selection_run(None)
+    assert "ao menos" in ui.out_sel_status.value
+    assert ui.seg.selection_ is None
+
+
+def _ui_com_selecao(steps=("missing", "iv")):
+    """UI com uma esteira curta já rodada em modo simulação (teste rápido)."""
+    ui = _build()
+    ui.cb_sel_simular.value = True
+    for nome, cb in ui._sel_step_cbs.items():
+        cb.value = nome in steps
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_selection_run(None)
+    return ui
+
+
+def test_esteira_selecao_exporta_relatorio_html(tmp_path):
+    """Botão 'Relatório (.html)': grava a página autocontida (completando o
+    sufixo do caminho) e confirma no card."""
+    ui = _ui_com_selecao()
+    destino = tmp_path / "selecao"                     # sem sufixo: a UI completa
+    ui.tx_sel_html.value = str(destino)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_selection_report(None)
+    html = destino.with_suffix(".html")
+    assert html.exists() and "Relatório salvo" in ui.out_sel_export.value
+    assert html.read_text(encoding="utf-8").startswith("<!doctype html>")
+
+
+def test_esteira_selecao_exporta_excel(tmp_path):
+    """Botão 'Exportar Excel': grava o .xlsx multi-abas (openpyxl é OPCIONAL —
+    sem ele o teste é pulado e a UI mostra o ImportError amigável)."""
+    pytest.importorskip("openpyxl")
+    ui = _ui_com_selecao()
+    xlsx = tmp_path / "selecao.xlsx"
+    ui.tx_sel_xlsx.value = str(xlsx)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_selection_xlsx(None)
+    assert xlsx.exists() and "Excel salvo" in ui.out_sel_export.value
+    abas = pd.read_excel(xlsx, sheet_name=None)
+    assert set(abas) == {"Decisoes", "Funil", "Politica"}

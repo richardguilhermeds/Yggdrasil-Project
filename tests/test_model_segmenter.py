@@ -2447,3 +2447,124 @@ def test_to_sql_opcoes_e_guarda(seg):
                                                seg.to_sql())]
     assert cortes_cru and np.allclose(np.array(cortes_neg),
                                       np.array(cortes_cru) * seg.score_scale)
+
+
+# ----------------------------------------------------------------------
+# Esteira de seleção pelo segmentador (select_features / selection_report)
+# ----------------------------------------------------------------------
+def _seg_selecao(task: str = "classification", n: int = 900):
+    df = _synthetic(task, n=n, seed=11, com_cat=True, com_na=True)
+    return ModelSegmenter(df, target="target", task_type=task, sample_col="amostra",
+                          ref_sample="DES", date_col="dt_ref", verbose=False)
+
+
+def test_select_features_equivale_ao_run_selection():
+    """``seg.select_features`` é a mesma esteira de ``run_selection`` — só que sem
+    importar submódulo nem passar o segmentador na mão — e guarda o resultado em
+    ``seg.selection_`` para o relatório/UI reaproveitarem."""
+    from yggdrasil.credit_risk.model import run_selection
+
+    seg = _seg_selecao()
+    assert seg.selection_ is None and seg.selection_policy_ is None
+    steps = ["missing", "constante", "categoricas", "iv", "psi"]
+    direto = run_selection(seg, steps=steps, apply=False, min_iv=0.03)
+    pelo_seg = seg.select_features(steps=steps, apply=False, min_iv=0.03)
+
+    pd.testing.assert_frame_equal(pelo_seg.tabela, direto.tabela)
+    pd.testing.assert_frame_equal(pelo_seg.funil, direto.funil)
+    assert pelo_seg.selecionadas == direto.selecionadas
+    assert pelo_seg.politica["etapas"] == steps
+    assert pelo_seg.politica["parametros"]["min_iv"] == 0.03
+    # o último resultado fica pendurado no segmentador
+    assert seg.selection_ is pelo_seg
+    assert seg.selection_policy_["etapas"] == steps
+
+
+def test_select_features_aplica_e_simula():
+    """``apply=True`` grava a decisão (seleção + categoria + motivo);
+    ``apply=False`` não toca no segmentador."""
+    seg = _seg_selecao()
+    antes = set(seg.included)
+    sim = seg.select_features(apply=False, min_iv=0.90)     # régua impossível
+    assert set(seg.included) == antes                       # simulação não muta
+    assert sim.politica["aplicado"] is False
+    assert len(sim.excluidas) > 0
+
+    res = seg.select_features(apply=True, min_iv=0.90)
+    assert res.politica["aplicado"] is True
+    assert set(seg.included) != antes
+    for f in res.excluidas:
+        assert f not in seg.included
+        assert seg.var_meta[f]["categoria"] == "descartar"
+        assert seg.var_meta[f]["motivo"]
+
+
+def test_selection_report_com_e_sem_path(tmp_path):
+    """Sem ``path`` devolve o HTML; com ``path`` grava o arquivo autocontido."""
+    seg = _seg_selecao()
+    seg.select_features(steps=["missing", "constante", "iv"], apply=False)
+    html = seg.selection_report()
+    assert isinstance(html, str) and html.startswith("<!doctype html>")
+    assert "Relatório de seleção de variáveis" in html
+    assert "data:image/png;base64," in html          # figuras embutidas
+
+    destino = tmp_path / "selecao.html"
+    devolvido = seg.selection_report(str(destino))
+    assert devolvido == str(destino) and destino.exists()
+    assert destino.read_text(encoding="utf-8").startswith("<!doctype html>")
+
+
+def test_selection_sem_selecao_previa_da_erro_claro(tmp_path):
+    """Relatório/plots/Excel sem esteira rodada: erro dizendo o que fazer."""
+    seg = _seg_selecao()
+    for chamada in (lambda: seg.selection_report(),
+                    lambda: seg.selection_xlsx(str(tmp_path / "x.xlsx")),
+                    lambda: seg.plot_selection_funil(),
+                    lambda: seg.plot_selection_iv(),
+                    lambda: seg.plot_selection_iv_psi(),
+                    lambda: seg.plot_selection_motivos()):
+        with pytest.raises(RuntimeError, match="select_features"):
+            chamada()
+
+
+def test_plots_da_selecao_pelo_segmentador(tmp_path):
+    """Os quatro gráficos são alcançáveis pelo segmentador, com a mesma convenção
+    ``figsize/dpi/save_path`` dos demais ``plot_*`` (e aceitam ``result=``)."""
+    seg = _seg_selecao()
+    res = seg.select_features(apply=False)
+    png = tmp_path / "funil.png"
+    fig = seg.plot_selection_funil(figsize=(6.0, 3.4), dpi=90, save_path=str(png))
+    assert png.exists() and fig.get_size_inches()[0] == 6.0
+    assert seg.plot_selection_iv(top=5) is not None
+    assert seg.plot_selection_iv_psi(annotate_top=2) is not None
+    assert seg.plot_selection_motivos(result=res, top=3) is not None
+
+
+def test_selection_xlsx_pelo_segmentador(tmp_path):
+    pytest.importorskip("openpyxl")
+    seg = _seg_selecao()
+    seg.select_features(steps=["missing", "iv"], apply=False)
+    destino = tmp_path / "selecao.xlsx"
+    assert seg.selection_xlsx(str(destino)) == str(destino)
+    abas = pd.read_excel(destino, sheet_name=None)
+    assert set(abas) == {"Decisoes", "Funil", "Politica"}
+
+
+def test_politica_da_selecao_roundtrip_no_to_dict(tmp_path):
+    """A política da última esteira persiste em ``to_dict``/``save`` (chave
+    ausente em JSONs antigos ⇒ ``None``, sem quebrar o load)."""
+    seg = _seg_selecao()
+    seg.select_features(steps=["missing", "iv"], apply=True, min_iv=0.04)
+    d = seg.to_dict()
+    assert d["selection_policy"]["etapas"] == ["missing", "iv"]
+    assert d["selection_policy"]["parametros"]["min_iv"] == 0.04
+    import json
+    json.dumps(d)                                   # a política é 100% JSON
+
+    seg2 = ModelSegmenter.from_dict(d, seg.df, verbose=False)
+    assert seg2.selection_policy_ == d["selection_policy"]
+    assert seg2.selection_ is None                  # a trilha completa é da sessão
+    # JSON antigo (sem a chave) continua carregando
+    antigo = {k: v for k, v in d.items() if k != "selection_policy"}
+    seg3 = ModelSegmenter.from_dict(antigo, seg.df, verbose=False)
+    assert seg3.selection_policy_ is None

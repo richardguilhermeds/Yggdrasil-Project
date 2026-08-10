@@ -737,6 +737,12 @@ class ModelSegmenter:
                                        if c not in self._nonfeature_cols()])
         self.included: set = set(self.candidates)      # começa com todas; usuário poda
         self.var_meta: dict[str, dict] = {c: {"categoria": None} for c in self.candidates}
+        # última esteira de seleção (ver :meth:`select_features`): o resultado
+        # completo vive só nesta sessão (memória) e a POLÍTICA — etapas +
+        # parâmetros efetivos, tudo JSON — persiste em to_dict/save, para que a
+        # seleção possa ser reproduzida a partir de um modelo salvo.
+        self.selection_ = None
+        self.selection_policy_: dict | None = None
 
         # estado de modelo / score / rating
         self.model = None
@@ -2190,6 +2196,188 @@ class ModelSegmenter:
         rk["categoria"] = cats
         rk["motivo"] = motivos
         return rk
+
+    # ==================================================================
+    # ESTEIRA DE SELEÇÃO DE VARIÁVEIS
+    #   Porta de entrada única: escolha as etapas, rode e leve o relatório.
+    #   A lógica vive em `selection` (esteira) e `selection_report`
+    #   (apresentação) — importados LAZY, dentro dos métodos.
+    # ==================================================================
+    def select_features(self, steps=None, apply=True, progress_callback=None,
+                        **params):
+        """Roda a **esteira de seleção de variáveis** e devolve a trilha de auditoria.
+
+        É a porta de entrada da seleção: você escolhe **quais** etapas quer, em
+        **qual ordem**, e recebe — para cada candidata — a decisão
+        (``selecionada``/``revisar``/``excluida``), **onde** ela saiu e **por
+        quê**, em texto apresentável. O resultado fica guardado em
+        :attr:`selection_` (e a política em :attr:`selection_policy_`), de onde o
+        relatório, os gráficos e a interface o reaproveitam sem re-rodar.
+
+        Etapas disponíveis (``steps``), na ordem canônica:
+
+        * ``missing`` — exclui quem tem faltantes acima de ``max_missing``;
+        * ``constante`` — exclui valor único, variância ~nula ou categoria
+          dominante demais;
+        * ``categoricas`` — cardinalidade, agrupamento de categorias raras e
+          faltantes como categoria;
+        * ``iv`` — poder discriminante: IV mínimo; IV altíssimo vira *revisar*
+          (suspeita de vazamento);
+        * ``psi`` — estabilidade entre amostras pelo pior PSI da variável;
+        * ``monotonia`` — tendência da ordem de risco entre as faixas (só numéricas);
+        * ``correlacao`` — redundância entre pares: sai a de menor IV;
+        * ``vif`` — multicolinearidade pelo VIF do desenho do modelo vigente
+          (exige modelo ajustado);
+        * ``backward`` — *backward elimination* por importância, aplicando o passo
+          escolhido (treina dezenas de modelos).
+
+        ``steps=None`` usa a sequência default
+        ``("missing", "constante", "categoricas", "iv", "psi", "monotonia",
+        "correlacao")`` — filtros baratos primeiro, o tratamento das categóricas
+        antes do IV (o agrupamento das raras muda a binagem e, portanto, o IV) e a
+        redundância no fim. ``vif`` e ``backward`` ficam de fora do default por
+        custo/pré-requisito.
+
+        Parâmetros mais usados (todos opcionais; a lista completa e os defaults
+        estão em :data:`~yggdrasil.credit_risk.model.selection.PARAMS_DEFAULT`):
+
+        * ``min_iv`` — IV mínimo (``None`` → 0,02 na classificação · 0,01 na regressão);
+        * ``max_psi`` — pior PSI tolerado entre amostras (0,25);
+        * ``max_corr`` — associação máxima entre um par de variáveis (0,85);
+        * ``max_missing`` — fração de faltantes tolerada (0,60);
+        * ``max_categorias`` — cardinalidade máxima de uma categórica (30);
+        * ``min_freq_categoria`` — abaixo disso a categoria é "rara" (0,01).
+
+        Parameters
+        ----------
+        steps:
+            Etapas a executar, na ordem desejada. Nome desconhecido/repetido
+            levanta ``ValueError`` listando os válidos.
+        apply:
+            ``True`` (default) grava a decisão no segmentador (``include``/
+            ``exclude``, ``set_category`` e o ``motivo`` do ``var_meta``).
+            ``False`` **simula**: o estado volta exatamente como estava.
+        progress_callback:
+            ``cb(key, label, status, detail)`` — mesmo contrato de progresso das
+            demais rotinas longas (``status`` ∈ ``"run"``/``"ok"``/``"err"``).
+        **params:
+            Réguas da esteira (ver acima).
+
+        Returns
+        -------
+        SelectionResult
+            Com ``tabela`` (uma linha por candidata), ``funil`` (por etapa),
+            ``politica`` (parâmetros efetivos, em JSON) e ``historico``.
+
+        Examples
+        --------
+        Chamada mínima — a sequência default, já aplicada no segmentador::
+
+            res = seg.select_features()
+            res.resumo()
+            seg.selection_report("selecao.html")
+
+        Escolhendo as etapas e apertando as réguas::
+
+            res = seg.select_features(steps=["missing", "categoricas", "iv", "psi",
+                                             "correlacao"],
+                                      min_iv=0.05, max_psi=0.10, max_corr=0.80)
+            res.tabela[["variavel", "decisao", "etapa_saida", "motivo"]]
+
+        Simulando antes de aplicar (nada muda no segmentador)::
+
+            simulado = seg.select_features(apply=False, min_iv=0.10)
+            simulado.funil
+        """
+        from .selection import run_selection
+
+        res = run_selection(self, steps=steps, apply=apply,
+                            progress_callback=progress_callback, **params)
+        self.selection_ = res
+        self.selection_policy_ = dict(res.politica)
+        return res
+
+    def _selection_result(self, result=None):
+        """Resultado de seleção a usar: o informado ou o último de
+        :meth:`select_features` — com erro claro quando não há nenhum."""
+        res = self.selection_ if result is None else result
+        if res is None:
+            raise RuntimeError(
+                "Nenhuma seleção disponível: rode seg.select_features(...) antes "
+                "(ou passe result=... com um SelectionResult já obtido).")
+        return res
+
+    def selection_report(self, path=None, result=None, **kw):
+        """Relatório da última seleção como página HTML **autocontida**.
+
+        Sem ``path`` devolve o HTML (``str``) — pronto para ``display(HTML(...))``
+        no notebook; com ``path`` grava o arquivo e devolve o caminho. Usa
+        ``result`` ou, na falta dele, a última :meth:`select_features`.
+
+        ``**kw`` segue
+        :func:`~yggdrasil.credit_risk.model.selection_report.build_selection_report_html`
+        (``title``, ``subtitle``, ``top_iv``, ``annotate_top``, ``dpi``,
+        ``incluir_graficos``); o próprio segmentador entra como contexto do
+        cabeçalho."""
+        from .selection_report import build_selection_report_html
+
+        res = self._selection_result(result)
+        kw.setdefault("seg", self)
+        html_doc = build_selection_report_html(res, **kw)
+        if path is None:
+            return html_doc
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(html_doc)
+        return str(path)
+
+    def selection_xlsx(self, path, result=None):
+        """Exporta a última seleção para um Excel multi-abas (``Decisoes``,
+        ``Funil``, ``Politica``) e devolve o caminho.
+
+        Requer o pacote **opcional** ``openpyxl`` — sem ele, sobe um
+        :class:`ImportError` com a instrução de instalação (a biblioteca não ganha
+        dependência nova por causa do relatório)."""
+        from .selection_report import export_selection_xlsx
+
+        return export_selection_xlsx(self._selection_result(result), path)
+
+    def plot_selection_funil(self, result=None, figsize=None, dpi=150,
+                             save_path=None, ax=None):
+        """**Funil da seleção**: quantas variáveis seguiram depois de cada etapa —
+        o gráfico-síntese da apresentação. Usa ``result`` ou a última
+        :meth:`select_features`."""
+        from .selection_report import plot_funil
+
+        return plot_funil(self._selection_result(result), figsize=figsize, dpi=dpi,
+                          save_path=save_path, ax=ax)
+
+    def plot_selection_motivos(self, result=None, top=10, por="causa", figsize=None,
+                               dpi=150, save_path=None, ax=None):
+        """**Por que perdemos variáveis**: quantas cada causa de exclusão levou
+        embora (a leitura executiva do funil). ``por`` ∈ ``"causa"``/``"etapa"``/
+        ``"motivo"``."""
+        from .selection_report import plot_motivos
+
+        return plot_motivos(self._selection_result(result), top=top, por=por,
+                            figsize=figsize, dpi=dpi, save_path=save_path, ax=ax)
+
+    def plot_selection_iv(self, result=None, top=20, figsize=None, dpi=150,
+                          save_path=None, ax=None):
+        """**Ranking de IV** das candidatas, colorido pela decisão, com o corte de
+        IV efetivamente usado marcado no eixo."""
+        from .selection_report import plot_iv_ranking
+
+        return plot_iv_ranking(self._selection_result(result), top=top,
+                               figsize=figsize, dpi=dpi, save_path=save_path, ax=ax)
+
+    def plot_selection_iv_psi(self, result=None, annotate_top=8, figsize=(7.8, 5.6),
+                              dpi=150, save_path=None, ax=None):
+        """**Poder × estabilidade** (IV × pior PSI) em quadrantes formados pelos
+        cortes da política — a matriz de decisão da seleção."""
+        from .selection_report import plot_iv_psi
+
+        return plot_iv_psi(self._selection_result(result), annotate_top=annotate_top,
+                           figsize=figsize, dpi=dpi, save_path=save_path, ax=ax)
 
     # ---- multicolinearidade (redundância entre variáveis selecionadas) ----
     @staticmethod
@@ -7859,6 +8047,10 @@ class ModelSegmenter:
             # camada de calibração pós-treino (calibrate): parâmetros 100% JSON —
             # o load a reaplica no fluxo de score sem depender do joblib
             "calibration": self.calibration_,
+            # política da última esteira de seleção (select_features): etapas +
+            # parâmetros efetivos, para reproduzir a seleção. JSONs antigos não
+            # têm a chave ⇒ None no from_dict.
+            "selection_policy": self.selection_policy_,
         }
 
     def save(self, path: str):
@@ -7900,6 +8092,9 @@ class ModelSegmenter:
         # camada de calibração: setada ANTES do load recomputar o score_, para o
         # score carregado já sair calibrado (JSONs antigos: sem a chave ⇒ None)
         seg.calibration_ = data.get("calibration")
+        # política da última seleção (JSONs antigos: sem a chave ⇒ None). Só a
+        # política volta — a trilha completa (selection_) é da sessão que rodou.
+        seg.selection_policy_ = data.get("selection_policy")
         seg._rebuild_derived()      # recria colunas categóricas derivadas no df
         return seg
 

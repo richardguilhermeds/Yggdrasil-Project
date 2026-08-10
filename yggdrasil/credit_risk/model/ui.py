@@ -8,7 +8,10 @@ a modelo:
 
 * **Variáveis** — analisa cada variável (logodds/WoE, IV, inversão) e decide
   o que entra no modelo (incluir/categorizar; auto-seleção por IV/PSI/monotonia;
-  análise de multicolinearidade com sugestão de poda e VIF);
+  análise de multicolinearidade com sugestão de poda e VIF); o card **Esteira de
+  seleção** roda de uma vez as etapas escolhidas (faltantes, constantes,
+  categóricas, IV, PSI, monotonia, correlação, VIF, backward), mostra o funil e a
+  decisão de cada variável e exporta o relatório (.html) e o Excel;
 * **Análise de variáveis** — mergulho por variável: logodds por faixa,
   distribuição, inversão entre amostras/safras, série temporal e PSI por safra;
 * **Modelo** — escolhe o algoritmo (Logística/Linear, RandomForest, ExtraTrees,
@@ -49,6 +52,7 @@ except Exception as e:  # pragma: no cover
 
 from .segmenter import (ADVANCED_HYPERPARAMS, ALGORITHMS, BOOSTING_ALGORITHMS,
                         MONOTONE_ALGORITHMS, OPTUNA_SEARCH_SPACE, ModelSegmenter)
+from .selection import _PISO_IV, PARAMS_DEFAULT, SELECTION_STEPS, STEPS_DEFAULT
 
 #: Ordem e rótulo de exibição dos hiperparâmetros na gaveta de "Ajuste do tuning
 #: (Optuna)" — a união dos parâmetros de :data:`OPTUNA_SEARCH_SPACE`.
@@ -499,10 +503,16 @@ class ModelSegmenterUI:
             return "bom" if m <= a else "atencao" if m <= b else "ruim"
         return None
 
+    #: cores da decisão da esteira de seleção (coluna "Decisão" de
+    #: ``selection_report.tabela_decisoes``) — mesmos tokens da categorização
+    _DECISAO_COLORS = {"selecionada": ("var(--ok-ink)", "var(--ok-bg)"),
+                       "a revisar": ("var(--warn-ink)", "var(--warn-bg)"),
+                       "excluída": ("var(--bad-ink)", "var(--bad-bg)")}
+
     def _df_html(self, df, max_height=None, color_categoria=False, center=False,
                  color_forca=False, color_tendencia=False, color_estabilidade=False,
                  color_validation=False, pct_cols=None, highlight_included=False,
-                 color_veredicto=False):
+                 color_veredicto=False, color_decisao=False):
         sty = (df.style.hide(axis="index").set_table_styles(self._TABLE_STYLES)
                .set_properties(**{"font-size": "12px"}))
         if highlight_included and "incluida" in df.columns:
@@ -549,6 +559,11 @@ class ModelSegmenterUI:
                 fg, bg = self._ESTABILIDADE_COLORS.get(v, ("", ""))
                 return (f"color:{fg};background-color:{bg};font-weight:600" if fg else "")
             sty = sty.map(_estab_css, subset=["estabilidade"])
+        if color_decisao and "Decisão" in df.columns:
+            def _dec_css(v):
+                fg, bg = self._DECISAO_COLORS.get(str(v).strip().lower(), ("", ""))
+                return (f"color:{fg};background-color:{bg};font-weight:600" if fg else "")
+            sty = sty.map(_dec_css, subset=["Decisão"])
         if color_veredicto and "veredicto" in df.columns:
             # semáforo do champion × challenger: melhorou→verde · piorou→vermelho ·
             # empate (dentro do ruído)→neutro — sempre tokens de tema
@@ -993,6 +1008,8 @@ class ModelSegmenterUI:
         ])
         redund_card.add_class("mseg-card")
         self._redund_card = redund_card
+        # --- Esteira de seleção: escolher as etapas, rodar e levar o relatório ---
+        sel_card = self._build_selection_card()
         # --- Feature 1: definir a seleção de variáveis (escolha ótima × manual) ---
         self.btn_feat_optimal = W.Button(
             description="Escolha ótima (backward)", button_style="primary", icon="star",
@@ -1057,6 +1074,7 @@ class ModelSegmenterUI:
                            layout=W.Layout(width="54%")),
                     W.VBox([redund_card], layout=W.Layout(width="45%"))],
                    layout=W.Layout(justify_content="space-between", width="99%")),
+            sel_card,
             # incluir/excluir UMA variável por vez — a escolhida em 'Variável:'
             W.HBox([self.dd_var, self.btn_include, self.btn_exclude]),
             W.VBox([self.sel_included,
@@ -2394,6 +2412,324 @@ class ModelSegmenterUI:
                         layout=W.Layout(justify_content="space-between"))
         self.panel = W.VBox([W.HTML(_CSS), topbar, self.banner, self.bar, self.tabs, console])
         self.panel.add_class("mseg")
+
+    # ==================================================================
+    # Card "Esteira de seleção" (aba Variáveis)
+    #   Escolha as etapas → rode → veja o funil/decisões → leve o relatório.
+    #   Espelha :meth:`ModelSegmenter.select_features` (mesmas etapas, mesmos
+    #   parâmetros e mesmos defaults) — a interface não tem régua própria.
+    # ==================================================================
+    def _build_selection_card(self):
+        """Monta o card da esteira de seleção de variáveis e devolve o ``VBox``."""
+        # uma caixa por etapa registrada, na ORDEM canônica de execução, com o
+        # rótulo em pt-BR e a descrição da etapa no tooltip
+        self._sel_step_cbs: dict = {}
+        caixas = []
+        for nome, step in SELECTION_STEPS.items():
+            cb = W.Checkbox(value=nome in STEPS_DEFAULT, description=step.rotulo,
+                            indent=False, layout=W.Layout(width="auto",
+                                                          margin="0 10px 0 0"))
+            cb.tooltip = step.descricao
+            self._sel_step_cbs[nome] = cb
+            caixas.append(cb)
+        self.box_sel_steps = W.GridBox(
+            caixas, layout=W.Layout(width="99%", grid_gap="0 6px",
+                                    grid_template_columns="repeat(4, minmax(120px, 1fr))"))
+        # parâmetros — defaults de PARAMS_DEFAULT (min_iv=None ⇒ piso da tarefa)
+        _min_iv = PARAMS_DEFAULT["min_iv"]
+        if _min_iv is None:
+            _min_iv = _PISO_IV.get(self.task_type, 0.02)
+        _est = {"description_width": "initial"}
+        _lay = W.Layout(width="168px")
+        self.fl_sel_min_iv = W.BoundedFloatText(value=float(_min_iv), min=0.0, max=1.0,
+                                                step=0.01, description="IV mín.:",
+                                                style=_est, layout=_lay)
+        self.fl_sel_min_iv.tooltip = ("IV mínimo para a variável seguir na etapa 'IV' "
+                                      "(abaixo disso, sem poder discriminante).")
+        self.fl_sel_max_psi = W.BoundedFloatText(value=float(PARAMS_DEFAULT["max_psi"]),
+                                                 min=0.0, max=2.0, step=0.05,
+                                                 description="PSI máx.:",
+                                                 style=_est, layout=_lay)
+        self.fl_sel_max_psi.tooltip = ("Pior PSI tolerado entre as amostras na etapa "
+                                       "'PSI' (acima disso, instável).")
+        self.fl_sel_max_corr = W.BoundedFloatText(value=float(PARAMS_DEFAULT["max_corr"]),
+                                                  min=0.30, max=1.0, step=0.05,
+                                                  description="corr. máx.:",
+                                                  style=_est, layout=_lay)
+        self.fl_sel_max_corr.tooltip = ("Associação máxima de um par na etapa "
+                                        "'correlação' (acima disso sai a de menor IV).")
+        self.fl_sel_max_missing = W.BoundedFloatText(
+            value=float(PARAMS_DEFAULT["max_missing"]), min=0.0, max=1.0, step=0.05,
+            description="faltantes máx.:", style=_est, layout=W.Layout(width="196px"))
+        self.fl_sel_max_missing.tooltip = ("Fração de faltantes tolerada na etapa "
+                                           "'faltantes' (0,60 = 60%).")
+        self.it_sel_max_cat = W.BoundedIntText(
+            value=int(PARAMS_DEFAULT["max_categorias"]), min=2, max=1000, step=1,
+            description="categorias máx.:", style=_est, layout=W.Layout(width="196px"))
+        self.it_sel_max_cat.tooltip = ("Cardinalidade máxima de uma categórica na "
+                                       "etapa 'categóricas'.")
+        self.fl_sel_min_freq_cat = W.BoundedFloatText(
+            value=float(PARAMS_DEFAULT["min_freq_categoria"]), min=0.0, max=0.50,
+            step=0.005, description="freq. mín. categoria:", style=_est,
+            layout=W.Layout(width="234px"))
+        self.fl_sel_min_freq_cat.tooltip = ("Abaixo desta frequência a categoria é "
+                                            "'rara' e vai para o grupo (outros).")
+        self.cb_sel_simular = W.Checkbox(
+            value=False, indent=False, description="apenas simular (não aplica)")
+        self.cb_sel_simular.tooltip = ("Roda a esteira e mostra o resultado SEM tocar "
+                                       "no segmentador (seleção, categorias e bins "
+                                       "voltam como estavam).")
+        self.btn_sel_run = W.Button(description="Rodar seleção", button_style="primary",
+                                    icon="play",
+                                    layout=W.Layout(width="auto", min_width="170px"),
+                                    tooltip="Executa as etapas marcadas, na ordem, e "
+                                            "aplica a decisão no modelo (a menos que "
+                                            "'apenas simular' esteja marcado).")
+        self.out_sel_status = W.HTML()
+        self.out_sel_progress = W.HTML()
+        self.out_sel_result = W.HTML()
+        self._sel_progress: list = []       # linhas da tabela de progresso por etapa
+        # exportação: relatório HTML autocontido e Excel multi-abas (openpyxl é opcional)
+        _suf = (self.seg.problem_label or self.seg.target or "alvo")
+        _suf = "".join(ch if (ch.isalnum() or ch in "-_") else "_" for ch in str(_suf))
+        self.tx_sel_html = W.Text(value=f"selecao_{_suf}.html", description="arquivo:",
+                                  style=_est, layout=W.Layout(width="46%"),
+                                  placeholder="caminho .html do relatório")
+        self.btn_sel_html = W.Button(description="Relatório (.html)", icon="file-text-o",
+                                     layout=W.Layout(width="auto", min_width="182px"),
+                                     tooltip="Página HTML autocontida (sumário, funil, "
+                                             "causas, IV, IV × PSI, decisões e política) "
+                                             "— anexável à apresentação.")
+        self.tx_sel_xlsx = W.Text(value=f"selecao_{_suf}.xlsx", description="arquivo:",
+                                  style=_est, layout=W.Layout(width="46%"),
+                                  placeholder="caminho .xlsx da planilha")
+        self.btn_sel_xlsx = W.Button(description="Exportar Excel", icon="file-excel-o",
+                                     layout=W.Layout(width="auto", min_width="168px"),
+                                     tooltip="Excel multi-abas (Decisoes · Funil · "
+                                             "Politica). Requer o pacote opcional "
+                                             "openpyxl.")
+        self.out_sel_export = W.HTML()
+        self.btn_sel_run.on_click(self._on_selection_run)
+        self.btn_sel_html.on_click(self._on_selection_report)
+        self.btn_sel_xlsx.on_click(self._on_selection_xlsx)
+
+        card = W.VBox([
+            W.HTML("<div class='mseg-h'>Esteira de seleção</div>"),
+            W.HTML("<div class='mseg-legend'>Marque as <b>etapas</b> que quer rodar (na "
+                   "ordem abaixo), ajuste as réguas e clique em <b>Rodar seleção</b>: "
+                   "cada variável recebe uma decisão — <b>selecionada</b>, <b>a "
+                   "revisar</b> ou <b>excluída</b> — com a etapa em que saiu e o motivo "
+                   "por extenso. O default trata as categóricas <i>antes</i> do IV (o "
+                   "agrupamento das raras muda a binagem). <i>VIF</i> exige modelo "
+                   "treinado e <i>backward elimination</i> treina dezenas de modelos.</div>"),
+            self.box_sel_steps,
+            W.HBox([self.fl_sel_min_iv, self.fl_sel_max_psi, self.fl_sel_max_corr],
+                   layout=W.Layout(flex_flow="row wrap")),
+            W.HBox([self.fl_sel_max_missing, self.it_sel_max_cat,
+                    self.fl_sel_min_freq_cat], layout=W.Layout(flex_flow="row wrap")),
+            W.HBox([self.btn_sel_run, self.cb_sel_simular]),
+            self.out_sel_status,
+            self.out_sel_progress,
+            self.out_sel_result,
+            W.HTML("<div class='mseg-h' style='margin-top:6px'>Relatório da seleção</div>"),
+            W.HBox([self.tx_sel_html, self.btn_sel_html]),
+            W.HBox([self.tx_sel_xlsx, self.btn_sel_xlsx]),
+            self.out_sel_export,
+        ])
+        card.add_class("mseg-card")
+        self._sel_card = card
+        return card
+
+    def _selection_steps(self) -> list:
+        """Etapas marcadas no card, na ordem canônica de execução."""
+        return [n for n, cb in self._sel_step_cbs.items() if cb.value]
+
+    def _selection_params(self) -> dict:
+        """Réguas do card no formato de ``select_features(**params)``."""
+        return {"min_iv": float(self.fl_sel_min_iv.value),
+                "max_psi": float(self.fl_sel_max_psi.value),
+                "max_corr": float(self.fl_sel_max_corr.value),
+                "max_missing": float(self.fl_sel_max_missing.value),
+                "max_categorias": int(self.it_sel_max_cat.value),
+                "min_freq_categoria": float(self.fl_sel_min_freq_cat.value)}
+
+    def _selection_progress_cb(self, key, label, status, detail=""):
+        """Callback de progresso da esteira (passado a ``select_features``): cria ou
+        atualiza a linha da etapa ``key`` e re-renderiza a tabela de progresso."""
+        for row in self._sel_progress:
+            if row["key"] == key:
+                row["status"] = status
+                if detail:
+                    row["detail"] = detail
+                break
+        else:
+            self._sel_progress.append({"key": key, "label": label,
+                                       "status": status, "detail": detail})
+        self._render_selection_progress()
+
+    def _render_selection_progress(self):
+        """Tabela de progresso por etapa da esteira (mesmo desenho da escoragem)."""
+        if not self._sel_progress:
+            self.out_sel_progress.value = ""
+            return
+        icon = {"run": "⏳", "ok": "✅", "err": "❌"}
+        cor = {"run": "var(--warn-ink)", "ok": "var(--ok-ink)", "err": "var(--bad-ink)"}
+        rot = {"run": "processando…", "ok": "concluído", "err": "erro"}
+        trs = ""
+        for r in self._sel_progress:
+            st = r["status"]
+            trs += (f"<tr><td style='padding:4px 10px'>{icon.get(st, '')}</td>"
+                    f"<td style='padding:4px 10px'>{r['label']}</td>"
+                    f"<td style='padding:4px 10px;color:{cor.get(st, 'var(--ink)')};font-weight:600'>"
+                    f"{rot.get(st, st)}</td>"
+                    f"<td style='padding:4px 10px;color:var(--muted)'>{r.get('detail', '')}</td></tr>")
+        self.out_sel_progress.value = (
+            "<div class='mseg-legend' style='margin-top:6px'>Progresso da esteira</div>"
+            "<table style='border-collapse:collapse;font-size:12px;width:100%;margin:2px 0 8px'>"
+            "<thead><tr style='background:var(--tbl-head-bg)'>"
+            "<th style='padding:4px 10px'></th>"
+            "<th style='padding:4px 10px;text-align:left'>Etapa</th>"
+            "<th style='padding:4px 10px;text-align:left'>Status</th>"
+            "<th style='padding:4px 10px;text-align:left'>Detalhe</th>"
+            f"</tr></thead><tbody>{trs}</tbody></table>")
+
+    def _render_selection_result(self, res, simulado=False):
+        """Funil + decisões + gráficos da última esteira, no corpo do card."""
+        from .selection_report import tabela_decisoes, tabela_funil
+
+        partes = []
+        if simulado:
+            partes.append(
+                "<div class='mseg-legend' style='color:var(--warn-ink)'>Simulação — as "
+                "decisões abaixo <b>não</b> foram aplicadas no modelo (nada foi "
+                "incluído, excluído ou categorizado).</div>")
+        for aviso in (res.politica.get("avisos") or []):
+            partes.append(f"<div class='mseg-legend' style='color:var(--warn-ink)'>"
+                          f"Aviso: {aviso}</div>")
+        partes.append("<div class='mseg-h' style='margin-top:6px'>Funil por etapa</div>")
+        partes.append(self._df_html(tabela_funil(res), max_height="220px"))
+        try:
+            partes.append(self._fig_html(self.seg.plot_selection_funil(result=res)))
+            partes.append(self._fig_html(self.seg.plot_selection_iv(result=res)))
+            partes.append(self._fig_html(self.seg.plot_selection_iv_psi(result=res)))
+            if len(res.excluidas):
+                partes.append(self._fig_html(self.seg.plot_selection_motivos(result=res)))
+        except Exception as e:      # noqa: BLE001 — os gráficos são complemento
+            partes.append(f"<div class='mseg-legend'>Gráficos indisponíveis: {e}</div>")
+        partes.append("<div class='mseg-h' style='margin-top:6px'>Decisão por "
+                      "variável</div>")
+        partes.append(self._df_html(tabela_decisoes(res), max_height="320px",
+                                    color_decisao=True))
+        self.out_sel_result.value = "".join(partes)
+
+    def _on_selection_run(self, b):
+        """Roda a esteira com as etapas/réguas do card. Aplicando (default), a ação
+        é DESFAZÍVEL (↶ devolve a seleção anterior) e marca o modelo desatualizado;
+        em 'apenas simular' nada no segmentador é tocado."""
+        steps = self._selection_steps()
+        if not steps:
+            self.out_sel_status.value = (
+                "<div class='mseg-legend' style='color:var(--warn-ink)'>Marque ao menos "
+                "uma etapa da esteira antes de rodar.</div>")
+            self._log("[seleção] nenhuma etapa marcada.")
+            return
+        simular = bool(self.cb_sel_simular.value)
+        params = self._selection_params()
+        self._sel_progress = []                       # zera a tabela de progresso
+        self._render_selection_progress()
+        self.out_sel_result.value = ""
+        self.out_sel_export.value = ""
+        with self._busy(self.btn_sel_run, self.btn_sel_html, self.btn_sel_xlsx,
+                        status=self.out_sel_status, msg="rodando a esteira de seleção…"):
+            try:
+                if simular:                           # nada muda ⇒ sem checkpoint
+                    res = self.seg.select_features(
+                        steps=steps, apply=False,
+                        progress_callback=self._selection_progress_cb, **params)
+                else:
+                    with self._undoable("seleção"):   # troca a seleção em lote
+                        res = self.seg.select_features(
+                            steps=steps, apply=True,
+                            progress_callback=self._selection_progress_cb, **params)
+            except Exception as e:
+                for row in reversed(self._sel_progress):
+                    if row["status"] == "run":
+                        row["status"] = "err"
+                        row["detail"] = type(e).__name__   # detalhe só no Console
+                        break
+                self._render_selection_progress()
+                self.out_sel_status.value = (
+                    "<div class='mseg-legend' style='color:var(--bad-ink)'>✗ Falha na "
+                    "esteira — veja o <b>Console</b> (rodapé) para o detalhe.</div>")
+                self._log(f"[seleção] ERRO: {type(e).__name__}: {e}")
+                return
+        if not simular:
+            # a esteira já recalculou o binning das sobreviventes → exibe (force)
+            self._sync_sel(); self._refresh_vars(force=True)
+            self._mark_dirty(); self._refresh_bar()
+        self._render_selection_result(res, simulado=simular)
+        cor = "var(--warn-ink)" if simular else "var(--ok-ink)"
+        marca = "Simulação" if simular else "✓ Seleção aplicada"
+        self.out_sel_status.value = (
+            f"<div class='mseg-legend' style='color:{cor}'><b>{marca}</b> — "
+            f"{len(res.tabela)} candidatas → <b>{len(res.selecionadas)}</b> "
+            f"selecionadas · {len(res.revisar)} a revisar · {len(res.excluidas)} "
+            f"excluídas.</div>")
+        self._log(f"[seleção] {'simulação · ' if simular else ''}"
+                  f"{len(res.tabela)} candidatas → {len(res.selecionadas)} selecionadas · "
+                  f"{len(res.revisar)} a revisar · {len(res.excluidas)} excluídas.")
+
+    def _on_selection_report(self, b):
+        """Grava o relatório HTML autocontido da última esteira no caminho do card."""
+        path = (self.tx_sel_html.value or "").strip()
+        if not path:
+            self.out_sel_export.value = ("<div class='mseg-legend'>Informe o caminho "
+                                         "do arquivo .html.</div>")
+            return
+        if not path.lower().endswith((".html", ".htm")):
+            path += ".html"
+        with self._busy(self.btn_sel_html, self.btn_sel_xlsx,
+                        msg="gerando o relatório…"):
+            try:
+                self.seg.selection_report(path)
+            except Exception as e:
+                self.out_sel_export.value = (
+                    f"<div class='mseg-legend' style='color:var(--bad-ink)'>Erro ao "
+                    f"gerar o relatório: {type(e).__name__}: {e}</div>")
+                self._log(f"[seleção] relatório: erro: {e}")
+                return
+        self.out_sel_export.value = (f"<div class='mseg-legend' style='color:var(--ok-ink)'>"
+                                     f"✓ Relatório salvo em <code>{path}</code>.</div>")
+        self._log(f"[seleção] relatório HTML salvo em '{path}'.")
+
+    def _on_selection_xlsx(self, b):
+        """Exporta a última esteira para Excel multi-abas (openpyxl é OPCIONAL —
+        sem ele, o ImportError amigável vai para o card e para o console)."""
+        path = (self.tx_sel_xlsx.value or "").strip()
+        if not path:
+            self.out_sel_export.value = ("<div class='mseg-legend'>Informe o caminho "
+                                         "do arquivo .xlsx.</div>")
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+        with self._busy(self.btn_sel_html, self.btn_sel_xlsx, msg="gerando o Excel…"):
+            try:
+                self.seg.selection_xlsx(path)
+            except ImportError as e:
+                self.out_sel_export.value = (
+                    f"<div class='mseg-legend' style='color:var(--warn-ink)'>⚠ {e}</div>")
+                self._log(f"[seleção] Excel: {e}")
+                return
+            except Exception as e:
+                self.out_sel_export.value = (
+                    f"<div class='mseg-legend' style='color:var(--bad-ink)'>Erro ao "
+                    f"exportar o Excel: {type(e).__name__}: {e}</div>")
+                self._log(f"[seleção] Excel: erro: {e}")
+                return
+        self.out_sel_export.value = (
+            f"<div class='mseg-legend' style='color:var(--ok-ink)'>✓ Excel salvo em "
+            f"<code>{path}</code> (Decisoes · Funil · Politica).</div>")
+        self._log(f"[seleção] Excel salvo em '{path}'.")
 
     def _on_dark(self, change):
         if change["new"]:
