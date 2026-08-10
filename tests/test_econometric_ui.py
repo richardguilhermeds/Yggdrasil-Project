@@ -9,12 +9,16 @@ champion-challenger** (dimensionamento da grade, ranking, motivo do descarte,
 escolha manual e Diebold-Mariano), a **bateria de diagnóstico** (placar por
 família, tabela completa, leitura em texto e invalidação), os **cenários e a
 projeção** (padrão, choque com persistência, colagem da trajetória, leque,
-projeção ponderada e exportação) e o **backtest de cobertura** (erro por
-horizonte, Kupiec/Christoffersen, veredito e gráfico das violações).
+projeção ponderada e exportação), o **backtest de cobertura** (erro por
+horizonte, Kupiec/Christoffersen, veredito e gráfico das violações), o **estudo
+completo em um clique** (as cinco chamadas preenchendo todas as abas) e a aba
+**Exportar** (relatório HTML, registro no MLflow, a configuração em JSON —
+exibir/salvar/carregar/aplicar — e as tabelas em CSV).
 
 Tudo roda em séries sintéticas **curtas** e grades minúsculas (2 candidatas, 2
 defasagens, 1 variável por especificação) — a busca completa é do usuário, não
-da suíte.
+da suíte. O MLflow entra por *stub*: os testes verificam o que a interface
+manda para o registro, não o servidor.
 """
 from __future__ import annotations
 
@@ -780,6 +784,298 @@ def test_troca_de_dados_zera_cenarios_e_backtest():
 
 
 # ======================================================================
+# Estudo completo em um clique
+# ======================================================================
+def test_estudo_completo_preenche_todas_as_abas():
+    """O botão equivale às cinco chamadas: busca, ajuste, diagnóstico, cenários e
+    projeção — e cada aba tem de sair preenchida."""
+    ui = _ui_para_busca(n=54)
+    ui.btn_run_study.click()
+    res = ui.study_
+    assert res is not None, ui.out_study_status.value
+    assert res.config.name == ui.tx_nome.value
+
+    # (1) busca — ranking na aba Seleção e o seletor manual utilizável
+    assert ui.search_ is res.search
+    assert ui.out_search_rank.value and "especificação" in ui.out_search_rank.value
+    assert ui.dd_pick_spec.options, "o seletor da aba Seleção ficou vazio"
+    # (2) ajuste — a campeã é o modelo vigente, e não está marcado como sujo
+    assert ui.fit_ is res.fit and ui.model_ is res.best
+    assert ui.selected_spec_ is res.search.best_spec
+    assert ui._dirty_since_fit is False
+    assert "AIC" in ui.out_fit_metrics.value
+    # (3) diagnóstico — placar preenchido
+    assert ui.diagnostics_ is not None and ui.diag_blocks_
+    assert ui.out_diag_placar.value and ui.out_diag_notice.value == ""
+    # (4) cenários — os do estudo, com peso somando 1
+    assert ui.scenarios_ is res.scenarios
+    assert set(ui.scenarios_.names()) == {"base", "adverso", "otimista"}
+    assert sum(s.probability for s in ui.scenarios_.scenarios) == pytest.approx(1.0)
+    # (5) projeção — a do estudo (não uma reprojeção) e a curva ponderada
+    assert ui.projection_ is res.projection
+    assert ui.weighted_ is not None and len(ui.weighted_) == res.projection.horizon
+    assert "<img" in ui.out_proj_plot.value
+    assert ui.sl_scen_horizon.value == res.config.horizon
+    assert ui.fl_scen_alpha.value == pytest.approx(res.projection.alpha)
+
+    # feedback: progresso por etapa, resumo e barra
+    prog = ui.out_study_progress.value
+    for etapa in ("StudyConfig", "Busca champion-challenger", "Ajuste da campeã",
+                  "Bateria de diagnóstico", "Cenários padrão", "Projeção condicional"):
+        assert etapa in prog, etapa
+    assert "erro" not in prog
+    assert "concluído" in ui.out_study_status.value
+    assert "qualificadas" in ui.out_study_resumo.value
+    assert "estudo completo" in ui.bar.value
+    # o backtest fica de fora de propósito
+    assert ui.backtest_ is None
+
+
+def test_estudo_completo_avisa_o_que_falta():
+    ui = _ui()
+    ui.btn_run_study.click()
+    assert ui.study_ is None
+    assert "Sem série carregada" in ui.out_study_status.value
+
+    ui2 = _ui_para_busca(n=48)
+    ui2._set_all_candidates(False)
+    ui2.btn_run_study.click()
+    assert ui2.study_ is None
+    assert "candidata" in ui2.out_study_status.value
+
+    ui3 = _ui_para_busca(n=48)
+    ui3.sl_min_train.value = 60                    # maior que a própria série
+    ui3.btn_run_study.click()
+    assert ui3.study_ is None
+    assert "janela de validação" in ui3.out_study_status.value
+
+
+def test_estudo_invalidado_quando_a_especificacao_muda():
+    ui = _ui_para_busca(n=54)
+    ui.btn_run_study.click()
+    assert ui.study_ is not None
+    ui.tx_ar_orders.value = "2"
+    assert ui.study_ is None
+    assert "desatualizadas" in ui.out_exp_notice.value
+
+
+# ======================================================================
+# Aba Exportar
+# ======================================================================
+def _ui_exportavel(n=60):
+    """Interface com modelo vigente ajustado (o mínimo para exportar)."""
+    ui = _ui_pronta_para_ajuste(n=n)
+    ui.btn_fit_now.click()
+    assert ui.fit_ is not None, ui.out_fit_status.value
+    return ui
+
+
+def test_placar_de_estado_diz_o_que_esta_pronto():
+    ui = _ui()
+    placar = ui.out_exp_estado.value
+    assert "sem dados" in placar and "nenhum ajuste" in placar
+    assert "não rodada" in placar or "não rodado" in placar
+
+    ui2 = _ui_exportavel()
+    ui2._render_export_estado()
+    placar2 = ui2.out_exp_estado.value
+    assert "ARDL" in placar2
+    assert "Projeção" in placar2 and "não projetada" in placar2
+
+
+def test_relatorio_html_gravado_em_arquivo(tmp_path):
+    ui = _ui_exportavel()
+    alvo = tmp_path / "relatorio.html"
+    ui.tx_report_path.value = str(alvo)
+    ui.btn_report.click()
+    assert alvo.exists(), ui.out_report_status.value
+    html = alvo.read_text(encoding="utf-8")
+    assert "<html" in html and "Coeficientes" in html
+    assert "Diagnóstico" in html
+    assert ui.report_path_ == str(alvo)
+    assert "gravado" in ui.out_report_status.value
+
+    # sobrescrever pede confirmação (dois cliques)
+    ui.btn_report.click()
+    assert "já existe" in ui.out_report_status.value
+    ui.btn_report.click()
+    assert "gravado" in ui.out_report_status.value
+
+
+def test_relatorio_sem_modelo_avisa():
+    ui = _ui()
+    ui.btn_report.click()
+    assert "modelo vigente" in ui.out_report_status.value
+    assert ui.report_path_ is None
+
+
+def test_config_json_exibe_salva_carrega_e_aplica(tmp_path):
+    ui = _ui_exportavel(n=48)
+    ui.tx_nome.value = "estudo_exportado"
+    ui.tx_lag_set.value = "0,2"
+    ui.btn_cfg_show.click()
+    texto = ui.ta_config_json.value
+    assert '"candidates"' in texto and "estudo_exportado" in texto
+
+    alvo = tmp_path / "cfg.json"
+    ui.tx_cfg_path.value = str(alvo)
+    ui.btn_cfg_save.click()
+    assert alvo.exists(), ui.out_cfg_status.value
+
+    # mexe em tudo e recarrega do arquivo
+    ui.tx_lag_set.value = "0"
+    ui.tx_nome.value = "outro"
+    ui._set_all_candidates(False)
+    ui.btn_cfg_load.click()
+    assert ui.tx_nome.value == "estudo_exportado", ui.out_cfg_status.value
+    assert tuple(ui.to_config().lag_set) == (0, 2)
+    assert set(ui.candidates()) == {"desemprego", "renda"}
+
+    # e o JSON editado na caixa também vale
+    ui.ta_config_json.value = ui.ta_config_json.value.replace(
+        "estudo_exportado", "colado_na_mao")
+    ui.btn_cfg_apply.click()
+    assert ui.tx_nome.value == "colado_na_mao"
+
+
+def test_config_json_erros_viram_mensagem(tmp_path):
+    ui = _ui_exportavel(n=48)
+    ui.tx_cfg_path.value = str(tmp_path / "nao_existe.json")
+    ui.btn_cfg_load.click()
+    assert "não encontrado" in ui.out_cfg_status.value
+
+    ui.ta_config_json.value = "{isto não é json}"
+    ui.btn_cfg_apply.click()
+    assert "inválido" in ui.out_cfg_status.value
+
+    ui.ta_config_json.value = ""
+    ui.btn_cfg_apply.click()
+    assert "vazia" in ui.out_cfg_status.value
+
+
+def test_exportacao_das_tabelas_em_csv(tmp_path):
+    ui = _ui_para_busca(n=54)
+    ui.btn_run_study.click()
+    assert ui.study_ is not None, ui.out_study_status.value
+
+    # projeção (formato longo)
+    ui.dd_exp_tabela.value = "projecao"
+    ui.btn_exp_mostrar.click()
+    texto = ui.ta_export_tabela.value
+    assert texto.splitlines()[0].startswith("parametro,segmento")
+    assert "ponderado" in texto
+
+    # ranking da busca, com o motivo de cada descarte
+    ui.dd_exp_tabela.value = "ranking"
+    ui.dd_exp_fmt.value = "csv_br"
+    ui.btn_exp_mostrar.click()
+    cab = ui.ta_export_tabela.value.splitlines()[0]
+    assert cab.count(";") >= 5 and "motivo" in cab
+
+    alvo = tmp_path / "ranking.csv"
+    ui.tx_exp_path.value = str(alvo)
+    ui.btn_exp_salvar.click()
+    assert alvo.exists(), ui.out_exp_tab_status.value
+    assert len(alvo.read_text(encoding="utf-8-sig").splitlines()) > 1
+
+    # o nome do arquivo acompanha a tabela escolhida
+    ui.dd_exp_tabela.value = "coeficientes"
+    assert ui.tx_exp_path.value.endswith("_coeficientes.csv")
+    ui.btn_exp_mostrar.click()
+    assert "termo" in ui.ta_export_tabela.value.splitlines()[0]
+
+
+def test_exportacao_avisa_a_etapa_que_falta():
+    ui = _ui_exportavel(n=48)
+    for chave, esperado in (("projecao", "rode a projeção"),
+                            ("ranking", "rode a busca"),
+                            ("diagnostico", "rode a bateria"),
+                            ("cobertura", "rode o backtest"),
+                            ("estacionariedade", "estacionariedade")):
+        ui.dd_exp_tabela.value = chave
+        ui.btn_exp_mostrar.click()
+        assert esperado in ui.out_exp_tab_status.value, chave
+        assert ui.ta_export_tabela.value == ""
+
+
+def test_mlflow_sem_o_pacote_avisa(monkeypatch):
+    """Sem MLflow instalado a interface avisa — nunca mostra traceback."""
+    import sys
+
+    ui = _ui_exportavel(n=48)
+    monkeypatch.setitem(sys.modules, "mlflow", None)
+    ui.btn_mlflow.click()
+    assert "não está instalado" in ui.out_mlflow_status.value
+    assert ui.mlflow_run_id_ is None
+
+
+def test_mlflow_erro_de_tracking_vira_mensagem(monkeypatch):
+    from yggdrasil.credit_risk.econometric import tracking
+
+    ui = _ui_exportavel(n=48)
+
+    def _explode(*a, **k):
+        raise RuntimeError("nenhum tracking configurado")
+
+    monkeypatch.setattr(tracking, "log_satellite_run", _explode)
+    ui.btn_mlflow.click()
+    assert "Não foi possível registrar" in ui.out_mlflow_status.value
+    assert "tracking" in ui.out_mlflow_status.value
+    assert ui.mlflow_run_id_ is None
+    assert not ui.btn_mlflow.disabled          # o botão volta a funcionar
+
+
+def test_mlflow_leva_o_que_existe_no_estado(monkeypatch):
+    """O registro passa ajuste, busca, projeção e backtest — o que houver."""
+    from yggdrasil.credit_risk.econometric import tracking
+
+    ui = _ui_para_busca(n=54)
+    ui.btn_run_study.click()
+    assert ui.projection_ is not None, ui.out_study_status.value
+    capturado = {}
+
+    def _fake(fit, **kwargs):
+        capturado["fit"] = fit
+        capturado.update(kwargs)
+        return "run-fake-123"
+
+    monkeypatch.setattr(tracking, "log_satellite_run", _fake)
+    ui.tx_mlflow_exp.value = "/Shared/teste"
+    ui.btn_mlflow.click()
+    assert ui.mlflow_run_id_ == "run-fake-123"
+    assert capturado["fit"] is ui.fit_
+    assert capturado["projection"] is ui.projection_
+    assert capturado["search"] is ui.search_
+    assert capturado["backtest"] is None            # não rodou o backtest
+    assert capturado["experiment"] == "/Shared/teste"
+    assert "run_id = run-fake-123" in ui.out_mlflow_status.value
+    assert "projeção por cenário" in ui.out_mlflow_info.value
+
+
+def test_keepalive_sem_spark_desliga_sozinho_e_explica():
+    """O botão de manter o cluster ativo é conveniência: fora do Spark ele volta
+    para desligado com uma linha no console, nunca com traceback."""
+    ui = _ui()
+    ui.cb_keepalive.value = True
+    assert ui.cb_keepalive.value is False
+    assert ui.cb_keepalive.description == "☕ Manter cluster ativo"
+    assert any("keepalive" in linha for linha in ui._log_lines)
+
+
+def test_troca_de_dados_zera_a_aba_exportar():
+    ui = _ui_para_busca(n=54)
+    ui.btn_run_study.click()
+    ui.btn_cfg_show.click()
+    assert ui.study_ is not None and ui.ta_config_json.value
+    outra = _sintetico(n=48, seed=11)
+    ui.set_data(outra.series, outra.macro)
+    assert ui.study_ is None and ui.report_path_ is None and ui.mlflow_run_id_ is None
+    assert ui.ta_config_json.value == "" and ui.ta_export_tabela.value == ""
+    assert ui.out_study_progress.value == "" and ui.out_study_resumo.value == ""
+    assert "sem dados" not in ui.out_exp_estado.value      # a nova série está lá
+
+
+# ======================================================================
 # Tema
 # ======================================================================
 def _htmls(widget, acc=None):
@@ -836,6 +1132,24 @@ def test_html_de_cenarios_e_backtest_usa_tokens_de_tema():
     ui.btn_project.click()
     ui.btn_scen_export.click()
     ui.btn_backtest.click()
+    ui.cb_dark.value = True
+    for html in _htmls(ui.panel):
+        if "<style>" in html:
+            continue
+        achados = _HEX.findall(html)
+        assert not achados, f"hex fixo no HTML gerado: {achados[:3]} em {html[:120]!r}"
+
+
+def test_html_do_estudo_e_da_exportacao_usa_tokens_de_tema(tmp_path):
+    """Idem no estudo completo e na aba Exportar (progresso, placar de estado,
+    status de relatório/MLflow/tabelas)."""
+    ui = _ui_para_busca(n=54)
+    ui.btn_run_study.click()
+    ui.tx_report_path.value = str(tmp_path / "rel.html")
+    ui.btn_report.click()
+    ui.btn_cfg_show.click()
+    ui.dd_exp_tabela.value = "projecao"
+    ui.btn_exp_mostrar.click()
     ui.cb_dark.value = True
     for html in _htmls(ui.panel):
         if "<style>" in html:

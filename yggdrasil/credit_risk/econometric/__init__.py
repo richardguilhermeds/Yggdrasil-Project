@@ -47,8 +47,11 @@ Pipeline declarativo (:mod:`.config`)
 Interface (:mod:`.ui`)
     :class:`SatelliteUI` — a camada interativa (ipywidgets) sobre tudo isso:
     série e estacionariedade, especificação e sinais esperados, seleção,
-    diagnóstico, cenários, backtest e exportação. ``SatelliteUI()`` sem argumentos
-    carrega o estudo de referência para explorar a ferramenta na hora.
+    diagnóstico, cenários, backtest e exportação (relatório HTML, MLflow,
+    :class:`StudyConfig` em JSON e tabelas em CSV). O botão *Rodar estudo
+    completo* chama :func:`run_study` e preenche todas as abas de uma vez.
+    ``SatelliteUI()`` sem argumentos carrega o estudo de referência para explorar
+    a ferramenta na hora.
 
 As visualizações (:mod:`.report`, matplotlib), o registro no MLflow
 (:mod:`.tracking`) e a interface (:mod:`.ui`, ipywidgets) são carregados **sob

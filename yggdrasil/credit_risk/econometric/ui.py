@@ -33,7 +33,17 @@ tema claro/escuro) mas para um fluxo de **série temporal + macro**:
 * **Backtest** — a outra metade da projeção: reestimação **janela a janela**, erro
   por horizonte e **cobertura empírica** dos intervalos contra a nominal, com
   Kupiec (proporção de violações) e Christoffersen (independência), lidos em texto;
-* **Exportar** — o fechamento do estudo.
+* **Exportar** — o fechamento do estudo: o **relatório HTML** de governança, o
+  registro do *run* no **MLflow** (com o que houver no estado: ajuste, busca,
+  projeção e backtest), a configuração da sessão em **JSON** — exibir, salvar e
+  **carregar**, para que a configuração que gerou a projeção viaje junto com ela —
+  e as tabelas (projeção, ranking, diagnóstico, cobertura, coeficientes) em CSV.
+
+Quem já sabe o que quer não precisa percorrer as abas: o botão **Rodar estudo
+completo**, na aba *Especificação*, monta a configuração da tela e encadeia
+seleção → ajuste → diagnóstico → cenários → projeção numa passada só,
+preenchendo todas as abas com o resultado. As abas continuam servindo para
+conduzir o estudo passo a passo — e para discordar de qualquer etapa.
 
 A configuração corrente é materializável como
 :class:`~yggdrasil.credit_risk.econometric.config.StudyConfig` (:meth:`to_config`)
@@ -464,7 +474,9 @@ class SatelliteUI:
         e ``coverage``) e a tabela de **cobertura dos intervalos** por horizonte,
         com Kupiec e Christoffersen (aba Backtest).
     study_:
-        O último :class:`StudyResult` de um estudo completo (aba Exportar).
+        O último :class:`StudyResult` do botão **Rodar estudo completo** (aba
+        Especificação) — a configuração, a busca, o ajuste, o diagnóstico, os
+        cenários, a projeção e o HTML do relatório numa estrutura só.
     """
 
     #: estilo das tabelas (Styler) — cores por token, resolvidas no tema ativo
@@ -485,7 +497,8 @@ class SatelliteUI:
         {"selector": "tbody tr:hover td", "props": [("background-color", "var(--tbl-hover)")]},
     ]
 
-    #: nomes definitivos das abas (os próximos blocos só preenchem o conteúdo)
+    #: as abas, na ordem do fluxo (dados → especificação → seleção → crítica →
+    #: projeção → validação da banda → fechamento)
     ABAS = ("Série", "Especificação", "Seleção", "Diagnóstico",
             "Cenários & Projeção", "Backtest", "Exportar")
 
@@ -530,6 +543,10 @@ class SatelliteUI:
         self._scen_pesos: dict = {}       # peso declarado por cenário manual
         self._bt_steps: list = []         # linhas da tabela de progresso do backtest
         self._bt_secs = None              # duração do último backtest (segundos)
+        self._study_steps: list = []      # linhas da tabela de progresso do estudo completo
+        self._study_secs = None           # duração do último estudo completo (segundos)
+        self.report_path_ = None          # caminho do último relatório HTML gravado
+        self.mlflow_run_id_ = None        # run_id do último registro no MLflow
         self._dirty_since_fit = False
         self._init_candidates = list(candidates) if candidates else None
         self._init_signs = dict(expected_signs or {})
@@ -657,6 +674,9 @@ class SatelliteUI:
         self._scen_pesos = {}
         self._bt_steps = []
         self._bt_secs = None
+        self._study_steps = []
+        self._study_secs = None
+        self.report_path_ = self.mlflow_run_id_ = None
         self._clear_dirty()
         self._init_candidates = None
         self._init_signs = {}
@@ -676,6 +696,7 @@ class SatelliteUI:
         self._clear_selecao_outputs()
         self._clear_cenarios_outputs()
         self._clear_backtest_outputs()
+        self._clear_exportar_outputs()
         self._refresh_bar()
         self._refresh_serie()
         self._sync_model_fields()
@@ -879,7 +900,11 @@ class SatelliteUI:
                 btn.description = btn._cc_desc
                 btn.button_style = btn._cc_style
 
-        threading.Timer(timeout, _revert).start()
+        # daemon: desarmar o botão é cortesia visual — não pode segurar o encerramento
+        # do kernel (ou da suíte de testes) por causa de um timer pendente.
+        temporizador = threading.Timer(timeout, _revert)
+        temporizador.daemon = True
+        temporizador.start()
 
     def _mark_dirty(self, *_args):
         """Marca o ajuste como **desatualizado** (a especificação mudou depois do
@@ -894,6 +919,7 @@ class SatelliteUI:
         self._invalidate_diag("a especificação mudou depois do último ajuste")
         self._invalidate_cenarios("a especificação mudou depois do último ajuste")
         self._invalidate_backtest("a especificação mudou depois do último ajuste")
+        self._invalidate_exportar("a especificação mudou depois do último ajuste")
         self._render_scen_notice()
         self._refresh_bar()
 
@@ -906,6 +932,7 @@ class SatelliteUI:
         self._invalidate_diag("o modelo vigente mudou")
         self._invalidate_cenarios("o modelo vigente mudou")
         self._invalidate_backtest("o modelo vigente mudou")
+        self._invalidate_exportar("o modelo vigente mudou")
         self._render_scen_notice()
 
     # ==================================================================
@@ -922,20 +949,18 @@ class SatelliteUI:
 
         tab_serie = self._build_tab_serie()
         tab_spec = self._build_tab_spec()
-        # a última aba nasce VAZIA (placeholder) com o nome definitivo — o bloco
-        # seguinte só substitui ``.children``.
+        # cada aba é um VBox próprio: os cartões entram em ``.children`` logo em
+        # seguida (a ordem importa — a aba Exportar lê widgets das anteriores).
         self.box_selecao = W.VBox(layout=W.Layout(padding="2px"))
         self.box_diagnostico = W.VBox(layout=W.Layout(padding="2px"))
         self.box_cenarios = W.VBox(layout=W.Layout(padding="2px"))
         self.box_backtest = W.VBox(layout=W.Layout(padding="2px"))
+        self.box_exportar = W.VBox(layout=W.Layout(padding="2px"))
         self.box_selecao.children = self._build_tab_selecao()
         self.box_diagnostico.children = self._build_tab_diagnostico()
         self.box_cenarios.children = self._build_tab_cenarios()
         self.box_backtest.children = self._build_tab_backtest()
-        self.box_exportar = self._placeholder_box(
-            "Exportar",
-            "relatório HTML de governança, tabelas, a configuração do estudo e o registro "
-            "no MLflow.")
+        self.box_exportar.children = self._build_tab_exportar()
 
         self.tabs = W.Tab(children=[tab_serie, tab_spec, self.box_selecao,
                                     self.box_diagnostico, self.box_cenarios,
@@ -970,14 +995,6 @@ class SatelliteUI:
                         layout=W.Layout(justify_content="space-between"))
         self.panel = W.VBox([W.HTML(_CSS), topbar, self.banner, self.bar, self.tabs, console])
         self.panel.add_class("satui")
-
-    def _placeholder_box(self, titulo, texto):
-        """VBox de uma aba ainda **em construção** (nome definitivo já no lugar)."""
-        box = W.VBox([W.HTML(
-            f"<div class='satui-card'><div class='satui-h'>{titulo}</div>"
-            f"<div class='satui-legend'>🚧 <b>Em construção.</b> Aqui entram: {texto}</div>"
-            "</div>")], layout=W.Layout(padding="2px"))
-        return box
 
     # ------------------------------------------------------------------ aba Série
     def _build_tab_serie(self):
@@ -1026,8 +1043,10 @@ class SatelliteUI:
             style={"description_width": "initial"}, layout=W.Layout(width="240px"))
         self.dd_link_serie.observe(lambda c: self._render_serie_plots(), names="value")
         self.btn_serie_plot = W.Button(description="Redesenhar", icon="refresh",
-                                       layout=W.Layout(width="140px"))
-        self.btn_serie_plot.on_click(lambda b: self._refresh_serie())
+                                       layout=W.Layout(width="140px"),
+                                       tooltip="Redesenha a série no nível e na escala do "
+                                               "link escolhido.")
+        self.btn_serie_plot.on_click(self._on_serie_plot)
         self.out_serie_nivel = W.HTML(layout=W.Layout(width="49%"))
         self.out_serie_link = W.HTML(layout=W.Layout(width="49%"))
         card_serie = W.VBox([
@@ -1279,6 +1298,40 @@ class SatelliteUI:
         ])
         card_fit.add_class("satui-card")
 
+        # --- card: estudo completo em um clique -------------------------------
+        self.btn_run_study = W.Button(
+            description="Rodar estudo completo", icon="rocket", button_style="primary",
+            layout=W.Layout(width="auto", min_width="230px"),
+            tooltip="Monta a StudyConfig desta tela e roda busca → ajuste → diagnóstico → "
+                    "cenários → projeção de uma vez, preenchendo todas as abas.")
+        self.btn_run_study.on_click(self._on_run_study)
+        self.cb_study_report = W.Checkbox(
+            value=True, indent=False,
+            description="gerar também o HTML do relatório de governança")
+        self.out_study_status = W.HTML()
+        self.out_study_progress = W.HTML()
+        self.out_study_timer = W.HTML()
+        self.out_study_resumo = W.HTML()
+        card_study = W.VBox([
+            W.HTML("<div class='satui-h'>Estudo completo em um clique</div>"),
+            W.HTML("<div class='satui-help'><div class='ttl'>O que este botão faz</div>"
+                   "Exatamente as <b>cinco chamadas</b> do fluxo manual, na ordem: "
+                   "<b>busca</b> champion-challenger sobre a grade acima → <b>ajuste</b> da "
+                   "campeã → <b>bateria de diagnóstico</b> → <b>cenários padrão</b> sobre a "
+                   "variável de estresse → <b>projeção condicional</b>. Ao terminar, as abas "
+                   "<i>Seleção</i>, <i>Diagnóstico</i> e <i>Cenários &amp; Projeção</i> "
+                   "aparecem preenchidas — e você pode discordar de qualquer etapa ali "
+                   "mesmo (adotar outra especificação, trocar o cenário, reprojetar). O "
+                   "<b>backtest</b> fica de fora de propósito: ele é caro e tem aba própria."
+                   "<br>É o atalho de quem já sabe o que quer; para conduzir passo a passo, "
+                   "use <i>Ajustar agora</i> acima e siga pelas abas.</div>"),
+            W.HBox([self.btn_run_study, self.cb_study_report],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            self.out_study_status, self.out_study_progress, self.out_study_timer,
+            self.out_study_resumo,
+        ])
+        card_study.add_class("satui-card")
+
         # mudanças na especificação deixam o ajuste desatualizado
         for w in (self.dd_model, self.dd_link, self.dd_trend, self.dd_cov, self.fl_rho,
                   self.cb_ttc_auto, self.fl_pd_ttc, self.tx_arima_order,
@@ -1288,7 +1341,7 @@ class SatelliteUI:
 
         self._rebuild_signs()
         self._render_model_help()
-        return W.VBox([card_modelo, card_sinais, card_grade, card_fit],
+        return W.VBox([card_modelo, card_sinais, card_grade, card_fit, card_study],
                       layout=W.Layout(padding="2px"))
 
     # ------------------------------------------------------------------ matriz de sinais
@@ -1386,6 +1439,12 @@ class SatelliteUI:
         self._sync_data_widgets()
         self._render_serie_head()
         self._render_serie_plots()
+
+    def _on_serie_plot(self, b):
+        """Botão *Redesenhar* — sob :meth:`_busy` (desenhar duas figuras não é
+        instantâneo em série longa, e um botão mudo parece travado)."""
+        with self._busy(self.btn_serie_plot, msg="desenhando…"):
+            self._refresh_serie()
 
     def _render_serie_head(self):
         if self.series is None:
@@ -1842,29 +1901,41 @@ class SatelliteUI:
             "<table class='satui-prog'><thead><tr><th></th><th>Etapa</th><th>Status</th>"
             f"<th>Detalhe</th></tr></thead><tbody>{trs}</tbody></table>")
 
-    def _search_prog(self, key, label, status, detail=""):
-        """Cria/atualiza a linha ``key`` da tabela de progresso da busca."""
-        for row in self._search_steps:
+    def _prog(self, steps, widget, titulo, key, label, status, detail=""):
+        """Cria/atualiza a linha ``key`` de uma tabela de progresso e a redesenha.
+
+        Uma única implementação para as três ações longas com etapas (busca,
+        backtest e estudo completo) — cada uma passa a **sua** lista e o seu
+        widget.
+        """
+        for row in steps:
             if row["key"] == key:
                 row["status"] = status
                 if detail:
                     row["detail"] = detail
                 break
         else:
-            self._search_steps.append({"key": key, "label": label, "status": status,
-                                       "detail": detail})
-        self._render_progress(self._search_steps, self.out_search_progress,
-                              "Progresso da busca")
+            steps.append({"key": key, "label": label, "status": status, "detail": detail})
+        self._render_progress(steps, widget, titulo)
 
-    def _search_prog_erro(self, exc):
+    def _prog_erro(self, steps, widget, titulo, exc):
         """Marca como **erro** a etapa que estava em andamento."""
-        for row in reversed(self._search_steps):
+        for row in reversed(steps):
             if row.get("status") == "run":
                 row["status"] = "err"
                 row["detail"] = type(exc).__name__
                 break
-        self._render_progress(self._search_steps, self.out_search_progress,
-                              "Progresso da busca")
+        self._render_progress(steps, widget, titulo)
+
+    def _search_prog(self, key, label, status, detail=""):
+        """Cria/atualiza a linha ``key`` da tabela de progresso da busca."""
+        self._prog(self._search_steps, self.out_search_progress, "Progresso da busca",
+                   key, label, status, detail)
+
+    def _search_prog_erro(self, exc):
+        """Marca como **erro** a etapa da busca que estava em andamento."""
+        self._prog_erro(self._search_steps, self.out_search_progress,
+                        "Progresso da busca", exc)
 
     @contextmanager
     def _cronometro(self, alvo, rotulo="processando"):
@@ -1905,7 +1976,8 @@ class SatelliteUI:
         """Reage à troca de aba: cada aba depende de controles de outra.
 
         **Seleção** recalcula o tamanho da grade, **Cenários** repõe o aviso do que
-        falta para projetar e **Backtest** redimensiona as janelas.
+        falta para projetar, **Backtest** redimensiona as janelas e **Exportar**
+        relê o estado da sessão.
         """
         with suppress(Exception):
             idx = change.get("new")
@@ -1915,6 +1987,8 @@ class SatelliteUI:
                 self._render_scen_notice()
             elif idx == 5:
                 self._render_bt_info()
+            elif idx == 6:
+                self._render_export_estado()
 
     # ==================================================================
     # Aba Seleção — busca champion-challenger
@@ -4023,16 +4097,8 @@ class SatelliteUI:
 
     def _bt_prog(self, key, label, status, detail=""):
         """Cria/atualiza a linha ``key`` da tabela de progresso do backtest."""
-        for row in self._bt_steps:
-            if row["key"] == key:
-                row["status"] = status
-                if detail:
-                    row["detail"] = detail
-                break
-        else:
-            self._bt_steps.append({"key": key, "label": label, "status": status,
-                                   "detail": detail})
-        self._render_progress(self._bt_steps, self.out_bt_progress, "Progresso do backtest")
+        self._prog(self._bt_steps, self.out_bt_progress, "Progresso do backtest",
+                   key, label, status, detail)
 
     # ------------------------------------------------------------------ execução
     def _on_backtest(self, b):
@@ -4061,13 +4127,8 @@ class SatelliteUI:
                     horizon=p["horizonte"], step=p["step"], alpha=p["alpha"],
                     n_sims=p["sims"], seed=0)
             except Exception as exc:  # noqa: BLE001
-                for row in reversed(self._bt_steps):
-                    if row.get("status") == "run":
-                        row["status"] = "err"
-                        row["detail"] = type(exc).__name__
-                        break
-                self._render_progress(self._bt_steps, self.out_bt_progress,
-                                      "Progresso do backtest")
+                self._prog_erro(self._bt_steps, self.out_bt_progress,
+                                "Progresso do backtest", exc)
                 self.out_bt_status.value = (
                     "<div class='satui-notice'>✗ O backtest falhou — veja o <b>Console</b> "
                     f"(rodapé): {type(exc).__name__}.</div>")
@@ -4385,6 +4446,806 @@ class SatelliteUI:
             "Clique em <i>Rodar backtest</i>.</div>") if tinha else ""
 
     # ==================================================================
+    # Estudo completo em um clique (as cinco chamadas numa passada)
+    # ==================================================================
+    def _study_prog(self, key, label, status, detail=""):
+        """Cria/atualiza a linha ``key`` da tabela de progresso do estudo completo."""
+        self._prog(self._study_steps, self.out_study_progress,
+                   "Progresso do estudo completo", key, label, status, detail)
+
+    def _on_run_study(self, b):
+        """Monta a :class:`StudyConfig` da tela, roda :func:`run_study` e **preenche
+        todas as abas** com o resultado (busca, ajuste, diagnóstico, cenários e
+        projeção). Equivale às cinco chamadas do fluxo manual."""
+        if self.series is None:
+            self.out_study_status.value = (
+                "<div class='satui-notice'>Sem série carregada — traga os dados na aba "
+                "<b>Série</b> (ou carregue o estudo de referência).</div>")
+            return
+        if self.macro is None or not self.candidates():
+            self.out_study_status.value = (
+                "<div class='satui-notice'>O estudo completo <b>busca</b> sobre a macro: "
+                "carregue as variáveis macro e marque ao menos uma <b>candidata</b> na "
+                "matriz de sinais acima.</div>")
+            return
+        try:
+            cfg = self.to_config()
+            info = self._grid_size()
+        except ValueError as exc:
+            self.out_study_status.value = f"<div class='satui-notice'>{exc}</div>"
+            return
+        if info["janelas"] <= 0:
+            self.out_study_status.value = (
+                "<div class='satui-notice'>Sem janela de validação fora da amostra: reduza o "
+                "<b>horizonte</b> ou o <b>mínimo de treino</b> no cartão da grade.</div>")
+            return
+
+        self._study_steps = []
+        self.out_study_status.value = self.out_study_resumo.value = ""
+        self._study_prog("cfg", "Montar a configuração da tela (StudyConfig)", "ok",
+                         f"{len(cfg.candidates)} candidata(s) · até {info['efetivo']} "
+                         f"especificações · critério {cfg.criterion}")
+        rot = "Rodar o estudo — busca, ajuste, diagnóstico, cenários e projeção"
+        self._study_prog("run", rot, "run", f"~{info['ajustes']} ajustes no pior caso")
+        with self._busy(self.btn_run_study, self.btn_fit_now, self.btn_search,
+                        self.btn_pick_fit, self.btn_dm, self.btn_diag, self.btn_project,
+                        self.btn_backtest), \
+                self._cronometro(self.out_study_timer, "estudo em andamento") as decorrido:
+            try:
+                res = _E.config.run_study(cfg, self.series, self.macro,
+                                          make_report=bool(self.cb_study_report.value))
+            except Exception as exc:  # noqa: BLE001
+                self._prog_erro(self._study_steps, self.out_study_progress,
+                                "Progresso do estudo completo", exc)
+                self.out_study_status.value = (
+                    f"<div class='satui-notice'>✗ O estudo não completou: {exc}</div>")
+                self._log(f"[estudo] ERRO: {type(exc).__name__}: {exc}")
+                return
+            secs = decorrido()
+        self._study_secs = secs
+        self._study_prog("run", rot, "ok", self._fmt_dur(secs))
+        self._adota_estudo(res, secs)
+
+    def _adota_estudo(self, res, secs):
+        """Espalha o :class:`StudyResult` pelas abas, na ordem em que ele foi produzido."""
+        cfg = res.config
+        # (1) busca — o ranking e o mapa describe() → Specification do seletor manual.
+        # A grade não volta dentro do StudyResult: ela é **remontada** aqui (custo
+        # zero, nenhuma estimação) para que a aba Seleção continue permitindo
+        # adotar outra especificação.
+        self.search_ = res.search
+        self._search_secs = None
+        try:
+            import warnings
+
+            with warnings.catch_warnings(record=True) as capturados:
+                warnings.simplefilter("always")
+                grid = _E.selection.make_grid(
+                    list(cfg.candidates), lag_set=cfg.lag_set, min_vars=1,
+                    max_vars=cfg.max_vars, ar_orders=cfg.ar_orders, link=cfg.link,
+                    expected_signs=dict(cfg.expected_signs), seasonal=cfg.seasonal,
+                    seasonal_period=cfg.seasonal_period, max_specs=cfg.max_specs)
+            for a in capturados:
+                self._log(f"[estudo] {a.message}")
+            self._spec_por_desc = {s.describe(): s for s in grid}
+        except Exception as exc:  # noqa: BLE001
+            self._spec_por_desc = {}
+            self._log(f"[estudo] o seletor manual da aba Seleção ficou vazio "
+                      f"(a grade não pôde ser remontada): {exc}")
+
+        # (2) ajuste — a campeã vira o modelo vigente
+        self.model_, self.fit_ = res.best, res.fit
+        self.selected_spec_ = res.search.best_spec
+        self._clear_dirty()          # o que havia pertencia ao modelo anterior
+        self._render_fit()
+        self._render_search()
+        rk = res.search.ranking
+        n_qual = int((rk["status"] == "qualificado").sum()) if len(rk) else 0
+        campea = (res.search.best_spec.describe()
+                  if res.search.best_spec is not None else "—")
+        self._study_prog("busca", "Busca champion-challenger", "ok",
+                         f"{n_qual} qualificada(s) · campeã: {campea}")
+        aic = f" · AIC {res.fit.aic:.1f}" if res.fit.aic is not None else ""
+        self._study_prog("ajuste", "Ajuste da campeã na amostra cheia", "ok",
+                         f"{res.fit.model_name}{aic}")
+
+        # (3) diagnóstico — a bateria da tela (com Chow, Quandt-Andrews e VIF)
+        self._on_diag(None)
+        ruins = [x["bloco"] for x in (self.diag_blocks_ or []) if x["nivel"] == "bad"]
+        self._study_prog(
+            "diag", "Bateria de diagnóstico", "ok" if self.diagnostics_ is not None else "err",
+            (f"{len(ruins)} bloco(s) reprovado(s): {', '.join(ruins)}" if ruins
+             else "sem reprovações") if self.diagnostics_ is not None else "indisponível")
+
+        # (4) cenários — os padrão que o próprio estudo montou
+        with suppress(Exception):
+            self.sl_scen_horizon.value = int(cfg.horizon)
+        self._scen_pesos = {}
+        self._adota_cenarios(res.scenarios, origem="estudo completo")
+        self._study_prog("cen", "Cenários padrão", "ok",
+                         f"{len(res.scenarios)} cenário(s) sobre '{cfg.stress_var}'")
+
+        # (5) projeção — a do estudo (não reprojetamos: seria outra resposta)
+        proj = res.projection
+        for w, v in ((self.fl_scen_alpha, float(proj.alpha)), (self.sl_scen_sims, 2000)):
+            with suppress(Exception):
+                w.value = v
+        self.projection_ = proj
+        self.projection_table_ = None
+        pesos = {s.name: float(s.probability or 0.0) for s in res.scenarios.scenarios}
+        try:
+            self.weighted_ = proj.weighted(pesos)
+        except Exception as exc:  # noqa: BLE001
+            self.weighted_ = None
+            self._log(f"[estudo] projeção ponderada indisponível: {exc}")
+        self._render_projection()
+        self._render_weighted()
+        nivel = int(round((1 - proj.alpha) * 100))
+        self._study_prog("proj", "Projeção condicional aos cenários", "ok",
+                         f"{proj.horizon} períodos · leque {nivel}%")
+        self._study_prog("rep", "Relatório HTML de governança",
+                         "ok" if res.report_html else "skip",
+                         "pronto para gravar na aba Exportar" if res.report_html
+                         else "não solicitado")
+
+        self.study_ = res
+        self._refresh_bar()
+        self._render_export_estado()
+        tiles = {"tempo": self._fmt_dur(secs), "qualificadas": n_qual,
+                 "AIC": res.fit.aic, "cenários": len(res.scenarios),
+                 "horizonte": int(proj.horizon)}
+        qual = rk[rk["status"] == "qualificado"] if len(rk) else rk
+        if len(qual) and "oos_rmse" in qual.columns:
+            tiles["RMSE fora"] = float(qual["oos_rmse"].iloc[0])
+        self.out_study_resumo.value = (
+            self._metric_tiles(tiles)
+            + "<div class='satui-legend'>Tudo já está nas abas: o ranking e as descartadas "
+              "em <b>Seleção</b>, o placar dos testes em <b>Diagnóstico</b>, as trajetórias "
+              "e o leque em <b>Cenários &amp; Projeção</b>, e o relatório, o MLflow e o JSON "
+              "da configuração em <b>Exportar</b>. Falta só o <b>Backtest</b> — ele tem aba "
+              "própria porque custa caro.</div>")
+        self.out_study_status.value = (
+            "<div class='satui-legend' style='color:var(--ok-ink)'>✓ Estudo "
+            f"<b>{cfg.name}</b> concluído em {self._fmt_dur(secs)} — campeã "
+            f"<code>{campea}</code>.</div>")
+        for linha in (
+                f"[estudo] '{cfg.name}' concluído em {self._fmt_dur(secs)}",
+                f"[estudo] busca: {n_qual} qualificada(s) · campeã {campea}",
+                f"[estudo] ajuste: {res.fit.model_name}{aic}",
+                "[estudo] diagnóstico: " + (f"reprovados {', '.join(ruins)}" if ruins
+                                            else "sem reprovações"),
+                f"[estudo] projeção: {len(res.scenarios)} cenário(s) × {proj.horizon} "
+                f"períodos (leque {nivel}%)",
+                "[estudo] próximos passos: rode o Backtest e feche pela aba Exportar."):
+            self._log(linha)
+
+    # ==================================================================
+    # Aba Exportar — relatório, MLflow, configuração e tabelas
+    # ==================================================================
+    #: tabelas oferecidas na exportação (chave → rótulo na tela)
+    _TABELAS_EXPORT = (
+        ("projecao", "Projeção por cenário (formato longo)"),
+        ("ranking", "Ranking da busca champion-challenger"),
+        ("diagnostico", "Bateria de diagnóstico do modelo vigente"),
+        ("cobertura", "Cobertura dos intervalos (backtest)"),
+        ("coeficientes", "Coeficientes do modelo vigente"),
+        ("estacionariedade", "Relatório de estacionariedade"),
+    )
+
+    def _build_tab_exportar(self):
+        """Cartões da aba **Exportar** (devolve a tupla de filhos do VBox)."""
+        base = self._nome_arquivo()
+        # --- card: o que está pronto ---------------------------------------
+        self.out_exp_notice = W.HTML()
+        self.out_exp_estado = W.HTML()
+        self.btn_exp_estado = W.Button(
+            description="Atualizar", icon="refresh",
+            layout=W.Layout(width="auto", min_width="130px"),
+            tooltip="Relê o estado da sessão (ajuste, busca, diagnóstico, projeção, "
+                    "backtest).")
+        self.btn_exp_estado.on_click(lambda b: self._render_export_estado())
+        card_estado = W.VBox([
+            W.HTML("<div class='satui-h'>O que já está pronto nesta sessão</div>"),
+            W.HTML("<div class='satui-legend'>Cada saída abaixo exporta o <b>estado "
+                   "corrente</b> — o relatório e o registro no MLflow levam o que existir "
+                   "(ajuste, busca, projeção, backtest). O que estiver faltando aqui "
+                   "simplesmente não vai junto.</div>"),
+            self.out_exp_notice, self.out_exp_estado,
+            W.HBox([self.btn_exp_estado], layout=W.Layout(align_items="center")),
+        ])
+        card_estado.add_class("satui-card")
+
+        # --- card: relatório HTML -------------------------------------------
+        self.tx_report_path = W.Text(
+            value=f"relatorio_{base}.html", description="arquivo:",
+            style={"description_width": "initial"}, layout=W.Layout(width="440px"))
+        self.btn_report = W.Button(
+            description="Gerar relatório HTML", icon="file-text-o", button_style="primary",
+            layout=W.Layout(width="auto", min_width="210px"),
+            tooltip="Gera o relatório de governança (especificação, coeficientes, métricas, "
+                    "diagnóstico e o leque da projeção) e grava no arquivo indicado.")
+        self.btn_report.on_click(self._on_report)
+        self.out_report_status = W.HTML()
+        card_report = W.VBox([
+            W.HTML("<div class='satui-h'>Relatório HTML de governança</div>"),
+            W.HTML("<div class='satui-legend'>Documento autocontido (um único arquivo, "
+                   "figuras embutidas) com a <b>especificação</b>, a tabela de "
+                   "<b>coeficientes</b>, as métricas, a <b>bateria de diagnóstico</b> e — se "
+                   "houver projeção — o gráfico em leque. É o anexo que acompanha o modelo "
+                   "na validação independente. Se o arquivo já existir, o botão pede "
+                   "confirmação antes de sobrescrever.</div>"),
+            W.HBox([self.tx_report_path, self.btn_report],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            self.out_report_status,
+        ])
+        card_report.add_class("satui-card")
+
+        # --- card: MLflow -----------------------------------------------------
+        self.tx_mlflow_exp = W.Text(
+            value="", placeholder="vazio = experimento ativo da sessão",
+            description="experimento:", style={"description_width": "initial"},
+            layout=W.Layout(width="480px"))
+        self.tx_mlflow_run = W.Text(
+            value=base, description="nome do run:",
+            style={"description_width": "initial"}, layout=W.Layout(width="330px"))
+        self.btn_mlflow = W.Button(
+            description="Registrar no MLflow", icon="database", button_style="primary",
+            layout=W.Layout(width="auto", min_width="210px"),
+            tooltip="Cria um run com a especificação, as métricas, o diagnóstico, a projeção "
+                    "e o backtest disponíveis — mais o relatório em abas como artefato.")
+        self.btn_mlflow.on_click(self._on_mlflow)
+        self.out_mlflow_status = W.HTML()
+        self.out_mlflow_info = W.HTML()
+        card_mlflow = W.VBox([
+            W.HTML("<div class='satui-h'>Registrar o run no MLflow</div>"),
+            W.HTML("<div class='satui-legend'>Versiona o estudo: parâmetros (modelo, "
+                   "<i>link</i>, especificação), métricas (AIC/BIC/R², erro fora da amostra, "
+                   "cobertura dos intervalos), a bateria de diagnóstico, o ranking da busca, "
+                   "as figuras e um relatório em abas — tudo como artefato do <i>run</i>. "
+                   "Deixe o <b>experimento</b> vazio para usar o ativo da sessão. Exige "
+                   "<code>mlflow</code> instalado e o <i>tracking</i> configurado (no "
+                   "Databricks já vem).</div>"),
+            W.HBox([self.tx_mlflow_exp, self.tx_mlflow_run],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            W.HBox([self.btn_mlflow], layout=W.Layout(align_items="center")),
+            self.out_mlflow_status, self.out_mlflow_info,
+        ])
+        card_mlflow.add_class("satui-card")
+
+        # --- card: StudyConfig em JSON ---------------------------------------
+        self.btn_cfg_show = W.Button(
+            description="Ver JSON da sessão", icon="code",
+            layout=W.Layout(width="auto", min_width="195px"),
+            tooltip="Serializa a configuração corrente (ui.to_config()) como JSON.")
+        self.btn_cfg_show.on_click(self._on_cfg_show)
+        self.tx_cfg_path = W.Text(
+            value=f"{base}.json", description="arquivo:",
+            style={"description_width": "initial"}, layout=W.Layout(width="380px"))
+        self.btn_cfg_save = W.Button(
+            description="Salvar", icon="save", button_style="success",
+            layout=W.Layout(width="auto", min_width="130px"),
+            tooltip="Grava o JSON da configuração no arquivo indicado.")
+        self.btn_cfg_save.on_click(self._on_cfg_save)
+        self.btn_cfg_load = W.Button(
+            description="Carregar", icon="upload",
+            layout=W.Layout(width="auto", min_width="140px"),
+            tooltip="Lê o arquivo e repõe TODOS os controles da interface.")
+        self.btn_cfg_load.on_click(self._on_cfg_load)
+        self.btn_cfg_apply = W.Button(
+            description="Aplicar o JSON abaixo", icon="check",
+            layout=W.Layout(width="auto", min_width="205px"),
+            tooltip="Aplica na interface o JSON editado/colado na caixa (sem passar por "
+                    "arquivo).")
+        self.btn_cfg_apply.on_click(self._on_cfg_apply)
+        self.out_cfg_status = W.HTML()
+        self.ta_config_json = W.Textarea(
+            placeholder="o JSON da configuração aparece aqui — edite e clique em Aplicar, ou "
+                        "salve em arquivo para versionar junto com a projeção",
+            layout=W.Layout(width="99%", height="230px"))
+        card_config = W.VBox([
+            W.HTML("<div class='satui-h'>Configuração do estudo (JSON) — reprodutibilidade"
+                   "</div>"),
+            W.HTML("<div class='satui-help'><div class='ttl'>Por que salvar isto</div>"
+                   "A projeção só é reproduzível se a <b>configuração que a gerou</b> viajar "
+                   "junto: candidatas, sinais esperados, defasagens, ordens AR, critério, "
+                   "teto de VIF, horizonte, variável de estresse e pesos dos cenários. Este "
+                   "JSON é exatamente a <code>StudyConfig</code> — o mesmo objeto que o "
+                   "pipeline declarativo (<code>run_study</code>) consome fora do notebook. "
+                   "<b>Carregar</b> repõe todos os controles da interface; reajuste depois "
+                   "para reproduzir o resultado.</div>"),
+            W.HBox([self.btn_cfg_show, self.btn_cfg_apply],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            W.HBox([self.tx_cfg_path, self.btn_cfg_save, self.btn_cfg_load],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            self.out_cfg_status, self.ta_config_json,
+        ])
+        card_config.add_class("satui-card")
+
+        # --- card: tabelas em CSV ---------------------------------------------
+        self.dd_exp_tabela = W.Dropdown(
+            options=[(rot, ch) for ch, rot in self._TABELAS_EXPORT], value="projecao",
+            description="tabela:", style={"description_width": "initial"},
+            layout=W.Layout(width="430px"))
+        self.dd_exp_fmt = W.Dropdown(
+            options=[("CSV — ponto decimal, vírgula", "csv"),
+                     ("CSV — vírgula decimal, ponto e vírgula", "csv_br"),
+                     ("TSV — colar no Excel", "tsv")],
+            value="csv", description="formato:", style={"description_width": "initial"},
+            layout=W.Layout(width="330px"))
+        self.btn_exp_mostrar = W.Button(
+            description="Mostrar para copiar", icon="clipboard",
+            layout=W.Layout(width="auto", min_width="200px"),
+            tooltip="Escreve a tabela na caixa abaixo (Ctrl+A, Ctrl+C).")
+        self.btn_exp_mostrar.on_click(self._on_exp_mostrar)
+        self.tx_exp_path = W.Text(
+            value=f"{base}_projecao.csv", description="arquivo:",
+            style={"description_width": "initial"}, layout=W.Layout(width="380px"))
+        self.btn_exp_salvar = W.Button(
+            description="Salvar CSV", icon="download", button_style="primary",
+            layout=W.Layout(width="auto", min_width="165px"),
+            tooltip="Grava a tabela escolhida no arquivo indicado.")
+        self.btn_exp_salvar.on_click(self._on_exp_salvar)
+        self.out_exp_tab_status = W.HTML()
+        self.ta_export_tabela = W.Textarea(
+            placeholder="a tabela escolhida aparece aqui — selecione tudo (Ctrl+A) e copie "
+                        "(Ctrl+C)",
+            layout=W.Layout(width="99%", height="200px"))
+        self.dd_exp_tabela.observe(self._on_exp_tabela_change, names="value")
+        card_tabelas = W.VBox([
+            W.HTML("<div class='satui-h'>Tabelas do estudo em CSV</div>"),
+            W.HTML("<div class='satui-legend'>As mesmas tabelas que estão nas abas, prontas "
+                   "para o processo seguinte: a <b>projeção</b> em formato longo (uma linha "
+                   "por cenário e período, com banda e a curva ponderada), o <b>ranking</b> "
+                   "da busca com o motivo de cada descarte, a <b>bateria de diagnóstico</b>, "
+                   "a <b>cobertura</b> dos intervalos e os <b>coeficientes</b>. Use o "
+                   "formato de vírgula decimal para abrir direto no Excel em pt-BR.</div>"),
+            W.HBox([self.dd_exp_tabela, self.dd_exp_fmt, self.btn_exp_mostrar],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            W.HBox([self.tx_exp_path, self.btn_exp_salvar],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            self.out_exp_tab_status, self.ta_export_tabela,
+        ])
+        card_tabelas.add_class("satui-card")
+
+        self._render_export_estado()
+        return (card_estado, card_report, card_mlflow, card_config, card_tabelas)
+
+    # ------------------------------------------------------------------ estado
+    def _nome_arquivo(self) -> str:
+        """Nome do estudo em forma segura para arquivo (sem acento nem espaço)."""
+        tx = getattr(self, "tx_nome", None)
+        bruto = _sem_acento(tx.value if tx is not None else self.study_name)
+        return re.sub(r"[^a-z0-9_.-]+", "_", bruto).strip("_") or "estudo"
+
+    def _estado_blocos(self) -> list:
+        """Blocos do placar "o que está pronto" (mesmo desenho do diagnóstico)."""
+        def _b(bloco, nivel, veredito, detalhe):
+            return {"bloco": bloco, "nivel": nivel, "veredito": veredito,
+                    "detalhe": detalhe, "falhas": 0, "n": 0}
+
+        blocos = []
+        if self.series is None:
+            blocos.append(_b("Série", "bad", "sem dados",
+                             "carregue a série na aba Série"))
+        else:
+            blocos.append(_b("Série", "ok", f"{len(self.series)} períodos",
+                             f"{self._param_label()} · {len(self._macro_cols())} variável(is) "
+                             "macro"))
+        if self.fit_ is None:
+            blocos.append(_b("Modelo vigente", "warn", "nenhum ajuste",
+                             "ajuste na aba Especificação ou adote uma especificação na "
+                             "aba Seleção"))
+        elif self._dirty_since_fit:
+            blocos.append(_b("Modelo vigente", "warn", "desatualizado",
+                             "a especificação mudou depois do ajuste — reajuste antes de "
+                             "exportar"))
+        else:
+            spec = (self.selected_spec_.describe() if self.selected_spec_ is not None
+                    else (self.fit_.spec.describe() if self.fit_.spec else "—"))
+            blocos.append(_b("Modelo vigente", "ok", self.fit_.model_name, spec))
+        if self.search_ is None:
+            blocos.append(_b("Busca", "na", "não rodada",
+                             "o relatório e o run saem sem o ranking"))
+        else:
+            rk = self.search_.ranking
+            n = int((rk["status"] == "qualificado").sum()) if len(rk) else 0
+            blocos.append(_b("Busca", "ok" if n else "warn", f"{n} qualificada(s)",
+                             f"{len(rk)} linha(s) no ranking"))
+        if self.diagnostics_ is None:
+            blocos.append(_b("Diagnóstico", "na", "não rodado",
+                             "rode a bateria na aba Diagnóstico"))
+        else:
+            ruins = [x["bloco"] for x in (self.diag_blocks_ or []) if x["nivel"] == "bad"]
+            blocos.append(_b("Diagnóstico", "bad" if ruins else "ok",
+                             f"{len(ruins)} reprovado(s)" if ruins else "sem reprovações",
+                             ", ".join(ruins) if ruins else
+                             f"{len(self.diagnostics_)} teste(s) na bateria"))
+        if self.projection_ is None:
+            blocos.append(_b("Projeção", "warn", "não projetada",
+                             "monte os cenários e projete na aba Cenários & Projeção"))
+        else:
+            nivel = int(round((1 - self.projection_.alpha) * 100))
+            blocos.append(_b("Projeção", "ok",
+                             f"{len(self.projection_.paths)} cenário(s)",
+                             f"{self.projection_.horizon} períodos · leque {nivel}%"))
+        if self.backtest_ is None:
+            blocos.append(_b("Backtest", "na", "não rodado",
+                             "a cobertura dos intervalos é o que a validação pergunta"))
+        else:
+            cov = self.coverage_
+            det = f"{int(self.backtest_.get('n_windows', 0))} janela(s)"
+            if cov is not None and len(cov):
+                tot = cov[cov["passo"] == "todos"]
+                if len(tot):
+                    det += (f" · cobertura {float(tot['cobertura'].iloc[0]):.0%} de "
+                            f"{float(tot['nominal'].iloc[0]):.0%}")
+            blocos.append(_b("Backtest", "ok", "rodado", det))
+        return blocos
+
+    def _render_export_estado(self):
+        """Repinta o placar do estado (chamado ao abrir a aba e após cada ação)."""
+        if getattr(self, "out_exp_estado", None) is None:
+            return
+        self.out_exp_estado.value = self._placar_html(self._estado_blocos())
+
+    # ------------------------------------------------------------------ arquivos
+    @staticmethod
+    def _existe(caminho: str) -> bool:
+        import os
+
+        return bool(caminho) and os.path.exists(caminho)
+
+    def _grava_com_confirmacao(self, btn, status, caminho, acao):
+        """Executa ``acao`` — pedindo **confirmação em dois cliques** quando o arquivo
+        já existe (:meth:`_confirm_twice`, o padrão de sobrescrita da casa)."""
+        if not self._existe(caminho):
+            acao()
+            return
+        if not getattr(btn, "_cc_armed", 0.0):
+            status.value = (
+                f"<div class='satui-notice'>O arquivo <code>{caminho}</code> <b>já "
+                "existe</b>. Clique de novo (<i>Confirmar?</i>) para sobrescrever.</div>")
+        self._confirm_twice(btn, acao)
+
+    # ------------------------------------------------------------------ relatório
+    def _on_report(self, b):
+        if self.fit_ is None:
+            self.out_report_status.value = (
+                "<div class='satui-notice'>Nenhum <b>modelo vigente</b>: ajuste na aba "
+                "<b>Especificação</b> ou adote uma especificação na aba <b>Seleção</b> "
+                "antes de gerar o relatório.</div>")
+            return
+        caminho = str(self.tx_report_path.value or "").strip()
+        if not caminho:
+            self.out_report_status.value = (
+                "<div class='satui-notice'>Informe o <b>arquivo</b> de destino "
+                "(por exemplo <code>relatorio_estudo.html</code>).</div>")
+            return
+        self._grava_com_confirmacao(self.btn_report, self.out_report_status, caminho,
+                                    lambda: self._salva_report(caminho))
+
+    def _salva_report(self, caminho):
+        import os
+
+        with self._busy(self.btn_report, status=self.out_report_status,
+                        msg="gerando o relatório…"):
+            try:
+                html = None
+                # o estudo completo já produziu o HTML deste mesmo ajuste: reaproveita
+                if (self.study_ is not None and self.study_.report_html
+                        and self.study_.fit is self.fit_):
+                    html = self.study_.report_html
+                if html is None:
+                    html = _E.report.model_report(
+                        self.fit_, self.series, self.projection_,
+                        title=f"Estudo: {self.tx_nome.value or self.study_name}")
+                _E.report.save_report(html, caminho)
+            except Exception as exc:  # noqa: BLE001
+                self.out_report_status.value = (
+                    f"<div class='satui-notice'>Não foi possível gerar o relatório: "
+                    f"{exc}</div>")
+                self._log(f"[relatório] ERRO: {type(exc).__name__}: {exc}")
+                return
+        self.report_path_ = caminho
+        kb = f"{os.path.getsize(caminho) / 1024.0:,.0f}".replace(",", ".")
+        com_proj = "com" if self.projection_ is not None else "sem"
+        self.out_report_status.value = (
+            "<div class='satui-legend' style='color:var(--ok-ink)'>✓ Relatório gravado em "
+            f"<code>{caminho}</code> ({kb} KB) — {com_proj} o gráfico da projeção.</div>")
+        self._log(f"[relatório] gravado em {caminho} ({kb} KB).")
+        self._render_export_estado()
+
+    # ------------------------------------------------------------------ MLflow
+    def _on_mlflow(self, b):
+        if self.fit_ is None:
+            self.out_mlflow_status.value = (
+                "<div class='satui-notice'>Nenhum <b>modelo vigente</b>: ajuste (ou adote "
+                "uma especificação) antes de registrar o run.</div>")
+            return
+        with self._busy(self.btn_mlflow, status=self.out_mlflow_status,
+                        msg="registrando no MLflow…"):
+            try:
+                import mlflow  # noqa: F401
+            except ImportError:
+                self.out_mlflow_status.value = (
+                    "<div class='satui-notice'><b>MLflow não está instalado</b> neste "
+                    "ambiente (<code>pip install mlflow</code>). O relatório HTML e o JSON "
+                    "da configuração acima não dependem dele.</div>")
+                self._log("[mlflow] pacote ausente — registro não realizado.")
+                return
+            params = {"criterio": self.dd_criterion.value,
+                      "horizonte": int(self.sl_horizon.value),
+                      "vif_max": float(self.fl_vif_max.value),
+                      "candidatas": ",".join(self.candidates()) or "(nenhuma)"}
+            tags = {"parametro": self._param_label(),
+                    "segmento": (self.series.segment if self.series is not None else "") or "—",
+                    "estudo": str(self.tx_nome.value or self.study_name)}
+            try:
+                rid = _E.tracking.log_satellite_run(
+                    self.fit_, series=self.series, projection=self.projection_,
+                    search=self.search_, backtest=self.backtest_, params=params, tags=tags,
+                    experiment=(str(self.tx_mlflow_exp.value).strip() or None),
+                    run_name=(str(self.tx_mlflow_run.value).strip()
+                              or str(self.tx_nome.value or self.study_name)))
+            except Exception as exc:  # noqa: BLE001
+                self.out_mlflow_status.value = (
+                    f"<div class='satui-notice'>Não foi possível registrar "
+                    f"({type(exc).__name__}): {str(exc)[:300]}<br>Confira se o "
+                    "<b>tracking</b> está configurado (variável <code>MLFLOW_TRACKING_URI</code>"
+                    ", ou rode dentro do Databricks) e se você tem permissão de escrita no "
+                    "experimento informado.</div>")
+                self._log(f"[mlflow] ERRO: {type(exc).__name__}: {exc}")
+                return
+        self.mlflow_run_id_ = rid
+        levou = [("ajuste e diagnóstico", True),
+                 ("ranking da busca", self.search_ is not None),
+                 ("projeção por cenário", self.projection_ is not None),
+                 ("cobertura do backtest", self.backtest_ is not None)]
+        itens = "".join(
+            f"<li>{'✓' if ok else '—'} {rot}{'' if ok else ' (não havia no estado)'}</li>"
+            for rot, ok in levou)
+        self.out_mlflow_status.value = (
+            "<div class='satui-legend' style='color:var(--ok-ink)'>✓ Run registrado — "
+            f"<code>run_id = {rid}</code> (também em <code>ui.mlflow_run_id_</code>).</div>")
+        self.out_mlflow_info.value = (
+            f"<div class='satui-help'><div class='ttl'>O que foi para o run</div>"
+            f"<ul>{itens}</ul>O artefato <code>report.html</code> traz tudo em abas.</div>")
+        self._log(f"[mlflow] run_id = {rid}")
+        self._render_export_estado()
+
+    # ------------------------------------------------------------------ StudyConfig
+    def _config_json(self) -> str:
+        """O JSON (indentado) da :class:`StudyConfig` corrente."""
+        import json
+
+        return json.dumps(self.to_config().to_dict(), indent=2, ensure_ascii=False)
+
+    def _on_cfg_show(self, b):
+        try:
+            texto = self._config_json()
+        except ValueError as exc:
+            self.out_cfg_status.value = f"<div class='satui-notice'>{exc}</div>"
+            return
+        self.ta_config_json.value = texto
+        self.out_cfg_status.value = (
+            "<div class='satui-legend' style='color:var(--ok-ink)'>✓ Configuração corrente "
+            "serializada — o mesmo objeto está em <code>ui.to_config()</code>.</div>")
+
+    def _on_cfg_save(self, b):
+        caminho = str(self.tx_cfg_path.value or "").strip()
+        if not caminho:
+            self.out_cfg_status.value = (
+                "<div class='satui-notice'>Informe o <b>arquivo</b> de destino "
+                "(por exemplo <code>estudo.json</code>).</div>")
+            return
+        self._grava_com_confirmacao(self.btn_cfg_save, self.out_cfg_status, caminho,
+                                    lambda: self._salva_config(caminho))
+
+    def _salva_config(self, caminho):
+        with self._busy(self.btn_cfg_save, status=self.out_cfg_status,
+                        msg="gravando a configuração…"):
+            try:
+                texto = self._config_json()
+                with open(caminho, "w", encoding="utf-8") as fh:
+                    fh.write(texto)
+            except Exception as exc:  # noqa: BLE001
+                self.out_cfg_status.value = (
+                    f"<div class='satui-notice'>Não foi possível gravar: {exc}</div>")
+                self._log(f"[config] ERRO ao gravar: {type(exc).__name__}: {exc}")
+                return
+        self.ta_config_json.value = texto
+        self.out_cfg_status.value = (
+            "<div class='satui-legend' style='color:var(--ok-ink)'>✓ Configuração gravada em "
+            f"<code>{caminho}</code> — versione este arquivo junto com a projeção.</div>")
+        self._log(f"[config] configuração gravada em {caminho}.")
+
+    def _on_cfg_load(self, b):
+        import json
+
+        caminho = str(self.tx_cfg_path.value or "").strip()
+        if not caminho:
+            self.out_cfg_status.value = (
+                "<div class='satui-notice'>Informe o <b>arquivo</b> a carregar.</div>")
+            return
+        with self._busy(self.btn_cfg_load, status=self.out_cfg_status,
+                        msg="lendo a configuração…"):
+            try:
+                with open(caminho, "r", encoding="utf-8") as fh:
+                    dados = json.load(fh)
+                self.ta_config_json.value = json.dumps(dados, indent=2, ensure_ascii=False)
+                self.from_config(dados)
+            except FileNotFoundError:
+                self.out_cfg_status.value = (
+                    f"<div class='satui-notice'>Arquivo não encontrado: "
+                    f"<code>{caminho}</code>.</div>")
+                return
+            except Exception as exc:  # noqa: BLE001
+                self.out_cfg_status.value = (
+                    f"<div class='satui-notice'>Não foi possível carregar: {exc}</div>")
+                self._log(f"[config] ERRO ao carregar: {type(exc).__name__}: {exc}")
+                return
+        self.out_cfg_status.value = (
+            "<div class='satui-legend' style='color:var(--ok-ink)'>✓ Configuração de "
+            f"<code>{caminho}</code> aplicada à interface — <b>reajuste</b> (ou rode o "
+            "estudo completo) para reproduzir o resultado.</div>")
+
+    def _on_cfg_apply(self, b):
+        import json
+
+        texto = str(self.ta_config_json.value or "").strip()
+        if not texto:
+            self.out_cfg_status.value = (
+                "<div class='satui-notice'>A caixa está vazia — clique em <i>Ver JSON da "
+                "sessão</i> ou cole a configuração antes.</div>")
+            return
+        try:
+            dados = json.loads(texto)
+            if not isinstance(dados, dict):
+                raise TypeError("o JSON precisa ser um objeto com os campos da StudyConfig.")
+            self.from_config(dados)
+        except Exception as exc:  # noqa: BLE001
+            self.out_cfg_status.value = (
+                f"<div class='satui-notice'>JSON inválido: {exc}</div>")
+            return
+        self.out_cfg_status.value = (
+            "<div class='satui-legend' style='color:var(--ok-ink)'>✓ JSON aplicado à "
+            "interface — <b>reajuste</b> para que o modelo vigente corresponda a ele.</div>")
+
+    # ------------------------------------------------------------------ tabelas
+    def _tabela_export(self, chave):
+        """``(DataFrame, sufixo do arquivo)`` da tabela escolhida.
+
+        Levanta :class:`RuntimeError` com a mensagem que a tela deve mostrar quando
+        a etapa correspondente ainda não rodou.
+        """
+        if chave == "projecao":
+            return self.projection_frame(), "projecao"
+        if chave == "ranking":
+            if self.search_ is None:
+                raise RuntimeError("nada a exportar: rode a busca na aba Seleção antes.")
+            rk = self.search_.ranking.copy()
+            if len(rk) and "status" in rk.columns:
+                situ, motivo = zip(*[self._motivo_descarte(s) for s in rk["status"]])
+                rk["situacao"], rk["motivo"] = list(situ), list(motivo)
+            return rk, "ranking"
+        if chave == "diagnostico":
+            if self.diagnostics_ is None:
+                raise RuntimeError("nada a exportar: rode a bateria na aba Diagnóstico antes.")
+            return self.diagnostics_.copy(), "diagnostico"
+        if chave == "cobertura":
+            if self.coverage_ is None or not len(self.coverage_):
+                raise RuntimeError("nada a exportar: rode o backtest na aba Backtest antes.")
+            return self.coverage_.copy(), "cobertura"
+        if chave == "coeficientes":
+            if self.fit_ is None:
+                raise RuntimeError("nada a exportar: não há modelo vigente ajustado.")
+            return (self.fit_.coef_frame().reset_index().rename(columns={"index": "termo"}),
+                    "coeficientes")
+        if chave == "estacionariedade":
+            if self.stationarity_ is None:
+                raise RuntimeError("nada a exportar: rode o relatório de estacionariedade na "
+                                   "aba Série antes.")
+            return self.stationarity_.copy(), "estacionariedade"
+        raise RuntimeError(f"tabela desconhecida: {chave!r}.")
+
+    def _on_exp_tabela_change(self, change):
+        """Acompanha o nome sugerido de arquivo com a tabela escolhida."""
+        with suppress(Exception):
+            self.tx_exp_path.value = f"{self._nome_arquivo()}_{change['new']}.csv"
+
+    def _exp_sep(self):
+        """``(separador, decimal)`` do formato escolhido na aba Exportar."""
+        return {"tsv": ("\t", "."), "csv": (",", "."),
+                "csv_br": (";", ",")}[self.dd_exp_fmt.value]
+
+    def _on_exp_mostrar(self, b):
+        try:
+            df, _sufixo = self._tabela_export(self.dd_exp_tabela.value)
+        except RuntimeError as exc:
+            self.out_exp_tab_status.value = f"<div class='satui-notice'>{exc}</div>"
+            self.ta_export_tabela.value = ""
+            return
+        sep, dec = self._exp_sep()
+        self.ta_export_tabela.value = df.to_csv(sep=sep, index=False, decimal=dec)
+        self.out_exp_tab_status.value = (
+            "<div class='satui-legend' style='color:var(--ok-ink)'>✓ "
+            f"{len(df)} linha(s) × {df.shape[1]} coluna(s) prontas — selecione tudo (Ctrl+A) "
+            "e copie (Ctrl+C).</div>")
+
+    def _on_exp_salvar(self, b):
+        caminho = str(self.tx_exp_path.value or "").strip()
+        if not caminho:
+            self.out_exp_tab_status.value = (
+                "<div class='satui-notice'>Informe o <b>arquivo</b> de destino.</div>")
+            return
+        try:
+            df, _sufixo = self._tabela_export(self.dd_exp_tabela.value)
+        except RuntimeError as exc:
+            self.out_exp_tab_status.value = f"<div class='satui-notice'>{exc}</div>"
+            return
+        self._grava_com_confirmacao(self.btn_exp_salvar, self.out_exp_tab_status, caminho,
+                                    lambda: self._salva_tabela(df, caminho))
+
+    def _salva_tabela(self, df, caminho):
+        sep, dec = self._exp_sep()
+        with self._busy(self.btn_exp_salvar, status=self.out_exp_tab_status,
+                        msg="gravando a tabela…"):
+            try:
+                df.to_csv(caminho, sep=sep, index=False, decimal=dec, encoding="utf-8-sig")
+            except Exception as exc:  # noqa: BLE001
+                self.out_exp_tab_status.value = (
+                    f"<div class='satui-notice'>Não foi possível gravar: {exc}</div>")
+                self._log(f"[exportar] ERRO ao gravar {caminho}: {type(exc).__name__}: {exc}")
+                return
+        self.out_exp_tab_status.value = (
+            "<div class='satui-legend' style='color:var(--ok-ink)'>✓ "
+            f"{len(df)} linha(s) gravadas em <code>{caminho}</code>.</div>")
+        self._log(f"[exportar] {len(df)} linha(s) gravadas em {caminho}.")
+
+    # ------------------------------------------------------------------ invalidação
+    def _clear_exportar_outputs(self):
+        """Zera a aba Exportar (dados novos ⇒ relatório e run antigos sem sentido)."""
+        for w in ("out_report_status", "out_mlflow_status", "out_mlflow_info",
+                  "out_cfg_status", "out_exp_tab_status"):
+            widget = getattr(self, w, None)
+            if widget is not None:
+                widget.value = ""
+        for w in ("ta_config_json", "ta_export_tabela"):
+            widget = getattr(self, w, None)
+            if widget is not None:
+                widget.value = ""
+        self._study_steps = []
+        self._study_secs = None
+        for w in ("out_study_status", "out_study_progress", "out_study_timer",
+                  "out_study_resumo"):
+            widget = getattr(self, w, None)
+            if widget is not None:
+                widget.value = ""
+        self._invalidate_exportar("os dados mudaram")
+
+    def _invalidate_exportar(self, motivo="o modelo vigente mudou"):
+        """Invalida o que a aba Exportar produziu para o modelo **anterior**.
+
+        O relatório e o run já gravados continuam no disco/MLflow — o que cai aqui
+        é a garantia de que eles descrevem o modelo vigente.
+        """
+        tinha = (self.study_ is not None or self.report_path_ is not None
+                 or self.mlflow_run_id_ is not None)
+        self.study_ = None
+        self.report_path_ = self.mlflow_run_id_ = None
+        if getattr(self, "out_exp_notice", None) is None:   # ainda em construção
+            return
+        for w in ("out_report_status", "out_mlflow_status", "out_mlflow_info",
+                  "out_exp_tab_status"):
+            getattr(self, w).value = ""
+        self.ta_export_tabela.value = ""
+        self.out_exp_notice.value = (
+            f"<div class='satui-notice'>⚠️ <b>Saídas desatualizadas</b> — {motivo}. O "
+            "relatório e o registro anteriores descrevem o modelo <b>ANTERIOR</b>: gere-os "
+            "de novo depois de reajustar.</div>") if tinha else ""
+        self._render_export_estado()
+
+    # ==================================================================
     # Configuração declarativa (StudyConfig)
     # ==================================================================
     def _stress_var(self) -> str:
@@ -4537,21 +5398,30 @@ class SatelliteUI:
             self.panel.remove_class("dark")
             self.cb_dark.description = "🌙 Tema escuro"
 
-    def _on_keepalive(self, change):
-        from ...utils.keepalive import ClusterKeepAlive
+    def _desliga_keepalive(self, msg):
+        """Volta o botão para "desligado" **sem** reentrar no observer, e explica."""
+        self._suspend_ka = True
+        self.cb_keepalive.value = False
+        self._suspend_ka = False
+        self.cb_keepalive.description = "☕ Manter cluster ativo"
+        self._log(f"[keepalive] {msg}")
 
+    def _on_keepalive(self, change):
         if change["new"]:
-            if self._keepalive is None:
-                self._keepalive = ClusterKeepAlive(interval_seconds=120)
-            if not self._keepalive.has_spark():
-                self._suspend_ka = True
-                self.cb_keepalive.value = False
-                self._suspend_ka = False
-                self.cb_keepalive.description = "☕ Manter cluster ativo"
-                self._log("[keepalive] nenhuma SparkSession ativa — recurso só funciona "
-                          "no Databricks (ou com Spark local).")
+            try:
+                from ...utils.keepalive import ClusterKeepAlive
+
+                if self._keepalive is None:
+                    self._keepalive = ClusterKeepAlive(interval_seconds=120)
+                if not self._keepalive.has_spark():
+                    self._desliga_keepalive("nenhuma SparkSession ativa — recurso só "
+                                            "funciona no Databricks (ou com Spark local).")
+                    return
+                self._keepalive.start()
+            except Exception as exc:  # noqa: BLE001 - conveniência, nunca fatal
+                self._desliga_keepalive(f"não foi possível ligar ({type(exc).__name__}): "
+                                        f"{exc}")
                 return
-            self._keepalive.start()
             self.cb_keepalive.description = "☕ Cluster ativo ✓"
             self._log("[keepalive] ligado — job Spark mínimo a cada 2 min mantém o cluster "
                       "ativo durante buscas longas. Desligue ao terminar.")
@@ -4559,7 +5429,8 @@ class SatelliteUI:
             if self._suspend_ka:
                 return
             if self._keepalive is not None:
-                self._keepalive.stop()
+                with suppress(Exception):
+                    self._keepalive.stop()
             self.cb_keepalive.description = "☕ Manter cluster ativo"
             self._log("[keepalive] desligado.")
 
@@ -4610,6 +5481,8 @@ class SatelliteUI:
                 pills.append(self._pill(
                     f"cobertura: {cob:.0%} de {nom:.0%}",
                     "green" if ok is True else ("yellow" if ok is None else "red")))
+        if self.study_ is not None:
+            pills.append(self._pill(f"estudo completo: {self.study_.config.name}", "green"))
         self.bar.value = "<div class='satui-bar'>" + "".join(pills) + "</div>"
 
     # ------------------------------------------------------------------ display
