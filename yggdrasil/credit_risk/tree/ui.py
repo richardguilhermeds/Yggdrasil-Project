@@ -820,6 +820,19 @@ class TreeSegmenterUI:
         self.ck_estab_pct = W.Checkbox(value=False, indent=False, description="métricas em %")
         self.ck_estab_pct.tooltip = ("Mostra TODAS as métricas do gráfico em % (útil p/ alvo "
                                      "em [0,1], ex.: LGD). Desmarcado = padrão por métrica.")
+        # zoom do eixo Y dos gráficos de PSI (por safra e por amostra) — o eixo cheio
+        # (0–100%) comprime as barras quando o PSI é pequeno
+        self._psi_zoom = False
+        _psi_zlay = W.Layout(width="80px")
+        self.btn_psi_zoom = W.Button(description="🔍 Zoom PSI", layout=W.Layout(width="104px"),
+                                     tooltip="Aperta o eixo Y dos gráficos de PSI (por safra e "
+                                             "por amostra) aos dados")
+        self.btn_psi_reset = W.Button(description="Reset", layout=W.Layout(width="72px"),
+                                      tooltip="Volta o eixo dos PSI ao cheio (0–100%) e limpa mín/máx")
+        self.tx_psi_ymin = W.Text(value="", placeholder="mín %", layout=_psi_zlay,
+                                  tooltip="Limite inferior do eixo Y dos PSI, em % (ex.: 0)")
+        self.tx_psi_ymax = W.Text(value="", placeholder="máx %", layout=_psi_zlay,
+                                  tooltip="Limite superior do eixo Y dos PSI, em % (ex.: 5)")
         self.btn_varprofile = mk("Perfil das variáveis por safra", "info",
                                  "Grade por variável da árvore: % de missing (0–100%) e dispersão "
                                  "p5·média·p95 por safra (categóricas: área empilhada com legenda)",
@@ -976,9 +989,13 @@ class TreeSegmenterUI:
         self.tx_sib_ymax.observe(lambda c: self._render_sib_charts(), names="value")
         self.ck_sib_pct.observe(lambda c: self._render_sib_charts(), names="value")
         self.btn_estab.on_click(self._on_estab)
-        # re-renderiza o gráfico de métricas ao mudar seletor/% (só se já foi gerado)
-        self.sm_estab_metrics.observe(lambda c: self._render_estab_metrics(), names="value")
-        self.ck_estab_pct.observe(lambda c: self._render_estab_metrics(), names="value")
+        # re-renderiza métricas + PSI ao mudar seletor/% ou zoom (só se já foi gerado)
+        self.sm_estab_metrics.observe(lambda c: self._render_estab_charts(), names="value")
+        self.ck_estab_pct.observe(lambda c: self._render_estab_charts(), names="value")
+        self.btn_psi_zoom.on_click(self._on_psi_zoom)
+        self.btn_psi_reset.on_click(self._on_psi_reset)
+        self.tx_psi_ymin.observe(lambda c: self._render_estab_charts(), names="value")
+        self.tx_psi_ymax.observe(lambda c: self._render_estab_charts(), names="value")
         self.btn_varprofile.on_click(self._on_varprofile)
         # amostras p/ a análise por safra das folhas-irmãs (fixas — não mudam
         # com a árvore): "todas" + a referência (DES) + as demais com alvo.
@@ -1465,6 +1482,9 @@ class TreeSegmenterUI:
                    "das folhas entre amostras</b> (representatividade de cada folha em cada "
                    "amostra).</div>"),
             W.HBox([self.btn_estab, self.sm_estab_metrics, self.ck_estab_pct],
+                   layout=W.Layout(align_items="center", flex_flow="row wrap")),
+            # zoom do eixo Y dos gráficos de PSI (por safra e por amostra)
+            W.HBox([self.btn_psi_zoom, self.btn_psi_reset, self.tx_psi_ymin, self.tx_psi_ymax],
                    layout=W.Layout(align_items="center", flex_flow="row wrap")),
             self.out_estab,
             self.out_conc,
@@ -4282,46 +4302,40 @@ class TreeSegmenterUI:
             self.out_conc.value = ""
             self._estab_ready = False
             return
-        # PSI ao longo do tempo (não muda com o seletor de métricas) — renderiza 1×
-        tcol = (self.tx_sib_time.value or "").strip() or self.date_col
-        if not tcol or tcol not in self.df.columns:
-            self._estab_psi_html = ("<div class='treeui-legend'>Informe a coluna de tempo (no "
-                                    "card de folhas-irmãs, acima) para o PSI ao longo do tempo.</div>")
-        else:
-            try:
-                self._estab_psi_html = self._fig_html(
-                    self.seg.plot_psi_by_safra(time_col=tcol, figsize=(8.4, 4.6)),
-                    full_width=True, tight=False)
-            except Exception as e:
-                self._estab_psi_html = self._estab_err("PSI no tempo", e)
+        self._estab_tcol = (self.tx_sib_time.value or "").strip() or self.date_col
+        # concentração das folhas: NÃO muda com métricas/zoom — renderiza 1× e guarda
+        try:
+            self._estab_conc_html = self._fig_html(
+                self.seg.plot_leaf_concentration(figsize=(9.0, 4.0)), full_width=True)
+        except Exception as e:
+            self._estab_conc_html = self._estab_err("concentração", e)
         self._estab_ready = True
-        self._render_estab_metrics()          # gráfico de métricas (respeita seletor/%) + PSI
-        # PSI da segmentação ENTRE amostras (barh, mesmo estilo da concentração) —
-        # resumo de estabilidade acima do detalhe por folha
-        try:
-            h_psi_s = self._fig_html(self.seg.plot_psi_by_sample(figsize=(9.0, 2.9)),
-                                     full_width=True)
-        except Exception as e:
-            h_psi_s = self._estab_err("PSI entre amostras", e)
-        try:
-            h_c = self._fig_html(self.seg.plot_leaf_concentration(figsize=(9.0, 4.0)),
-                                 full_width=True)
-        except Exception as e:
-            h_c = self._estab_err("concentração", e)
-        self.out_conc.value = (
-            "<div class='treeui-h' style='margin-top:10px'>PSI da segmentação entre "
-            f"amostras</div>{h_psi_s}"
-            "<div class='treeui-h' style='margin-top:12px'>Concentração das folhas "
-            f"entre amostras</div>{h_c}")
+        self._render_estab_charts()
 
-    def _render_estab_metrics(self):
-        """(Re)renderiza o gráfico 'principais métricas por amostra' com as métricas
-        escolhidas e o toggle de %, ao lado do PSI já gerado. Ignora se a aba de
-        estabilidade ainda não foi aberta."""
+    def _read_psi_ylim(self):
+        """(lo, hi) do zoom manual dos gráficos de PSI, em fração — os campos são
+        lidos em % (÷100). ``None`` se ambos vazios."""
+        def _p(tx):
+            s = (tx.value or "").strip().replace("%", "").replace(",", ".")
+            if not s:
+                return None
+            try:
+                return float(s) / 100.0
+            except ValueError:
+                return None
+        lo, hi = _p(self.tx_psi_ymin), _p(self.tx_psi_ymax)
+        return None if (lo is None and hi is None) else (lo, hi)
+
+    def _render_estab_charts(self):
+        """(Re)renderiza métricas (seletor/%) + PSI da segmentação por safra e por
+        amostra (respeitando o zoom do eixo Y), reusando a concentração já gerada.
+        Ignora se a aba de estabilidade ainda não foi aberta."""
         if not getattr(self, "_estab_ready", False):
             return
         metrics = list(self.sm_estab_metrics.value) or None    # nada marcado ⇒ todas
         pct = True if self.ck_estab_pct.value else None         # marcado ⇒ tudo em %
+        ylim = self._read_psi_ylim(); zoom = self._psi_zoom
+        tcol = getattr(self, "_estab_tcol", None)
         try:
             # MESMA altura de figura (4.6) + tight=False → alinha com o PSI nas
             # colunas proporcionais 66:84 (larguras 6.6 : 8.4).
@@ -4330,13 +4344,48 @@ class TreeSegmenterUI:
                 full_width=True, tight=False)
         except Exception as e:
             h_m = self._estab_err("métricas", e)
+        if not tcol or tcol not in self.df.columns:
+            h_psi_safra = ("<div class='treeui-legend'>Informe a coluna de tempo (no card de "
+                           "folhas-irmãs, acima) para o PSI ao longo do tempo.</div>")
+        else:
+            try:
+                h_psi_safra = self._fig_html(
+                    self.seg.plot_psi_by_safra(time_col=tcol, figsize=(8.4, 4.6),
+                                               ylim=ylim, auto_zoom=zoom),
+                    full_width=True, tight=False)
+            except Exception as e:
+                h_psi_safra = self._estab_err("PSI no tempo", e)
         self.out_estab.value = (
             "<div style='display:flex;gap:10px;align-items:flex-start'>"
             f"<div style='flex:66 1 0;min-width:0'>"
             f"<div class='treeui-h'>Principais métricas por amostra</div>{h_m}</div>"
             f"<div style='flex:84 1 0;min-width:0'>"
             "<div class='treeui-h'>PSI da segmentação ao longo do tempo</div>"
-            f"{getattr(self, '_estab_psi_html', '')}</div></div>")
+            f"{h_psi_safra}</div></div>")
+        # PSI da segmentação ENTRE amostras (barras verticais) + concentração guardada
+        try:
+            h_psi_s = self._fig_html(
+                self.seg.plot_psi_by_sample(figsize=(7.6, 3.6), ylim=ylim, auto_zoom=zoom),
+                full_width=True)
+        except Exception as e:
+            h_psi_s = self._estab_err("PSI entre amostras", e)
+        self.out_conc.value = (
+            "<div class='treeui-h' style='margin-top:10px'>PSI da segmentação entre "
+            f"amostras</div>{h_psi_s}"
+            "<div class='treeui-h' style='margin-top:12px'>Concentração das folhas "
+            f"entre amostras</div>{getattr(self, '_estab_conc_html', '')}")
+
+    def _on_psi_zoom(self, _):
+        self._psi_zoom = True
+        self.btn_psi_zoom.button_style = "info"
+        self._render_estab_charts()
+
+    def _on_psi_reset(self, _):
+        self._psi_zoom = False
+        self.btn_psi_zoom.button_style = ""
+        self.tx_psi_ymin.value = ""
+        self.tx_psi_ymax.value = ""
+        self._render_estab_charts()
 
     def _on_varprofile(self, _):
         # grade por variável da árvore: % missing por safra (0–100%) · dispersão p5·média·p95

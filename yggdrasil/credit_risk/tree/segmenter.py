@@ -4192,10 +4192,11 @@ class TreeSegmenter:
                 .sort_values("safra").reset_index(drop=True))
 
     def plot_psi_by_safra(self, time_col=None, figsize=(8.4, 4.0), dpi=150,
-                          save_path=None, ax=None):
+                          save_path=None, ax=None, ylim=None, auto_zoom=False):
         """Gráfico de **barras** do PSI da segmentação ao longo do tempo (vs DES).
         Verde &lt; 0.10 (estável) · amarelo &lt; 0.25 (atenção) · vermelho ≥ 0.25
-        (instável); linhas-guia em 0.10 e 0.25."""
+        (instável); linhas-guia em 0.10 e 0.25. ``auto_zoom``/``ylim`` dão zoom no
+        eixo Y."""
         import matplotlib.pyplot as plt  # noqa: F401
         ps = self.psi_by_safra(time_col)
         fig, ax = self._new_ax(figsize, dpi, ax)
@@ -4207,14 +4208,15 @@ class TreeSegmenter:
         cor = ["#1aa64b" if p < 0.10 else "#caa000" if p < 0.25 else "#d6453e"
                for p in ps["psi"]]
         ax.bar(x, ps["psi"], color=cor, width=0.78, edgecolor="#33424f", linewidth=0.4)
-        for xi, p in zip(x, ps["psi"]):
-            if p < 0.98:      # barra (e o rótulo acima) que passaria de 100% fica sem texto
-                ax.annotate(f"{p * 100:.1f}%", (xi, p), textcoords="offset points", xytext=(0, 3),
-                            ha="center", fontsize=7, color="#33424f")
         ax.set_xticks(x)
         ax.set_xticklabels(_fmt_safras(ps["safra"]), rotation=45, ha="right", fontsize=8)
         ax.set_xlabel("safra")
         self._psi_pct_axis(ax)                                    # PSI em %, eixo 0–100% + linhas
+        self._apply_zoom_ylim(ax, ps["psi"].to_numpy(dtype="float64"), ylim, auto_zoom)
+        for xi, p in zip(x, ps["psi"]):
+            if p < ax.get_ylim()[1] * 0.98:   # rótulo só se não passar do topo do eixo
+                ax.annotate(f"{p * 100:.1f}%", (xi, p), textcoords="offset points", xytext=(0, 3),
+                            ha="center", fontsize=7, color="#33424f")
         self._draw_sample_dividers(ax, list(ps["safra"]), time_col)
         ax.set_title(f"PSI da segmentação por safra vs {self.ref_sample}",
                      fontsize=11, fontweight="bold", color="#15324a")
@@ -4365,7 +4367,9 @@ class TreeSegmenter:
         linhas não são rotuladas (a cor indica) — o texto batia nas barras."""
         from matplotlib.ticker import PercentFormatter
         ax.set_ylim(0, 1.0)
-        ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
+        # decimals=None: casas automáticas conforme a faixa — no eixo cheio mostra
+        # "0%..100%", e com zoom (faixa estreita) mostra "1.8%", "2.0%", … sem colapsar
+        ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=None))
         ax.set_ylabel("PSI (%)")
         ax.axhline(0.10, color="#caa000", lw=1.1, ls="--", alpha=0.85)   # atenção
         ax.axhline(0.25, color="#d6453e", lw=1.1, ls="--", alpha=0.85)   # crítico
@@ -4608,14 +4612,14 @@ class TreeSegmenter:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         return fig
 
-    def plot_psi_by_sample(self, figsize=(8.4, 3.0), dpi=150, save_path=None, ax=None):
-        """PSI da SEGMENTAÇÃO por AMOSTRA vs DES (barras HORIZONTAIS): estabilidade da
-        distribuição das folhas ENTRE amostras (OOT, ESTABILIDADE, …) — mesmo estilo
-        da concentração das folhas. Eixo X em %, verde &lt;10% · amarelo &lt;25% ·
-        vermelho ≥25%; linhas-guia de atenção (10%) e crítico (25%). Complementa o
-        PSI por safra (ao longo do tempo)."""
+    def plot_psi_by_sample(self, figsize=(7.0, 3.8), dpi=150, save_path=None, ax=None,
+                           ylim=None, auto_zoom=False):
+        """PSI da SEGMENTAÇÃO por AMOSTRA vs DES (barras verticais): estabilidade da
+        distribuição das folhas ENTRE amostras (OOT, ESTABILIDADE, …). Amostra no
+        eixo X, PSI (%) no eixo Y — verde &lt;10% · amarelo &lt;25% · vermelho ≥25%;
+        linhas-guia de atenção (10%) e crítico (25%). ``auto_zoom``/``ylim`` dão zoom
+        no eixo Y. Complementa o PSI por safra (ao longo do tempo)."""
         import matplotlib.pyplot as plt  # noqa: F401
-        from matplotlib.ticker import PercentFormatter
         fig, ax = self._new_ax(figsize, dpi, ax)
         if self.sample_col is None:
             ax.text(0.5, 0.5, "requer coluna de amostra", ha="center", va="center",
@@ -4631,24 +4635,21 @@ class TreeSegmenter:
             ax.axis("off"); fig.tight_layout(); return fig
         amostras = ps["amostra"].tolist()
         vals = ps["psi"].to_numpy(dtype="float64")
-        y = np.arange(len(amostras))
+        x = np.arange(len(amostras))
         cor = ["#1aa64b" if p < 0.10 else "#caa000" if p < 0.25 else "#d6453e" for p in vals]
-        ax.barh(y, vals, color=cor, edgecolor="#33424f", linewidth=0.4, height=0.62)
-        ax.set_yticks(y); ax.set_yticklabels([str(a) for a in amostras], fontsize=9)
-        ax.invert_yaxis()
-        ax.set_xlabel("PSI (%)"); ax.set_ylabel("amostra")
-        ax.xaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
-        top = max(float(np.nanmax(vals)) * 1.20 if vals.size else 0.0, 0.28)
-        ax.set_xlim(0, top)
-        ax.axvline(0.10, color="#caa000", lw=1.1, ls="--", alpha=0.85)   # atenção
-        ax.axvline(0.25, color="#d6453e", lw=1.1, ls="--", alpha=0.85)   # crítico
-        for yi, p in zip(y, vals):
-            if p < top * 0.98:                  # rótulo à direita (fora barras longas)
-                ax.text(p, yi, f" {p * 100:.1f}%", ha="left", va="center",
-                        fontsize=8, fontweight="bold", color="black")
+        ax.bar(x, vals, color=cor, width=0.6, edgecolor="#33424f", linewidth=0.4)
+        ax.set_xticks(x); ax.set_xticklabels([str(a) for a in amostras], fontsize=9)
+        ax.set_xlim(-0.7, len(amostras) - 0.3); ax.set_xlabel("amostra")
+        self._psi_pct_axis(ax)                             # eixo Y em %, 0–100% + linhas
+        zoomed = self._apply_zoom_ylim(ax, vals, ylim, auto_zoom)  # zoom sobrescreve
+        for xi, p in zip(x, vals):
+            if p < ax.get_ylim()[1] * 0.98:                # não passar do topo do eixo
+                ax.annotate(f"{p * 100:.1f}%", (xi, p), textcoords="offset points",
+                            xytext=(0, 3), ha="center", fontsize=8, fontweight="bold",
+                            color="#33424f")
         ax.set_title(f"PSI da segmentação por amostra vs {self.ref_sample}", fontsize=11,
                      fontweight="bold", color="#15324a", loc="left")
-        ax.grid(axis="x", alpha=0.15)
+        ax.grid(axis="y", alpha=0.15)
         fig.tight_layout()
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
