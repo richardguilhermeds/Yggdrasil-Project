@@ -1,7 +1,7 @@
 """Métricas de discriminação/calibração para modelos de classificação.
 
 Inclui KS, AUC, Gini, Acurácia, F1, precisão, recall, Brier e log loss.
-KS e Gini seguem o padrão usado em risco de crédito (CMN 4.966, Art. 18).
+KS e Gini seguem o padrão de mercado em risco de crédito.
 """
 
 from __future__ import annotations

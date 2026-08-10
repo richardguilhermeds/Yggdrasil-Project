@@ -51,6 +51,7 @@ from .._common import (
     classifica_iv as _classifica_iv,
     count_inversions as _count_inversions,
     fit_optbinning_splits as _fit_optbinning_splits,
+    psi_from_shares as _psi_from_shares,
 )
 
 TASK_TYPES = ("classification", "regression")
@@ -1290,15 +1291,12 @@ class TreeSegmenter:
             if amostra == self.ref_sample:
                 continue
             cur_pct = fracs(amostra)
-            psi_col, repr_col = [], []
-            for sid in leaf_ids:
-                frac = cur_pct[sid]
-                p_ref = max(ref_pct[sid], eps)
-                p_cur = max(frac, eps)
-                psi_col.append(round((p_cur - p_ref) * np.log(p_cur / p_ref), 4))
-                repr_col.append(round(100 * frac, 1))
-            out[f"psi_{amostra}"] = psi_col
-            out[f"repr_{amostra}_%"] = repr_col
+            _, contribs = _psi_from_shares([ref_pct[sid] for sid in leaf_ids],
+                                           [cur_pct[sid] for sid in leaf_ids],
+                                           eps, return_contrib=True)
+            out[f"psi_{amostra}"] = [round(c, 4) for c in contribs]
+            out[f"repr_{amostra}_%"] = [round(100 * cur_pct[sid], 1)
+                                        for sid in leaf_ids]
         return out
 
     # alvo de uma folha, restrito à amostra de referência quando houver
@@ -1768,12 +1766,10 @@ class TreeSegmenter:
         for amostra, pct in dist.items():
             if amostra == self.ref_sample:
                 continue
-            psi_total = 0.0
-            for sid in leaf_ids:
-                p_ref = max(ref[sid], eps)
-                p_cur = max(pct[sid], eps)
-                contrib = (p_cur - p_ref) * np.log(p_cur / p_ref)
-                psi_total += contrib
+            psi_total, contribs = _psi_from_shares(
+                [ref[sid] for sid in leaf_ids], [pct[sid] for sid in leaf_ids],
+                eps, return_contrib=True)
+            for sid, contrib in zip(leaf_ids, contribs):
                 self._psi_detalhe.append({
                     "amostra": amostra, "segmento": sid,
                     f"%_{self.ref_sample}": round(100 * ref[sid], 2),
@@ -1839,13 +1835,12 @@ class TreeSegmenter:
             for a in nonref:
                 a_mask = self._sample_masks[a]
                 n_a = int(a_mask.sum())
-                csi_tot = 0.0
-                for b, p_ref, bm in zip(bins, ref_pct, bin_masks):
-                    p_cur = (int((bm & a_mask).sum()) / n_a
-                             if n_a else 0.0)
-                    pr, pc = max(p_ref, eps), max(p_cur, eps)
-                    contrib = (pc - pr) * np.log(pc / pr)
-                    csi_tot += contrib
+                cur_pct = [(int((bm & a_mask).sum()) / n_a if n_a else 0.0)
+                           for bm in bin_masks]
+                csi_tot, contribs = _psi_from_shares(ref_pct, cur_pct, eps,
+                                                     return_contrib=True)
+                for b, p_ref, p_cur, contrib in zip(bins, ref_pct, cur_pct,
+                                                    contribs):
                     self._csi_detalhe.append({
                         "variavel": feat, "amostra": a,
                         "faixa": self._bin_label(feat, b),
@@ -3169,11 +3164,9 @@ class TreeSegmenter:
             n_g = len(g)
             if n_g == 0:
                 continue
-            psi = 0.0
-            for b, p_ref in zip(bins, ref_pct):
-                p_cur = max(int(self._mask_in(g, feature, b).sum()) / n_g, eps)
-                psi += (p_cur - p_ref) * np.log(p_cur / p_ref)
-            rows.append({"safra": str(per), "n": n_g, "psi": round(float(psi), 4),
+            cur_pct = [int(self._mask_in(g, feature, b).sum()) / n_g for b in bins]
+            psi = _psi_from_shares(ref_pct, cur_pct, eps)
+            rows.append({"safra": str(per), "n": n_g, "psi": round(psi, 4),
                          "classificacao": _classifica_psi(psi)})
         return pd.DataFrame(rows).sort_values("safra").reset_index(drop=True)
 
@@ -4182,10 +4175,9 @@ class TreeSegmenter:
             if pd.isna(per):
                 continue
             n_g = int(len(g)); vc = g.value_counts()
-            psi = 0.0
-            for sid in leaf_ids:
-                p_cur = max((float(vc.get(sid, 0.0)) / n_g) if n_g else 0.0, eps)
-                psi += (p_cur - ref_pct[sid]) * np.log(p_cur / ref_pct[sid])
+            cur_pct = [(float(vc.get(sid, 0.0)) / n_g) if n_g else 0.0
+                       for sid in leaf_ids]
+            psi = _psi_from_shares([ref_pct[sid] for sid in leaf_ids], cur_pct, eps)
             rows.append({"safra": str(per), "n": n_g, "psi": round(psi, 4),
                          "classificacao": _classifica_psi(psi)})
         return (pd.DataFrame(rows, columns=["safra", "n", "psi", "classificacao"])
@@ -4807,18 +4799,17 @@ class TreeSegmenter:
                                 iv += (yi.size / n_base) * abs(float(yi.mean()) - mean_global)
                         # PSI sobre os MESMOS bins (DES × amostra, na folha)
                         if psi_on and n_ref_leaf > 0:
+                            ref_shares = [int(self._mask_in(ref_frame, feat, b).sum())
+                                          / n_ref_leaf for b in bins]
                             for a in nonref:
                                 n_a = len(cur_frames[a])
                                 if n_a == 0:
                                     continue
-                                psi = 0.0
-                                for b in bins:
-                                    p_ref = max(int(self._mask_in(ref_frame, feat, b).sum())
-                                                / n_ref_leaf, 1e-6)
-                                    p_cur = max(int(self._mask_in(cur_frames[a], feat, b).sum())
-                                                / n_a, 1e-6)
-                                    psi += (p_cur - p_ref) * np.log(p_cur / p_ref)
-                                psi_vals[a] = round(float(psi), 4)
+                                cur_shares = [int(self._mask_in(cur_frames[a], feat,
+                                                                b).sum()) / n_a
+                                              for b in bins]
+                                psi_vals[a] = round(_psi_from_shares(
+                                    ref_shares, cur_shares, eps=1e-6), 4)
                 except Exception:
                     iv = np.nan
             row = {

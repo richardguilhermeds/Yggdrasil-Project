@@ -7,7 +7,7 @@ O PSI mede o deslocamento de uma distribuição em relação a uma referência
 * estabilidade da distribuição de cada **rating** (categórico) ao longo do tempo;
 * PSI agregado DES -> OOT, logado como métrica no MLflow.
 
-Faixas de interpretação (CMN 4.966 / prática de mercado):
+Faixas de interpretação (padrão de mercado em risco de crédito):
 ``< 0.10`` estável, ``0.10–0.25`` atenção, ``> 0.25`` instável.
 """
 

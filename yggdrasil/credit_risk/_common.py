@@ -4,10 +4,10 @@ yggdrasil.credit_risk._common
 Helpers PUROS compartilhados entre os segmentadores de **árvore**
 (:mod:`yggdrasil.credit_risk.tree`) e de **modelo**
 (:mod:`yggdrasil.credit_risk.model`). Fonte ÚNICA para formatação de faixas,
-classificação de PSI/IV, contagem de inversões e o ajuste do optbinning — antes
-essas funções eram copiadas nos dois módulos e já haviam começado a **divergir**
-(guard de NaN no PSI, default de ``task_type`` no IV). Centralizá-las aqui elimina
-o drift.
+a fórmula do PSI (:func:`psi_from_shares`), classificação de PSI/IV, contagem de
+inversões e o ajuste do optbinning — antes essas funções eram copiadas nos dois
+módulos e já haviam começado a **divergir** (guard de NaN no PSI, default de
+``task_type`` no IV). Centralizá-las aqui elimina o drift.
 """
 from __future__ import annotations
 
@@ -15,6 +15,10 @@ import warnings
 
 import numpy as np
 import pandas as pd
+
+# limiares únicos do repositório (< PSI_STABLE estável · < PSI_SIGNIFICANT
+# atenção · acima instável) — import leve: monitoring.psi só usa numpy/pandas.
+from ..monitoring.psi import PSI_SIGNIFICANT, PSI_STABLE
 
 
 def fmt(x: float) -> str:
@@ -26,15 +30,50 @@ def fmt(x: float) -> str:
     return f"{x:.4g}"
 
 
+def psi_from_shares(p_ref, p_cur, eps: float = 1e-6, return_contrib: bool = False):
+    """PSI entre duas distribuições de participação por faixa (*shares*).
+
+    Fórmula clássica, por faixa: ``(p_cur − p_ref)·ln(p_cur/p_ref)``, com cada
+    participação truncada por baixo em ``eps`` (faixa vazia não gera ``log(0)``
+    nem divisão por zero — mesmo tratamento de todos os segmentadores). A soma é
+    **sequencial na ordem das faixas**, preservando o comportamento numérico dos
+    laços originais que esta função substitui.
+
+    Parameters
+    ----------
+    p_ref, p_cur:
+        Sequências de participações (mesmo comprimento e mesma ordem de faixa).
+        Valores já truncados em ``eps`` na origem não mudam (``max`` idempotente).
+    eps:
+        Piso de cada participação antes do log.
+    return_contrib:
+        Se ``True``, devolve ``(psi_total, contribuicoes)`` com a parcela de cada
+        faixa — para tabelas de decomposição (``psi_detalhe``/``csi_detalhe``).
+
+    Returns
+    -------
+    float | tuple[float, list[float]]
+    """
+    contribs = []
+    for r, c in zip(p_ref, p_cur):
+        r = max(float(r), eps)
+        c = max(float(c), eps)
+        contribs.append(float((c - r) * np.log(c / r)))
+    total = float(sum(contribs))
+    return (total, contribs) if return_contrib else total
+
+
 def classifica_psi(psi) -> str:
     """Classificação usual de PSI para monitoramento de estabilidade.
 
+    Limiares únicos do repositório (:mod:`yggdrasil.monitoring.psi`):
+    ``< PSI_STABLE`` estável · ``< PSI_SIGNIFICANT`` atenção · acima, instável.
     ``None``/``NaN`` → ``"—"`` (um PSI indefinido não é 'instável')."""
     if psi is None or (isinstance(psi, float) and np.isnan(psi)):
         return "—"
-    if psi < 0.10:
+    if psi < PSI_STABLE:
         return "estável"
-    if psi < 0.25:
+    if psi < PSI_SIGNIFICANT:
         return "atenção"
     return "instável"
 

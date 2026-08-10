@@ -46,6 +46,7 @@ from .._common import (
     classifica_iv as _classifica_iv,
     count_inversions as _count_inversions,
     fit_optbinning_splits as _fit_optbinning_splits,
+    psi_from_shares as _psi_from_shares,
 )
 
 try:  # optbinning é dependência core, mas degradamos com elegância.
@@ -1046,11 +1047,9 @@ class ModelSegmenter:
             n_cur = len(cur)
             if n_cur == 0:
                 continue
-            psi = 0.0
-            for b, p_ref in zip(bins, ref_pct):
-                p_cur = max(int(self._mask_in(cur, feature, b).sum()) / n_cur, eps)
-                psi += (p_cur - p_ref) * np.log(p_cur / p_ref)
-            out[a] = round(float(psi), 4)
+            cur_pct = [int(self._mask_in(cur, feature, b).sum()) / n_cur
+                       for b in bins]
+            out[a] = round(_psi_from_shares(ref_pct, cur_pct, eps), 4)
         return out
 
     def variable_summary(self, feature, sample=None) -> dict:
@@ -1181,11 +1180,9 @@ class ModelSegmenter:
             n_g = len(g)
             if n_g == 0:
                 continue
-            psi = 0.0
-            for b, p_ref in zip(bins, ref_pct):
-                p_cur = max(int(self._mask_in(g, feature, b).sum()) / n_g, eps)
-                psi += (p_cur - p_ref) * np.log(p_cur / p_ref)
-            rows.append({"safra": str(per), "n": n_g, "psi": round(float(psi), 4),
+            cur_pct = [int(self._mask_in(g, feature, b).sum()) / n_g for b in bins]
+            psi = _psi_from_shares(ref_pct, cur_pct, eps)
+            rows.append({"safra": str(per), "n": n_g, "psi": round(psi, 4),
                          "classificacao": _classifica_psi(psi)})
         return pd.DataFrame(rows).sort_values("safra").reset_index(drop=True)
 
@@ -4679,9 +4676,9 @@ class ModelSegmenter:
         for a, pct in dist.items():
             if a == self.ref_sample:
                 continue
-            psi = sum((max(pct[l], eps) - max(ref[l], eps)) *
-                      np.log(max(pct[l], eps) / max(ref[l], eps)) for l in labels)
-            rows.append({"amostra": a, "psi": round(float(psi), 4),
+            psi = _psi_from_shares([ref[l] for l in labels],
+                                   [pct[l] for l in labels], eps)
+            rows.append({"amostra": a, "psi": round(psi, 4),
                          "classificacao": _classifica_psi(psi)})
         return pd.DataFrame(rows).sort_values("psi", ascending=False).reset_index(drop=True)
 
@@ -4712,16 +4709,17 @@ class ModelSegmenter:
 
         ref_dist = _dist(ref)
         comp_dists = {a: _dist(a) for a in comparison_samples}
-        rows, totais = [], {a: 0.0 for a in comparison_samples}
-        for l in labels:
+        ref_shares = [ref_dist[l] for l in labels]
+        decomp = {a: _psi_from_shares(ref_shares, [comp_dists[a][l] for l in labels],
+                                      eps, return_contrib=True)
+                  for a in comparison_samples}
+        rows = []
+        totais = {a: tot for a, (tot, _c) in decomp.items()}
+        for i, l in enumerate(labels):
             row = {"rating": l, f"%{ref}": round(100 * ref_dist[l], 2)}
             for a in comparison_samples:
-                pct_a = comp_dists[a][l]
-                contrib = ((max(pct_a, eps) - max(ref_dist[l], eps)) *
-                           np.log(max(pct_a, eps) / max(ref_dist[l], eps)))
-                totais[a] += contrib
-                row[f"%{a}"] = round(100 * pct_a, 2)
-                row[f"PSI {a}"] = round(float(contrib), 4)
+                row[f"%{a}"] = round(100 * comp_dists[a][l], 2)
+                row[f"PSI {a}"] = round(decomp[a][1][i], 4)
             rows.append(row)
         total = {"rating": "TOTAL", f"%{ref}": round(100 * sum(ref_dist.values()), 1)}
         for a in comparison_samples:
@@ -4760,12 +4758,9 @@ class ModelSegmenter:
             if n_g == 0:
                 continue
             vc = r_g.value_counts()
-            psi = 0.0
-            for l in labels:
-                p_cur = max(int(vc.get(l, 0)) / n_g, eps)
-                p_ref = ref_pct[l]
-                psi += (p_cur - p_ref) * np.log(p_cur / p_ref)
-            rows.append({"safra": str(per), "n": int(n_g), "psi": round(float(psi), 4),
+            psi = _psi_from_shares([ref_pct[l] for l in labels],
+                                   [int(vc.get(l, 0)) / n_g for l in labels], eps)
+            rows.append({"safra": str(per), "n": int(n_g), "psi": round(psi, 4),
                          "classificacao": _classifica_psi(psi)})
         return (pd.DataFrame(rows, columns=["safra", "n", "psi", "classificacao"])
                 .sort_values("safra").reset_index(drop=True))
