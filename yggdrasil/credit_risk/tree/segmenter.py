@@ -1041,6 +1041,205 @@ class TreeSegmenter:
         return self
 
     # ------------------------------------------------------------------
+    # MOVE_CUT: move o corte numérico entre a folha e a irmã adjacente à
+    #   DIREITA (mesma variável, mesmo pai) SEM recolher o pai: o `hi` da
+    #   folha e o `lo` da irmã passam a ser o novo corte. A irmã pode ser um
+    #   NÓ INTERNO (com sub-splits): cada descendente carrega a condição do
+    #   pai no caminho, então o novo limite é propagado às conditions de TODO
+    #   o subtree dela e as máscaras são recalculadas.
+    # ------------------------------------------------------------------
+    def _resolve_move_cut(self, sid: str, new_threshold):
+        """Valida o :meth:`move_cut` e localiza a irmã adjacente à direita.
+        Devolve ``(seg, sib_id, t, cond, cond_sib)``; levanta ``ValueError``
+        quando a folha não veio de split numérico, é a última faixa da variável
+        ou o novo corte está fora do intervalo válido — estritamente entre o
+        ``lo`` da folha e o ``hi`` da irmã (exclusivo nos dois extremos)."""
+        if sid not in self.segments:
+            raise ValueError(f"segmento '{sid}' não existe.")
+        seg = self.segments[sid]
+        if not seg["is_leaf"]:
+            raise ValueError(f"'{sid}' não é folha — selecione a folha à esquerda do corte.")
+        if not seg["conditions"] or seg["conditions"][-1]["kind"] != "num":
+            raise ValueError("mover corte só vale para folha originada de split numérico.")
+        cond = seg["conditions"][-1]
+        feat, hi = cond["feature"], cond["hi"]
+        if not np.isfinite(hi):
+            raise ValueError(
+                f"a folha é a última faixa de '{feat}' (sem corte à direita) — "
+                "selecione a folha à ESQUERDA do corte que quer mover.")
+        pai = seg["parent"]
+        sib_id = None
+        for c, s in self.segments.items():
+            if c == sid or s["parent"] != pai or not s["conditions"]:
+                continue
+            lc = s["conditions"][-1]
+            lo_c = lc.get("lo")
+            if lc["kind"] == "num" and lc["feature"] == feat and lo_c is not None \
+                    and (lo_c == hi or np.isclose(lo_c, hi, rtol=1e-12, atol=0.0)):
+                sib_id = c
+                break
+        if sib_id is None:
+            raise ValueError(
+                f"não há irmã adjacente à direita do corte {_fmt(hi)} em '{feat}'.")
+        cond_sib = self.segments[sib_id]["conditions"][-1]
+        try:
+            t = float(new_threshold)
+        except (TypeError, ValueError):
+            raise ValueError(f"novo corte inválido: {new_threshold!r}.") from None
+        if not np.isfinite(t):
+            raise ValueError(f"novo corte inválido: {new_threshold!r}.")
+        if not (cond["lo"] < t < cond_sib["hi"]):
+            raise ValueError(
+                f"novo corte fora do intervalo válido: {_fmt(t)} deve ficar entre "
+                f"{_fmt(cond['lo'])} e {_fmt(cond_sib['hi'])} (exclusivo).")
+        return seg, sib_id, t, cond, cond_sib
+
+    def movable_cut(self, sid: str) -> dict | None:
+        """Corte numérico MÓVEL da folha ``sid`` (o ``hi`` dela, compartilhado
+        com a irmã adjacente à direita) — ``None`` quando a folha não veio de
+        split numérico ou é a última faixa da variável. Devolve
+        ``{'feature','cut','lo','hi_sib','sibling'}``: o corte vigente, os
+        limites do intervalo VÁLIDO (exclusivo) de :meth:`move_cut` e o sid da
+        irmã. Pronto para a UI preencher o campo editável."""
+        seg = self.segments.get(sid)
+        if seg is None or not seg["is_leaf"] or not seg["conditions"]:
+            return None
+        cond = seg["conditions"][-1]
+        if cond["kind"] != "num" or not np.isfinite(cond["hi"]):
+            return None
+        try:
+            _, sib_id, _, cond, cond_sib = self._resolve_move_cut(sid, cond["hi"])
+        except ValueError:
+            return None
+        return {"feature": cond["feature"], "cut": float(cond["hi"]),
+                "lo": float(cond["lo"]), "hi_sib": float(cond_sib["hi"]),
+                "sibling": sib_id}
+
+    def preview_move_cut(self, sid: str, new_threshold) -> pd.DataFrame:
+        """PREVIEW do :meth:`move_cut` (não altera estado): ``n`` e alvo médio —
+        total e por amostra, quando houver — dos DOIS lados do corte proposto:
+        a folha (esquerda) e a irmã à direita (o subtree inteiro dela). Levanta
+        ``ValueError`` se o corte for inválido (ver :meth:`_resolve_move_cut`)."""
+        seg, sib_id, t, cond, cond_sib = self._resolve_move_cut(sid, new_threshold)
+        linhas = []
+        for nome, base, c_new in (
+                ("folha (esq.)", seg, {**cond, "hi": t}),
+                ("irmã (dir.)", self.segments[sib_id], {**cond_sib, "lo": t})):
+            conds = base["conditions"][:-1] + [c_new]
+            sub = self.df[_match_conditions_pandas(self.df, conds)]
+            s_t = sub[self.target]
+            row = {"lado": f"{nome} {self._bin_label_short(c_new)}",
+                   "n": int(len(sub)),
+                   "valor_medio": round(float(s_t.mean()), 4) if len(s_t) else np.nan}
+            if self.sample_col is not None:
+                for amostra in self.df[self.sample_col].dropna().unique():
+                    s_am = sub.loc[sub[self.sample_col] == amostra, self.target]
+                    row[f"n_{amostra}"] = int(len(s_am))
+                    row[f"valor_{amostra}"] = (round(float(s_am.mean()), 4)
+                                               if len(s_am) else np.nan)
+            linhas.append(row)
+        return pd.DataFrame(linhas)
+
+    def move_cut(self, sid: str, new_threshold, verbose: bool = True):
+        """Move o corte numérico entre a folha ``sid`` e a irmã adjacente à
+        direita (mesma variável, mesmo pai) sem recolher o pai: o ``hi`` da
+        folha e o ``lo`` da irmã passam a ser ``new_threshold`` — que deve
+        ficar ESTRITAMENTE entre o ``lo`` da folha e o ``hi`` da irmã.
+
+        A irmã pode ser nó INTERNO: o novo limite é propagado às conditions de
+        TODO o subtree dela (cada descendente carrega a condição do pai no
+        caminho) e as máscaras são recalculadas. A operação é ATÔMICA: se algum
+        segmento afetado ficar sem linhas com o novo corte, nada muda e um
+        ``ValueError`` é levantado. Rótulos/ids afetados são reescritos e os
+        apelidos de negócio acompanham a renomeação."""
+        seg, sib_id, t, cond, cond_sib = self._resolve_move_cut(sid, new_threshold)
+        if t == cond["hi"]:
+            if verbose:
+                print(f"[move_cut] novo corte igual ao vigente ({_fmt(t)}) — nada a mudar")
+            return self
+        feat, hi_antigo = cond["feature"], cond["hi"]
+        pai = seg["parent"]
+        pai_seg = self.segments[pai]
+
+        # novas condições dos dois lados (preservam o include_na de cada um)
+        cond_leaf_new = dict(cond); cond_leaf_new["hi"] = t
+        cond_sib_new = dict(cond_sib); cond_sib_new["lo"] = t
+
+        # rótulo novo preserva o sufixo de faltantes quando o lado já o exibia
+        def _label(c, old_label):
+            suf = " + faltante" if old_label.endswith(" + faltante") else ""
+            return self._bin_label(feat, c) + suf
+
+        # ---- STAGING (nada é mutado ainda): folha + subtree da irmã ----------
+        # subtree em ordem pai-antes-do-filho (BFS) p/ reconstruir path/conditions
+        # de cada descendente a partir do pai já reconstruído
+        subtree, frente = [sib_id], [sib_id]
+        while frente:
+            atual = frente.pop(0)
+            filhos = [c for c, s in self.segments.items() if s["parent"] == atual]
+            subtree.extend(filhos)
+            frente.extend(filhos)
+
+        novos: dict[str, dict] = {}
+        id_map: dict[str, str] = {}
+        new_leaf_label = _label(cond_leaf_new, seg["label"])
+        new_leaf_id = new_leaf_label if pai == "root" else f"{pai} | {new_leaf_label}"
+        conds_leaf = pai_seg["conditions"] + [cond_leaf_new]
+        novos[new_leaf_id] = {
+            "mask": self._mask_from_conds(self._conditions_json(conds_leaf), conds_leaf),
+            "label": new_leaf_label, "depth": seg["depth"], "is_leaf": True,
+            "path": pai_seg["path"] + [new_leaf_label], "parent": pai,
+            "conditions": conds_leaf,
+        }
+        id_map[sid] = new_leaf_id
+        for old in subtree:
+            s = self.segments[old]
+            if old == sib_id:
+                own_cond = cond_sib_new
+                label = _label(cond_sib_new, s["label"])
+                parent_new, parent_seg = pai, pai_seg
+            else:
+                own_cond = dict(s["conditions"][-1])   # cópia: quebra o compartilhamento
+                label = s["label"]
+                parent_new = id_map[s["parent"]]
+                parent_seg = novos[parent_new]
+            new_id = label if parent_new == "root" else f"{parent_new} | {label}"
+            conds = parent_seg["conditions"] + [own_cond]
+            novos[new_id] = {
+                "mask": self._mask_from_conds(self._conditions_json(conds), conds),
+                "label": label, "depth": s["depth"], "is_leaf": s["is_leaf"],
+                "path": parent_seg["path"] + [label], "parent": parent_new,
+                "conditions": conds,
+            }
+            id_map[old] = new_id
+
+        # atomicidade: nenhum segmento afetado pode ficar vazio com o novo corte
+        # (ex.: o corte cruzou um sub-split da irmã na MESMA variável)
+        vazios = [nid for nid, s in novos.items() if int(s["mask"].sum()) == 0]
+        if vazios:
+            raise ValueError(
+                f"novo corte {_fmt(t)} deixaria segmento(s) sem linhas: "
+                f"{vazios}. Recolha o sub-split da irmã ou escolha outro valor.")
+
+        # ---- COMMIT ----------------------------------------------------------
+        self._bump_version()      # estrutura vai mudar → invalida agregados memoizados
+        for old in [sid, *subtree]:
+            self.segments.pop(old, None)
+        self.segments.update(novos)
+        # apelidos de negócio acompanham a renomeação (a folha é conceitualmente
+        # a MESMA — só o limite mudou; sem isto o apelido viraria órfão)
+        for old, novo_id in id_map.items():
+            if old in self.leaf_names and old != novo_id:
+                self.leaf_names[novo_id] = self.leaf_names.pop(old)
+        if verbose:
+            n_desc = len(subtree) - 1
+            extra = (f" (+{n_desc} segmento(s) do subtree da irmã atualizado(s))"
+                     if n_desc else "")
+            print(f"[move_cut] corte de '{feat}' movido: {_fmt(hi_antigo)} → "
+                  f"{_fmt(t)}{extra}")
+        return self
+
+    # ------------------------------------------------------------------
     # MERGE_MISSING: junta o nó de FALTANTES (na) do mesmo split DENTRO de um
     #   nó POPULADO da variável. A regra do destino passa a ser "<bin> OU
     #   faltante" (condição com include_na=True). Selecione sempre o nó populado

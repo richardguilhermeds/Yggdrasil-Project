@@ -216,6 +216,43 @@ def test_ui_apelido_da_folha_com_undo(task):
         assert ui.tx_leaf_name.value == "Fatia premium"
 
 
+def test_ui_move_cut_sync_preview_efetiva_undo(task):
+    """Mover corte: o campo espelha o corte vigente da folha (extraído das
+    conditions lo/hi), o preview mostra os dois lados sem alterar a árvore, o
+    'Mover corte' efetiva com checkpoint e o desfazer restaura o corte anterior."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        # raiz selecionada: sem corte móvel → controles desabilitados
+        assert ui.btn_move_cut.disabled and ui.tx_move_cut.disabled
+        ui.dd_leaf.value = "root"
+        ui.dd_feature.value = "score"
+        ui.tg_mode.value = "Manual"
+        ui.tx_cuts.value = "0.8"
+        ui._on_preview(None); ui._on_split(None)
+        # folha à esquerda do corte (hi = 0.8): campo habilita e espelha o corte
+        sid = next(s for s, v in ui.seg.segments.items()
+                   if v["is_leaf"] and v["conditions"]
+                   and v["conditions"][-1].get("hi") == 0.8)
+        ui.dd_leaf.value = sid
+        assert not ui.btn_move_cut.disabled
+        assert ui.tx_move_cut.value == pytest.approx(0.8)
+        # preview: renderiza os dois lados e NÃO altera a árvore
+        ui.tx_move_cut.value = 0.9
+        ui._on_move_cut_preview(None)
+        assert "folha (esq.)" in ui.out_move_cut.value
+        assert sid in ui.seg.segments
+        ui._on_move_cut(None)                       # efetiva (com _checkpoint)
+    movida = next(v for v in ui.seg.segments.values()
+                  if v["is_leaf"] and v["conditions"]
+                  and v["conditions"][-1].get("hi") == 0.9)
+    assert int(movida["mask"].sum()) == int((ui.df["score"] <= 0.9).sum())
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_undo(None)                           # desfazer restaura o corte
+    assert any(v["is_leaf"] and v["conditions"]
+               and v["conditions"][-1].get("hi") == 0.8
+               for v in ui.seg.segments.values())
+
+
 def test_ui_merge_missing(task):
     ui = _build(task, com_na=True, n=5000, seed=7)
     with contextlib.redirect_stdout(io.StringIO()):

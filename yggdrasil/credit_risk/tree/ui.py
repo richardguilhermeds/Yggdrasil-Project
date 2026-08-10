@@ -36,6 +36,7 @@ except Exception as e:  # pragma: no cover
     raise ImportError("Este módulo requer ipywidgets e IPython (Jupyter).") from e
 
 from .segmenter import TreeSegmenter
+from .._common import fmt as _fmt      # formatação de limites (corte vigente na UI)
 
 
 def _esc(txt) -> str:
@@ -731,6 +732,20 @@ class TreeSegmenterUI:
         self.btn_merge_na = mk("Juntar missings", "warning",
                                "Junta o nó de faltantes/missings (NaN) deste split dentro da folha "
                                "populada selecionada — a regra vira 'bin OU missing'", "link")
+        # ---- mover corte numérico (hi da folha ↔ lo da irmã à direita) ----
+        self.lbl_move_cut = W.HTML()           # corte vigente + intervalo válido
+        self.tx_move_cut = W.FloatText(description="novo corte", layout=full,
+                                       style=dstyle)
+        self.tx_move_cut.tooltip = ("Novo valor do corte — estritamente entre o início "
+                                    "desta folha e o fim da irmã à direita")
+        self.btn_move_prev = mk("Preview corte", "info",
+                                f"Mostra n e {self._risk_label} por amostra dos dois lados "
+                                "do novo corte (não altera a árvore)", "eye")
+        self.btn_move_cut = mk("Mover corte", "warning",
+                               "Move o corte numérico p/ o valor digitado: ajusta o fim desta "
+                               "folha e o início da irmã à direita (propagado aos sub-splits "
+                               "da irmã), sem recolher o pai", "arrows-h")
+        self.out_move_cut = W.HTML()           # preview/erros do mover corte
         self.btn_suggest = mk("Sugerir split", "info",
                               "Recomenda a variável de maior IV para a folha selecionada", "lightbulb-o")
         self.btn_autofit = mk("Auto-fit (árvore)", "info",
@@ -1082,6 +1097,8 @@ class TreeSegmenterUI:
         self.btn_merge_l.on_click(lambda _: self._on_merge("left"))
         self.btn_merge_r.on_click(lambda _: self._on_merge("right"))
         self.btn_merge_na.on_click(self._on_merge_missing)
+        self.btn_move_prev.on_click(self._on_move_cut_preview)
+        self.btn_move_cut.on_click(self._on_move_cut)
         self.btn_suggest.on_click(self._on_suggest)
         self.btn_suggest3.on_click(self._on_suggest3)
         self.btn_importance.on_click(self._on_importance)
@@ -1355,7 +1372,8 @@ class TreeSegmenterUI:
         det_c2 = W.VBox([card_split], layout=W.Layout(width="44%"))
 
         for _b in (self.btn_lock, self.btn_unlock, self.btn_collapse,
-                   self.btn_merge_l, self.btn_merge_r, self.btn_merge_na):
+                   self.btn_merge_l, self.btn_merge_r, self.btn_merge_na,
+                   self.btn_move_prev, self.btn_move_cut):
             _b.layout.width = "100%"
             _b.layout.margin = "2px 0"
         card_actions = W.VBox([
@@ -1364,6 +1382,9 @@ class TreeSegmenterUI:
             self.btn_lock, self.btn_unlock, self.btn_collapse,
             W.HBox([self.btn_merge_l, self.btn_merge_r]),   # fundir ◀ / ▶ lado a lado
             self.btn_merge_na,
+            self.lbl_move_cut, self.tx_move_cut,
+            W.HBox([self.btn_move_prev, self.btn_move_cut]),  # preview / mover lado a lado
+            self.out_move_cut,
         ], layout=W.Layout(width="100%"))
         card_actions.add_class("treeui-card")
         card_autofit = W.VBox([
@@ -2933,6 +2954,7 @@ class TreeSegmenterUI:
         finally:
             self._suspend_leaf_obs = False
         self._sync_leaf_name_field()     # campo de apelido acompanha a folha em foco
+        self._sync_move_cut_field()      # corte vigente acompanha a folha em foco
 
         self._set_html(self.bar, "bar", self._status_html())
         self._set_html(self.out_tree, "tree", self._tree_html())
@@ -3289,6 +3311,80 @@ class TreeSegmenterUI:
         if novos and novos[0] in folhas:
             self.dd_leaf.value = novos[0]
         self._log_delta("juntar missings", antes)
+
+    # ------------------------------------------------------------------
+    # Mover corte numérico: hi da folha ↔ lo da irmã à direita (sem recolher
+    # o pai; a irmã pode ter sub-splits — o segmentador propaga ao subtree)
+    # ------------------------------------------------------------------
+    def _sync_move_cut_field(self):
+        """Espelha o corte numérico vigente da folha selecionada (o ``hi`` dela,
+        compartilhado com a irmã à direita) no campo 'novo corte' e habilita os
+        controles só quando há corte móvel — senão explica o porquê no rótulo."""
+        sid = self.dd_leaf.value
+        info = (self.seg.movable_cut(sid)
+                if sid is not None and sid in self.seg.segments else None)
+        self.out_move_cut.value = ""          # preview antigo não vale p/ outra folha
+        if info is None:
+            self.lbl_move_cut.value = (
+                "<div class='treeui-legend'>Mover corte: só para folha que termina "
+                "num corte numérico com irmã à direita (não é a última faixa).</div>")
+            self.tx_move_cut.disabled = True
+            self.btn_move_prev.disabled = True
+            self.btn_move_cut.disabled = True
+            return
+        rot = self.seg.feature_labels.get(info["feature"], info["feature"])
+        self.lbl_move_cut.value = (
+            f"<div class='treeui-legend'>Corte vigente em <b>{_esc(rot)}</b>: "
+            f"<b>{_fmt(info['cut'])}</b> · válido entre {_fmt(info['lo'])} e "
+            f"{_fmt(info['hi_sib'])} (exclusivo)</div>")
+        self.tx_move_cut.value = info["cut"]
+        self.tx_move_cut.disabled = False
+        self.btn_move_prev.disabled = False
+        self.btn_move_cut.disabled = False
+
+    def _on_move_cut_preview(self, _):
+        sid = self._selected_leaf()
+        if sid is None or sid not in self.seg.segments:
+            self._log("Selecione uma folha."); return
+        try:
+            tbl = self.seg.preview_move_cut(sid, self.tx_move_cut.value)
+        except Exception as e:
+            self.out_move_cut.value = ("<div style='font-size:12px;color:var(--bad-tx)'>"
+                                       f"{_esc(e)}</div>")
+            return
+        self.out_move_cut.value = self._df_html(tbl, center=True)
+        self._log(f"👁 preview do corte em {_fmt(float(self.tx_move_cut.value))} — "
+                  "confira os dois lados e clique em Mover corte para efetivar.")
+
+    def _on_move_cut(self, _):
+        sid = self._selected_leaf()
+        if sid is None or sid not in self.seg.segments:
+            self._log("Selecione uma folha."); return
+        before = set(self.seg.segments)
+        redo_bak = list(self._redo)
+        antes = self._delta_snapshot()
+        self._checkpoint()
+        try:
+            self.seg.move_cut(sid, self.tx_move_cut.value, verbose=False)
+        except Exception as e:
+            self._revert_checkpoint(redo_bak)
+            self._log(f"Erro ao mover o corte: {type(e).__name__}: {e}")
+            self.out_move_cut.value = ("<div style='font-size:12px;color:var(--bad-tx)'>"
+                                       f"{_esc(e)}</div>")
+            return
+        if set(self.seg.segments) == before:     # no-op: corte igual ao vigente
+            self._revert_checkpoint(redo_bak)
+            self._log("O novo corte é igual ao vigente — nada a mudar.")
+            return
+        self.locked &= set(self.seg.segments)
+        self._pending = None
+        novos = [i for i in self.seg.segments
+                 if i not in before and self.seg.segments[i]["is_leaf"]]
+        self._refresh()
+        folhas = [s for s, sg in self.seg.segments.items() if sg["is_leaf"]]
+        if novos and novos[0] in folhas:         # 1º novo = a folha à esq. do corte
+            self.dd_leaf.value = novos[0]
+        self._log_delta("mover corte", antes)
 
     def _on_suggest(self, _):
         sid = self._selected_leaf()
@@ -3866,6 +3962,7 @@ class TreeSegmenterUI:
         if self._suspend_leaf_obs:
             return
         self._sync_leaf_name_field()          # apelido da folha recém-selecionada
+        self._sync_move_cut_field()           # corte vigente da folha recém-selecionada
         # trocar a folha NÃO altera a estrutura: a árvore HTML é a mesma. O realce
         # é aplicado por CSS (data-leaf) → só atualizamos o <style> minúsculo, sem
         # remontar nem reenviar a árvore inteira pelo comm.

@@ -418,6 +418,91 @@ def test_merge_missing_numerico(task):
 
 
 # ----------------------------------------------------------------------
+# MOVE_CUT: mover corte numérico entre folhas-irmãs sem recolher o pai
+# ----------------------------------------------------------------------
+def _folha_num(seg, chave, valor):
+    """sid da folha cuja última condição numérica tem ``chave`` (lo/hi) == valor."""
+    return next(s for s, v in seg.segments.items()
+                if v["is_leaf"] and v["conditions"]
+                and v["conditions"][-1]["kind"] == "num"
+                and v["conditions"][-1].get(chave) == valor)
+
+
+def test_move_cut_irma_folha(seg):
+    seg.grow("score", splits=[0.8])
+    sid = _folha_num(seg, "hi", 0.8)
+    seg.set_leaf_name(sid, "Fatia esquerda")     # apelido deve acompanhar a renomeação
+    info = seg.movable_cut(sid)
+    assert info["feature"] == "score" and info["cut"] == 0.8
+    # preview: n dos dois lados bate com o recorte manual e NÃO altera o estado
+    prev = seg.preview_move_cut(sid, 0.9)
+    assert list(prev["n"]) == [int((seg.df["score"] <= 0.9).sum()),
+                               int((seg.df["score"] > 0.9).sum())]
+    assert "valor_DES" in prev.columns and _folha_num(seg, "hi", 0.8) == sid
+    seg.move_cut(sid, 0.9, verbose=False)
+    esq, dirr = _folha_num(seg, "hi", 0.9), _folha_num(seg, "lo", 0.9)
+    assert int(seg.segments[esq]["mask"].sum()) == int((seg.df["score"] <= 0.9).sum())
+    assert int(seg.segments[dirr]["mask"].sum()) == int((seg.df["score"] > 0.9).sum())
+    assert seg.leaf_name(esq) == "Fatia esquerda"
+    assert _cobertura_total(seg)
+
+
+def test_move_cut_irma_com_subsplit_e_undo(task):
+    seg = _mk(task)
+    seg.grow("score", splits=[0.8])
+    sid_dir = _folha_num(seg, "lo", 0.8)
+    seg.grow("garantia", splits=[["A", "B"], ["C", "D"]], only_segments={sid_dir})
+    snap = seg.to_dict()["segments"]             # p/ o "desfazer" ao final
+    contagens = {s: int(v["mask"].sum()) for s, v in seg.segments.items()}
+
+    seg.move_cut(_folha_num(seg, "hi", 0.8), 0.7, verbose=False)
+    df = seg.df
+    # o subtree INTEIRO da irmã (nó interno) carrega o novo lo=0.7 no caminho
+    desc = {s: v for s, v in seg.segments.items() if v["depth"] == 2}
+    assert len(desc) == 2
+    for v in desc.values():
+        assert any(c["kind"] == "num" and c.get("lo") == 0.7 for c in v["conditions"])
+    # contagens batem com o recorte manual do df
+    ab = df["garantia"].astype(str).isin(["A", "B"])
+    folha_ab = next(v for v in desc.values()
+                    if v["conditions"][-1]["kind"] == "cat"
+                    and v["conditions"][-1]["cats"] == ["A", "B"])
+    assert int(folha_ab["mask"].sum()) == int(((df["score"] > 0.7) & ab).sum())
+    assert int(seg.segments[_folha_num(seg, "hi", 0.7)]["mask"].sum()) == \
+        int((df["score"] <= 0.7).sum())
+    assert _cobertura_total(seg)
+    # "undo" (mesmo caminho do desfazer da UI): restaura estrutura e contagens
+    seg._load_segments(snap)
+    assert {s: int(v["mask"].sum()) for s, v in seg.segments.items()} == contagens
+
+
+def test_move_cut_validacoes(seg):
+    seg.grow("score", splits=[0.6, 0.8])
+    meio = _folha_num(seg, "hi", 0.8)                    # folha (0.6, 0.8]
+    with pytest.raises(ValueError, match="intervalo"):
+        seg.move_cut(meio, 0.5)                          # abaixo do lo da folha
+    with pytest.raises(ValueError, match="intervalo"):
+        seg.move_cut(meio, 0.6)                          # exclusivo: == lo não vale
+    with pytest.raises(ValueError, match="ESQUERDA"):
+        seg.move_cut(_folha_num(seg, "lo", 0.8), 1.0)    # última faixa (hi = inf)
+    with pytest.raises(ValueError, match="sem linhas"):  # atômico: lado esvaziado
+        seg.move_cut(_folha_num(seg, "hi", 0.6), 0.05)   # score mínimo ≈ 0.3
+    # nada mudou após as tentativas inválidas
+    assert {0.6, 0.8} == {v["conditions"][-1]["hi"] for v in seg.segments.values()
+                          if v["is_leaf"] and v["conditions"][-1]["kind"] == "num"
+                          and np.isfinite(v["conditions"][-1]["hi"])}
+
+
+def test_move_cut_exige_split_numerico(seg):
+    seg.grow("garantia", splits=[["A"], ["B", "C", "D"]])
+    folha_cat = next(s for s, v in seg.segments.items()
+                     if v["is_leaf"] and v["conditions"][-1]["kind"] == "cat")
+    with pytest.raises(ValueError, match="num"):
+        seg.move_cut(folha_cat, 0.5)
+    assert seg.movable_cut(folha_cat) is None
+
+
+# ----------------------------------------------------------------------
 # Backtest / calibração / monotonicidade
 # ----------------------------------------------------------------------
 def test_backtest_por_safra(task):
