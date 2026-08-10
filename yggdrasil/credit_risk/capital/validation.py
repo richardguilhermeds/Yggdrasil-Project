@@ -20,7 +20,7 @@ motor irmão tenha problema pontual).
 """
 from __future__ import annotations
 
-from typing import Dict, Optional, Sequence, Union
+from typing import Dict, Mapping, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -153,13 +153,19 @@ def benchmark(
     n_scenarios: int = 200_000,
     seed: Optional[int] = 0,
     rho_default: float = 0.15,
-    sigma_crp: float = 0.5,
+    sigma_crp: Union[float, Mapping[str, float], Sequence[float]] = 0.5,
 ) -> pd.DataFrame:
     """Concilia os três motores num quadro único (EL, VaR, ES, CE).
 
     O ASRF é aditivo (sem diversificação) e serve de teto/benchmark; o Monte
     Carlo multifatorial captura a diversificação; o CreditRisk+ é o desafio
     atuarial independente. Diferenças entre eles devem ser **explicadas**.
+
+    ``sigma_crp`` aceita, além do escalar single-sector, um ``dict {setor: σ}``
+    ou um vetor alinhado a ``portfolio.factor_names`` — o CreditRisk+ roda
+    então no modo **multi-setor** (um fator gama independente por setor), o que
+    aproxima a estrutura de diversificação do Monte Carlo multifatorial; ver
+    :func:`~yggdrasil.credit_risk.capital.creditrisk_plus.creditrisk_plus`.
     """
     linhas = []
 

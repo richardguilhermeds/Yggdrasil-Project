@@ -28,12 +28,17 @@ A mecânica em três ideias:
   ``P(L = j·L₀)`` em tempo ``O(N²)``, sem simulação.
 
 Insumos mínimos: taxas de *default* médias e a sua volatilidade sistêmica ``σ``
-por carteira. É **rápido** e **barato**. Limitações (por construção): LGD e EAD
-entram como **constantes por banda** (severidade determinística), e este módulo
-implementa o caso **single-sector** (um único fator gama comum a toda a
-carteira). Por isso o CreditRisk+ é usado aqui como **benchmark** para desafiar
-o modelo principal — se ASRF, Monte Carlo e CreditRisk+ concordam na ordem de
-grandeza do capital, ganha-se confiança; se divergem, há o que investigar.
+por carteira. É **rápido** e **barato**. Limitação (por construção): LGD e EAD
+entram como **constantes por banda** (severidade determinística). O módulo
+implementa o caso **single-sector** (``σ`` escalar: um único fator gama comum a
+toda a carteira) e a extensão **multi-setor** de Giese (``σ`` por setor: um
+fator gama **independente** por setor sistêmico). No multi-setor a PGF total é
+o **produto** das PGFs setoriais — perdas setoriais independentes —, obtida
+aqui por recursão de Panjer **por setor** seguida de **convolução** das
+distribuições discretizadas (ver :func:`creditrisk_plus`). Por isso o
+CreditRisk+ é usado aqui como **benchmark** para desafiar o modelo principal —
+se ASRF, Monte Carlo e CreditRisk+ concordam na ordem de grandeza do capital,
+ganha-se confiança; se divergem, há o que investigar.
 
 Contexto regulatório: Resolução CMN 4.557/2017 (ICAAP) — a validação exige
 mais de uma metodologia independente para o capital econômico; o CreditRisk+ é
@@ -42,7 +47,8 @@ simulado.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
 
@@ -94,7 +100,12 @@ _MAX_GRID_BANDS = 8000
 _TAIL_SIGMAS = 15.0
 
 
-def _choose_loss_unit(sev: np.ndarray, mu: np.ndarray, sigma: float) -> float:
+def _choose_loss_unit(
+    sev: np.ndarray,
+    mu: np.ndarray,
+    sigma,
+    factor_idx: Optional[np.ndarray] = None,
+) -> float:
     """Escolhe a unidade de perda ``L₀`` (a granularidade da grade).
 
     ``L₀`` controla o compromisso entre **precisão** (unidade menor → grade mais
@@ -118,6 +129,11 @@ def _choose_loss_unit(sev: np.ndarray, mu: np.ndarray, sigma: float) -> float:
     já é pequena. A escolha de ``L₀`` afeta só a **cauda**: a EL é preservada
     **exatamente** pela reescala de intensidade em :func:`_discretize`
     (``μ_eff = μ·sev/(ν·L₀)``), independentemente de ``L₀``.
+
+    No caso **multi-setor** ``sigma`` é o vetor de σ por fator e ``factor_idx``
+    o índice do fator de cada segmento: como os fatores gama são independentes,
+    as variâncias sistêmicas setoriais **somam** — ``Σ_k (σ_k·EL_k)²`` no lugar
+    de ``(σ·EL_total)²``. Com um único setor as duas contas coincidem.
     """
     pos = sev[sev > 0]
     if pos.size == 0:
@@ -129,7 +145,16 @@ def _choose_loss_unit(sev: np.ndarray, mu: np.ndarray, sigma: float) -> float:
     # Escala da perda AGREGADA (não da severidade individual).
     loss_mean = float(np.sum(mu * sev))
     idio_var = float(np.sum(mu * sev * sev))                 # Poisson: Var = Σ μ·sev²
-    std = float(np.sqrt(idio_var + (float(sigma) * loss_mean) ** 2))
+    sig = np.asarray(sigma, dtype=float)
+    if sig.ndim == 0:
+        # Single-sector: um fator gama comum acopla toda a carteira.
+        sys_var = (float(sig) * loss_mean) ** 2
+    else:
+        # Multi-setor: fatores independentes ⇒ Σ_k (σ_k·EL_k)².
+        el_setor = np.bincount(np.asarray(factor_idx, dtype=int),
+                               weights=mu * sev, minlength=sig.size)
+        sys_var = float(np.sum((sig * el_setor) ** 2))
+    std = float(np.sqrt(idio_var + sys_var))
     loss_upper = loss_mean + _TAIL_SIGMAS * std
     l0_grid = loss_upper / _MAX_GRID_BANDS if loss_upper > 0 else 0.0
     # L₀ = maior entre o limite de custo (bounded grid) e a resolução da menor
@@ -395,41 +420,94 @@ def _panjer_core(
 
 
 # ======================================================================
+# Multi-setor (Giese): normalização do sigma por setor
+# ======================================================================
+def _sigma_por_fator(portfolio: "Portfolio", sigma) -> np.ndarray:
+    """Normaliza um ``sigma`` multi-setor num vetor alinhado a ``factor_names``.
+
+    Aceita um *mapping* ``{setor: σ}`` (setores são os fatores sistêmicos dos
+    segmentos, ver :meth:`~yggdrasil.credit_risk.capital.portfolio.Portfolio.factor_of`)
+    ou uma sequência/vetor já alinhado a ``portfolio.factor_names``. Valida
+    cobertura (todo setor **usado** por algum segmento precisa de σ), nomes
+    desconhecidos (proteção contra erro de digitação) e não-negatividade.
+    """
+    nomes = list(portfolio.factor_names)
+    if isinstance(sigma, Mapping):
+        desconhecidos = sorted(set(map(str, sigma)) - set(nomes))
+        if desconhecidos:
+            raise ValueError(
+                f"sigma tem setores fora de factor_names: {desconhecidos} "
+                f"(fatores da carteira: {nomes})."
+            )
+        usados = {s.factor for s in portfolio.segments}
+        faltando = sorted(usados - set(sigma))
+        if faltando:
+            raise ValueError(
+                f"sigma por setor não cobre todos os setores usados: faltam {faltando}."
+            )
+        # Setor declarado em factor_names mas sem segmento: σ=0 (não contribui).
+        vec = np.array([float(sigma.get(f, 0.0)) for f in nomes], dtype=float)
+    else:
+        vec = np.asarray(sigma, dtype=float).ravel()
+        if vec.size != len(nomes):
+            raise ValueError(
+                f"sigma vetorial deve ter {len(nomes)} entradas (uma por fator em "
+                f"factor_names={nomes}); recebido {vec.size}."
+            )
+    if not np.all(np.isfinite(vec)) or np.any(vec < 0):
+        raise ValueError("sigma por setor deve ser finito e >= 0.")
+    return vec
+
+
+# ======================================================================
 # API principal
 # ======================================================================
 def creditrisk_plus(
     portfolio: "Portfolio",
     loss_unit: Optional[float] = None,
-    sigma: float = 0.5,
+    sigma: Union[float, Mapping, Sequence, np.ndarray] = 0.5,
     max_loss_units: Optional[int] = None,
 ) -> LossDistribution:
     """Distribuição de perdas **analítica** da carteira pelo CreditRisk+.
 
-    Motor atuarial single-sector (um fator sistêmico gama comum). Obtém a
-    distribuição inteira das perdas agregadas por recursão de Panjer/Giese, sem
-    simulação — rápido e reprodutível, ideal como **benchmark** para desafiar o
-    ASRF (:func:`.asrf.asrf_capital`) e o Monte Carlo (:func:`.monte_carlo.simulate`).
+    Motor atuarial: obtém a distribuição inteira das perdas agregadas por
+    recursão de Panjer/Giese, sem simulação — rápido e reprodutível, ideal como
+    **benchmark** para desafiar o ASRF (:func:`.asrf.asrf_capital`) e o Monte
+    Carlo (:func:`.monte_carlo.simulate`). Suporta um fator gama comum
+    (``sigma`` escalar, single-sector) ou um fator gama **independente por
+    setor** (``sigma`` por setor, multi-setor de Giese).
 
     Parameters
     ----------
     portfolio:
         A carteira (:class:`~yggdrasil.credit_risk.capital.portfolio.Portfolio`).
-        Usa PD, LGD, EAD e ``n_obligors`` de cada segmento; ``rho`` e a estrutura
-        de fatores **não** entram (o CreditRisk+ tem seu próprio fator gama). O
-        risco sistêmico é governado por ``sigma``, único para toda a carteira.
+        Usa PD, LGD, EAD e ``n_obligors`` de cada segmento; ``rho`` e a matriz
+        ``factor_corr`` **não** entram (o CreditRisk+ tem seus próprios fatores
+        gama). No modo multi-setor os segmentos são agrupados pelo seu fator
+        sistêmico (``Segment.factor``, via ``portfolio.factor_of()``).
     loss_unit:
         Unidade de perda ``L₀`` (granularidade da grade). Se ``None``, é
-        escolhida automaticamente a partir da mediana das severidades — ver
+        escolhida automaticamente a partir da escala da perda agregada — ver
         :func:`_choose_loss_unit`. Um ``L₀`` menor dá mais precisão ao custo de
-        uma grade maior.
+        uma grade maior. No multi-setor a **mesma** ``L₀`` vale para todos os
+        setores (pré-requisito da convolução numa grade comum).
     sigma:
-        Coeficiente de variação do fator sistêmico gama (média 1). ``sigma = 0``
-        → *defaults* quase independentes (Poisson pura, cauda fina); ``sigma``
-        maior → mais correlação sistêmica e **cauda mais gorda** (VaR sobe).
-        Padrão 0,5, valor típico de calibração do CreditRisk+.
+        Volatilidade sistêmica (coeficiente de variação do fator gama, média 1).
+        Três formatos:
+
+        * **float** — single-sector: um único fator gama comum a toda a
+          carteira. ``sigma = 0`` → *defaults* quase independentes (Poisson
+          pura, cauda fina); maior → cauda mais gorda. Padrão 0,5.
+        * **dict** ``{setor: σ}`` — multi-setor: um fator gama independente por
+          setor (os setores são os fatores sistêmicos dos segmentos). Todo
+          setor usado por algum segmento precisa aparecer no dict.
+        * **sequência/vetor** alinhado a ``portfolio.factor_names`` — idem, na
+          ordem dos fatores da carteira.
     max_loss_units:
         Número máximo de bandas da grade. Se ``None``, é dimensionado
         automaticamente para conter a cauda (massa acumulada > ``1 − 1e-9``).
+        No multi-setor o teto é aplicado à grade **final** (pós-convolução),
+        truncando e renormalizando.
 
     Returns
     -------
@@ -441,24 +519,79 @@ def creditrisk_plus(
 
     Notes
     -----
-    A EL da distribuição discretizada bate com ``Σ PD·LGD·EAD`` a menos do ruído
-    numérico da recursão: a reescala de intensidade em :func:`_discretize`
-    preserva a perda esperada **exatamente**, independentemente de ``loss_unit``.
-    A granularidade afeta a **cauda** (VaR/ES), não a média; um ``loss_unit``
+    **Multi-setor (Giese).** Com fatores gama independentes, a PGF da perda
+    total é o **produto** das PGFs setoriais — i.e. as perdas setoriais são
+    variáveis independentes e a perda total é a sua soma. A implementação
+    explora isso diretamente: recursão de Panjer **por setor** (cada uma com o
+    seu σ) e **convolução** das distribuições discretizadas na grade comum
+    ``L₀``. A convolução é **direta** (``np.convolve``), não FFT: o produto de
+    vetores não-negativos permanece não-negativo e exato em precisão de
+    máquina, enquanto a FFT introduz ruído (inclusive negativo) da ordem de
+    ``1e-16·pico``, que polui exatamente a cauda profunda de onde saem VaR/ES a
+    99,9%+; o custo ``O(N_k·N_total)`` é aceitável porque a grade é limitada
+    (~:data:`_MAX_GRID_BANDS` bandas). O caso de **um único setor em uso** é
+    caso particular exato do single-sector (convolução com a identidade).
+
+    **Erro de discretização.** A EL da distribuição bate com ``Σ PD·LGD·EAD`` a
+    menos do ruído numérico da recursão: a reescala de intensidade em
+    :func:`_discretize` preserva a perda esperada **exatamente** por segmento
+    (portanto por setor e no total — a convolução soma médias), independente de
+    ``loss_unit``. A granularidade afeta a **cauda** (VaR/ES) em segunda ordem
+    (o "grão" ``L₀`` da grade), não a média; a convolução em grade comum não
+    adiciona erro de discretização além do caso single-sector. Um ``loss_unit``
     menor refina a cauda ao custo de uma grade maior.
     """
-    if sigma < 0:
-        raise ValueError(f"sigma deve ser >= 0; recebido {sigma!r}.")
     if loss_unit is not None and loss_unit <= 0:
         raise ValueError(f"loss_unit deve ser > 0; recebido {loss_unit!r}.")
+    multi = isinstance(sigma, Mapping) or (
+        isinstance(sigma, (Sequence, np.ndarray)) and not isinstance(sigma, (str, bytes))
+    )
 
     sev, mu = _severities(portfolio)
 
-    L0 = float(loss_unit) if loss_unit is not None else _choose_loss_unit(sev, mu, sigma)
-
-    nu, mu_eff = _discretize(sev, mu, L0)
-
-    P = panjer_recursion(nu, mu_eff, sigma=sigma, max_loss_units=max_loss_units)
+    if not multi:
+        # ------------------------------------------------------------------
+        # Single-sector: um fator gama comum (caminho original, inalterado).
+        # ------------------------------------------------------------------
+        sigma = float(sigma)
+        if sigma < 0:
+            raise ValueError(f"sigma deve ser >= 0; recebido {sigma!r}.")
+        L0 = float(loss_unit) if loss_unit is not None else _choose_loss_unit(sev, mu, sigma)
+        nu, mu_eff = _discretize(sev, mu, L0)
+        P = panjer_recursion(nu, mu_eff, sigma=sigma, max_loss_units=max_loss_units)
+        rotulo = f"σ={sigma:g}"
+    else:
+        # ------------------------------------------------------------------
+        # Multi-setor: Panjer por setor + convolução das perdas setoriais.
+        # ------------------------------------------------------------------
+        sigma_vec = _sigma_por_fator(portfolio, sigma)
+        fidx = portfolio.factor_of()
+        L0 = (float(loss_unit) if loss_unit is not None
+              else _choose_loss_unit(sev, mu, sigma_vec, factor_idx=fidx))
+        # A MESMA grade L₀ para todos os setores: a convolução exige que as
+        # distribuições setoriais estejam em múltiplos da mesma unidade.
+        nu, mu_eff = _discretize(sev, mu, L0)
+        usados: list[int] = []
+        P = np.array([1.0])                       # identidade da convolução (L = 0)
+        for k in range(len(portfolio.factor_names)):
+            mask = fidx == k
+            if not np.any(mask):
+                continue                          # fator declarado mas sem segmento
+            usados.append(k)
+            # Cada setor é um CreditRisk+ single-sector com o seu σ_k...
+            Pk = panjer_recursion(nu[mask], mu_eff[mask], sigma=float(sigma_vec[k]))
+            # ...e a perda total é a soma das perdas setoriais independentes.
+            P = np.convolve(P, Pk)
+        if max_loss_units is not None:
+            if max_loss_units < 1:
+                raise ValueError("max_loss_units deve ser >= 1.")
+            P = P[: int(max_loss_units) + 1]
+        s = P.sum()
+        if s > 0:
+            P = P / s
+        rotulo = "σ " + ", ".join(
+            f"{portfolio.factor_names[k]}={sigma_vec[k]:g}" for k in usados
+        )
 
     valores = np.arange(P.size, dtype=float) * L0
     el_analitica = portfolio.expected_loss()
@@ -467,7 +600,7 @@ def creditrisk_plus(
         losses=valores,
         weights=P,
         expected=el_analitica,
-        name=f"{portfolio.name} · CreditRisk+ (σ={sigma:g})",
+        name=f"{portfolio.name} · CreditRisk+ ({rotulo})",
     )
 
 

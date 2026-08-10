@@ -67,6 +67,73 @@ def test_creditrisk_plus_sigma_fattens_tail():
 
 
 # ----------------------------------------------------------------------
+# CreditRisk+ multi-setor (Giese): um fator gama independente por setor
+# ----------------------------------------------------------------------
+def test_creditrisk_plus_multisector_equal_sigmas_close_to_single():
+    port = toy_portfolio()
+    single = creditrisk_plus(port, sigma=0.5)
+    multi = creditrisk_plus(port, sigma={"cartao": 0.5, "consignado": 0.5})
+    # distribuição válida: pesos somam ~1 e a média discretizada preserva a EL
+    assert multi.weights is not None
+    assert multi.weights.sum() == pytest.approx(1.0, abs=1e-3)
+    assert multi.mean() == pytest.approx(port.expected_loss(), rel=1e-3)
+    # fatores independentes diversificam: cauda ≤ single-sector (que acopla
+    # os setores num único fator), mas com σ iguais fica perto
+    assert multi.var(0.999) <= single.var(0.999)
+    assert multi.var(0.999) == pytest.approx(single.var(0.999), rel=0.10)
+    # vetor alinhado a factor_names é equivalente ao dict
+    multi_vec = creditrisk_plus(port, sigma=[0.5, 0.5])
+    assert multi_vec.var(0.999) == pytest.approx(multi.var(0.999), rel=1e-12)
+
+
+def test_creditrisk_plus_multisector_heterogeneous_sigma_moves_tail():
+    port = toy_portfolio()
+    base = creditrisk_plus(port, sigma={"cartao": 0.5, "consignado": 0.5}).var(0.999)
+    # subir o σ do setor dominante na EL engorda a cauda; baixar, afina
+    up = creditrisk_plus(port, sigma={"cartao": 1.0, "consignado": 0.5}).var(0.999)
+    down = creditrisk_plus(port, sigma={"cartao": 0.2, "consignado": 0.5}).var(0.999)
+    assert down < base < up
+
+
+def test_creditrisk_plus_multisector_single_sector_is_exact_particular_case():
+    # Um único setor em uso: o multi-setor colapsa EXATAMENTE no single-sector.
+    port = Portfolio([Segment("s", pd=0.03, lgd=0.50, ead=5e6, rho=0.10,
+                              n_obligors=5_000, factor="F")])
+    a = creditrisk_plus(port, sigma=0.5)
+    b = creditrisk_plus(port, sigma={"F": 0.5})
+    c = creditrisk_plus(port, sigma=[0.5])
+    for other in (b, c):
+        assert other.losses.shape == a.losses.shape
+        np.testing.assert_allclose(other.losses, a.losses, rtol=0, atol=0)
+        np.testing.assert_allclose(other.weights, a.weights, rtol=1e-12, atol=1e-300)
+    assert b.var(0.999) == pytest.approx(a.var(0.999), rel=1e-12)
+
+
+def test_creditrisk_plus_multisector_sigma_validated():
+    port = toy_portfolio()
+    with pytest.raises(ValueError):                        # setor usado sem σ
+        creditrisk_plus(port, sigma={"cartao": 0.5})
+    with pytest.raises(ValueError):                        # setor desconhecido
+        creditrisk_plus(port, sigma={"cartao": 0.5, "consignado": 0.5, "veic": 0.1})
+    with pytest.raises(ValueError):                        # vetor desalinhado
+        creditrisk_plus(port, sigma=[0.5])
+    with pytest.raises(ValueError):                        # σ negativo
+        creditrisk_plus(port, sigma={"cartao": 0.5, "consignado": -0.1})
+
+
+def test_benchmark_accepts_sector_sigma():
+    from yggdrasil.credit_risk.capital import benchmark
+
+    port = toy_portfolio()
+    df = benchmark(port, n_scenarios=20_000,
+                   sigma_crp={"cartao": 0.6, "consignado": 0.3})
+    row = df[df["metodo"] == "CreditRisk+"].iloc[0]
+    # o motor rodou (sem cair no fallback de erro) e produziu cauda plausível
+    assert np.isfinite(row["VaR"]) and np.isfinite(row["ES"])
+    assert row["VaR"] > row["EL"] > 0
+
+
+# ----------------------------------------------------------------------
 # Correlação
 # ----------------------------------------------------------------------
 def _vasicek_series(T, n, rho, pd, seed):
