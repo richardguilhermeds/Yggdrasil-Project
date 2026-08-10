@@ -1,9 +1,10 @@
 """Registro da esteira no MLflow.
 
 Centraliza o logging de um run: parâmetros, métricas por amostra (DES/OOT),
-shifts, PSI (agregado e séries temporais por rating), relatórios por grupo,
-dashboard, SHAP e o próprio modelo. Estende o padrão ``log_credit_model`` da
-referência de MLflow do projeto.
+shifts, PSI (agregado e séries temporais por rating), performance por período
+(discriminação/erro ao longo do tempo), relatórios por grupo, dashboard, SHAP
+e o próprio modelo. Estende o padrão ``log_credit_model`` da referência de
+MLflow do projeto.
 """
 
 from __future__ import annotations
@@ -17,7 +18,8 @@ import pandas as pd
 
 from ..config import ColumnConfig
 from ..interpretability import shap_report
-from ..monitoring import psi_rating_over_time, psi_score_over_time
+from ..monitoring import (metric_over_time, plot_metric_over_time,
+                          psi_rating_over_time, psi_score_over_time)
 from ..reporting import group_reports_to_html, save_dashboard
 
 DEFAULT_EXPERIMENT = "/Shared/Yggdrasil/esteira_ml"
@@ -80,8 +82,13 @@ def log_pipeline_run(
     registered_model_name: Optional[str] = None,
     log_shap: bool = True,
     artifacts_dir: Optional[str] = None,
+    perf_min_n: int = 200,
 ) -> str:
-    """Loga um run completo da esteira e retorna o ``run_id``."""
+    """Loga um run completo da esteira e retorna o ``run_id``.
+
+    ``perf_min_n`` é o tamanho mínimo de período para as métricas de
+    performance ao longo do tempo (:func:`~yggdrasil.monitoring.metric_over_time`);
+    períodos menores saem com métricas NaN e nota."""
     import mlflow
     from mlflow.models.signature import infer_signature
 
@@ -141,6 +148,27 @@ def log_pipeline_run(
             _plot_psi_series(ts, f"PSI do rating '{metodo}' ao longo do tempo",
                              os.path.join(psi_dir, f"psi_{metodo}_over_time.png"))
         mlflow.log_artifacts(psi_dir, artifact_path="psi")
+
+        # ── artefatos: performance ao longo do tempo (padrão do PSI) ────
+        import matplotlib.pyplot as plt
+
+        perf_dir = os.path.join(tmp, "performance")
+        os.makedirs(perf_dir, exist_ok=True)
+        perf = metric_over_time(df_scored, cfg, problem_type, min_n=perf_min_n)
+        perf.to_csv(os.path.join(perf_dir, "metrics_over_time.csv"), index=False)
+        serie_cols = (("ks", "auc", "gini") if problem_type == "classification"
+                      else ("rmse", "mae", "r2"))
+        for m in serie_cols:
+            if m not in perf.columns:
+                continue
+            # série por período como curva no MLflow (step = índice do período)
+            for i, valor in enumerate(perf[m].tolist()):
+                if valor is not None and np.isfinite(valor):
+                    mlflow.log_metric(f"{m}_safra", float(valor), step=i)
+            fig = plot_metric_over_time(
+                perf, m, save_path=os.path.join(perf_dir, f"{m}_over_time.png"))
+            plt.close(fig)
+        mlflow.log_artifacts(perf_dir, artifact_path="performance")
 
         # ── artefato: dashboard ─────────────────────────────────────────
         dash_path = os.path.join(tmp, "dashboard.png")

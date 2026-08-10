@@ -1,5 +1,6 @@
-"""Monitoramento de estabilidade (PSI) de score e ratings."""
+"""Monitoramento: estabilidade (PSI) e performance ao longo do tempo."""
 
+from .performance import metric_over_time, plot_metric_over_time
 from .psi import (
     PSI_SIGNIFICANT,
     PSI_STABLE,
@@ -22,4 +23,6 @@ __all__ = [
     "classify_psi",
     "PSI_STABLE",
     "PSI_SIGNIFICANT",
+    "metric_over_time",
+    "plot_metric_over_time",
 ]
