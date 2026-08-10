@@ -309,6 +309,50 @@ def test_n_orfas_conta_linhas_sem_rota(seg):
 
 
 # ----------------------------------------------------------------------
+# Apelidos de negócio por folha (leaf_names)
+# ----------------------------------------------------------------------
+def test_leaf_names_roundtrip_e_json_antigo(seg):
+    seg.grow("score", splits=[0.8])
+    folhas = [s for s, v in seg.segments.items() if v["is_leaf"]]
+    seg.set_leaf_name(folhas[0], "  Baixo   risco  ")      # normaliza espaços
+    assert seg.leaf_name(folhas[0]) == "Baixo risco"
+    d = seg.to_dict()
+    assert d["meta"]["leaf_names"] == {folhas[0]: "Baixo risco"}
+    novo = TreeSegmenter.from_dict(d, seg.df)
+    assert novo.leaf_name(folhas[0]) == "Baixo risco"       # roundtrip preserva
+    # JSON ANTIGO (sem a chave leaf_names) carrega com apelidos vazios
+    del d["meta"]["leaf_names"]
+    antigo = TreeSegmenter.from_dict(d, seg.df)
+    assert antigo.leaf_names == {}
+
+
+def test_leaf_names_saidas_e_orfaos(seg):
+    seg.grow("score", splits=[0.8])
+    folhas = [s for s, v in seg.segments.items() if v["is_leaf"]]
+    seg.set_leaf_name(folhas[0], "Fatia nomeada")
+    # tabela de folhas ganha a coluna 'apelido' (só quando há apelido definido)
+    lv = seg.leaves()
+    assert "apelido" in lv.columns
+    assert (lv.loc[lv["segmento"] == folhas[0], "apelido"] == "Fatia nomeada").all()
+    # assign ganha a coluna '<col>_apelido' (NA nas folhas sem apelido)
+    out = seg.assign("segmento")
+    assert "segmento_apelido" in out.columns
+    m = out["segmento"] == folhas[0]
+    assert (out.loc[m, "segmento_apelido"] == "Fatia nomeada").all()
+    assert out.loc[~m, "segmento_apelido"].isna().all()
+    # SQL documenta o apelido como comentário no ramo do CASE
+    assert "-- Fatia nomeada" in seg.to_sql()
+    # apelidar algo que não é folha atual → erro
+    with pytest.raises(ValueError, match="folha"):
+        seg.set_leaf_name("root", "X")                      # root virou nó interno
+    # fundir MUDA o sid → o apelido do sid antigo é descartado em silêncio
+    seg.merge_leaf(folhas[0], side="right", verbose=False)
+    assert seg.leaf_name(folhas[0]) is None
+    assert seg.to_dict()["meta"]["leaf_names"] == {}
+    assert "apelido" not in seg.leaves().columns
+
+
+# ----------------------------------------------------------------------
 # Poda / fusão / estabilidade
 # ----------------------------------------------------------------------
 def test_auto_merge_funde_irmas_indistinguiveis(task):

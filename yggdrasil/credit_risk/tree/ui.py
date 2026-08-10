@@ -21,6 +21,7 @@ sobre o DataFrame e o alvo reais. Recursos:
 """
 from __future__ import annotations
 
+import html as _html
 from contextlib import contextmanager
 
 import pandas as pd
@@ -32,6 +33,11 @@ except Exception as e:  # pragma: no cover
     raise ImportError("Este módulo requer ipywidgets e IPython (Jupyter).") from e
 
 from .segmenter import TreeSegmenter
+
+
+def _esc(txt) -> str:
+    """Escapa texto LIVRE do usuário (ex.: apelidos de folha) p/ HTML/atributos."""
+    return _html.escape(str(txt), quote=True)
 
 
 def _running_in_databricks() -> bool:
@@ -560,6 +566,10 @@ class TreeSegmenterUI:
         # reatribui dd_leaf.value (senão _on_leaf_change re-dispara DENTRO do
         # _refresh → árvore/IV/histograma renderizados 2× por mutação).
         self._suspend_leaf_obs = False
+        # flag análoga p/ o campo de APELIDO da folha: o _sync_leaf_name_field
+        # reatribui tx_leaf_name.value programaticamente (troca de folha, undo) e
+        # o observer não pode tratar isso como digitação do usuário.
+        self._suspend_name_obs = False
         # cache de HTML por widget (hash-and-skip): só reescreve .value quando o
         # conteúdo muda — evita reenviar blobs idênticos pelo comm kernel↔browser.
         self._last_html: dict = {}
@@ -588,6 +598,18 @@ class TreeSegmenterUI:
         # para mostrar o máximo possível do texto da opção selecionada
         self.dd_leaf = W.Dropdown(description="Folha", layout=W.Layout(width="100%"),
                                   style={"description_width": "52px"})
+        # APELIDO de negócio da folha selecionada (leaf_names do segmentador):
+        # aplicado ao confirmar (Enter / perder o foco); texto vazio remove. O
+        # apelido é atrelado ao sid da folha — fundir/dividir muda o sid e o
+        # apelido é descartado (collapse que restaura o sid antigo o revive).
+        self.tx_leaf_name = W.Text(
+            description="Apelido", placeholder="apelido de negócio (opcional)",
+            continuous_update=False,
+            tooltip="Apelido de negócio da folha selecionada — aparece na árvore, "
+                    "na tabela de folhas, no assign() e como comentário no SQL. "
+                    "Vazio remove. Fundir/dividir a folha descarta o apelido "
+                    "(o identificador da folha muda).",
+            layout=W.Layout(width="98%"), style={"description_width": "52px"})
         # seletor de variável com BUSCA (Combobox: digite para filtrar). As opções
         # são os NOMES DE EXIBIÇÃO (feature_labels); o mapa rótulo→coluna fica em
         # _feat_by_label e a resolução (texto livre → coluna) em _sel_feature.
@@ -1021,6 +1043,7 @@ class TreeSegmenterUI:
             lambda b: self._confirm_twice(b, lambda: self._on_reset(None)))
         self.btn_export.on_click(self._on_export)
         self.dd_leaf.observe(self._on_leaf_change, names="value")
+        self.tx_leaf_name.observe(self._on_leaf_name, names="value")
         self.dd_test.observe(lambda _: self._refresh_table(), names="value")
         self.btn_copy_table.on_click(self._on_copy_table)
         self.btn_collapse.on_click(self._on_collapse)
@@ -1276,7 +1299,8 @@ class TreeSegmenterUI:
         # ---- DETALHE · linha 1: folha (detalhe) | dividir | ações + auto-fit
         sep_det = W.HTML("<div class='treeui-band treeui-band-muted'>② Detalhe / inspeção — "
                          "role quando precisar</div>")
-        card_leaf = W.VBox([self.leaf_header]); card_leaf.add_class("treeui-card")
+        card_leaf = W.VBox([self.leaf_header, self.tx_leaf_name])
+        card_leaf.add_class("treeui-card")
         det_c1 = W.VBox([card_leaf], layout=W.Layout(width="30%"))
 
         self.btn_sugcuts.layout.width = "99%"
@@ -2089,6 +2113,10 @@ class TreeSegmenterUI:
         pd_txt = "—" if pd.isna(pdv) else f"{pdv * 100:.2f}%"
         label = ("TODA A CARTEIRA" if s["parent"] is None
                  else self.seg._descrever(s["conditions"]))
+        # apelido de negócio na frente (a descrição segue como complemento)
+        nome = self.seg.leaf_name(sid)
+        if nome:
+            label = f"{_esc(nome)} · {label}"
         if len(label) > 46:
             label = label[:43] + "…"
         vol = f"{n:,}".replace(",", ".")
@@ -2264,6 +2292,12 @@ class TreeSegmenterUI:
             sel_marker = ""
             if s["is_leaf"]:
                 tags += f" · <b>folha {nota_map.get(sid, '?')}</b>"
+                # apelido de negócio da folha (quando definido) ao lado do número
+                nome = seg.leaf_name(sid)
+                if nome:
+                    tags += (" · <span style='color:var(--strong-ink);"
+                             "font-style:italic' title='apelido do segmento'>"
+                             + _esc(nome) + "</span>")
                 if sid in self.locked:
                     tags += " 🔒"
                 sel_marker = "<i class='tsel'></i>"   # ::after injeta '◀ selecionada'
@@ -2339,6 +2373,8 @@ class TreeSegmenterUI:
         if "p_des_oot" in lv.columns:
             sty = sty.map(p_stab_bg, subset=["p_des_oot"])
         fmt = {"repr_%": "{:.1f}"}
+        if "apelido" in lv.columns:          # texto LIVRE do usuário → escapa p/ HTML
+            fmt["apelido"] = _esc
         for c in lv.columns:
             if c.startswith("repr_") and c.endswith("_%"):   # % por amostra
                 fmt[c] = "{:.1f}"
@@ -2363,6 +2399,10 @@ class TreeSegmenterUI:
     def _leaf_label(self, sid):
         s = self.seg.segments[sid]
         txt = "TODA A CARTEIRA" if s["parent"] is None else self.seg._descrever(s["conditions"])
+        # apelido de negócio na frente; a descrição mecânica vira complemento
+        nome = self.seg.leaf_name(sid)
+        if nome:
+            txt = f"{nome} · {txt}"
         if len(txt) > 72:
             txt = txt[:69] + "…"
         return ("🔒 " if sid in self.locked else "") + txt
@@ -2410,13 +2450,21 @@ class TreeSegmenterUI:
             return (f"<div class='treeui-metric'><div class='k'>{k}</div>"
                     f"<div class='v mono'{sty}>{v}</div>{sub_html}</div>")
 
+        # com APELIDO de negócio, ele assume o título e a descrição mecânica vira
+        # tooltip + linha-complemento menor (sem apelido, nada muda)
+        nome = self.seg.leaf_name(sid)
+        titulo = _esc(nome) if nome else label
+        tip = f" title='{_esc(label)}'" if nome else ""
+        sub_desc = (f"<div style='font-size:11.5px;color:var(--sub-ink);"
+                    f"margin:-2px 0 5px 22px'>{label}</div>" if nome else "")
         head = (
-            # linha 1: o CORTE (condição da folha) — sozinho, para não competir com os selos
+            # linha 1: o apelido (quando definido) ou o CORTE (condição da folha)
             "<div style='display:flex;align-items:center;gap:9px;margin-bottom:5px'>"
             f"<span style='width:13px;height:13px;border-radius:4px;background:{color};"
             "flex:none'></span>"
-            f"<span style='font-size:15px;font-weight:600;color:var(--strong-ink)'>{label}</span>"
-            "</div>"
+            f"<span style='font-size:15px;font-weight:600;color:var(--strong-ink)'{tip}>"
+            f"{titulo}</span>"
+            "</div>" + sub_desc +
             # linha 2: SEMPRE abaixo do corte — status (aberta/fechada · faltantes) e
             # qual folha está sendo editada ("folha N")
             "<div style='display:flex;align-items:center;gap:9px;margin-bottom:4px;"
@@ -2601,8 +2649,11 @@ class TreeSegmenterUI:
         # Colunas em blocos legíveis: identificação · % por amostra · alvo médio
         # por amostra (só as que têm alvo) · PSI por amostra · teste de hipótese.
         # `headers` renomeia só a EXIBIÇÃO (a formatação segue pelos nomes reais).
-        cols = ["folha", "descricao"]
-        headers = {"folha": "folha", "descricao": "descrição"}
+        cols = ["folha"]
+        headers = {"folha": "folha", "apelido": "apelido", "descricao": "descrição"}
+        if "apelido" in lv.columns:          # só existe quando há apelido definido
+            cols.append("apelido")
+        cols.append("descricao")
         if self.sample_col is None:
             for c, h in (("repr_%", "repr. %"), ("valor_medio", self._risk_mean)):
                 if c in lv.columns:
@@ -2741,6 +2792,9 @@ class TreeSegmenterUI:
             if s["is_leaf"]:
                 own = ("TODA A CARTEIRA" if s["parent"] is None
                        else seg._descrever(s["conditions"]))   # caminho COMPLETO, sem cortar
+                nome = seg.leaf_name(sid)
+                if nome:                     # apelido na frente, descrição completa atrás
+                    own = f"{nome} — {own}"
                 rep = 100 * s["mask"].sum() / n_total
                 lock = "🔒 " if sid in self.locked else ""
                 nota = nota_map.get(sid, "?")
@@ -2818,6 +2872,7 @@ class TreeSegmenterUI:
                 self.dd_sib_group.value = sib_opts[0][1]
         finally:
             self._suspend_leaf_obs = False
+        self._sync_leaf_name_field()     # campo de apelido acompanha a folha em foco
 
         self._set_html(self.bar, "bar", self._status_html())
         self._set_html(self.out_tree, "tree", self._tree_html())
@@ -3453,11 +3508,54 @@ class TreeSegmenterUI:
         grupos = self._cat_groups()
         return grupos if grupos else None
 
+    def _sync_leaf_name_field(self):
+        """Espelha o apelido da folha selecionada no campo de texto, sem disparar
+        o observer (a reatribuição programática não é digitação do usuário)."""
+        sid = self.dd_leaf.value
+        nome = self.seg.leaf_name(sid) if sid is not None else None
+        self._suspend_name_obs = True
+        try:
+            self.tx_leaf_name.value = nome or ""
+            self.tx_leaf_name.disabled = (sid is None or sid not in self.seg.segments)
+        finally:
+            self._suspend_name_obs = False
+
+    def _on_leaf_name(self, _):
+        """Aplica o apelido digitado à folha selecionada — imediato, com undo
+        (o :meth:`_checkpoint` guarda o estado anterior dos apelidos)."""
+        if self._suspend_name_obs:
+            return
+        sid = self.dd_leaf.value
+        if sid is None or sid not in self.seg.segments or \
+                not self.seg.segments[sid]["is_leaf"]:
+            return
+        novo = " ".join((self.tx_leaf_name.value or "").split())
+        atual = self.seg.leaf_name(sid) or ""
+        if novo == atual:
+            self._sync_leaf_name_field()      # normaliza o texto exibido
+            return
+        redo_bak = list(self._redo)
+        self._checkpoint()                    # desfazer restaura o apelido anterior
+        try:
+            self.seg.set_leaf_name(sid, novo or None)
+        except Exception as e:
+            self._revert_checkpoint(redo_bak)
+            self._log(f"Erro ao apelidar a folha: {type(e).__name__}: {e}")
+            return
+        acao = "aplicado" if novo else "removido"
+        self._log(f"🏷️ apelido {acao}: {self._leaf_label(sid)}")
+        # apelido não muda a estrutura: atualiza árvore/dropdowns/cartões (mesmo
+        # caminho leve do cadeado) + a tabela de folhas (coluna 'apelido')
+        self._refresh_lock_labels()
+        self._refresh_table()
+        self._sync_leaf_name_field()
+
     def _on_leaf_change(self, _):
         # ignora o disparo programático durante o _refresh (a árvore/IV/histograma
         # já são renderizados lá) — evita renderização dupla por mutação.
         if self._suspend_leaf_obs:
             return
+        self._sync_leaf_name_field()          # apelido da folha recém-selecionada
         # trocar a folha NÃO altera a estrutura: a árvore HTML é a mesma. O realce
         # é aplicado por CSS (data-leaf) → só atualizamos o <style> minúsculo, sem
         # remontar nem reenviar a árvore inteira pelo comm.
@@ -4955,10 +5053,11 @@ class TreeSegmenterUI:
     # Undo / redo de splits (e demais alterações estruturais da árvore)
     # ==================================================================
     def _snapshot(self):
-        """Estado restaurável: estrutura da árvore + folhas travadas + folha selecionada
-        (para o desfazer/refazer voltar à folha que estava em foco)."""
+        """Estado restaurável: estrutura da árvore + folhas travadas + apelidos de
+        negócio + folha selecionada (para o desfazer/refazer voltar à folha em foco)."""
         return {"segments": self.seg.to_dict()["segments"], "locked": set(self.locked),
-                "selected": self.dd_leaf.value}
+                "selected": self.dd_leaf.value,
+                "leaf_names": dict(self.seg.leaf_names)}
 
     def _checkpoint(self):
         """Empilha o estado atual para permitir desfazer; zera a pilha de refazer."""
@@ -4984,6 +5083,9 @@ class TreeSegmenterUI:
         self.seg._prime_mask_cache()
         self.seg._load_segments(snap["segments"])
         self.locked = set(snap["locked"]) & set(self.seg.segments)
+        # apelidos de negócio viajam no snapshot (snapshots antigos → {});
+        # sids extintos são filtrados na leitura (leaf_name/_leaf_names_validos)
+        self.seg.leaf_names = dict(snap.get("leaf_names", {}))
 
     def _sync_undo_buttons(self):
         self.btn_undo.disabled = not self._undo
@@ -5160,6 +5262,13 @@ class TreeSegmenterUI:
             antes = self._delta_snapshot()
             self._checkpoint()
             self.seg._load_segments(data["segments"])
+            # apelidos de negócio persistidos no JSON (chave ausente em JSONs
+            # antigos → {}); sids que não são folhas desta árvore são descartados
+            nomes = meta.get("leaf_names") or {}
+            self.seg.leaf_names = {
+                sid: str(n) for sid, n in nomes.items()
+                if n and sid in self.seg.segments
+                and self.seg.segments[sid]["is_leaf"]}
             # fallback persistido no JSON: restaura no segmentador e sincroniza o
             # dropdown quando a opção existe na UI (nota int fica só no segmentador)
             if "fallback" in meta:

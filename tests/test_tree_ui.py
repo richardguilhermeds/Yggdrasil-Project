@@ -192,6 +192,30 @@ def test_ui_undo_redo_restaura_folha(task):
     assert alvo != sel_pos                 # garante que o teste é significativo
 
 
+def test_ui_apelido_da_folha_com_undo(task):
+    """Campo 'Apelido' do cartão da folha: aplica imediatamente ao segmentador,
+    aparece na árvore HTML/dropdown e entra no _checkpoint (undo/redo restauram)."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.dd_leaf.value = "root"
+        ui.dd_feature.value = "score"
+        ui.tg_mode.value = "Manual"
+        ui.tx_cuts.value = "0.8"
+        ui._on_preview(None); ui._on_split(None)
+        sid = ui.dd_leaf.value                    # folha em foco após o split
+        assert ui.seg.segments[sid]["is_leaf"]
+        ui.tx_leaf_name.value = "Fatia premium"   # aplicação imediata (observer)
+        assert ui.seg.leaf_name(sid) == "Fatia premium"
+        assert "Fatia premium" in ui.out_tree.value            # árvore HTML
+        assert any("Fatia premium" in lbl for lbl, _ in ui.dd_leaf.options)
+        ui._on_undo(None)                         # desfazer remove o apelido
+        assert ui.seg.leaf_name(sid) is None
+        assert ui.tx_leaf_name.value == ""
+        ui._on_redo(None)                         # refazer o traz de volta
+        assert ui.seg.leaf_name(sid) == "Fatia premium"
+        assert ui.tx_leaf_name.value == "Fatia premium"
+
+
 def test_ui_merge_missing(task):
     ui = _build(task, com_na=True, n=5000, seed=7)
     with contextlib.redirect_stdout(io.StringIO()):

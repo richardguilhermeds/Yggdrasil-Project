@@ -379,6 +379,14 @@ class TreeSegmenter:
                              f"(colunas: {list(self.df.columns)}).")
         # rótulos amigáveis por variável para a descrição por extenso
         self.feature_labels = feature_labels or {}
+        # APELIDOS DE NEGÓCIO por folha: sid -> texto livre (ex.: "Baixo risco
+        # com garantia"). Os sids derivam dos RÓTULOS DE CONDIÇÃO, então mudam
+        # quando a estrutura muda: fundir/dividir renomeia a folha e o apelido do
+        # sid antigo fica ÓRFÃO — órfãos são ignorados na leitura (leaf_name) e
+        # descartados em silêncio na serialização (to_dict). Um collapse que
+        # restaura um sid antigo "revive" o apelido correspondente. Persistido em
+        # to_dict/from_dict (JSONs antigos sem a chave carregam com {}).
+        self.leaf_names: dict[str, str] = {}
         # mínimo de linhas (na amostra de ajuste) para tentar binning ótimo
         self.min_leaf_rows = min_leaf_rows
 
@@ -1275,9 +1283,16 @@ class TreeSegmenter:
         """Tabela de folhas (memoizada por versão da árvore + parâmetros). A UI
         chama isto ~5× por _refresh (direto e via _grade_map); a memoização evita
         revarrer as máscaras full-length por folha a cada chamada."""
-        return self._agg_memo(
+        out = self._agg_memo(
             ("leaves", ascending, with_psi, with_test, test),
             lambda: self._compute_leaves(ascending, with_psi, with_test, test))
+        # coluna 'apelido' SÓ quando há apelido definido — e FORA do memo: os
+        # apelidos mudam sem alterar a versão da árvore, então não podem ficar
+        # presos no cache por versão (o memo devolve cópia defensiva).
+        nomes = self._leaf_names_validos()
+        if nomes:
+            out.insert(1, "apelido", out["segmento"].map(lambda s: nomes.get(s, "")))
+        return out
 
     def _compute_leaves(self, ascending: bool = True, with_psi: bool = False,
                         with_test: bool = False, test: str = "mannwhitney") -> pd.DataFrame:
@@ -1685,9 +1700,11 @@ class TreeSegmenter:
                              fontsize=base_fs - 0.8, color=txt_color, zorder=3,
                              linespacing=1.12, clip_on=True)
             fit_items.append((t_metr, bw * 0.94, bh * 0.34))
-            # 3) número da folha no CANTO INFERIOR DIREITO
+            # 3) número da folha (+ apelido de negócio, quando definido) no
+            #    CANTO INFERIOR DIREITO
             if is_leaf:
-                ax.text(x + bw * 0.93, y - bh * 0.9, f"folha {nota_map.get(sid, '?')}",
+                ax.text(x + bw * 0.93, y - bh * 0.9,
+                        self._leaf_tag(sid, nota_map.get(sid, "?"), max_len=14),
                         ha="right", va="bottom", fontsize=base_fs - 1.8, color=txt_color,
                         zorder=3, fontweight="bold", clip_on=True)
 
@@ -2363,7 +2380,8 @@ class TreeSegmenter:
             patch.set_edgecolor("#33424f")
             patch.set_alpha(0.92)
         ax.set_xticks(range(1, len(vals) + 1))
-        ax.set_xticklabels([f"folha {n}" for n in notas], rotation=0, fontsize=9)
+        ax.set_xticklabels([self._leaf_tag(i, n, max_len=16)
+                            for i, n in zip(ids, notas)], rotation=0, fontsize=9)
         ax.set_ylabel("alvo")
         sfx = f" · {sample}" if sample else ""
         ax.set_title(f"Dispersão do alvo por folha{sfx}", fontsize=12,
@@ -2726,7 +2744,7 @@ class TreeSegmenter:
         if sample is None and self.sample_col is not None:
             sample = self.ref_sample
         lv = self.leaves(ascending=ascending)
-        notas, rates, los, his = [], [], [], []
+        ids, notas, rates, los, his = [], [], [], [], []
         for _, r in lv.iterrows():
             sid = r["segmento"]
             m = self.segments[sid]["mask"]
@@ -2737,7 +2755,8 @@ class TreeSegmenter:
             if len(v) == 0:
                 continue
             p, lo, hi = self._wilson_ci(int(v.sum()), len(v))
-            notas.append(int(r["nota"])); rates.append(p); los.append(lo); his.append(hi)
+            ids.append(sid); notas.append(int(r["nota"]))
+            rates.append(p); los.append(lo); his.append(hi)
         if not rates:
             raise ValueError("Sem dados para a taxa de default por folha.")
         if figsize is None:
@@ -2756,7 +2775,8 @@ class TreeSegmenter:
             ax.text(x, p, f"{p:.3f}", ha="center", va="bottom", fontsize=8.5,
                     color="#15324a", fontweight="bold")
         ax.set_xticks(xs)
-        ax.set_xticklabels([f"folha {n}" for n in notas], rotation=0, fontsize=9)
+        ax.set_xticklabels([self._leaf_tag(i, n, max_len=16)
+                            for i, n in zip(ids, notas)], rotation=0, fontsize=9)
         ax.set_ylabel(f"Taxa de default ({self._risk_word})")
         sfx = f" · {sample}" if sample else ""
         ax.set_title(f"Taxa de default por folha{sfx} (IC de Wilson 95%)", fontsize=12,
@@ -4129,7 +4149,7 @@ class TreeSegmenter:
         for sid in ordered:
             ax.plot(x, series[sid], marker="o", lw=1.9, ms=5.5,
                     color=cores[sid], markeredgecolor="#33424f", markeredgewidth=0.6,
-                    label=f"folha {nota.get(sid)}")
+                    label=self._leaf_tag(sid, nota.get(sid), max_len=16))
         ax.set_xticks(x); ax.set_xticklabels(xs, fontsize=9)
         ax.set_xlim(-0.25, len(xs) - 0.75 + 0.5)
         ax.set_ylabel(self._risk_mean); ax.set_xlabel("amostra")
@@ -4174,7 +4194,7 @@ class TreeSegmenter:
         for sid in ordered:
             ax.plot(x, series[sid], marker="o", lw=1.7, ms=4.5,
                     color=cores[sid], markeredgecolor="#33424f", markeredgewidth=0.5,
-                    label=f"folha {nota.get(sid)}")
+                    label=self._leaf_tag(sid, nota.get(sid), max_len=16))
         ax.set_xticks(x); ax.set_xticklabels(_fmt_safras(xs), rotation=45, ha="right", fontsize=8)
         ax.set_xlim(-0.7, len(xs) - 0.3)
         ax.set_ylabel(self._risk_mean); ax.set_xlabel("safra")
@@ -4743,7 +4763,9 @@ class TreeSegmenter:
             conts.append(ax.barh(y + (k - (n_s - 1) / 2.0) * bw, vals,
                                  height=bw, label=str(a), color=self._sample_bar_color(a),
                                  edgecolor="#33424f", linewidth=0.3))
-        ax.set_yticks(y); ax.set_yticklabels([str(n) for n in notas], fontsize=8)
+        ax.set_yticks(y)
+        ax.set_yticklabels([self._leaf_tag(s, n, max_len=18, com_prefixo=False)
+                            for s, n in zip(lv["segmento"], lv["nota"])], fontsize=8)
         ax.invert_yaxis()                          # folha de menor nota no topo
         ax.set_xlabel("concentração (% da amostra)"); ax.set_ylabel("folha")
         ax.xaxis.set_major_formatter(PercentFormatter(xmax=100, decimals=0))
@@ -5121,12 +5143,61 @@ class TreeSegmenter:
     #   Por padrão adiciona também a nota de alvo (1..N) e a descrição
     #   por extenso. Colunas: <col>, <col>_nota, <col>_desc
     # ------------------------------------------------------------------
+    # ==================================================================
+    # APELIDOS DE NEGÓCIO POR FOLHA (leaf_names)
+    #   sid -> texto livre. Como o sid deriva dos rótulos de condição, ele MUDA
+    #   quando a estrutura muda: merge/split renomeia a folha e o apelido do sid
+    #   antigo fica órfão — órfãos são ignorados na leitura e descartados em
+    #   silêncio no to_dict; um collapse que restaura o sid antigo revive o
+    #   apelido. Quando definidos, os apelidos aparecem na tabela de folhas,
+    #   no assign() (coluna extra), no to_sql (comentário por ramo do CASE) e
+    #   nos gráficos com rótulo de folha.
+    # ==================================================================
+    def set_leaf_name(self, sid: str, name: str | None):
+        """Define (ou remove, com ``name=None``/vazio) o apelido de negócio da
+        folha ``sid``. O texto é normalizado (espaços/quebras colapsados).
+        Devolve ``self`` para encadear."""
+        if sid not in self.segments or not self.segments[sid]["is_leaf"]:
+            raise ValueError(f"'{sid}' não é uma folha atual da árvore.")
+        nome = " ".join(str(name).split()) if name is not None else ""
+        if nome:
+            self.leaf_names[sid] = nome
+        else:
+            self.leaf_names.pop(sid, None)
+        return self
+
+    def leaf_name(self, sid) -> str | None:
+        """Apelido de negócio da folha ``sid`` — ``None`` sem apelido ou quando o
+        sid não é mais uma folha (apelidos órfãos são ignorados)."""
+        s = self.segments.get(sid)
+        if s is None or not s["is_leaf"]:
+            return None
+        return self.leaf_names.get(sid) or None
+
+    def _leaf_names_validos(self) -> dict:
+        """Apelidos das folhas ATUAIS (descarta os órfãos de sids extintos)."""
+        return {sid: nome for sid, nome in self.leaf_names.items()
+                if nome and sid in self.segments and self.segments[sid]["is_leaf"]}
+
+    def _leaf_tag(self, sid, nota, max_len: int = 24,
+                  com_prefixo: bool = True) -> str:
+        """Rótulo curto de folha p/ os gráficos: ``"folha N"`` (+ `` · apelido``
+        truncado quando a folha tem apelido de negócio)."""
+        base = f"folha {nota}" if com_prefixo else f"{nota}"
+        nome = self.leaf_name(sid)
+        if not nome:
+            return base
+        if max_len and len(nome) > max_len:
+            nome = nome[:max_len - 1] + "…"
+        return f"{base} · {nome}"
+
     def assign(
         self,
         col_name: str = "segmento",
         add_grade: bool = True,
         add_desc: bool = True,
         ascending: bool = True,
+        add_name: bool = True,
     ) -> pd.DataFrame:
         out = self.df.copy()
         out[col_name] = pd.Series(pd.NA, index=out.index, dtype="object")
@@ -5148,6 +5219,12 @@ class TreeSegmenter:
 
         if add_grade:
             out[f"{col_name}_nota"] = out[f"{col_name}_nota"].astype("Int64")
+        # coluna com o APELIDO de negócio da folha (NA onde não definido), logo
+        # após a coluna do segmento — só quando há apelido em alguma folha atual
+        nomes = self._leaf_names_validos() if add_name else {}
+        if nomes:
+            ap = out[col_name].map(lambda s: nomes.get(s, pd.NA))
+            out.insert(out.columns.get_loc(col_name) + 1, f"{col_name}_apelido", ap)
         return out
 
     # ==================================================================
@@ -5206,6 +5283,9 @@ class TreeSegmenter:
                 "feature_labels": dict(self.feature_labels),
                 "problem_label": self.problem_label,
                 "fallback": self.fallback,
+                # apelidos de negócio das folhas ATUAIS — apelidos órfãos (o sid
+                # deixou de existir após merge/split) são descartados em silêncio
+                "leaf_names": self._leaf_names_validos(),
             },
             "segments": segs,
         }
@@ -5288,6 +5368,12 @@ class TreeSegmenter:
         # fallback persistido (JSONs antigos não têm a chave → None = sem fallback)
         seg.fallback = meta.get("fallback")
         seg._load_segments(data["segments"])
+        # apelidos de negócio por folha (JSONs antigos não têm a chave → {});
+        # entradas cujo sid não é folha desta estrutura são descartadas
+        nomes = meta.get("leaf_names") or {}
+        seg.leaf_names = {sid: str(n) for sid, n in nomes.items()
+                          if n and sid in seg.segments
+                          and seg.segments[sid]["is_leaf"]}
         return seg
 
     @classmethod
@@ -5506,10 +5592,16 @@ class TreeSegmenter:
                 parts.append(expr)
             return " AND ".join(parts) if parts else "1=1"
 
+        # apelido de negócio por folha → comentário no ramo do CASE (documenta a
+        # régua no próprio SQL sem alterar a semântica)
+        nomes = self._leaf_names_validos()
+
         def case(valfn, alias):
             linhas = [f"  CASE"]
             for leaf in regua["leaves"]:
-                linhas.append(f"    WHEN {cond_sql(leaf['conditions'])} THEN {valfn(leaf)}")
+                com = f"  -- {nomes[leaf['id']]}" if leaf["id"] in nomes else ""
+                linhas.append(f"    WHEN {cond_sql(leaf['conditions'])} "
+                              f"THEN {valfn(leaf)}{com}")
             # linhas órfãs (sem rota): NULL por padrão; com fallback, a folha escolhida
             linhas.append("    ELSE NULL" if fb is None else f"    ELSE {valfn(fb)}")
             linhas.append(f"  END AS {alias}")
