@@ -25,6 +25,17 @@ Uso típico::
     seg.build_ratings("quantil", n_ratings=10)
     seg.rating_table()
 
+A **esteira de seleção de variáveis** (:func:`run_selection`) orquestra, numa
+chamada só, as etapas que o usuário escolher — filtro de faltantes/constantes,
+tratamento de categóricas, IV, PSI, monotonia, redundância e backward — e devolve
+a trilha de auditoria (tabela por variável, funil por etapa e política em JSON)::
+
+    from yggdrasil.credit_risk.model import run_selection
+
+    res = run_selection(seg, steps=["missing", "categoricas", "iv", "psi",
+                                    "correlacao"], apply=True)
+    res.tabela; res.funil; res.politica
+
 A interface interativa (ipywidgets, dentro do Jupyter/Databricks) é opcional e
 carregada sob demanda — instale com ``pip install yggdrasil[ui]``::
 
@@ -36,8 +47,19 @@ carregada sob demanda — instale com ``pip install yggdrasil[ui]``::
 from __future__ import annotations
 
 from .segmenter import ModelSegmenter
+from .selection import (
+    PARAMS_DEFAULT,
+    SELECTION_STEPS,
+    STEPS_DEFAULT,
+    SelectionResult,
+    register_step,
+    rotulo_etapa,
+    run_selection,
+)
 
-__all__ = ["ModelSegmenter", "ModelSegmenterUI"]
+__all__ = ["ModelSegmenter", "ModelSegmenterUI", "run_selection", "SelectionResult",
+           "SELECTION_STEPS", "STEPS_DEFAULT", "PARAMS_DEFAULT", "register_step",
+           "rotulo_etapa"]
 
 
 def __getattr__(name):
