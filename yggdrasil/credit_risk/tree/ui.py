@@ -732,7 +732,18 @@ class TreeSegmenterUI:
         self.btn_sql = mk("Gerar SQL (CASE WHEN)", "primary",
                           "Gera a régua como SQL copiável", "database")
         self.tx_sql_table = W.Text(description="tabela", value="minha_tabela",
-                                   layout=W.Layout(width="60%"), style=dstyle)
+                                   layout=W.Layout(width="34%"), style=dstyle)
+        # fallback p/ linhas não classificadas no scoring (categoria não vista /
+        # faltante sem rota): NULL (padrão) ou a folha de pior risco. A escolha é
+        # persistida no segmentador (self.seg.fallback → to_dict/save).
+        _fb0 = getattr(self.seg, "fallback", None)
+        self.dd_fallback = W.Dropdown(
+            description="fallback p/ não classificados",
+            options=[("NULL (padrão)", None), ("pior nota (maior risco)", "pior_nota")],
+            value=("pior_nota" if _fb0 == "pior_nota" else None),
+            tooltip="Destino das linhas que não caem em nenhuma folha ao aplicar "
+                    "a régua (comum em OOT/produção)",
+            layout=W.Layout(width="40%"), style={"description_width": "initial"})
         self.out_sql = W.Textarea(layout=W.Layout(width="99%", height="240px"))
         self.tx_diff_path = W.Text(description="árvore B (JSON)", placeholder="caminho do .json salvo",
                                    layout=W.Layout(width="95%"), style=dstyle)
@@ -1020,6 +1031,7 @@ class TreeSegmenterUI:
         self.btn_suggest3.on_click(self._on_suggest3)
         self.btn_importance.on_click(self._on_importance)
         self.btn_sql.on_click(self._on_sql)
+        self.dd_fallback.observe(self._on_fallback, names="value")
         self.btn_diff.on_click(self._on_diff)
         self.btn_autofit.on_click(self._on_autofit)
         self.btn_mlflow.on_click(self._on_mlflow)
@@ -1771,8 +1783,12 @@ class TreeSegmenterUI:
         card_sql = W.VBox([
             W.HTML("<div class='treeui-h'>Exportar como SQL (CASE WHEN)</div>"),
             W.HTML("<div class='treeui-legend'>Régua pronta para copiar e colar. Ajuste o nome da "
-                   "tabela de origem.</div>"),
-            W.HBox([self.tx_sql_table, self.btn_sql]), self.out_sql]); card_sql.add_class("treeui-card")
+                   "tabela de origem. O <b>fallback p/ não classificados</b> define o destino das "
+                   "linhas que não caem em nenhuma folha ao aplicar a régua (categoria não vista, "
+                   "faltante sem rota) — mesmo com 0 na base atual, isso acontece em OOT/produção; "
+                   "com fallback, o <code>ELSE</code> vira a folha escolhida em vez de NULL.</div>"),
+            W.HBox([self.tx_sql_table, self.dd_fallback, self.btn_sql]),
+            self.out_sql]); card_sql.add_class("treeui-card")
         card_diff = W.VBox([
             W.HTML("<div class='treeui-h'>Comparar duas árvores (versões)</div>"),
             W.HTML("<div class='treeui-legend'>Carrega outra árvore salva em JSON e compara com a "
@@ -2094,13 +2110,14 @@ class TreeSegmenterUI:
         hexc = {"green": "var(--ok-ink)", "yellow": "var(--warn-ink)", "red": "var(--bad-ink)"}
         bgc = {"green": "var(--ok-bg)", "yellow": "var(--warn-bg)", "red": "var(--bad-bg)"}
 
-        def cell(label, value, color="var(--ink)", badge=None, cls=None):
+        def cell(label, value, color="var(--ink)", badge=None, cls=None, tip=""):
             bh = ""
             if badge and cls:
                 bh = (f"<span style='font-size:10px;font-weight:600;color:{hexc[cls]};"
                       f"background:{bgc[cls]};border-radius:20px;padding:2px 8px;"
                       f"margin-left:7px'>{badge}</span>")
-            return (f"<div style='flex:1;min-width:86px;padding:8px 14px;"
+            t = f" title='{tip}'" if tip else ""
+            return (f"<div{t} style='flex:1;min-width:86px;padding:8px 14px;"
                     f"border-right:1px solid var(--hair)'>"
                     f"<div style='font-size:10px;font-weight:600;letter-spacing:.07em;"
                     f"text-transform:uppercase;color:var(--sub-ink);white-space:nowrap'>{label}</div>"
@@ -2109,6 +2126,25 @@ class TreeSegmenterUI:
                     f"{value}</span>{bh}</div></div>")
         cells = [cell("Folhas", n_folhas), cell("Profundidade", prof),
                  cell("Fechadas", n_lock)]
+        # linhas da base atual sem rota na régua vigente (órfãs): esperado 0 no
+        # desenvolvimento; >0 educa sobre o que acontecerá em OOT/produção — o
+        # destino é configurável no card Exportar como SQL (aba Avançado).
+        try:
+            n_orf = seg.n_orfas()
+            tip = ("Linhas da base atual que não caem em nenhuma folha da régua "
+                   "(categoria não vista / faltante sem rota). Esperado 0 no "
+                   "desenvolvimento; em OOT/produção essas linhas viram nulo — "
+                   "configure o fallback no card Exportar como SQL (aba Avançado).")
+            if n_orf == 0:
+                cells.append(cell("Sem rota", 0, badge="ok", cls="green", tip=tip))
+            else:
+                fb = getattr(seg, "fallback", None)
+                badge = "→ fallback" if fb is not None else "→ nulo"
+                cells.append(cell("Sem rota", f"{n_orf:,}".replace(",", "."),
+                                  color=hexc["yellow"], badge=badge, cls="yellow",
+                                  tip=tip))
+        except Exception:
+            pass
         if self.sample_col is not None and n_folhas >= 1:
             try:
                 for _, r in seg.psi().iterrows():
@@ -3231,10 +3267,20 @@ class TreeSegmenterUI:
             self.out_importance_legend.value = dic
             self._log("Importância das variáveis na árvore calculada.")
 
+    def _on_fallback(self, ch):
+        """Persiste a escolha de fallback no segmentador (viaja no to_dict/save)
+        e atualiza o chip de linhas sem rota na barra de status."""
+        self.seg.fallback = ch["new"]
+        self._set_html(self.bar, "bar", self._status_html())
+        self._log("Fallback p/ não classificados: "
+                  + ("pior nota (maior risco)." if ch["new"] == "pior_nota"
+                     else "NULL (sem fallback)."))
+
     def _on_sql(self, _):
         tbl = (self.tx_sql_table.value or "minha_tabela").strip()
         try:
-            self.out_sql.value = self.seg.to_sql(table=tbl)
+            self.out_sql.value = self.seg.to_sql(table=tbl,
+                                                 fallback=self.dd_fallback.value)
             self._log("SQL gerado — selecione tudo na caixa e copie (Ctrl+C).")
         except Exception as e:
             self.out_sql.value = f"-- Erro ao gerar SQL: {type(e).__name__}: {e}"
@@ -4095,6 +4141,8 @@ class TreeSegmenterUI:
             antes = self._delta_snapshot()
             self._checkpoint()
             self.seg = TreeSegmenter(self.df, **self._kwargs)
+            # o segmentador novo nasce sem fallback — reaplica a escolha da UI
+            self.seg.fallback = self.dd_fallback.value
             self.locked.clear()
             self._pending = None
             self._log("Árvore reiniciada.")
@@ -5112,6 +5160,12 @@ class TreeSegmenterUI:
             antes = self._delta_snapshot()
             self._checkpoint()
             self.seg._load_segments(data["segments"])
+            # fallback persistido no JSON: restaura no segmentador e sincroniza o
+            # dropdown quando a opção existe na UI (nota int fica só no segmentador)
+            if "fallback" in meta:
+                self.seg.fallback = meta.get("fallback")
+                if self.seg.fallback in (None, "pior_nota"):
+                    self.dd_fallback.value = self.seg.fallback
             self.locked = set(data.get("_ui", {}).get("locked", [])) & set(self.seg.segments)
             self._pending = None
             n = sum(s["is_leaf"] for s in self.seg.segments.values())

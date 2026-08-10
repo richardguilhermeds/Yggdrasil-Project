@@ -231,6 +231,84 @@ def test_to_pyspark_compila(seg):
 
 
 # ----------------------------------------------------------------------
+# Fallback de scoring p/ linhas órfãs (categoria não vista / faltante sem rota)
+# ----------------------------------------------------------------------
+def test_fallback_pior_nota_categoria_nao_vista(seg):
+    seg.grow("garantia", splits=[["A"], ["B", "C"], ["D"]])
+    novo = make_df(seg.task_type, n=300, seed=13)
+    idx = novo.index[:30]
+    novo.loc[idx, "garantia"] = "Z"                    # categoria não vista
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        sem = seg.predict(novo)                        # padrão: órfã fica nula
+        com = seg.predict(novo, fallback="pior_nota")
+    assert sem.loc[idx, "segmento"].isna().all()
+    assert com["segmento"].notna().all() and com["nota"].notna().all()
+    pior = seg.leaves().iloc[-1]                       # pior risco = maior nota
+    assert (com.loc[idx, "segmento"] == pior["segmento"]).all()
+    assert (com.loc[idx, "nota"] == pior["nota"]).all()
+    # linhas com rota não mudam com o fallback
+    ok = sem["segmento"].notna()
+    assert (com.loc[ok, "segmento"] == sem.loc[ok, "segmento"]).all()
+
+
+def test_fallback_nota_especifica_e_invalida(seg):
+    seg.grow("garantia", splits=[["A"], ["B", "C"], ["D"]])
+    novo = make_df(seg.task_type, n=200, seed=14)
+    novo.loc[novo.index[:10], "garantia"] = "Z"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        com = seg.predict(novo, fallback=1)            # nota específica
+    assert (com.loc[novo.index[:10], "nota"] == 1).all()
+    with pytest.raises(ValueError, match="não existe"):
+        seg.predict(novo, fallback=99)                 # nota inexistente
+    with pytest.raises(ValueError, match="fallback inválido"):
+        seg.predict(novo, fallback="qualquer_coisa")
+
+
+def test_to_sql_fallback_troca_else(seg):
+    seg.grow("garantia", splits=[["A"], ["B", "C"], ["D"]])
+    assert "ELSE NULL" in seg.to_sql()                 # padrão preservado
+    sql = seg.to_sql(fallback="pior_nota")
+    pior = seg.leaves().iloc[-1]
+    assert "ELSE NULL" not in sql
+    assert f"ELSE '{pior['segmento']}'" in sql         # segmento da folha fallback
+    assert f"ELSE {int(pior['nota'])}" in sql          # nota da folha fallback
+    assert "fallback" in sql                           # comentário no cabeçalho
+
+
+def test_to_pyspark_fallback_troca_otherwise(seg):
+    seg.grow("score", splits=[0.8])
+    code = seg.to_pyspark(fallback="pior_nota")
+    compile(code, "<regua>", "exec")
+    pior = seg.leaves().iloc[-1]
+    assert ".otherwise(F.lit(None))" not in code
+    assert f".otherwise(F.lit({pior['segmento']!r}))" in code
+    assert f".otherwise(F.lit({int(pior['nota'])}))" in code
+
+
+def test_fallback_persistido_em_save_load(seg, tmp_path):
+    seg.grow("score", splits=[0.8])
+    seg.fallback = "pior_nota"
+    assert seg.to_dict()["meta"]["fallback"] == "pior_nota"
+    p = str(tmp_path / "arvore_fb.json")
+    seg.save(p)
+    novo = TreeSegmenter.load(p, seg.df)
+    assert novo.fallback == "pior_nota"
+    # parâmetro omitido → vale o persistido; None explícito volta ao padrão
+    assert "ELSE NULL" not in novo.to_sql()
+    assert "ELSE NULL" in novo.to_sql(fallback=None)
+
+
+def test_n_orfas_conta_linhas_sem_rota(seg):
+    assert seg.n_orfas() == 0                          # raiz cobre tudo
+    # split categórico manual que NÃO cobre 'D' → linhas de 'D' ficam sem rota
+    seg.grow("garantia", splits=[["A"], ["B", "C"]])
+    esperado = int((seg.df["garantia"].astype(str) == "D").sum())
+    assert seg.n_orfas() == esperado > 0
+
+
+# ----------------------------------------------------------------------
 # Poda / fusão / estabilidade
 # ----------------------------------------------------------------------
 def test_auto_merge_funde_irmas_indistinguiveis(task):

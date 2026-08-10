@@ -213,9 +213,43 @@ def _match_conditions_pandas(df, conditions):
     return m
 
 
+def _folha_fallback(regua, fallback):
+    """Resolve a folha de fallback da régua para linhas órfãs (sem rota).
+
+    ``fallback``: ``None`` mantém o comportamento atual (linha órfã fica nula);
+    ``'pior_nota'`` devolve a folha de pior risco segundo a ordenação vigente
+    (maior nota — a nota é a posição esquerda→direita da árvore, então a última
+    é a de maior alvo na referência); um ``int`` devolve a folha daquela nota.
+    Levanta ``ValueError`` para valor inválido ou nota inexistente.
+    """
+    if fallback is None:
+        return None
+    leaves = regua.get("leaves") or []
+    if not leaves:
+        return None
+    if fallback == "pior_nota":
+        return max(leaves, key=lambda lf: lf["nota"])
+    if isinstance(fallback, (int, np.integer)) and not isinstance(fallback, bool):
+        alvo = int(fallback)
+        for lf in leaves:
+            if lf["nota"] == alvo:
+                return lf
+        raise ValueError(
+            f"fallback inválido: nota {alvo} não existe na régua "
+            f"(notas válidas: {[lf['nota'] for lf in leaves]}).")
+    raise ValueError(
+        f"fallback inválido: {fallback!r}. Use 'pior_nota', uma nota (int) ou None.")
+
+
 def _aplicar_regua_pandas(regua, df, col_seg="segmento",
-                          col_nota="nota", col_valor="valor_regua"):
-    """Aplica uma régua (dict de folhas) a um DataFrame pandas."""
+                          col_nota="nota", col_valor="valor_regua",
+                          fallback=None):
+    """Aplica uma régua (dict de folhas) a um DataFrame pandas.
+
+    ``fallback`` roteia as linhas órfãs (que não caem em folha nenhuma):
+    ``None`` mantém nulo; ``'pior_nota'``/nota (int) atribui a folha escolhida
+    — ver :func:`_folha_fallback`. O warning com a contagem é mantido."""
+    fb = _folha_fallback(regua, fallback)   # valida cedo, mesmo sem órfãs
     seg = pd.Series(pd.NA, index=df.index, dtype="object")
     nota = pd.Series(pd.NA, index=df.index, dtype="Int64")
     pdcol = pd.Series(np.nan, index=df.index, dtype="float64")
@@ -224,18 +258,34 @@ def _aplicar_regua_pandas(regua, df, col_seg="segmento",
         seg[m] = leaf["id"]
         nota[m] = leaf["nota"]
         pdcol[m] = leaf["pd"]
-    # cobertura no scoring: linhas que não caíram em NENHUM segmento ficam nulas.
-    # Não é silencioso — avisa com a causa provável (faltante sem rota quando o
-    # split usou na_to_worst=False, ou categoria não vista no ajuste).
-    n_orfas = int(seg.isna().sum())
+    # cobertura no scoring: linhas que não caíram em NENHUM segmento ficam nulas
+    # (ou vão para a folha de fallback, quando configurado). Não é silencioso —
+    # avisa com a causa provável (faltante sem rota quando o split usou
+    # na_to_worst=False, ou categoria não vista no ajuste).
+    orfas = seg.isna()
+    n_orfas = int(orfas.sum())
     if n_orfas:
         import warnings
-        warnings.warn(
-            f"{n_orfas} linha(s) sem segmento na régua (segmento nulo): valor "
-            f"faltante numa variável sem rota de faltantes (grow com "
-            f"na_to_worst=False) ou categoria não vista no ajuste.",
-            stacklevel=2)
+        causa = ("valor faltante numa variável sem rota de faltantes (grow com "
+                 "na_to_worst=False) ou categoria não vista no ajuste")
+        if fb is not None:
+            seg[orfas] = fb["id"]
+            nota[orfas] = fb["nota"]
+            pdcol[orfas] = fb["pd"]
+            warnings.warn(
+                f"{n_orfas} linha(s) sem segmento na régua atribuída(s) ao "
+                f"fallback '{fb['id']}' (nota {fb['nota']}): {causa}.",
+                stacklevel=2)
+        else:
+            warnings.warn(
+                f"{n_orfas} linha(s) sem segmento na régua (segmento nulo): "
+                f"{causa}.", stacklevel=2)
     return pd.DataFrame({col_seg: seg, col_nota: nota, col_valor: pdcol}, index=df.index)
+
+
+# sentinela p/ distinguir "parâmetro omitido" (usa o fallback persistido em
+# ``self.fallback``) de "explicitamente None" (sem fallback nesta chamada)
+_FALLBACK_OMITIDO = object()
 
 
 # ======================================================================
@@ -279,6 +329,12 @@ class TreeSegmenter:
         self.problem_label = problem_label
         self._risk_word = problem_label or target
         self._risk_mean = f"média de {self._risk_word}"
+        # fallback de scoring p/ linhas órfãs (categoria não vista / faltante sem
+        # rota): None mantém nulo; 'pior_nota' roteia p/ a folha de pior risco
+        # (maior nota); int roteia p/ a nota específica. É o PADRÃO usado por
+        # predict/to_sql/to_pyspark/apply_spark quando o parâmetro `fallback` é
+        # omitido, e é persistido em to_dict/from_dict (viaja no JSON salvo).
+        self.fallback: str | int | None = None
         # cache do binning ótimo por folha (o solver do optbinning é o gargalo) —
         # ver _resolve_bins_cached; chaveado por id() da máscara da folha
         self._bins_cache: dict = {}
@@ -5149,6 +5205,7 @@ class TreeSegmenter:
                 "min_leaf_rows": self.min_leaf_rows,
                 "feature_labels": dict(self.feature_labels),
                 "problem_label": self.problem_label,
+                "fallback": self.fallback,
             },
             "segments": segs,
         }
@@ -5228,6 +5285,8 @@ class TreeSegmenter:
                   problem_label=meta.get("problem_label"),
                   min_leaf_rows=meta.get("min_leaf_rows", 50),
                   verbose=verbose)
+        # fallback persistido (JSONs antigos não têm a chave → None = sem fallback)
+        seg.fallback = meta.get("fallback")
         seg._load_segments(data["segments"])
         return seg
 
@@ -5290,17 +5349,43 @@ class TreeSegmenter:
         leaves.sort(key=lambda x: x["nota"])
         return {"target": self.target, "ref_sample": self.ref_sample, "leaves": leaves}
 
+    def _fallback_resolvido(self, fallback):
+        """Fallback efetivo de uma chamada de scoring/export: o parâmetro quando
+        informado (inclusive ``None`` explícito = sem fallback), senão o
+        persistido em ``self.fallback``."""
+        return self.fallback if fallback is _FALLBACK_OMITIDO else fallback
+
+    def n_orfas(self) -> int:
+        """Linhas da base atual SEM folha na régua vigente (sem rota): valor
+        faltante numa variável sem rota de faltantes ou categoria fora de toda
+        folha. Esperado 0 na base de desenvolvimento; >0 antecipa linhas nulas
+        no scoring (use ``fallback`` para roteá-las)."""
+        return int(self._leaf_id_series().isna().sum())
+
     def predict(self, X: pd.DataFrame, col_seg="segmento",
-                col_nota="nota", col_valor="valor_regua") -> pd.DataFrame:
-        """Aplica a régua a um DataFrame pandas novo: segmento, nota e alvo."""
-        return _aplicar_regua_pandas(self._regua_dict(), X, col_seg, col_nota, col_valor)
+                col_nota="nota", col_valor="valor_regua",
+                fallback=_FALLBACK_OMITIDO) -> pd.DataFrame:
+        """Aplica a régua a um DataFrame pandas novo: segmento, nota e alvo.
+
+        ``fallback`` roteia as linhas órfãs (categoria não vista / faltante sem
+        rota): ``None`` mantém nulo (comportamento padrão), ``'pior_nota'`` usa a
+        folha de pior risco, um ``int`` usa a folha daquela nota. Omitido, vale o
+        persistido em ``self.fallback``."""
+        return _aplicar_regua_pandas(self._regua_dict(), X, col_seg, col_nota,
+                                     col_valor,
+                                     fallback=self._fallback_resolvido(fallback))
 
     # ------------------------------------------------------------------
     # TO_PYSPARK: gera o código da régua como F.when().otherwise() para
     #   aplicar a segmentação (segmento + nota + alvo) em escala no Spark.
     # ------------------------------------------------------------------
-    def to_pyspark(self, func_name: str = "aplicar_regua") -> str:
+    def to_pyspark(self, func_name: str = "aplicar_regua",
+                   fallback=_FALLBACK_OMITIDO) -> str:
         """Gera o código PySpark (string) que reproduz a régua (segmento, nota e alvo).
+
+        ``fallback`` define o ``otherwise`` das linhas que não caem em folha
+        nenhuma: ``None`` mantém nulo; ``'pior_nota'``/nota (int) grava a folha
+        escolhida. Omitido, vale o persistido em ``self.fallback``.
 
         Contrato de faltantes: as colunas numéricas devem usar **NULL** (não ``NaN``)
         para ausente. No Spark um ``NaN`` numérico é ordenado como o MAIOR valor e
@@ -5309,6 +5394,7 @@ class TreeSegmenter:
         (``F.when(F.isnan(col), None).otherwise(col)``) ou use :meth:`apply_spark`, que
         já trata ``NaN`` como faltante internamente."""
         regua = self._regua_dict()
+        fb = _folha_fallback(regua, self._fallback_resolvido(fallback))
 
         def cond_expr(conds):
             parts = []
@@ -5338,12 +5424,16 @@ class TreeSegmenter:
             for i, leaf in enumerate(regua["leaves"], 1):
                 head = "  F.when" if i == 1 else "   .when"
                 out.append(f'        {head}(c{i}, {valfn(leaf)})')
-            out.append("           .otherwise(F.lit(None))")
+            # linhas órfãs (sem rota): nulo por padrão; com fallback, a folha escolhida
+            otherwise = "F.lit(None)" if fb is None else valfn(fb)
+            out.append(f"           .otherwise({otherwise})")
             return "\n".join(out)
 
+        fb_doc = ("" if fb is None else
+                  f" Linhas sem rota vão p/ o fallback '{fb['id']}' (nota {fb['nota']}).")
         L = ["from pyspark.sql import functions as F", "",
              f"def {func_name}(df, col_seg='segmento', col_nota='nota', col_valor='valor_regua'):",
-             f'    """Régua de {self._risk_word} gerada por TreeSegmenter (segmento, nota e {self._risk_word} por folha)."""']
+             f'    """Régua de {self._risk_word} gerada por TreeSegmenter (segmento, nota e {self._risk_word} por folha).{fb_doc}"""']
         for i, leaf in enumerate(regua["leaves"], 1):
             L.append(f'    c{i} = {cond_expr(leaf["conditions"])}')
         L.append("    seg = (")
@@ -5365,7 +5455,8 @@ class TreeSegmenter:
     #   segmento (id da folha), nota (1..N) e o valor previsto do alvo.
     # ------------------------------------------------------------------
     def to_sql(self, table: str = "minha_tabela", col_seg: str = "segmento",
-               col_nota: str = "folha", col_valor: str = "valor_previsto") -> str:
+               col_nota: str = "folha", col_valor: str = "valor_previsto",
+               fallback=_FALLBACK_OMITIDO) -> str:
         """Gera SQL ANSI com ``CASE WHEN`` que reproduz a régua. Pronto p/ copiar.
 
         ``table`` é o nome da tabela/CTE de origem. Cada folha vira um ramo do
@@ -5373,11 +5464,17 @@ class TreeSegmenter:
         pandas/Spark (faixas (lo, hi], ``IN`` para categóricas, ``IS NULL`` para
         faltantes, ``include_na`` quando o nó de faltantes foi fundido).
 
+        ``fallback`` define o ``ELSE`` das linhas que não caem em folha nenhuma
+        (categoria não vista / faltante sem rota): ``None`` mantém ``ELSE NULL``;
+        ``'pior_nota'``/nota (int) grava a folha escolhida. Omitido, vale o
+        persistido em ``self.fallback``.
+
         Contrato de faltantes: colunas numéricas devem usar **NULL** (não ``NaN``)
         para ausente — no Spark um ``NaN`` é o MAIOR valor e ``IS NULL`` não o captura,
         então cairia no bin mais alto. Normalize ``NaN``→``NULL`` antes (ex.:
         ``nanvl``/``CASE WHEN isnan(x) THEN NULL``) ou use :meth:`apply_spark`."""
         regua = self._regua_dict()
+        fb = _folha_fallback(regua, self._fallback_resolvido(fallback))
 
         def _q(v):                       # literal de categoria com escape de aspas
             return "'" + str(v).replace("'", "''") + "'"
@@ -5413,11 +5510,16 @@ class TreeSegmenter:
             linhas = [f"  CASE"]
             for leaf in regua["leaves"]:
                 linhas.append(f"    WHEN {cond_sql(leaf['conditions'])} THEN {valfn(leaf)}")
-            linhas.append(f"    ELSE NULL")
+            # linhas órfãs (sem rota): NULL por padrão; com fallback, a folha escolhida
+            linhas.append("    ELSE NULL" if fb is None else f"    ELSE {valfn(fb)}")
             linhas.append(f"  END AS {alias}")
             return "\n".join(linhas)
 
-        L = [f"-- Régua de segmentação ({self.task_type}) gerada por TreeSegmenter",
+        cab = f"-- Régua de segmentação ({self.task_type}) gerada por TreeSegmenter"
+        if fb is not None:
+            cab += (f"\n-- fallback p/ linhas sem rota (não classificadas): "
+                    f"'{fb['id']}' (nota {fb['nota']})")
+        L = [cab,
              "SELECT",
              "  *,",
              case(lambda lf: _q(lf["id"]), col_seg) + ",",
@@ -5622,7 +5724,13 @@ class TreeSegmenter:
     #   `sdf` com o MESMO nome (senão levanta erro listando as que faltam).
     # ------------------------------------------------------------------
     def apply_spark(self, sdf, col_seg: str = "segmento",
-                    col_nota: str = "nota", col_valor: str = "valor_regua"):
+                    col_nota: str = "nota", col_valor: str = "valor_regua",
+                    fallback=_FALLBACK_OMITIDO):
+        """Aplica a régua num Spark DataFrame (segmento, nota e alvo).
+
+        ``fallback`` roteia as linhas órfãs (sem rota) para a folha escolhida
+        (``'pior_nota'``/nota int) em vez de deixá-las nulas; omitido, vale o
+        persistido em ``self.fallback``."""
         try:
             from pyspark.sql import functions as F
         except ImportError as e:  # pragma: no cover
@@ -5631,6 +5739,7 @@ class TreeSegmenter:
         regua = self._regua_dict()
         if not regua["leaves"]:
             raise ValueError("Árvore sem folhas — cresça a segmentação antes de aplicar.")
+        fb = _folha_fallback(regua, self._fallback_resolvido(fallback))
 
         faltando = [f for f in self.regua_features() if f not in sdf.columns]
         if faltando:
@@ -5684,9 +5793,15 @@ class TreeSegmenter:
                 nota_col = nota_col.when(cond, F.lit(leaf["nota"]))
                 pd_col = pd_col.when(cond, F.lit(leaf["pd"]))
 
-        return (sdf.withColumn(col_seg, seg_col.otherwise(F.lit(None)))
-                   .withColumn(col_nota, nota_col.otherwise(F.lit(None)))
-                   .withColumn(col_valor, pd_col.otherwise(F.lit(None))))
+        # linhas órfãs (sem rota): nulo por padrão; com fallback, a folha escolhida
+        if fb is None:
+            o_seg = o_nota = o_val = F.lit(None)
+        else:
+            o_seg, o_nota, o_val = (F.lit(fb["id"]), F.lit(fb["nota"]),
+                                    F.lit(fb["pd"]))
+        return (sdf.withColumn(col_seg, seg_col.otherwise(o_seg))
+                   .withColumn(col_nota, nota_col.otherwise(o_nota))
+                   .withColumn(col_valor, pd_col.otherwise(o_val)))
 
     # ------------------------------------------------------------------
     # SUGGEST_SPLIT: recomenda a melhor variável para dividir uma folha,

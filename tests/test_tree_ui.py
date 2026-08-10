@@ -418,6 +418,28 @@ def test_ui_avancado_suggest_importance_sql(task):
     assert "CASE" in ui.out_sql.value and "WHEN" in ui.out_sql.value
 
 
+def test_ui_sql_fallback_dropdown_e_chip_sem_rota(task):
+    """O card de SQL tem o dropdown de fallback p/ não classificados: NULL por
+    padrão; 'pior nota' persiste no segmentador (viaja no to_dict) e troca o
+    ELSE do SQL. A barra de status mostra o chip de linhas sem rota (0 na base
+    de desenvolvimento)."""
+    ui = _build(task)
+    assert ui.dd_fallback.value is None             # padrão: sem fallback
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        ui._on_sql(None)
+    assert "ELSE NULL" in ui.out_sql.value          # padrão preservado
+    assert "Sem rota" in ui.bar.value               # chip na barra de status
+    assert ui.seg.n_orfas() == 0                    # base atual coberta (DES)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.dd_fallback.value = "pior_nota"          # escolhe o fallback
+        ui._on_sql(None)
+    assert ui.seg.fallback == "pior_nota"           # persistido no segmentador
+    assert ui.seg.to_dict()["meta"]["fallback"] == "pior_nota"
+    assert "ELSE NULL" not in ui.out_sql.value      # ELSE vira a folha escolhida
+    assert "fallback" in ui.out_sql.value           # comentário no cabeçalho
+
+
 def test_ui_criterio_de_split(task):
     crit = "gini" if task == "classification" else "variance"
     ui = _build(task)
