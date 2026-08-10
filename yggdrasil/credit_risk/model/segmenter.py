@@ -4932,6 +4932,86 @@ class ModelSegmenter:
                 "safra_series": safra_series, "sample_inv": sample_inv,
                 "n_safras": n_safras, "safras_inv": safras_inv, "safra_rate": safra_rate}
 
+    # ------------------------------------------------------------------
+    # Separação estatística entre ratings adjacentes
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _two_proportion_pvalue(k1, n1, k2, n2) -> float:
+        """p-valor (bicaudal) do teste z de duas proporções, com proporção
+        agrupada (aproximação normal). ``NaN`` quando indefinido; 1,0 quando as
+        duas faixas são degeneradas iguais (todas as linhas na mesma classe)."""
+        try:
+            from scipy.stats import norm
+        except ImportError:  # pragma: no cover
+            return float("nan")
+        if n1 <= 0 or n2 <= 0:
+            return float("nan")
+        p1, p2 = k1 / n1, k2 / n2
+        pool = (k1 + k2) / (n1 + n2)
+        se = float(np.sqrt(pool * (1 - pool) * (1 / n1 + 1 / n2)))
+        if se == 0.0:                        # pool ∈ {0,1} ⇒ p1 == p2
+            return 1.0 if p1 == p2 else 0.0
+        return float(2 * norm.sf(abs((p1 - p2) / se)))
+
+    def _rating_pair_pvalue(self, va, vb, min_n: int = 8) -> float:
+        """p-valor do teste de igualdade do alvo entre dois ratings vizinhos
+        (arrays já sem NaN): teste z de duas proporções na classificação e
+        Mann-Whitney bicaudal na regressão. ``NaN`` com volume < ``min_n``."""
+        if len(va) < min_n or len(vb) < min_n:
+            return float("nan")
+        if self.task_type == "classification":
+            return self._two_proportion_pvalue(float(np.sum(va)), len(va),
+                                               float(np.sum(vb)), len(vb))
+        try:
+            from scipy.stats import mannwhitneyu
+            return float(mannwhitneyu(va, vb, alternative="two-sided").pvalue)
+        except Exception:
+            return float("nan")
+
+    def adjacent_rating_tests(self, sample=None, alpha=0.05, min_n=8) -> pd.DataFrame:
+        """Testa a SEPARAÇÃO ESTATÍSTICA do alvo entre cada par de ratings
+        VIZINHOS (na ordem da régua), por amostra — o análogo, para a régua de
+        ratings, do teste entre folhas-irmãs da árvore. A fusão monotônica
+        garante a **ordem** do risco, não a significância: dois ratings podem
+        ficar ordenados e ainda assim estatisticamente indistinguíveis —
+        candidatos a fusão (reduzir ``n_ratings`` ou usar cortes manuais).
+
+        Teste z de duas proporções na classificação; Mann-Whitney (bicaudal)
+        na regressão. ``sample=None`` avalia todas as amostras (referência
+        primeiro); pares com volume < ``min_n`` em algum lado saem como ``n/d``.
+
+        Retorna DataFrame com ``par``, ``amostra``, ``n_a``, ``n_b``, ``teste``,
+        ``p_valor`` e ``veredito`` (``separa`` se p < ``alpha``, senão
+        ``nao_separa``; ``n/d`` sem volume ou sem p-valor)."""
+        rating = self._rating_series()
+        labels = list(self.rating_labels_)
+        if sample is not None and sample not in self._samples():
+            raise ValueError(f"Amostra desconhecida: {sample!r}. "
+                             f"Opções: {self._samples()}")
+        samples = self._samples() if sample is None else [sample]
+        teste = ("proporções (z)" if self.task_type == "classification"
+                 else "Mann-Whitney")
+        cols = ["par", "amostra", "n_a", "n_b", "teste", "p_valor", "veredito"]
+        rows, vazio = [], np.empty(0)
+        for a in samples:
+            m = (np.ones(len(self.df), dtype=bool) if self.sample_col is None
+                 else self._frame_mask(a))
+            sub = pd.DataFrame({"y": self.df[self.target], "r": rating})[m]
+            sub = sub[sub["y"].notna() & sub["r"].notna()]
+            grp = {lab: g["y"].to_numpy(dtype="float64")
+                   for lab, g in sub.groupby("r", observed=True)}
+            for la, lb in zip(labels[:-1], labels[1:]):
+                va, vb = grp.get(la, vazio), grp.get(lb, vazio)
+                p = self._rating_pair_pvalue(va, vb, min_n=min_n)
+                verd = ("n/d" if not np.isfinite(p)
+                        else "separa" if p < alpha else "nao_separa")
+                rows.append({"par": f"{la} × {lb}", "amostra": a,
+                             "n_a": int(len(va)), "n_b": int(len(vb)),
+                             "teste": teste,
+                             "p_valor": round(p, 4) if np.isfinite(p) else np.nan,
+                             "veredito": verd})
+        return pd.DataFrame(rows, columns=cols)
+
     def plot_rating_badrate(self, sample=None, figsize=(7.4, 4.0), dpi=150,
                             save_path=None, ax=None):
         """Risco médio (event_rate/alvo) por rating, na amostra escolhida."""

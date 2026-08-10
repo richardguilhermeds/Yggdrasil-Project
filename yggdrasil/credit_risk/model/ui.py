@@ -15,8 +15,8 @@ a modelo:
   e treina (ou usa um modelo pré-ajustado); métricas por amostra, gráficos do
   modelo, fórmula (modelos lineares) e **SHAP**;
 * **Ratings & Score** — segmenta o score em ratings (decis/quantil/árvore/optbin),
-  com o número escolhido pelo usuário; tabela, badrate, distribuição e inversão
-  entre ratings;
+  com o número escolhido pelo usuário; tabela, badrate, distribuição, inversão
+  entre ratings e indicador de separação estatística entre ratings vizinhos;
 * **Validar & Exportar** — backtest por safra, PSI, **escorar uma base** (rating +
   valor previsto do alvo daquele rating, via :meth:`ModelSegmenter.rating_ruler`),
   exportar DataFrame rotulado, salvar/carregar e registrar no MLflow.
@@ -1333,6 +1333,9 @@ class ModelSegmenterUI:
         self.btn_suggest_n.on_click(self._on_suggest_n)
         self.out_rating_auto = W.HTML()
         self.out_rating_table = W.HTML()
+        # indicador de SEPARAÇÃO estatística entre ratings vizinhos (✅/⚠), ao
+        # lado da tabela — a fusão monotônica garante a ordem, não a significância
+        self.out_rating_septest = W.HTML()
         self.out_rating_badrate = W.HTML()
         self.out_rating_dist = W.HTML()
         self.out_rating_inv_s = W.HTML()
@@ -1402,7 +1405,12 @@ class ModelSegmenterUI:
                            "do 99%, <b>alerta</b> se fora do 99%. Rating pequeno tem IC largo (gap "
                            "grande pode ser ruído); rating grande, IC estreito (gap pequeno já é "
                            "significativo).</div>"),
-                    self.out_rating_table]),
+                    # tabela + indicador de separação entre ratings vizinhos lado a lado
+                    W.HBox([W.VBox([self.out_rating_table],
+                                   layout=W.Layout(flex="1 1 auto", overflow="auto")),
+                            W.VBox([self.out_rating_septest],
+                                   layout=W.Layout(flex="0 0 320px",
+                                                   margin="0 0 0 12px"))])]),
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Risco por rating</div>"),
                             self.out_rating_badrate], layout=W.Layout(width="50%")),
                     W.VBox([W.HTML("<div class='mseg-h'>Distribuição dos ratings</div>"),
@@ -3221,10 +3229,10 @@ class ModelSegmenterUI:
         self.seg.rating_strategy = None
         self.seg.rating_labels_ = []
         self.seg.rating_config = {}
-        for w in (self.out_rating_auto, self.out_rating_table, self.out_rating_badrate,
-                  self.out_rating_dist, self.out_rating_inv_s, self.out_rating_inv_t,
-                  self.out_rating_psi_sample, self.out_rating_psi_safra,
-                  self.out_rating_mono):
+        for w in (self.out_rating_auto, self.out_rating_table, self.out_rating_septest,
+                  self.out_rating_badrate, self.out_rating_dist, self.out_rating_inv_s,
+                  self.out_rating_inv_t, self.out_rating_psi_sample,
+                  self.out_rating_psi_safra, self.out_rating_mono):
             w.value = ""
         self._refresh_bar()
 
@@ -3678,6 +3686,52 @@ class ModelSegmenterUI:
         self.tx_inv_t_max.value = ""
         self._render_inv_safra()
 
+    def _rating_septest_html(self):
+        """Indicador compacto (✅/⚠) da SEPARAÇÃO estatística do alvo entre
+        ratings VIZINHOS, por amostra (:meth:`ModelSegmenter.adjacent_rating_tests`).
+        A fusão monotônica garante a ordem do risco, não a significância — pares
+        que não separam viram chips com sugestão de fusão."""
+        seg = self.seg
+        t = seg.adjacent_rating_tests()
+        if t.empty:
+            return ("<div class='mseg-legend'>Régua com uma faixa só — nada a "
+                    "comparar entre ratings vizinhos.</div>")
+        fails = t[t["veredito"] == "nao_separa"]
+        n_nd = int((t["veredito"] == "n/d").sum())
+        if len(fails) == 0:
+            pill, rotulo = "pill-green", "✅ Ratings vizinhos separam"
+        elif fails["amostra"].eq(seg.ref_sample).any():
+            pill, rotulo = "pill-red", "⚠ Par(es) sem separação na referência"
+        else:
+            pill, rotulo = "pill-yellow", "⚠ Par(es) sem separação fora da referência"
+        head = (f"<div><span class='pill {pill}'>{rotulo}</span></div>"
+                f"<div style='font-size:11px;color:var(--muted);margin-top:3px'>"
+                f"{t['par'].nunique()} par(es) × {t['amostra'].nunique()} amostra(s) · "
+                f"{t['teste'].iloc[0]} · α=0,05</div>")
+        chips = sug = nd_line = ""
+        if len(fails):
+            def _chip(r):
+                ptxt = ("p=n/d" if pd.isna(r["p_valor"])
+                        else f"p={r['p_valor']:.2f}".replace(".", ","))
+                return (f"<span class='mono' style='background:var(--warn-bg);"
+                        f"color:var(--warn-ink);border-radius:3px;padding:1px 5px;"
+                        f"font-size:10.5px;margin:1px 3px 1px 0;display:inline-block'>"
+                        f"{r['par']} · {r['amostra']} ({ptxt})</span>")
+            vis = [_chip(r) for _, r in fails.head(10).iterrows()]
+            if len(fails) > 10:
+                vis.append(f"<span style='font-size:10.5px;color:var(--muted)'>"
+                           f"+{len(fails) - 10}</span>")
+            chips = f"<div style='margin-top:5px'>{''.join(vis)}</div>"
+            sug = ("<div style='font-size:11px;color:var(--muted);margin-top:5px'>"
+                   "<b>Sugestão:</b> funda os pares destacados — reduza o nº de "
+                   "ratings ou use cortes manuais. A fusão monotônica garante a "
+                   "<b>ordem</b> do risco, não a separação estatística.</div>")
+        if n_nd:
+            nd_line = (f"<div style='font-size:10.5px;color:var(--sub-ink);"
+                       f"margin-top:4px'>{n_nd} comparação(ões) sem volume "
+                       f"suficiente (n/d).</div>")
+        return f"<div style='font-size:12px'>{head}{chips}{sug}{nd_line}</div>"
+
     def _render_ratings(self):
         """Renderiza tabela e gráficos dos ratings a partir do estado atual do
         ``seg`` (usado ao gerar ratings e ao carregar um modelo já ratingado)."""
@@ -3686,6 +3740,12 @@ class ModelSegmenterUI:
         # IC do teste de calibração na mesma unidade do alvo → mesmo formato %
         rate_cols += [c for c in ("ic_low", "ic_high") if c in rt.columns]
         self.out_rating_table.value = self._df_html(rt, center=True, pct_cols=rate_cols)
+        try:
+            self.out_rating_septest.value = self._rating_septest_html()
+        except Exception as e:
+            self.out_rating_septest.value = (
+                f"<div style='font-size:11px;color:var(--bad-tx)'>(teste de "
+                f"separação não gerado: {type(e).__name__})</div>")
         self.out_rating_badrate.value = self._fig_html(self.seg.plot_rating_badrate())
         self.out_rating_dist.value = self._fig_html(self.seg.plot_rating_distribution())
         # os dois gráficos de inversão passam pelos helpers de zoom (mesma figsize +

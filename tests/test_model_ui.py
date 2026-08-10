@@ -229,6 +229,36 @@ def test_rating_table_status_teste_colorido():
     assert "var(--bad-bg)" in ui._semaforo_css("alerta")
 
 
+def test_indicador_separacao_ratings():
+    """Aba Ratings & Score: indicador compacto ✅/⚠ da separação estatística
+    entre ratings vizinhos ao lado da tabela — ⚠ com sugestão de fusão quando o
+    par não separa; HTML apenas com tokens de tema (sem hex fixo)."""
+    ui = _build()
+    # integração: _render_ratings preenche o widget ao lado da tabela
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.seg.fit()
+        ui.seg.build_ratings(method="quantil", n_ratings=5)
+        ui._render_ratings()
+    assert ui.out_rating_septest.value.strip()
+    assert ("✅" in ui.out_rating_septest.value
+            or "⚠" in ui.out_rating_septest.value)
+    # casos determinísticos com régua de 2 faixas montada à mão
+    seg = ui.seg
+    n = len(seg.df)
+    seg.rating_labels_ = ["R1", "R2"]
+    seg.rating_ = pd.Series(np.where(np.arange(n) < n // 2, "R1", "R2"),
+                            index=seg.df.index)
+    # ① alvo com distribuição idêntica nas duas faixas → ⚠ não separa + sugestão
+    seg.df["target"] = (np.arange(n) % 2).astype(float)
+    html = ui._rating_septest_html()
+    assert "⚠" in html and "Sugestão" in html and "R1 × R2" in html
+    assert "var(--" in html and "#" not in html          # só tokens de tema
+    # ② faixas bem separadas → ✅ (sem chips nem sugestão)
+    seg.df["target"] = (np.arange(n) >= n // 2).astype(float)
+    html2 = ui._rating_septest_html()
+    assert "✅" in html2 and "⚠" not in html2 and "Sugestão" not in html2
+
+
 def test_toggle_monotonicidade():
     """A linha 'restrições de monotonicidade' só aparece nos boostings com
     suporte nativo, e o fit via UI aplica monotonic_cst (dict por nome) com as

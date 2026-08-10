@@ -486,6 +486,56 @@ def test_build_ratings_exige_score(seg):
         seg.build_ratings()
 
 
+def test_adjacent_rating_tests(seg):
+    """API: DataFrame par×amostra×p-valor×veredito para TODOS os pares de
+    ratings vizinhos, em todas as amostras (ou só na pedida via ``sample``)."""
+    seg.fit(_default_algo(seg.task_type))
+    seg.build_ratings(method="quantil", n_ratings=5)
+    t = seg.adjacent_rating_tests()
+    assert list(t.columns) == ["par", "amostra", "n_a", "n_b", "teste",
+                               "p_valor", "veredito"]
+    assert t["par"].nunique() == len(seg.rating_labels_) - 1
+    assert set(t["amostra"]) == {"DES", "OOT"}
+    assert t["veredito"].isin(["separa", "nao_separa", "n/d"]).all()
+    esperado = ("proporções (z)" if seg.task_type == "classification"
+                else "Mann-Whitney")
+    assert (t["teste"] == esperado).all()
+    # filtro por amostra + validação de amostra desconhecida
+    t_des = seg.adjacent_rating_tests(sample="DES")
+    assert set(t_des["amostra"]) == {"DES"}
+    assert len(t_des) == t["par"].nunique()
+    with pytest.raises(ValueError, match="Amostra"):
+        seg.adjacent_rating_tests(sample="ZZZ")
+
+
+def test_adjacent_rating_tests_separacao(task):
+    """Dois ratings com alvo de distribuição idêntica → 'nao_separa' (a fusão
+    monotônica garante a ordem, não a significância); bem separados → 'separa'."""
+    df = _synthetic(task)
+    seg = ModelSegmenter(df, target="target", task_type=task, sample_col="amostra",
+                         ref_sample="DES", date_col="dt_ref", verbose=False)
+    n = len(seg.df)
+    seg.rating_labels_ = ["R1", "R2"]
+    seg.rating_ = pd.Series(np.where(np.arange(n) < n // 2, "R1", "R2"),
+                            index=seg.df.index)
+    # alvo alternado por paridade (independente da faixa) → distribuição idêntica
+    if task == "classification":
+        seg.df["target"] = (np.arange(n) % 2).astype(float)
+    else:
+        seg.df["target"] = np.where(np.arange(n) % 2 == 0, 0.2, 0.8)
+    t = seg.adjacent_rating_tests()
+    assert len(t) and (t["veredito"] == "nao_separa").all()
+    # faixas BEM separadas (R1 baixo, R2 alto) → separa em todas as amostras
+    if task == "classification":
+        seg.df["target"] = (np.arange(n) >= n // 2).astype(float)
+    else:
+        rng = np.random.default_rng(0)
+        seg.df["target"] = (np.where(np.arange(n) < n // 2, 0.1, 0.9)
+                            + rng.normal(0, 0.01, n))
+    t2 = seg.adjacent_rating_tests()
+    assert len(t2) and (t2["veredito"] == "separa").all()
+
+
 # ----------------------------------------------------------------------
 # Validação / estabilidade
 # ----------------------------------------------------------------------
