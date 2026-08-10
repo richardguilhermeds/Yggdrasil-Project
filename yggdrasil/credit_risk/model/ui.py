@@ -23,6 +23,12 @@ a modelo:
   valor previsto do alvo daquele rating, via :meth:`ModelSegmenter.rating_ruler`),
   exportar DataFrame rotulado, salvar/carregar e registrar no MLflow.
 
+No topo há **↶ Desfazer / Refazer ↷** da **configuração** — variáveis incluídas,
+derivadas, bins/WoE, algoritmo e hiperparâmetros: toda ação em lote (auto-seleção,
+poda de redundantes, backward, reset de derivadas, bins) vira um ponto de retorno,
+e uma ação que falha reverte sozinha. O histórico **não** cobre o modelo treinado:
+depois de desfazer é preciso **re-treinar** para o modelo refletir a configuração.
+
     from yggdrasil.credit_risk.model import ModelSegmenterUI
     ui = ModelSegmenterUI(df, target="target", task_type="classification",
                           sample_col="amostra", ref_sample="DES", date_col="dt_ref")
@@ -30,7 +36,7 @@ a modelo:
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 
 import numpy as np
 import pandas as pd
@@ -341,6 +347,14 @@ class ModelSegmenterUI:
         # modelo "desatualizado": alterações de variáveis/bins/WoE feitas DEPOIS
         # de um treino deixam o modelo defasado até o próximo fit.
         self._dirty_since_fit: bool = False
+        # histórico de CONFIGURAÇÃO p/ desfazer/refazer (ver _snapshot): pilhas de
+        # fotos do estado de variáveis/bins/opções de treino. Não guarda o modelo
+        # treinado — desfazer volta a configuração e exige re-treinar.
+        self._undo: list = []
+        self._redo: list = []
+        # trava de reentrância: _restore reatribui valores de widgets, cujos
+        # observers também empilham checkpoint (ex.: a troca de transformação).
+        self._restoring: bool = False
         self._build()
         self._refresh_bar()
         self._refresh_vars()
@@ -687,6 +701,145 @@ class ModelSegmenterUI:
         self._dirty_since_fit = False
         self.out_dirty_warn.value = ""
 
+    # ==================================================================
+    # Desfazer / refazer da CONFIGURAÇÃO (variáveis, bins e opções de treino)
+    #   O snapshot NÃO cobre o modelo treinado (nem score, ratings ou métricas):
+    #   desfazer volta a CONFIGURAÇÃO e o modelo fica desatualizado até o próximo
+    #   treino — o mesmo aviso de _mark_dirty.
+    # ==================================================================
+    #: widgets de configuração de treino que viajam no snapshot (só os que
+    #: existem no build corrente são lidos/restaurados)
+    _UNDO_WIDGETS = ("dd_algo", "cb_woe", "cb_balance", "cb_monotone",
+                     "cb_twostage", "sl_ts_threshold", "dd_ts_clf", "dd_ts_reg",
+                     "sl_n_est", "cb_max_depth", "sl_max_depth", "tx_C", "tx_lr",
+                     "cb_min_leaf", "sl_min_leaf", "dd_max_feat",
+                     "cb_subsample", "fl_subsample", "cb_colsample", "fl_colsample",
+                     "cb_num_leaves", "sl_num_leaves", "cb_l2", "fl_l2")
+
+    def _snapshot(self) -> dict:
+        """Foto restaurável da CONFIGURAÇÃO: variáveis candidatas/incluídas,
+        ``var_meta`` (categoria, bins manuais e registro das derivadas), apelidos e
+        as opções de treino (algoritmo, hiperparâmetros, transformação,
+        balanceamento, monotonicidade, Two-Stage)."""
+        s = self.seg
+        return {"included": set(s.included),
+                "candidates": list(s.candidates),
+                "var_meta": {k: dict(v) for k, v in s.var_meta.items()},
+                "feature_labels": dict(s.feature_labels),
+                "opts": {n: getattr(self, n).value for n in self._UNDO_WIDGETS
+                         if getattr(self, n, None) is not None}}
+
+    def _checkpoint(self, snap=None):
+        """Empilha a configuração atual (ou ``snap``, quando a mudança já ocorreu)
+        para permitir desfazer; zera a pilha de refazer."""
+        self._undo.append(self._snapshot() if snap is None else snap)
+        if len(self._undo) > 50:
+            self._undo.pop(0)
+        self._redo.clear()
+        self._sync_undo_buttons()
+
+    def _revert_checkpoint(self, redo_bak):
+        """Desfaz o último :meth:`_checkpoint` quando a ação FALHOU ou foi no-op:
+        remove o snapshot espúrio do undo e restaura a pilha de refazer (que o
+        checkpoint havia zerado). Sem isto, um erro deixaria histórico corrompido."""
+        if self._undo:
+            self._undo.pop()
+        self._redo[:] = redo_bak
+        self._sync_undo_buttons()
+
+    def _restore(self, snap):
+        """Repõe no segmentador (e nos widgets de treino) a configuração de ``snap``.
+        Invalida o binning só das variáveis cujos cortes/derivação mudam e recria no
+        DataFrame as variáveis derivadas que voltam."""
+        s = self.seg
+        atual, alvo = s.var_meta, snap["var_meta"]
+        mudadas = {f for f in set(atual) | set(alvo)
+                   if any((atual.get(f) or {}).get(k) != (alvo.get(f) or {}).get(k)
+                          for k in ("splits", "derived_from", "derived_bins"))}
+        # derivadas que não existem no estado alvo saem do DataFrame
+        alvo_derivadas = {n for n, m in alvo.items() if m.get("derived_from")}
+        for n in [n for n, m in atual.items() if m.get("derived_from")]:
+            if n not in alvo_derivadas and n in s.df.columns:
+                s.df.drop(columns=n, inplace=True)
+        s.candidates = list(snap["candidates"])
+        s.included = set(snap["included"])
+        s.var_meta = {k: dict(v) for k, v in alvo.items()}
+        s.feature_labels.clear(); s.feature_labels.update(snap["feature_labels"])
+        s._rebuild_derived()                  # recria as derivadas que voltaram
+        if mudadas:
+            s._invalidate_bins(*mudadas)      # já incrementa o _rank_version
+        else:
+            s._rank_version += 1              # caches de ranking/prévia por versão
+        # opções de treino: a trava evita que os observers (que também empilham
+        # checkpoint, ex.: a troca de transformação) reajam à restauração.
+        self._restoring = True
+        try:
+            for n, v in (snap.get("opts") or {}).items():
+                w = getattr(self, n, None)
+                if w is None or w.value == v:
+                    continue
+                with suppress(Exception):              # opção que sumiu do build
+                    w.value = v
+        finally:
+            self._restoring = False
+
+    def _refresh_after_restore(self):
+        """Repinta a UI depois de restaurar uma configuração (desfazer/refazer ou
+        rollback): listas de variáveis, ranking, controles de bin e barra."""
+        self._refresh_candidates()
+        self._sync_sel()
+        self._refresh_vars()
+        self._sync_bin_controls()
+        self._sync_algo_visibility()
+        self._sync_woe_hint()
+        self._mark_dirty()                    # config mudou ⇒ modelo desatualizado
+        self._refresh_bar()
+
+    def _sync_undo_buttons(self):
+        self.btn_undo.disabled = not self._undo
+        self.btn_redo.disabled = not self._redo
+
+    @contextmanager
+    def _undoable(self, rotulo="ação"):
+        """Torna a ação DESFAZÍVEL: fotografa a configuração antes de executar e,
+        se o bloco levantar, faz **rollback automático** — restaura o estado
+        anterior e devolve as pilhas ao que eram (a exceção segue para o handler,
+        que loga do jeito dele)."""
+        redo_bak = list(self._redo)
+        antes = self._snapshot()
+        self._checkpoint(antes)
+        try:
+            yield
+        except Exception:
+            self._restore(antes)
+            self._revert_checkpoint(redo_bak)
+            with suppress(Exception):
+                self._refresh_after_restore()
+            self._log(f"[{rotulo}] falhou — configuração revertida.")
+            raise
+
+    def _on_undo(self, _):
+        if not self._undo:
+            return
+        prev = self._undo.pop()
+        self._redo.append(self._snapshot())
+        self._restore(prev)
+        self._sync_undo_buttons()
+        self._refresh_after_restore()
+        self._log(f"↶ desfeito — configuração restaurada ({len(self.seg.included)} "
+                  f"variável(is) no modelo). Re-treine para valer no modelo.")
+
+    def _on_redo(self, _):
+        if not self._redo:
+            return
+        nxt = self._redo.pop()
+        self._undo.append(self._snapshot())
+        self._restore(nxt)
+        self._sync_undo_buttons()
+        self._refresh_after_restore()
+        self._log(f"↷ refeito — configuração restaurada ({len(self.seg.included)} "
+                  f"variável(is) no modelo). Re-treine para valer no modelo.")
+
     # ------------------------------------------------------------------ build
     def _build(self):
         cands = self.seg.candidates
@@ -870,16 +1023,11 @@ class ModelSegmenterUI:
         self.btn_include.on_click(self._on_include_var)
         self.btn_exclude.on_click(self._on_exclude_var)
         self.btn_set_cat.on_click(self._on_set_cat)
-        self.btn_incl_all.on_click(lambda b: (self.seg.include_all(), self._sync_sel(),
-                                              self._refresh_vars(), self._mark_dirty(),
-                                              self._refresh_bar()))
+        self.btn_incl_all.on_click(lambda b: self._on_include_all())
         # ações DESTRUTIVAS (esvaziar a seleção / remover derivadas): confirmação
         # em dois cliques — o 1º arma o botão ("Confirmar?"), o 2º executa.
         self.btn_clear.on_click(lambda b: self._confirm_twice(
-            self.btn_clear,
-            lambda: (self.seg.clear_features(), self._sync_sel(), self._refresh_vars(),
-                     self._mark_dirty(), self._refresh_bar(),
-                     self._log("[limpar] lista 'No modelo' esvaziada."))))
+            self.btn_clear, self._on_clear_features))
         self.btn_refresh_vars.on_click(lambda b: self._refresh_vars(force=True))
         self.btn_clear_derived.on_click(
             lambda b: self._confirm_twice(self.btn_clear_derived,
@@ -1170,8 +1318,7 @@ class ModelSegmenterUI:
             "é codificado pelo seu WoE (classificação) ou risco médio (regressão).")
         self.out_woe_help = W.HTML()
         # alternar o WoE com modelo já treinado deixa o modelo desatualizado
-        self.cb_woe.observe(lambda c: (self._sync_woe_hint(), self._mark_dirty()),
-                            names="value")
+        self.cb_woe.observe(self._on_transform_change, names="value")
         # --- balanceamento de classes (só classificação) --------------------
         # taxa de evento da referência AO LADO do toggle: contexto p/ decidir se
         # o balanceamento é necessário (desbalanceio forte → toggle útil).
@@ -2163,8 +2310,20 @@ class ModelSegmenterUI:
                     "não desligar por inatividade enquanto a interface está aberta",
             layout=W.Layout(width="190px"))
         self.cb_keepalive.observe(self._on_keepalive, names="value")
-        topbar = W.HBox([self.cb_keepalive, self.cb_dark],
-                        layout=W.Layout(justify_content="flex-end"))
+        # desfazer/refazer da CONFIGURAÇÃO (não do modelo treinado) — ver _snapshot
+        _undo_tip = ("Desfaz a última alteração de CONFIGURAÇÃO (variáveis, bins/WoE, "
+                     "derivadas, algoritmo e hiperparâmetros). NÃO desfaz o treino: o "
+                     "modelo vigente continua o mesmo — re-treine para valer.")
+        self.btn_undo = W.Button(description="↶ Desfazer", icon="undo", disabled=True,
+                                 tooltip=_undo_tip, layout=W.Layout(width="140px"))
+        self.btn_redo = W.Button(description="Refazer ↷", icon="repeat", disabled=True,
+                                 tooltip="Refaz a alteração de configuração desfeita",
+                                 layout=W.Layout(width="140px"))
+        self.btn_undo.on_click(self._on_undo)
+        self.btn_redo.on_click(self._on_redo)
+        topbar = W.HBox([W.HBox([self.btn_undo, self.btn_redo]),
+                         W.HBox([self.cb_keepalive, self.cb_dark])],
+                        layout=W.Layout(justify_content="space-between"))
         self.panel = W.VBox([W.HTML(_CSS), topbar, self.banner, self.bar, self.tabs, console])
         self.panel.add_class("mseg")
 
@@ -2305,8 +2464,10 @@ class ModelSegmenterUI:
     # ------------------------------------------------------------------ Aba 1 handlers
     def _on_auto_select(self, b):
         try:
-            self.seg.auto_select(min_iv=self.sl_min_iv.value, max_psi=self.sl_max_psi.value,
-                                 require_monotonic=self.cb_require_mono.value)
+            with self._undoable("auto"):   # desfazível: troca a seleção em lote
+                self.seg.auto_select(min_iv=self.sl_min_iv.value,
+                                     max_psi=self.sl_max_psi.value,
+                                     require_monotonic=self.cb_require_mono.value)
             # o ranking já foi computado pelo auto_select → exibe (force)
             self._sync_sel(); self._refresh_vars(force=True)
             self._mark_dirty(); self._refresh_bar()
@@ -2325,9 +2486,10 @@ class ModelSegmenterUI:
                     "<b>No modelo</b> acima e clique novamente.</div>")
                 self._log("[escolha manual] nenhuma variável marcada.")
                 return
-            self.seg.clear_features()
-            for f in chosen:
-                self.seg.include(f)
+            with self._undoable("escolha manual"):   # troca a seleção inteira
+                self.seg.clear_features()
+                for f in chosen:
+                    self.seg.include(f)
             self._sync_sel(); self._refresh_vars(); self._mark_dirty(); self._refresh_bar()
             self.out_feat_sel.value = (
                 f"<div class='mseg-legend'>Escolha manual aplicada: <b>{len(chosen)}</b> "
@@ -2429,9 +2591,10 @@ class ModelSegmenterUI:
 
     def _on_auto_categorize(self, b):
         try:
-            rk = self.seg.auto_categorize(min_iv=self.sl_min_iv.value,
-                                          max_psi=self.sl_max_psi.value,
-                                          require_monotonic=self.cb_require_mono.value)
+            with self._undoable("auto-categoria"):   # sobrescreve as categorias
+                rk = self.seg.auto_categorize(min_iv=self.sl_min_iv.value,
+                                              max_psi=self.sl_max_psi.value,
+                                              require_monotonic=self.cb_require_mono.value)
             # o ranking já foi computado pelo auto_categorize → exibe (force)
             self._refresh_vars(force=True); self._refresh_bar()
             vc = rk["categoria"].value_counts().to_dict()
@@ -2513,11 +2676,12 @@ class ModelSegmenterUI:
             return
         # parceira mantida de cada removida (para documentar o motivo no ranking)
         par_de = {r["remover"]: r["manter"] for _, r in rep.iloc[::-1].iterrows()}
-        for f in alvo:
-            self.seg.exclude(f)
-            self.seg.set_category(f, "descartar")
-            self.seg.var_meta[f]["motivo"] = (
-                f"redundante (associada a {self.seg.label(par_de.get(f, '?'))})")
+        with self._undoable("redundância"):   # poda em lote é desfazível
+            for f in alvo:
+                self.seg.exclude(f)
+                self.seg.set_category(f, "descartar")
+                self.seg.var_meta[f]["motivo"] = (
+                    f"redundante (associada a {self.seg.label(par_de.get(f, '?'))})")
         self._sync_sel(); self._refresh_vars(); self._mark_dirty(); self._refresh_bar()
         self.btn_redund_drop.disabled = True
         nomes = ", ".join(self.seg.label(f) for f in alvo)
@@ -2531,7 +2695,8 @@ class ModelSegmenterUI:
         feat = self.dd_var.value
         if not feat:
             return
-        self.seg.include(feat)
+        with self._undoable("incluir"):
+            self.seg.include(feat)
         self._sync_sel(); self._refresh_vars(); self._mark_dirty(); self._refresh_bar()
         self._log(f"[incluir] '{self.seg.label(feat)}' no modelo · {len(self.seg.included)} no total.")
 
@@ -2539,9 +2704,24 @@ class ModelSegmenterUI:
         feat = self.dd_var.value
         if not feat:
             return
-        self.seg.exclude(feat)
+        with self._undoable("excluir"):
+            self.seg.exclude(feat)
         self._sync_sel(); self._refresh_vars(); self._mark_dirty(); self._refresh_bar()
         self._log(f"[excluir] '{self.seg.label(feat)}' fora do modelo · {len(self.seg.included)} no total.")
+
+    def _on_include_all(self):
+        """Inclui TODAS as candidatas no modelo (desfazível: ↶ volta a seleção)."""
+        with self._undoable("incluir todas"):
+            self.seg.include_all()
+        self._sync_sel(); self._refresh_vars(); self._mark_dirty(); self._refresh_bar()
+        self._log(f"[incluir todas] {len(self.seg.included)} variável(is) no modelo.")
+
+    def _on_clear_features(self):
+        """Esvazia a seleção do modelo (desfazível: ↶ volta a seleção anterior)."""
+        with self._undoable("limpar"):
+            self.seg.clear_features()
+        self._sync_sel(); self._refresh_vars(); self._mark_dirty(); self._refresh_bar()
+        self._log("[limpar] lista 'No modelo' esvaziada.")
 
     def _on_sel_click(self, change):
         """Ao clicar numa variável na lista 'No modelo', aponta a prévia (gráfico de
@@ -2552,7 +2732,8 @@ class ModelSegmenterUI:
             self.dd_var.value = clicada[-1]      # dispara _refresh_var_preview
 
     def _on_clear_derived(self, b):
-        removidas = self.seg.clear_derived()
+        with self._undoable("reset"):   # desfazer recria as derivadas removidas
+            removidas = self.seg.clear_derived()
         self._refresh_candidates(); self._refresh_vars()
         if removidas:
             self._mark_dirty()
@@ -2834,7 +3015,8 @@ class ModelSegmenterUI:
             # categórica → grupos das caixas (lista de listas, robusto a vírgulas no
             # nome); numérica → cortes do campo de texto.
             spec = self._an_cat_groups() if is_cat else self.tx_cuts.value
-            self.seg.set_manual_bins(feat, spec)
+            with self._undoable("bins"):   # desfazer volta aos bins anteriores
+                self.seg.set_manual_bins(feat, spec)
             if not self.seg.manual_bins(feat):
                 self._log(f"[bins] '{self.seg.label(feat)}': nada para aplicar.")
             else:
@@ -2848,7 +3030,8 @@ class ModelSegmenterUI:
 
     def _on_clear_bins(self, b):
         feat = self.dd_var2.value
-        self.seg.clear_manual_bins(feat)
+        with self._undoable("bins"):   # desfazer devolve os bins manuais
+            self.seg.clear_manual_bins(feat)
         self.tx_cuts.value = ""
         self.tg_binmode.value = "Ótimo"
         self._rebuild_an_cat_box(force=True)     # reseta as caixas (cada categoria no seu grupo)
@@ -2874,7 +3057,8 @@ class ModelSegmenterUI:
         feat = self.dd_var2.value
         name = self.tx_new_cat.value.strip() or None
         try:
-            new = self.seg.create_categorical(feat, new_name=name)
+            with self._undoable("nova variável"):   # desfazer remove a derivada
+                new = self.seg.create_categorical(feat, new_name=name)
             ncat = int(self.seg.df[new].nunique(dropna=True))
             self.tx_new_cat.value = ""
             self._refresh_candidates()
@@ -3308,6 +3492,18 @@ class ModelSegmenterUI:
                 "como <code>WoE(variável)</code>. Defina/ajuste os bins na aba Análise antes de treinar.</div>")
         else:
             self.out_woe_help.value = ""
+
+    def _on_transform_change(self, change):
+        """Trocar a transformação das variáveis (valores crus ↔ WoE/bins) é
+        DESFAZÍVEL: como o observer só roda DEPOIS da mudança, o checkpoint recebe
+        uma foto com o valor ANTERIOR do toggle. Ignorado durante :meth:`_restore`
+        (senão desfazer/refazer empilharia um checkpoint próprio)."""
+        if not self._restoring:
+            snap = self._snapshot()
+            snap["opts"]["cb_woe"] = change["old"]
+            self._checkpoint(snap)
+        self._sync_woe_hint()
+        self._mark_dirty()
 
     def _on_fit(self, b):
         two = self.task_type == "regression" and self.cb_twostage.value
@@ -4368,10 +4564,14 @@ class ModelSegmenterUI:
         """Aplica um subconjunto do backward e atualiza toda a UI: o passo ÓTIMO
         (parcimônia · 1%) ou, se ``n_variaveis`` for dado, o passo com esse nº de
         variáveis (escolha MANUAL). Troca a seleção, retreina, regenera/reprojeta os
-        ratings, escreve o resumo em ``out_widget`` (se dado) e loga. Devolve o dict-info."""
-        info = self.seg.apply_backward_selection(
-            res, criterion="parsimony", tol=0.01, refit=True, rebuild_ratings=True,
-            n_variaveis=n_variaveis)
+        ratings, escreve o resumo em ``out_widget`` (se dado) e loga. Devolve o dict-info.
+
+        A troca de seleção é DESFAZÍVEL (↶ na barra) — o desfazer volta o conjunto de
+        variáveis anterior, mas não o modelo retreinado aqui: é preciso re-treinar."""
+        with self._undoable("backward"):
+            info = self.seg.apply_backward_selection(
+                res, criterion="parsimony", tol=0.01, refit=True, rebuild_ratings=True,
+                n_variaveis=n_variaveis)
         self._sync_sel(); self._refresh_vars(force=True)
         # modelo retreinado ⇒ atualiza métricas/gráficos/fórmula e limpa "dirty"
         self._render_metrics(); self._render_model_plots(); self._render_formula()
@@ -4955,6 +5155,10 @@ class ModelSegmenterUI:
                 self._render_ratings()
             except Exception as e:
                 self._log(f"[load] falha ao renderizar ratings: {e}")
+        # o histórico de desfazer aponta para a configuração ANTERIOR (outro
+        # segmentador, possivelmente outras candidatas) — restaurá-lo aqui seria
+        # incoerente com o modelo recém-carregado.
+        self._undo.clear(); self._redo.clear(); self._sync_undo_buttons()
 
     def _sync_hyperparam_widgets(self):
         """Espelha ``seg.hyperparams`` (modelo carregado/treinado) nos widgets de

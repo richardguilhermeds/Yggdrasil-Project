@@ -548,3 +548,64 @@ def test_toggle_monotonicidade_ignorado_sem_suporte():
     assert "✓" in ui.out_fit_status.value             # fit concluiu normalmente
     assert ui.seg.algorithm == "logistica"
     assert ui.seg.monotone is None and ui.seg.monotone_dirs_ == {}
+
+
+def test_undo_redo_da_configuracao():
+    """Barra ↶/↷: auto-selecionar é desfazível (o desfazer devolve o conjunto
+    anterior de variáveis), o refazer reaplica, e uma exceção DENTRO da ação faz
+    rollback automático da configuração sem sujar o histórico."""
+    ui = _build()
+    assert ui.btn_undo.disabled is True and ui.btn_redo.disabled is True
+    antes = set(ui.seg.included)
+    ui.sl_min_iv.value = 0.9                    # critério impossível → esvazia
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_auto_select(None)
+    depois = set(ui.seg.included)
+    assert depois != antes and ui.btn_undo.disabled is False
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_undo(None)
+    assert set(ui.seg.included) == antes
+    assert ui.btn_redo.disabled is False
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_redo(None)
+    assert set(ui.seg.included) == depois
+    # ação que levanta: estado E pilhas voltam ao que eram (rollback automático)
+    n_undo, n_redo = len(ui._undo), len(ui._redo)
+    estado = set(ui.seg.included)
+
+    def _boom(*a, **kw):
+        ui.seg.included = set()                 # mutação parcial antes do erro
+        raise RuntimeError("falha simulada")
+
+    ui.seg.auto_select = _boom
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_auto_select(None)
+    assert set(ui.seg.included) == estado
+    assert (len(ui._undo), len(ui._redo)) == (n_undo, n_redo)
+
+
+def test_undo_cobre_derivada_e_transformacao():
+    """O snapshot é de CONFIGURAÇÃO: desfazer remove a variável derivada do
+    DataFrame/candidatas (e o refazer a recria) e devolve a transformação
+    (valores crus ↔ WoE/bins) do treino."""
+    ui = _build()
+    cands0 = list(ui.seg.candidates)
+    ui.dd_var2.value = "score"
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_create_cat(None)
+    nova = [c for c in ui.seg.candidates if c not in cands0]
+    assert len(nova) == 1 and nova[0] in ui.seg.df.columns
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_undo(None)
+    assert list(ui.seg.candidates) == cands0 and nova[0] not in ui.seg.df.columns
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_redo(None)
+    assert nova[0] in ui.seg.candidates and nova[0] in ui.seg.df.columns
+    # trocar a transformação também é desfazível (o toggle volta ao valor antigo)
+    ui.cb_woe.value = True
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_undo(None)
+    assert ui.cb_woe.value is False
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_redo(None)
+    assert ui.cb_woe.value is True
