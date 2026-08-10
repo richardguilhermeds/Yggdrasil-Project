@@ -877,6 +877,17 @@ class TreeSegmenterUI:
                           "Curva ROC da régua por amostra, com a AUC e o Gini", "line-chart")
         self.btn_ks = mk("Curva KS", "info",
                          "Curva KS — distribuições acumuladas de bons e maus pelo score", "area-chart")
+        # CAP/Lift e métricas por safra valem nos DOIS task_type: usam a ordenação
+        # do alvo previsto da folha contra o alvo (evento binário ou massa contínua)
+        self.btn_cap = mk("Curva CAP (AR)", "info",
+                          "Curva CAP/Lorenz da régua por amostra, com o AR (accuracy ratio) "
+                          "na legenda", "signal")
+        self.btn_lift = mk("Lift por decil", "info",
+                           "Lift por decil de score (decil 1 = piores scores) + gains "
+                           "acumulado no eixo secundário", "bar-chart")
+        self.btn_msafra = mk("Métricas por safra", "info",
+                             "Evolução das métricas da régua por safra (requer coluna de "
+                             "data)", "calendar")
         # --- estabilidade: métricas por amostra · PSI da segmentação no tempo · concentração ---
         self.btn_estab = mk("Estabilidade & concentração", "info",
                             "Principais métricas por amostra, PSI da segmentação ao longo do "
@@ -1112,6 +1123,10 @@ class TreeSegmenterUI:
             self.btn_roc.description = "📦 Boxplot por folha"
             self.btn_roc.tooltip = "Boxplot do alvo por folha — dispersão dentro de cada folha"
             self.btn_roc.on_click(self._on_box)
+        # CAP · Lift · métricas por safra: comuns aos dois task_type
+        self.btn_cap.on_click(self._on_cap)
+        self.btn_lift.on_click(self._on_lift)
+        self.btn_msafra.on_click(self._on_msafra)
         self.btn_undo.on_click(self._on_undo)
         self.btn_redo.on_click(self._on_redo)
         self.btn_automerge.on_click(self._on_automerge)
@@ -1496,24 +1511,30 @@ class TreeSegmenterUI:
         self._card_sib = card_sib
 
         if self._is_clf:
-            _dh = "Discriminação · curva ROC &amp; curva KS"
+            _dh = "Discriminação · ROC · KS · CAP · Lift · métricas por safra"
             discrim_legend = W.HTML(
                 f"<div class='treeui-legend'>Poder de <b>ordenação de risco</b> da régua (score = {self._risk_label} "
                 "previsto por folha). <b>KS</b> = máxima separação entre as acumuladas de bons e "
-                "maus; <b>AUC</b>/<b>Gini</b> = área sob a ROC. Avalie quando a árvore estiver "
-                "fechada.</div>")
+                "maus; <b>AUC</b>/<b>Gini</b> = área sob a ROC; <b>CAP</b>/AR e <b>lift</b> = "
+                "concentração de eventos nos piores scores; <b>métricas por safra</b> acompanha "
+                "KS/AUC no tempo. Avalie quando a árvore estiver fechada.</div>")
         else:
-            _dh = "Dispersão do alvo por folha · boxplot"
+            _dh = "Dispersão e ordenação do alvo · boxplot · CAP · Lift · métricas por safra"
             discrim_legend = W.HTML(
                 "<div class='treeui-legend'>Dispersão do <b>alvo</b> por folha — curva ROC/KS "
                 "não se aplica a alvo contínuo. <b>Boxplot por folha</b> mostra mediana, quartis e "
-                "outliers de cada folha. Avalie quando a árvore estiver fechada.</div>")
-        # clf: ROC + KS · reg: só o boxplot por folha (histograma do alvo removido)
-        _discrim_btns = [self.btn_roc, self.btn_ks] if self._is_clf else [self.btn_roc]
+                "outliers de cada folha; a <b>curva CAP</b> e o <b>lift</b> usam a ordenação do "
+                "previsto contra a massa do alvo contínuo; <b>métricas por safra</b> acompanha "
+                "RMSE/R² no tempo. Avalie quando a árvore estiver fechada.</div>")
+        # clf: ROC + KS · reg: boxplot por folha — CAP/Lift/métricas por safra nos dois
+        _discrim_btns = ([self.btn_roc, self.btn_ks] if self._is_clf else [self.btn_roc])
+        _discrim_btns += [self.btn_cap, self.btn_lift, self.btn_msafra]
+        for _b in _discrim_btns:        # o width 98% do mk quebraria o wrap (1/linha)
+            _b.layout.width = "auto"
         card_discrim = W.VBox([
             W.HTML(f"<div class='treeui-h'>{_dh}</div>"),
             discrim_legend,
-            W.HBox(_discrim_btns),
+            W.HBox(_discrim_btns, layout=W.Layout(flex_flow="row wrap", gap="4px")),
             self.out_discrim,
         ])
         card_discrim.add_class("treeui-card")
@@ -2917,7 +2938,8 @@ class TreeSegmenterUI:
         self.out_boot.value = ("<div style='font-size:12px;color:var(--sub-ink)'>Árvore alterada — "
                                "clique em <b>Calcular IC bootstrap</b> para (re)calcular.</div>")
         self.out_discrim.value = ("<div style='font-size:12px;color:var(--sub-ink)'>Árvore alterada — "
-                                  "clique em <b>Curva ROC</b> ou <b>Curva KS</b> para renderizar.</div>")
+                                  "clique num dos botões do card (curvas · lift · métricas por "
+                                  "safra) para renderizar.</div>")
         self.out_plot.value = ("<div style='font-size:12px;color:var(--sub-ink)'>Árvore alterada — "
                                "clique em <b>Ver / salvar árvore (imagem)</b> para renderizar.</div>")
         # o placar de saúde, o SQL gerado e a validação também ficam obsoletos —
@@ -4984,6 +5006,38 @@ class TreeSegmenterUI:
         except Exception as e:
             self.out_discrim.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro no "
                                       f"histograma: {type(e).__name__}: {e}</div>")
+
+    # CAP · Lift · métricas por safra (clf E reg): score = alvo previsto da folha;
+    # renderizam em out_discrim (mesmo card), invalidados junto no _refresh
+    def _on_cap(self, _):
+        try:
+            self.out_discrim.value = self._fig_html(self.seg.plot_cap())
+        except Exception as e:
+            self.out_discrim.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro na "
+                                      f"curva CAP: {type(e).__name__}: {e}</div>")
+
+    def _on_lift(self, _):
+        try:
+            self.out_discrim.value = self._fig_html(self.seg.plot_lift())
+        except Exception as e:
+            self.out_discrim.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro no "
+                                      f"lift: {type(e).__name__}: {e}</div>")
+
+    def _on_msafra(self, _):
+        # coluna de tempo: o campo "coluna safra" do card de irmãs (mesma fonte do
+        # botão Estabilidade), com fallback no date_col configurado
+        tcol = (self.tx_sib_time.value or "").strip() or self.date_col
+        if not tcol or tcol not in self.seg.df.columns:
+            self.out_discrim.value = ("<div class='treeui-legend'>Métricas por safra requerem "
+                                      "uma coluna de data — configure <b>date_col</b> ou preencha "
+                                      "a <b>coluna safra</b> no card de folhas-irmãs.</div>")
+            return
+        try:
+            self.out_discrim.value = self._fig_html(
+                self.seg.plot_metrics_by_safra(time_col=tcol), full_width=True)
+        except Exception as e:
+            self.out_discrim.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro nas "
+                                      f"métricas por safra: {type(e).__name__}: {e}</div>")
 
     @staticmethod
     def _estab_err(what, e):

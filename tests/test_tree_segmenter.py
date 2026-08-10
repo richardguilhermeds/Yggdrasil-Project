@@ -496,6 +496,31 @@ def test_plot_feature_value(seg):
     assert fig is not None
 
 
+def test_plot_cap_lift_metricas_por_safra(task):
+    """Smoke dos três diagnósticos novos nos DOIS task_type (paridade clf×reg):
+    CAP com AR na legenda, lift por decil e métricas por safra (clf: KS/AUC ·
+    reg: R²/RMSE), sempre com o alvo previsto da folha como score."""
+    pytest.importorskip("matplotlib")
+    seg = _mk(task, com_oot=True, n=4000, seed=3)
+    seg.fit_auto(max_depth=2, verbose=False)
+    fig = seg.plot_cap()
+    labels = [t.get_text() for t in fig.axes[0].get_legend().get_texts()]
+    assert any("AR=" in t for t in labels)             # curva útil por amostra
+    assert seg.plot_lift() is not None
+    ms = seg.metrics_by_safra(time_col="dt_ref")
+    want = ({"safra", "n", "taxa_evento", "auc", "ks", "gini"}
+            if task == "classification"
+            else {"safra", "n", "previsto_medio", "realizado_medio", "mae", "rmse", "r2"})
+    assert want.issubset(ms.columns) and len(ms) >= 2
+    assert seg.plot_metrics_by_safra(time_col="dt_ref") is not None
+
+
+def test_metrics_by_safra_sem_time_col_erro(task):
+    seg = _mk(task)                                    # sem date_col configurado
+    with pytest.raises(ValueError, match="time_col"):
+        seg.metrics_by_safra()
+
+
 # ----------------------------------------------------------------------
 # PySpark (gated)
 # ----------------------------------------------------------------------

@@ -56,6 +56,12 @@ from .._common import (
 
 TASK_TYPES = ("classification", "regression")
 
+# Métricas limitadas a [0,1] (discriminação): eixos que só as contêm ficam FIXOS
+# em 0–1 p/ leitura estável e comparável entre safras — a autoescala "dá zoom" e
+# exagera variações pequenas. As demais (regressão: rmse/mae · r2, que pode ser
+# negativo) mantêm autoescala. Mesma convenção do ModelSegmenter.
+_UNIT_METRICS = frozenset({"ks", "auc", "gini"})
+
 
 # ======================================================================
 # Helpers (formatação/classificação/optbinning vêm de credit_risk._common)
@@ -2723,6 +2729,296 @@ class TreeSegmenter:
         ax.legend(fontsize=8, loc="lower right")
         ax.grid(alpha=0.2)
         ax.set_ylim(0, 1.02)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    # ------------------------------------------------------------------
+    # PLOT_CAP: curva CAP (Cumulative Accuracy Profile / Lorenz) da régua —
+    #   % acumulado do ALVO capturado × % acumulado da carteira ordenada do
+    #   pior para o melhor score (alvo previsto da folha), com o AR (accuracy
+    #   ratio) por amostra na legenda, a diagonal (aleatório) e a curva do
+    #   modelo perfeito. Paridade clf×reg: em classificação captura EVENTOS;
+    #   em regressão captura a MASSA do alvo contínuo (mesma ordenação
+    #   previsto→alvo do ModelSegmenter).
+    # ------------------------------------------------------------------
+    def plot_cap(self, samples: list | None = None, figsize=(6.0, 5.6),
+                 save_path: str | None = None, dpi: int = 150, ax=None):
+        try:
+            import matplotlib.pyplot as plt  # noqa: F401
+            from matplotlib.ticker import PercentFormatter
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("plot_cap requer matplotlib.") from e
+        pred = self._predicted_series()
+        # amostras (referência primeiro): clf exige as duas classes; reg usa todas
+        if self._is_clf:
+            grupos = self._samples_with_both_classes()
+        elif self.sample_col is None:
+            grupos = [(None, pd.Series(True, index=self.df.index))]
+        else:
+            todas = list(self.df[self.sample_col].dropna().unique())
+            ordem = [self.ref_sample] + [a for a in todas if a != self.ref_sample]
+            grupos = [(a, self._sample_masks[a]) for a in ordem]
+        if samples is not None:
+            grupos = [(a, m) for a, m in grupos if a in samples]
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        ax.plot([0, 1], [0, 1], color="#9aa7b2", lw=1.0, ls="--", label="aleatório")
+        cores = ["#0f3d57", "#d6453e", "#1aa64b", "#caa000", "#6b3fa0", "#2a9d8f"]
+        perfeito_feito = False
+        alguma = False
+        for i, (a, mask) in enumerate(grupos):
+            y = self.df.loc[mask, self.target].to_numpy(dtype="float64")
+            s = pred[mask.values].to_numpy(dtype="float64")
+            ok = ~(np.isnan(y) | np.isnan(s))
+            y, s = y[ok], s[ok]
+            tot = float(y.sum())
+            if y.size == 0 or tot <= 0 or (self._is_clf and np.unique(y).size < 2):
+                continue
+            # carteira ordenada do PIOR para o MELHOR score → % do alvo capturado
+            order = np.argsort(-s, kind="mergesort")
+            y_ord = y[order]
+            n = y_ord.size
+            x_cap = np.concatenate(([0.0], np.arange(1, n + 1) / n))
+            y_cap = np.concatenate(([0.0], np.cumsum(y_ord) / tot))
+            # área sob a CAP pela regra do trapézio (manual: independe da versão
+            # do numpy — trapz foi deprecado na 2.0 e trapezoid não existe <2.0)
+            area_mod = float(np.sum(np.diff(x_cap) * (y_cap[:-1] + y_cap[1:]) / 2.0))
+            # modelo perfeito = ordenar pelo PRÓPRIO alvo: clf sobe reto até a
+            # taxa de evento; reg é a curva de Lorenz do alvo decrescente.
+            y_perf = np.concatenate(([0.0], np.cumsum(np.sort(y)[::-1]) / tot))
+            area_perf = float(np.sum(np.diff(x_cap) * (y_perf[:-1] + y_perf[1:]) / 2.0))
+            # AR = (área do modelo − 0,5) / (área do perfeito − 0,5)
+            ar = ((area_mod - 0.5) / (area_perf - 0.5)
+                  if area_perf > 0.5 else float("nan"))
+            if not perfeito_feito:                       # perfeito da 1ª amostra útil
+                ax.plot(x_cap, y_perf, color="#8891a0", ls=":", lw=1.4,
+                        label="modelo perfeito")
+                perfeito_feito = True
+            nome = a if a is not None else "todos"
+            ax.plot(x_cap, y_cap, color=cores[i % len(cores)], lw=2.0,
+                    label=f"{nome} · AR={ar:.3f}")
+            alguma = True
+        if not alguma:
+            msg = ("sem as duas classes para a curva CAP" if self._is_clf
+                   else "sem massa de alvo para a curva CAP")
+            ax.text(0.5, 0.5, msg, ha="center", va="center",
+                    transform=ax.transAxes, color="#889")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1.02)
+        ax.set_xlabel("% acumulado da carteira (pior → melhor score)")
+        ax.set_ylabel("% acumulado de eventos capturados" if self._is_clf
+                      else f"% acumulado de {self._risk_word} capturado")
+        ax.xaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=None))
+        ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=None))
+        ax.set_title(f"Curva CAP (Lorenz) da régua de {self._risk_word}",
+                     fontsize=12, fontweight="bold", color="#15324a")
+        ax.legend(fontsize=8, loc="lower right")
+        ax.grid(alpha=0.2)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    # ------------------------------------------------------------------
+    # PLOT_LIFT: lift por decil de score (barras; decil 1 = piores scores) +
+    #   linha de gains acumulado (% do alvo capturado até o decil) num segundo
+    #   eixo, com a referência em lift = 1 (aleatório). Paridade clf×reg: em
+    #   classificação a taxa é de eventos; em regressão é a média do alvo
+    #   contínuo (mesma ordenação previsto→alvo do ModelSegmenter).
+    # ------------------------------------------------------------------
+    def plot_lift(self, sample: str | None = None, n_bins: int = 10,
+                  figsize=(7.2, 4.2), save_path: str | None = None,
+                  dpi: int = 150, ax=None):
+        try:
+            import matplotlib.pyplot as plt  # noqa: F401
+            from matplotlib.ticker import PercentFormatter
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("plot_lift requer matplotlib.") from e
+        pred = self._predicted_series()
+        if sample is None and self.sample_col is not None:
+            sample = self.ref_sample
+        mask = pd.Series(True, index=self.df.index)
+        if sample is not None and self.sample_col is not None:
+            mask = self.df[self.sample_col] == sample
+        y = self.df.loc[mask, self.target].to_numpy(dtype="float64")
+        s = pred[mask.values].to_numpy(dtype="float64")
+        ok = ~(np.isnan(y) | np.isnan(s))
+        y, s = y[ok], s[ok]
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        tx_geral = float(np.mean(y)) if y.size else 0.0
+        if y.size == 0 or tx_geral <= 0 or (self._is_clf and np.unique(y).size < 2):
+            msg = ("amostra com 1 classe" if self._is_clf
+                   else "alvo sem massa para o lift")
+            ax.text(0.5, 0.5, msg, ha="center", va="center",
+                    transform=ax.transAxes, color="#889")
+            ax.axis("off")
+            fig.tight_layout()
+            return fig
+        # decil 1 = PIORES scores (maior alvo previsto) — ordena descendente e
+        # fatia em n_bins grupos de tamanho ~igual (robusto a empates de score).
+        order = np.argsort(-s, kind="mergesort")
+        y_ord = y[order]
+        n = y_ord.size
+        n_bins = max(2, min(int(n_bins), n))
+        idx = np.minimum((np.arange(n) * n_bins) // n, n_bins - 1)
+        tot = float(y_ord.sum())                       # > 0 (guard do tx_geral)
+        lifts, gains = [], []
+        acum = 0.0
+        for g in range(n_bins):
+            m = idx == g
+            tx_g = float(y_ord[m].mean()) if m.any() else float("nan")
+            lifts.append(tx_g / tx_geral)
+            acum += float(y_ord[m].sum())
+            gains.append(acum / tot)
+        x = np.arange(1, n_bins + 1)
+        ax.bar(x, lifts, color="#3b6ea5", edgecolor="#2f5d82", alpha=0.9,
+               width=0.72, label="lift do decil")
+        ax.axhline(1.0, color="#d6453e", lw=1.2, ls="--", label="lift = 1 (aleatório)")
+        for x0, lf in zip(x, lifts):
+            if np.isfinite(lf):
+                ax.text(x0, lf, f"{lf:.2f}", ha="center", va="bottom", fontsize=7.5,
+                        color="#15324a")
+        ax.set_xticks(list(x))
+        ax.set_xlabel("decil de score (1 = piores scores)")
+        ax.set_ylabel("lift (taxa do decil / taxa geral)" if self._is_clf
+                      else "lift (média do decil / média geral)")
+        ax.set_ylim(0, max([lf for lf in lifts if np.isfinite(lf)] + [1.0]) * 1.18)
+        # gains acumulado no eixo secundário (% do alvo capturado)
+        ax2 = ax.twinx()
+        ax2.plot(x, gains, color="#0f3d57", lw=2.0, marker="o", ms=4.5,
+                 label="gains acumulado")
+        ax2.set_ylim(0, 1.05)
+        ax2.set_ylabel("% de eventos capturados (acum.)" if self._is_clf
+                       else f"% de {self._risk_word} capturado (acum.)")
+        ax2.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=None))
+        h1, l1 = ax.get_legend_handles_labels()
+        h2, l2 = ax2.get_legend_handles_labels()
+        ax.legend(h1 + h2, l1 + l2, fontsize=8, loc="center right", framealpha=0.9)
+        ax.set_title(f"Lift e gains por decil de score · {sample or 'todos'}",
+                     fontsize=12, fontweight="bold", color="#15324a")
+        ax.grid(axis="y", alpha=0.2)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    # ------------------------------------------------------------------
+    # METRICS_BY_SAFRA: métricas da régua como modelo POR SAFRA (mês de
+    #   date_col/time_col), com o alvo previsto da folha como score — mesma
+    #   leitura do metrics(), trocando a amostra pela safra.
+    # ------------------------------------------------------------------
+    def metrics_by_safra(self, sample: str | None = None,
+                         time_col: str | None = None) -> pd.DataFrame:
+        """Métricas da régua **por safra** (mês de ``date_col``/``time_col``).
+
+        classification → ``safra, n, taxa_evento, auc, ks, gini``.
+        regression → ``safra, n, previsto_medio, realizado_medio, mae, rmse, r2``.
+        Reutiliza :func:`~yggdrasil.metrics.classification_metrics` /
+        :func:`~yggdrasil.metrics.regression_metrics` (mesmo pacote de
+        :meth:`metrics`). Safras pequenas ou de classe única não quebram — as
+        métricas ficam NaN.
+
+        ``sample=None`` usa toda a base (as safras normalmente já separam
+        DES/OOT); informe uma amostra para restringir."""
+        time_col = time_col or self.date_col
+        if time_col is None or time_col not in self.df.columns:
+            raise ValueError("Informe time_col ou configure date_col.")
+        from yggdrasil.metrics import classification_metrics, regression_metrics
+        pred = self._predicted_series()
+        mask = pd.Series(True, index=self.df.index)
+        if sample is not None and self.sample_col is not None:
+            mask = self.df[self.sample_col] == sample
+        base = self.df.loc[mask]
+        sc_full = pred[mask.values]
+        safra = pd.to_datetime(base[time_col], errors="coerce").dt.to_period("M")
+        met_cols = (["taxa_evento", "auc", "ks", "gini"] if self._is_clf
+                    else ["previsto_medio", "realizado_medio", "mae", "rmse", "r2"])
+        rows = []
+        for per, g in base.groupby(safra):            # groupby dropa safra NaT
+            y = g[self.target].to_numpy(dtype="float64")
+            sc = sc_full.reindex(g.index).to_numpy(dtype="float64")
+            ok = ~np.isnan(y) & ~np.isnan(sc)
+            y, sc = y[ok], sc[ok]
+            row = {"safra": str(per), "n": int(y.size)}
+            row.update({c: float("nan") for c in met_cols})
+            if self._is_clf:
+                row["taxa_evento"] = float(np.mean(y)) if y.size else float("nan")
+                if y.size >= 2 and len(np.unique(y)) == 2:
+                    try:
+                        m = classification_metrics(y, sc)
+                        row.update({c: m.get(c, float("nan"))
+                                    for c in ("auc", "ks", "gini")})
+                    except Exception:  # noqa: BLE001 - safra degenerada ⇒ NaN
+                        pass
+            else:
+                row["previsto_medio"] = float(np.mean(sc)) if sc.size else float("nan")
+                row["realizado_medio"] = float(np.mean(y)) if y.size else float("nan")
+                if y.size >= 2:
+                    try:
+                        m = regression_metrics(y, sc)
+                        row.update({c: m.get(c, float("nan"))
+                                    for c in ("mae", "rmse", "r2")})
+                    except Exception:  # noqa: BLE001 - safra degenerada ⇒ NaN
+                        pass
+            rows.append(row)
+        return (pd.DataFrame(rows, columns=["safra", "n"] + met_cols)
+                .sort_values("safra").reset_index(drop=True))
+
+    def plot_metrics_by_safra(self, sample: str | None = None, metrics=None,
+                              time_col: str | None = None, figsize=(9.6, 4.2),
+                              dpi: int = 150, save_path: str | None = None,
+                              ax=None, ylim=None):
+        """Evolução das métricas da régua por safra (linhas), a partir de
+        :meth:`metrics_by_safra`. ``metrics=None`` usa o default do ``task_type``
+        (clf: ``ks``/``auc`` · reg: ``rmse``/``r2``); métricas que não existirem
+        para o tipo de alvo são ignoradas. ``ylim=(lo, hi)`` fixa o eixo vertical;
+        tem precedência sobre a heurística que fixa [0,1] para métricas de
+        discriminação."""
+        try:
+            import matplotlib.pyplot as plt  # noqa: F401
+        except ImportError as e:  # pragma: no cover
+            raise ImportError("plot_metrics_by_safra requer matplotlib.") from e
+        default = ("ks", "auc") if self._is_clf else ("rmse", "r2")
+        if metrics is None:
+            metrics = default
+        ms = self.metrics_by_safra(sample, time_col)
+        cols = [m for m in metrics if m in ms.columns and m not in ("safra", "n")]
+        if not cols:                        # métricas do outro task_type pedidas
+            cols = [c for c in default if c in ms.columns]
+        fig, ax = self._new_ax(figsize, dpi, ax)
+        if ms.empty or not cols:
+            ax.text(0.5, 0.5, "sem métricas por safra", ha="center", va="center",
+                    transform=ax.transAxes, color="#889")
+            ax.axis("off")
+            fig.tight_layout()
+            return fig
+        x = list(range(len(ms)))
+        cores = ["#0f3d57", "#d6453e", "#1aa64b", "#caa000", "#6b3fa0", "#2a9d8f"]
+        for i, c in enumerate(cols):
+            ax.plot(x, ms[c], marker="o", lw=2.0, ms=4.5, color=cores[i % len(cores)],
+                    markeredgecolor="#33424f", markeredgewidth=0.5, label=c.upper())
+        # eixo Y: override explícito (ylim) tem precedência; senão, métricas de
+        # discriminação (KS/AUC/Gini) ⇒ 0–1 comparável; regressão autoescala.
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+        elif all(c in _UNIT_METRICS for c in cols):
+            ax.set_ylim(0.0, 1.0)
+        # rótulos mmm/aa; com muitas safras, afina os ticks p/ não sobrepor
+        labels = _fmt_safras(ms["safra"])
+        step = max(1, len(ms) // 18)
+        ax.set_xticks(x[::step])
+        ax.set_xticklabels(labels[::step], rotation=45, ha="right", fontsize=8)
+        ax.set_xlabel("safra")
+        ax.set_ylabel("métrica")
+        # sem restrição de amostra, marca a troca DES→OOT… (linhas pontilhadas)
+        if sample is None:
+            self._draw_sample_dividers(ax, list(ms["safra"]),
+                                       time_col or self.date_col)
+        ax.set_title(f"Métricas por safra · {sample or 'todas as amostras'}",
+                     fontsize=12, fontweight="bold", color="#15324a")
+        ax.grid(alpha=0.2)
+        ax.legend(fontsize=8, loc="best", framealpha=0.9)
         fig.tight_layout()
         if save_path:
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight")

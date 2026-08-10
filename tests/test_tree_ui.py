@@ -602,6 +602,34 @@ def test_ui_plots_especificos_por_task(task):
     assert ui.out_discrim.value and "Erro" not in ui.out_discrim.value
 
 
+def test_ui_cap_lift_metricas_por_safra(task):
+    """Os três botões novos do card de discriminação (CAP · Lift · métricas por
+    safra) renderizam em out_discrim nos DOIS task_type, e a saída é invalidada
+    quando a árvore muda de estrutura (mensagem 'Árvore alterada')."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        for btn in (ui.btn_cap, ui.btn_lift, ui.btn_msafra):
+            btn.click()
+            assert "<img" in ui.out_discrim.value, btn.description
+            assert "Erro" not in ui.out_discrim.value, btn.description
+        # mudança estrutural → _refresh marca a saída como obsoleta
+        ui._on_autofit(None)
+    assert "Árvore alterada" in ui.out_discrim.value
+
+
+def test_ui_metricas_por_safra_sem_coluna_tempo(task):
+    """Sem coluna de tempo válida, o botão de métricas por safra mostra a
+    orientação amigável (sem stacktrace) em out_discrim."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        ui.tx_sib_time.value = "nao_existe"
+        ui.btn_msafra.click()
+    assert "coluna de data" in ui.out_discrim.value
+    assert "Erro" not in ui.out_discrim.value
+
+
 def test_ui_overwrite_pede_confirmacao(task, tmp_path):
     """Salvar (JSON) num caminho que já existe NÃO sobrescreve direto: abre a
     janela de confirmação e só grava quando o usuário confirma (do_save)."""
