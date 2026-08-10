@@ -42,10 +42,16 @@ Cenários (:mod:`.scenarios`)
 Pipeline declarativo (:mod:`.config`)
     :class:`StudyConfig`, :func:`run_study` — as "cinco chamadas" do guia.
 
-As visualizações (:mod:`.report`, matplotlib) e o registro no MLflow
-(:mod:`.tracking`) são carregados **sob demanda**. Este subpacote requer
-``statsmodels`` e ``arch`` (extra ``econometric``); o restante de
-``yggdrasil.credit_risk`` não os exige.
+Interface (:mod:`.ui`)
+    :class:`SatelliteUI` — a camada interativa (ipywidgets) sobre tudo isso:
+    série e estacionariedade, especificação e sinais esperados, seleção,
+    diagnóstico, cenários, backtest e exportação. ``SatelliteUI()`` sem argumentos
+    carrega o estudo de referência para explorar a ferramenta na hora.
+
+As visualizações (:mod:`.report`, matplotlib), o registro no MLflow
+(:mod:`.tracking`) e a interface (:mod:`.ui`, ipywidgets) são carregados **sob
+demanda**. Este subpacote requer ``statsmodels`` e ``arch`` (extra
+``econometric``); o restante de ``yggdrasil.credit_risk`` não os exige.
 
 Uso típico (o estudo em poucas chamadas)::
 
@@ -146,18 +152,21 @@ __all__ = [
     # pipeline
     "StudyConfig", "StudyResult", "run_study", "MODEL_REGISTRY",
     # carregados sob demanda
-    "report", "tracking", "log_satellite_run",
+    "report", "tracking", "log_satellite_run", "ui", "SatelliteUI",
 ]
 
 
 def __getattr__(name):
-    # Visualizações (matplotlib) e MLflow carregados só quando pedidos.
+    # Visualizações (matplotlib), MLflow e a interface (ipywidgets) carregados só
+    # quando pedidos — importar o subpacote não exige as dependências opcionais.
     import importlib
 
-    if name in ("report", "tracking"):
+    if name in ("report", "tracking", "ui"):
         return importlib.import_module(f"{__name__}.{name}")
     if name == "log_satellite_run":
         return importlib.import_module(f"{__name__}.tracking").log_satellite_run
+    if name == "SatelliteUI":
+        return importlib.import_module(f"{__name__}.ui").SatelliteUI
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
