@@ -639,6 +639,69 @@ class _IdentityModel:
         return np.asarray(X[self.col], dtype=float)
 
 
+def test_bootstrap_ci_e_forest_plot(seg):
+    """bootstrap_ci por rating: colunas, atributos, coerência do IC (a média da
+    referência cai dentro do próprio IC) e o forest plot renderiza do resultado."""
+    seg.fit(_default_algo(seg.task_type))
+    seg.build_ratings(method="quantil", n_ratings=5)
+    bc = seg.bootstrap_ci(n_boot=200)
+    assert list(bc["rating"]) == list(seg.rating_labels_)
+    assert {"n", "valor_DES", "ic_low", "ic_high", "amplitude",
+            "valor_OOT", "aderente", "status"}.issubset(bc.columns)
+    ok = bc["ic_low"].notna()
+    assert ok.any()
+    assert (bc.loc[ok, "ic_low"] <= bc.loc[ok, "valor_DES"]).all()
+    assert (bc.loc[ok, "valor_DES"] <= bc.loc[ok, "ic_high"]).all()
+    assert bc["status"].isin(["dentro", "acima", "abaixo", "—"]).all()
+    assert bc.attrs["sample"] == "DES" and bc.attrs["check_sample"] == "OOT"
+    assert bc.attrs["n_boot"] == 200 and bc.attrs["ci"] == 0.95
+    fig = seg.plot_bootstrap_forest(bc=bc)
+    assert fig is not None and len(fig.axes) >= 1
+
+
+def test_bootstrap_ci_exige_ratings(seg):
+    with pytest.raises(RuntimeError):
+        seg.bootstrap_ci(n_boot=50)
+
+
+def test_bootstrap_ci_aderencia_por_rating():
+    """Rating estável (mesma taxa em DES e OOT) fica 'dentro' do IC; alvo
+    deslocado artificialmente no OOT sai do IC ('acima'/'abaixo')."""
+    n_des, n_oot = 4000, 1000
+    idx = np.arange(n_des + n_oot)
+    amostra = np.where(idx < n_des, "DES", "OOT")
+    rating = np.where(idx % 2 == 0, "R1", "R2")
+    pos = idx // 2                                     # posição dentro do rating
+    # padrões determinísticos: R1 com 20% de evento, R2 com 60% — idênticos nas
+    # duas amostras (estável por construção)
+    alvo = np.where(rating == "R1", pos % 5 == 0, pos % 5 < 3).astype(float)
+    df = pd.DataFrame({"feat_x": idx / len(idx), "target": alvo, "amostra": amostra})
+    seg = ModelSegmenter(df, target="target", task_type="classification",
+                         sample_col="amostra", ref_sample="DES", verbose=False)
+    # régua montada à mão: bootstrap_ci usa o rating JÁ atribuído (score fixo,
+    # sem reescorar por réplica) — dispensa modelo para o teste determinístico
+    seg.rating_labels_ = ["R1", "R2"]
+    seg.rating_ = pd.Series(rating, index=df.index)
+
+    bc = seg.bootstrap_ci(n_boot=300)
+    assert list(bc["status"]) == ["dentro", "dentro"]
+    assert list(bc["aderente"]) == [True, True]
+
+    # desloca o alvo SÓ no OOT: R1 sobe p/ ~60% (acima) e R2 desce p/ ~10% (abaixo)
+    m1 = (amostra == "OOT") & (rating == "R1")
+    m2 = (amostra == "OOT") & (rating == "R2")
+    alvo2 = alvo.copy()                                # array numpy (pandas 3 CoW)
+    alvo2[m1] = (pos[m1] % 5 < 3).astype(float)
+    alvo2[m2] = (pos[m2] % 10 == 0).astype(float)
+    seg.df["target"] = alvo2
+    bc2 = seg.bootstrap_ci(n_boot=300)
+    assert list(bc2["status"]) == ["acima", "abaixo"]
+    assert list(bc2["aderente"]) == [False, False]
+    # o IC (na referência) não muda — só o realizado do OOT deslocou
+    assert list(bc2["ic_low"]) == list(bc["ic_low"])
+    assert list(bc2["ic_high"]) == list(bc["ic_high"])
+
+
 def test_psi_ratings(seg):
     seg.fit(_default_algo(seg.task_type))
     seg.build_ratings(method="decis", n_ratings=10)

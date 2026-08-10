@@ -5503,6 +5503,175 @@ class ModelSegmenter:
                          "inverte_vs_DES": inv_txt})
         return pd.DataFrame(rows)
 
+    # ------------------------------------------------------------------
+    # BOOTSTRAP_CI: intervalo de confiança do alvo médio por RATING, via
+    #   reamostragem bootstrap na amostra `sample` (default = referência/DES).
+    #   Se houver `check_sample` (default = 1ª não-referência, ex. OOT), traz o
+    #   alvo dela por rating e verifica a ADERÊNCIA: se o realizado cai dentro
+    #   do IC bootstrap da referência (estável) ou fora (acima/abaixo = alerta).
+    # ------------------------------------------------------------------
+    def bootstrap_ci(self, n_boot: int = 1000, ci: float = 0.95,
+                     sample: str | None = None, check_sample: str | None = None,
+                     seed: int = 42) -> pd.DataFrame:
+        """IC bootstrap do alvo médio por **rating** + aderência em outra amostra.
+
+        Premissa de custo: o score e o rating de cada linha são **fixos** (já
+        atribuídos pela régua vigente) — cada réplica reamostra apenas os
+        ÍNDICES das linhas do rating e reagrega o alvo, **sem reescorar** o
+        modelo. Isso mede a incerteza amostral do realizado por faixa a custo
+        baixo (nenhum refit/re-predição por réplica); a incerteza do próprio
+        modelo/régua fica fora do escopo.
+
+        Devolve uma linha por rating: ``n``, ``valor_<sample>`` (alvo médio),
+        ``ic_low``/``ic_high``/``amplitude`` (IC de ``ci``) e — quando há
+        ``check_sample`` — ``valor_<check>``, ``aderente`` e ``status``
+        (``dentro`` do IC = estável; ``acima``/``abaixo`` = o alvo deslocou
+        além da incerteza amostral)."""
+        rating = self._rating_series()
+        rng = np.random.default_rng(seed)
+        alpha = (1 - ci) / 2
+        if self.sample_col is not None:
+            if sample is None:
+                sample = self.ref_sample
+            if check_sample is None:
+                nonref = self._nonref_samples()
+                check_sample = nonref[0] if nonref else None
+        else:
+            sample = check_sample = None
+
+        # valores do alvo por rating num ÚNICO groupby por amostra (sem máscara
+        # full-length por rótulo — ver notas de performance em rating_table)
+        base = pd.DataFrame({"y": self.df[self.target], "r": rating})
+        sub = base if sample is None else base[self._frame_mask(sample)]
+        vals_by = {lab: g["y"].to_numpy(dtype="float64")
+                   for lab, g in sub.groupby("r", observed=True)}
+        chk_mean = None
+        if check_sample is not None:
+            chk_mean = (base[self._frame_mask(check_sample)]
+                        .groupby("r", observed=True)["y"].mean())
+
+        rows = []
+        for lab in self.rating_labels_:
+            vals = vals_by.get(lab, np.empty(0, dtype="float64"))
+            vals = vals[~np.isnan(vals)]
+            n = len(vals)
+            if n >= 2:
+                # bootstrap em BLOCOS de n_boot: limita a matriz de reamostragem a
+                # ~4M elementos (em vez de n_boot×n inteiro de uma vez — um rating
+                # com n=100k estouraria a memória do driver no Databricks).
+                means = np.empty(n_boot, dtype="float64")
+                passo = max(1, min(n_boot, 4_000_000 // max(n, 1)))
+                feito = 0
+                while feito < n_boot:
+                    b = min(passo, n_boot - feito)
+                    idx = rng.integers(0, n, size=(b, n))
+                    means[feito:feito + b] = vals[idx].mean(axis=1)
+                    feito += b
+                lo, hi = np.quantile(means, [alpha, 1 - alpha])
+                pt = float(vals.mean())
+            elif n == 1:
+                lo = hi = pt = float(vals[0])
+            else:
+                lo = hi = pt = np.nan
+
+            row = {
+                "rating": lab,
+                "n": int(n),
+                f"valor_{sample or 'todos'}": round(pt, 4) if not np.isnan(pt) else np.nan,
+                "ic_low": round(float(lo), 4) if not np.isnan(lo) else np.nan,
+                "ic_high": round(float(hi), 4) if not np.isnan(hi) else np.nan,
+                "amplitude": round(float(hi - lo), 4) if not np.isnan(hi) else np.nan,
+            }
+            if check_sample is not None:
+                v_c = chk_mean.get(lab, np.nan)
+                v_c = float(v_c) if pd.notna(v_c) else np.nan
+                row[f"valor_{check_sample}"] = (round(v_c, 4)
+                                                if not np.isnan(v_c) else np.nan)
+                if np.isnan(v_c) or np.isnan(lo):
+                    row["aderente"] = None
+                    row["status"] = "—"
+                else:
+                    dentro = bool(lo <= v_c <= hi)
+                    row["aderente"] = dentro
+                    row["status"] = ("dentro" if dentro
+                                     else "acima" if v_c > hi else "abaixo")
+            rows.append(row)
+
+        out = pd.DataFrame(rows)
+        out.attrs.update(sample=sample, check_sample=check_sample, ci=ci, n_boot=n_boot)
+        return out
+
+    def plot_bootstrap_forest(self, bc: pd.DataFrame | None = None, n_boot: int = 1000,
+                              ci: float = 0.95, sample: str | None = None,
+                              check_sample: str | None = None, seed: int = 42,
+                              figsize=None, dpi=150, save_path=None, ax=None):
+        """Forest plot dos ICs bootstrap por rating (:meth:`bootstrap_ci`): barra
+        horizontal = IC do alvo médio na referência; traço vertical = alvo médio
+        da referência; ponto = realizado na amostra de comparação (verde dentro
+        do IC / vermelho fora). Aceita um ``bc`` já calculado (evita refazer o
+        bootstrap) ou os parâmetros para calculá-lo."""
+        if bc is None:
+            bc = self.bootstrap_ci(n_boot=n_boot, ci=ci, sample=sample,
+                                   check_sample=check_sample, seed=seed)
+        smp = bc.attrs.get("sample") or "todos"
+        chk = bc.attrs.get("check_sample")
+        ci_pct = int(round(bc.attrs.get("ci", ci) * 100))
+        ref_col, chk_col = f"valor_{smp}", f"valor_{chk}"
+        k = len(bc)
+        if figsize is None:
+            figsize = (8.4, max(2.8, 0.46 * k + 1.4))
+        fig, ax = _new_ax(figsize, dpi, ax)
+        if k == 0:
+            ax.text(0.5, 0.5, "sem ratings para o forest plot", ha="center",
+                    va="center", transform=ax.transAxes, color="#889")
+            ax.axis("off"); fig.tight_layout()
+            if save_path:
+                fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+            return fig
+
+        ys = np.arange(k)[::-1]                     # 1º rating no topo
+        for y0, (_, r) in zip(ys, bc.iterrows()):
+            lo, hi = r["ic_low"], r["ic_high"]
+            if pd.notna(lo):
+                ax.barh(y0, max(float(hi) - float(lo), 1e-12), left=float(lo),
+                        height=0.5, color="steelblue", alpha=0.35,
+                        edgecolor="#33424f", linewidth=0.6, zorder=2)
+                if pd.notna(r[ref_col]):
+                    ax.plot([r[ref_col]], [y0], marker="|", ms=15, mew=2.2,
+                            color="#15324a", zorder=3)
+            # marcador da amostra de comparação só quando há IC para comparar
+            # (aderente=None ⇒ status "—": sem CI ou sem realizado — nada a pintar)
+            if (chk and chk_col in bc.columns and pd.notna(r.get(chk_col, np.nan))
+                    and r.get("aderente") is not None):
+                cor = "#1aa64b" if r.get("aderente") else "#d6453e"
+                ax.plot([r[chk_col]], [y0], marker="o", ms=6.5, color=cor,
+                        markeredgecolor="#33424f", markeredgewidth=0.6, zorder=4)
+        ax.set_yticks(ys)
+        ax.set_yticklabels([str(v) for v in bc["rating"]], fontsize=9)
+        ax.set_ylim(-0.7, k - 0.3)
+        ax.set_xlabel(f"{self._risk_word} médio")
+        _pct_axis(ax, "x")
+        ax.grid(axis="x", alpha=0.15)
+        # legenda com artistas proxy (as marcas são desenhadas por rating)
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import Patch
+        handles = [Patch(facecolor="steelblue", alpha=0.35, edgecolor="#33424f",
+                         label=f"IC {ci_pct}% ({smp})"),
+                   Line2D([], [], marker="|", ls="", ms=11, mew=2.2,
+                          color="#15324a", label=f"média ({smp})")]
+        if chk:
+            handles += [Line2D([], [], marker="o", ls="", ms=6.5, color="#1aa64b",
+                               markeredgecolor="#33424f", label=f"{chk} dentro do IC"),
+                        Line2D([], [], marker="o", ls="", ms=6.5, color="#d6453e",
+                               markeredgecolor="#33424f", label=f"{chk} fora do IC")]
+        ax.legend(handles=handles, fontsize=7.5, loc="best", framealpha=0.9)
+        titulo = f"IC {ci_pct}% bootstrap por rating · {smp}" + (f" × {chk}" if chk else "")
+        ax.set_title(titulo, fontsize=11, fontweight="bold", color="#15324a")
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
     def _calib_test(self, y, score) -> dict:
         """Teste estatístico de calibração de uma célula (safra ou rating):
         compara o **previsto** (score médio) com o **realizado** (alvo médio).

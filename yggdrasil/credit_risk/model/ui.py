@@ -1398,6 +1398,17 @@ class ModelSegmenterUI:
         self.out_rating_psi_safra = W.HTML()   # PSI dos ratings ao longo do tempo (por safra)
         self.out_rating_psi_sample = W.HTML()  # PSI dos ratings por amostra (DES × OOT/ESTABILIDADE)
         self.out_rating_mono = W.HTML()
+        # IC bootstrap do alvo por rating + forest plot (aderência do realizado
+        # nas demais amostras) — calculado sob demanda (botão), pois custa segundos.
+        self.sl_boot = W.IntSlider(value=1000, min=200, max=5000, step=100,
+                                   description="reamostras",
+                                   style={"description_width": "initial"})
+        self.btn_boot = W.Button(description="Calcular IC bootstrap", button_style="primary",
+                                 icon="random",
+                                 tooltip="IC bootstrap do alvo médio por rating na referência "
+                                         "e aderência do realizado em OOT (dentro/acima/abaixo)")
+        self.out_boot = W.HTML()
+        self.btn_boot.on_click(self._on_boot)
         self.btn_build_ratings.on_click(self._on_build_ratings)
 
         tab_rating = W.VBox([
@@ -1456,6 +1467,20 @@ class ModelSegmenterUI:
             ], layout=W.Layout(justify_content="space-between")),
             W.VBox([W.HTML("<div class='mseg-h'>Monotonicidade por amostra</div>"),
                     self.out_rating_mono]),
+            W.VBox([W.HTML("<div class='mseg-h'>Intervalos de confiança (bootstrap) &amp; "
+                           "aderência entre amostras</div>"),
+                    W.HTML("<div class='mseg-legend'>IC do alvo médio por <b>rating</b> via "
+                           "bootstrap na referência: reamostra as linhas de cada rating e "
+                           "reagrega o alvo — o score e o rating de cada linha ficam "
+                           "<b>fixos</b> (sem reescorar o modelo por réplica). Se houver "
+                           "outra amostra (ex. OOT), compara o realizado por rating: "
+                           "<span style='color:var(--ok-tx)'>dentro</span> do IC = estável; "
+                           "<span style='color:var(--bad-tx)'>acima/abaixo</span> = o alvo "
+                           "deslocou além da incerteza amostral. Calcule com a régua "
+                           "fechada.</div>"),
+                    W.HBox([self.sl_boot, self.btn_boot],
+                           layout=W.Layout(align_items="center")),
+                    self.out_boot]),
         ], layout=W.Layout(padding="2px"))
 
         # ---------- Aba 5: Validar & Exportar ----------
@@ -3821,9 +3846,71 @@ class ModelSegmenterUI:
                        f"suficiente (n/d).</div>")
         return f"<div style='font-size:12px'>{head}{chips}{sug}{nd_line}</div>"
 
+    # -------------------------------------------- IC bootstrap por rating (forest plot)
+    def _on_boot(self, b):
+        if getattr(self.seg, "rating_", None) is None:
+            self.out_boot.value = ("<div class='mseg-legend'>Gere os ratings antes "
+                                   "(botão <b>Gerar ratings</b>).</div>")
+            return
+        with self._busy(self.btn_boot, status=self.out_boot,
+                        msg="rodando o bootstrap…"):
+            self._do_boot()
+
+    def _do_boot(self):
+        try:
+            bc = self.seg.bootstrap_ci(n_boot=int(self.sl_boot.value))
+            fig_html = self._fig_html(self.seg.plot_bootstrap_forest(bc=bc))
+        except Exception as e:
+            self.out_boot.value = (f"<div class='mseg-legend' style='color:var(--bad-tx)'>"
+                                   f"Erro no bootstrap: {type(e).__name__}: {e}</div>")
+            self._log(f"[bootstrap] erro: {type(e).__name__}: {e}")
+            return
+        smp = bc.attrs.get("sample") or "todos"
+        chk = bc.attrs.get("check_sample")
+        ci_pct = int(round(bc.attrs.get("ci", 0.95) * 100))
+        resumo = ""
+        if "aderente" in bc.columns:
+            n_ok = int((bc["aderente"] == True).sum())      # noqa: E712 (None ≠ False)
+            n_tot = int(bc["aderente"].notna().sum())
+            resumo = (f"<div style='font-size:12px;color:var(--strong-ink);margin:6px 0'>"
+                      f"Aderência <b>{chk}</b>: <b>{n_ok}/{n_tot}</b> ratings dentro do IC "
+                      f"bootstrap (n_boot={bc.attrs.get('n_boot')}).</div>")
+
+        # tabela com o status pintado pelos tokens de tema (dentro=verde, fora=vermelho)
+        def status_bg(v):
+            if v == "dentro":
+                return "background-color:var(--ok-bg);color:var(--ok-tx);font-weight:600"
+            if v in ("acima", "abaixo"):
+                return "background-color:var(--bad-bg);color:var(--bad-tx);font-weight:600"
+            return "color:var(--faint-ink)"
+        rename = {"n": "volume", "ic_low": f"IC {ci_pct}% inf.",
+                  "ic_high": f"IC {ci_pct}% sup.", "amplitude": "amplitude do IC",
+                  "aderente": "aderente?", f"valor_{smp}": f"média ({smp})"}
+        if chk:
+            rename[f"valor_{chk}"] = f"média ({chk})"
+            rename["status"] = f"status ({chk})"
+        disp = bc.rename(columns=rename)
+        fmt = {c: "{:.4f}" for c in disp.columns if disp[c].dtype.kind == "f"}
+        sty = (disp.style.format(fmt, na_rep="—").hide(axis="index")
+               .set_table_styles(self._TABLE_STYLES)
+               .set_properties(**{"font-size": "12px", "text-align": "center"})
+               .set_table_styles([{"selector": "th, td",
+                                   "props": [("text-align", "center")]}],
+                                 overwrite=False))
+        status_col = rename.get("status")
+        if status_col and status_col in disp.columns:
+            sty = sty.map(status_bg, subset=[status_col])
+        self.out_boot.value = fig_html + resumo + sty.to_html()
+        self._log(f"[bootstrap] IC {ci_pct}% por rating calculado "
+                  f"(n_boot={bc.attrs.get('n_boot')}).")
+
     def _render_ratings(self):
         """Renderiza tabela e gráficos dos ratings a partir do estado atual do
         ``seg`` (usado ao gerar ratings e ao carregar um modelo já ratingado)."""
+        # o IC bootstrap fica obsoleto quando a régua muda: limpa e pede recálculo
+        if getattr(self, "out_boot", None) is not None and self.out_boot.value:
+            self.out_boot.value = ("<div class='mseg-legend'>Régua atualizada — clique em "
+                                   "<b>Calcular IC bootstrap</b> para (re)calcular.</div>")
         rt = self.seg.rating_table().round(4)
         rate_cols = [c for c in rt.columns if c.startswith(("event_rate", "alvo"))]
         # IC do teste de calibração na mesma unidade do alvo → mesmo formato %

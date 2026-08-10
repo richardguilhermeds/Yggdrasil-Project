@@ -259,6 +259,35 @@ def test_indicador_separacao_ratings():
     assert "✅" in html2 and "⚠" not in html2 and "Sugestão" not in html2
 
 
+def test_bootstrap_forest_card():
+    """Aba Ratings & Score: card do IC bootstrap — aviso amigável sem régua; com a
+    régua, o clique renderiza o forest plot (matplotlib), o resumo n_ok/n_tot e a
+    tabela com o status pintado por tokens de tema; regenerar a régua invalida a
+    saída (pede recálculo)."""
+    import re
+    ui = _build()
+    ui._on_boot(None)                        # sem ratings → aviso, sem exceção
+    assert "Gere os ratings" in ui.out_boot.value
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.seg.fit()
+        ui.seg.build_ratings(method="quantil", n_ratings=4)
+        ui.sl_boot.value = 200
+        ui._on_boot(None)
+    html = ui.out_boot.value
+    assert "<img" in html                    # forest plot (PNG base64 inline)
+    assert "ratings dentro do IC" in html    # resumo de aderência
+    assert re.search(r"<b>\d+/\d+</b>", html)
+    assert "status (OOT)" in html and "média (DES)" in html
+    # status pintado só com tokens semânticos de tema (nunca hex fixo no HTML)
+    assert "var(--ok-bg)" in html or "var(--bad-bg)" in html
+    # regenerar a régua deixa o IC obsoleto → nota pedindo recálculo
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.seg.build_ratings(method="quantil", n_ratings=3)
+        ui._render_ratings()
+    assert "Calcular IC bootstrap" in ui.out_boot.value
+    assert "<img" not in ui.out_boot.value
+
+
 def test_toggle_monotonicidade():
     """A linha 'restrições de monotonicidade' só aparece nos boostings com
     suporte nativo, e o fit via UI aplica monotonic_cst (dict por nome) com as
