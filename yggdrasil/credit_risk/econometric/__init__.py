@@ -35,7 +35,9 @@ Modelos com interface comum (``fit``/``predict``/``project``/``diagnostics``)
 Seleção (:mod:`.selection`)
     :func:`make_grid`, :func:`search`, :func:`walk_forward`,
     :func:`diebold_mariano`, :func:`compare` — filtros de sinal/VIF e ranking
-    champion-challenger.
+    champion-challenger; :func:`backtest_projection`, :func:`interval_coverage`,
+    :func:`kupiec_pof` e :func:`christoffersen_independence` para a cobertura
+    empírica dos intervalos de projeção.
 Cenários (:mod:`.scenarios`)
     :class:`Scenario`/:class:`ScenarioSet`, :func:`project`,
     :func:`ecl_projection`, :func:`standard_scenarios`.
@@ -111,7 +113,18 @@ from .panel import PanelSatellite
 
 # --- seleção -----------------------------------------------------------
 from . import selection
-from .selection import SearchResult, compare, diebold_mariano, make_grid, search, walk_forward
+from .selection import (
+    SearchResult,
+    backtest_projection,
+    christoffersen_independence,
+    compare,
+    diebold_mariano,
+    interval_coverage,
+    kupiec_pof,
+    make_grid,
+    search,
+    walk_forward,
+)
 
 # --- cenários ----------------------------------------------------------
 from . import scenarios
@@ -145,7 +158,8 @@ __all__ = [
     "VARModel", "VECMModel", "johansen_test", "engle_granger", "PanelSatellite",
     # seleção
     "selection", "make_grid", "search", "walk_forward", "diebold_mariano", "compare",
-    "SearchResult",
+    "SearchResult", "backtest_projection", "interval_coverage", "kupiec_pof",
+    "christoffersen_independence",
     # cenários
     "scenarios", "Scenario", "ScenarioSet", "project", "ecl_projection",
     "shock_scenarios", "standard_scenarios",

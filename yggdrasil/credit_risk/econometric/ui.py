@@ -25,7 +25,15 @@ tema claro/escuro) mas para um fluxo de **série temporal + macro**:
   **placar por família** (resíduo, heterocedasticidade, normalidade, estabilidade,
   colinearidade), a tabela completa com p-valores, os gráficos de ajuste e de
   resíduos e a leitura em texto do **que fazer** quando um teste falha;
-* **Cenários & Projeção**, **Backtest** e **Exportar** — as demais etapas do estudo.
+* **Cenários & Projeção** — o **fator prospectivo** propriamente dito: os cenários
+  por três caminhos (padrão de um clique, choque parametrizado com persistência e
+  **colagem** da trajetória que veio da área econômica), a projeção condicional em
+  **leque** com o futuro sombreado, a **projeção ponderada** pelos pesos — a curva
+  única que segue adiante — e a exportação em formato longo;
+* **Backtest** — a outra metade da projeção: reestimação **janela a janela**, erro
+  por horizonte e **cobertura empírica** dos intervalos contra a nominal, com
+  Kupiec (proporção de violações) e Christoffersen (independência), lidos em texto;
+* **Exportar** — o fechamento do estudo.
 
 A configuração corrente é materializável como
 :class:`~yggdrasil.credit_risk.econometric.config.StudyConfig` (:meth:`to_config`)
@@ -445,9 +453,16 @@ class SatelliteUI:
         (lista de dicionários com veredito e evidência) e a tabela de VIF por
         variável (aba Diagnóstico).
     scenarios_, projection_:
-        O último :class:`ScenarioSet` e a :class:`Projection` (aba Cenários).
-    backtest_:
-        A última tabela de backtest de cobertura/projeção (aba Backtest).
+        O último :class:`ScenarioSet` (as trajetórias macro futuras) e a
+        :class:`Projection` condicional a elas (aba Cenários).
+    weighted_, projection_table_:
+        A projeção **ponderada** pelos pesos dos cenários (``pandas.Series``) e a
+        projeção em formato longo da última exportação — veja
+        :meth:`projection_frame` (aba Cenários).
+    backtest_, coverage_:
+        O dicionário do último backtest de projeção (métricas, ``bands`` por janela
+        e ``coverage``) e a tabela de **cobertura dos intervalos** por horizonte,
+        com Kupiec e Christoffersen (aba Backtest).
     study_:
         O último :class:`StudyResult` de um estudo completo (aba Exportar).
     """
@@ -501,7 +516,10 @@ class SatelliteUI:
         self.vif_ = None            # VIF por variável do modelo vigente
         self.scenarios_ = None      # ScenarioSet (Cenários & Projeção)
         self.projection_ = None     # Projection (Cenários & Projeção)
-        self.backtest_ = None       # backtest de cobertura (Backtest)
+        self.weighted_ = None       # projeção ponderada pelos pesos de cenário
+        self.projection_table_ = None   # projeção em formato longo (exportação)
+        self.backtest_ = None       # dict do backtest de projeção (Backtest)
+        self.coverage_ = None       # tabela de cobertura dos intervalos (Backtest)
         self.study_ = None          # StudyResult de um estudo completo (Exportar)
         self.stationarity_ = None   # tabela do último relatório de estacionariedade
 
@@ -509,6 +527,9 @@ class SatelliteUI:
         self._search_steps: list = []     # linhas da tabela de progresso da busca
         self._spec_por_desc: dict = {}    # describe() -> Specification da última grade
         self._search_secs = None          # duração da última busca (segundos)
+        self._scen_pesos: dict = {}       # peso declarado por cenário manual
+        self._bt_steps: list = []         # linhas da tabela de progresso do backtest
+        self._bt_secs = None              # duração do último backtest (segundos)
         self._dirty_since_fit = False
         self._init_candidates = list(candidates) if candidates else None
         self._init_signs = dict(expected_signs or {})
@@ -628,10 +649,14 @@ class SatelliteUI:
         self.selected_spec_ = self.compare_ = None
         self.diagnostics_ = self.diag_blocks_ = self.vif_ = None
         self.scenarios_ = self.projection_ = self.backtest_ = self.study_ = None
+        self.weighted_ = self.projection_table_ = self.coverage_ = None
         self.stationarity_ = None
         self._spec_por_desc = {}
         self._search_steps = []
         self._search_secs = None
+        self._scen_pesos = {}
+        self._bt_steps = []
+        self._bt_secs = None
         self._clear_dirty()
         self._init_candidates = None
         self._init_signs = {}
@@ -649,6 +674,8 @@ class SatelliteUI:
         self.out_estac_resumo.value = ""
         self._clear_fit_outputs()
         self._clear_selecao_outputs()
+        self._clear_cenarios_outputs()
+        self._clear_backtest_outputs()
         self._refresh_bar()
         self._refresh_serie()
         self._sync_model_fields()
@@ -865,14 +892,21 @@ class SatelliteUI:
             "mudou depois do último ajuste; os coeficientes abaixo são do modelo "
             "ANTERIOR. Clique em <i>Ajustar agora</i> para atualizar.</div>")
         self._invalidate_diag("a especificação mudou depois do último ajuste")
+        self._invalidate_cenarios("a especificação mudou depois do último ajuste")
+        self._invalidate_backtest("a especificação mudou depois do último ajuste")
+        self._render_scen_notice()
         self._refresh_bar()
 
     def _clear_dirty(self):
         self._dirty_since_fit = False
         if getattr(self, "out_fit_warn", None) is not None:
             self.out_fit_warn.value = ""
-        # o diagnóstico pertencia ao ajuste anterior: some com ele
+        # diagnóstico, projeção e backtest pertenciam ao ajuste anterior: somem com ele
+        # (os CENÁRIOS ficam: a trajetória montada/colada é do usuário, não do modelo)
         self._invalidate_diag("o modelo vigente mudou")
+        self._invalidate_cenarios("o modelo vigente mudou")
+        self._invalidate_backtest("o modelo vigente mudou")
+        self._render_scen_notice()
 
     # ==================================================================
     # Construção da interface
@@ -888,20 +922,16 @@ class SatelliteUI:
 
         tab_serie = self._build_tab_serie()
         tab_spec = self._build_tab_spec()
-        # Seleção e Diagnóstico já preenchidas; as demais nascem VAZIAS (placeholder)
-        # com os nomes definitivos — os blocos seguintes só substituem ``.children``.
+        # a última aba nasce VAZIA (placeholder) com o nome definitivo — o bloco
+        # seguinte só substitui ``.children``.
         self.box_selecao = W.VBox(layout=W.Layout(padding="2px"))
         self.box_diagnostico = W.VBox(layout=W.Layout(padding="2px"))
+        self.box_cenarios = W.VBox(layout=W.Layout(padding="2px"))
+        self.box_backtest = W.VBox(layout=W.Layout(padding="2px"))
         self.box_selecao.children = self._build_tab_selecao()
         self.box_diagnostico.children = self._build_tab_diagnostico()
-        self.box_cenarios = self._placeholder_box(
-            "Cenários & Projeção",
-            "cenários base/adverso/otimista (ou choques), projeção condicional em leque "
-            "e a projeção ponderada pelos pesos de cenário.")
-        self.box_backtest = self._placeholder_box(
-            "Backtest",
-            "backtest da projeção fora da amostra e cobertura dos intervalos "
-            "(Kupiec/Christoffersen).")
+        self.box_cenarios.children = self._build_tab_cenarios()
+        self.box_backtest.children = self._build_tab_backtest()
         self.box_exportar = self._placeholder_box(
             "Exportar",
             "relatório HTML de governança, tabelas, a configuração do estudo e o registro "
@@ -1872,11 +1902,19 @@ class SatelliteUI:
             _pinta("")
 
     def _on_tab_change(self, change):
-        """Abrir a aba **Seleção** recalcula o tamanho da grade (ele depende dos
-        controles da aba Especificação, que o usuário acabou de mexer)."""
+        """Reage à troca de aba: cada aba depende de controles de outra.
+
+        **Seleção** recalcula o tamanho da grade, **Cenários** repõe o aviso do que
+        falta para projetar e **Backtest** redimensiona as janelas.
+        """
         with suppress(Exception):
-            if change.get("new") == 2:
+            idx = change.get("new")
+            if idx == 2:
                 self._render_grid_info()
+            elif idx == 4:
+                self._render_scen_notice()
+            elif idx == 5:
+                self._render_bt_info()
 
     # ==================================================================
     # Aba Seleção — busca champion-challenger
@@ -2924,6 +2962,1429 @@ class SatelliteUI:
                   + (f" · reprovados: {', '.join(reprovados)}" if reprovados else " · tudo ok"))
 
     # ==================================================================
+    # Aba Cenários & Projeção — o fator prospectivo
+    # ==================================================================
+    #: extrapolação da trajetória base (rótulo → método de :func:`extend_macro`)
+    _BASE_METODOS = (("reversão à média histórica", "revert"),
+                     ("manter o último valor observado", "hold"),
+                     ("extrapolar a última variação", "trend"))
+
+    def _build_tab_cenarios(self):
+        """Cartões da aba **Cenários & Projeção** (devolve a tupla de filhos)."""
+        # --- card: parâmetros comuns da projeção --------------------------
+        self.out_scen_notice = W.HTML()
+        self.sl_scen_horizon = W.BoundedIntText(
+            value=int(self.sl_horizon.value), min=1, max=120, description="horizonte:",
+            style={"description_width": "initial"}, layout=W.Layout(width="170px"))
+        self.sl_scen_horizon.observe(lambda c: self._render_scen_notice(), names="value")
+        self.fl_scen_alpha = W.BoundedFloatText(
+            value=0.10, min=0.01, max=0.50, step=0.05, description="α da banda:",
+            style={"description_width": "initial"}, layout=W.Layout(width="170px"))
+        self.sl_scen_sims = W.BoundedIntText(
+            value=2000, min=0, max=20000, step=250, description="simulações da banda:",
+            style={"description_width": "initial"}, layout=W.Layout(width="260px"))
+        self.dd_stress_var = W.Dropdown(
+            options=self._macro_cols(), description="variável de estresse:",
+            style={"description_width": "initial"}, layout=W.Layout(width="290px"))
+        self.tx_scen_probs = W.Text(
+            value=",".join(str(p) for p in self._scenario_probs_default),
+            description="pesos (base, otimista, adverso):",
+            style={"description_width": "initial"}, layout=W.Layout(width="380px"))
+        card_cfg = W.VBox([
+            W.HTML("<div class='satui-h'>Projeção condicional — parâmetros</div>"),
+            W.HTML("<div class='satui-legend'>O <b>cenário</b> é a trajetória futura das "
+                   "variáveis macro; o modelo vigente traduz essa trajetória na trajetória "
+                   "do parâmetro de risco. O <b>α da banda</b> define o leque "
+                   "(α=0,10 ⇒ intervalo de 90%), obtido por reamostragem dos resíduos "
+                   "propagada pela dinâmica do modelo — a incerteza <b>acumula</b> ao longo "
+                   "do horizonte. Os <b>pesos</b> valem para a projeção ponderada e seguem "
+                   "a ordem base, otimista, adverso (cenários com outro nome recebem o peso "
+                   "que sobrar).</div>"),
+            W.HBox([self.sl_scen_horizon, self.fl_scen_alpha, self.sl_scen_sims],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            W.HBox([self.dd_stress_var, self.tx_scen_probs],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            self.out_scen_notice,
+        ])
+        card_cfg.add_class("satui-card")
+
+        # --- card: cenários padrão ----------------------------------------
+        self.btn_scen_padrao = W.Button(
+            description="Montar base / adverso / otimista", icon="magic",
+            button_style="primary", layout=W.Layout(width="auto", min_width="290px"),
+            tooltip="Base por reversão à média + adverso (+2 desvios-padrão na variável de "
+                    "estresse) e otimista (−1 desvio-padrão).")
+        self.btn_scen_padrao.on_click(self._on_scen_padrao)
+        self.out_scen_padrao = W.HTML()
+        card_padrao = W.VBox([
+            W.HTML("<div class='satui-h'>Caminho 1 — cenários padrão (um clique)</div>"),
+            W.HTML("<div class='satui-legend'>Ponto de partida para explorar o modelo: a "
+                   "trajetória <b>base</b> reverte à média histórica de cada variável e os "
+                   "cenários <b>adverso</b>/<b>otimista</b> deslocam a variável de estresse "
+                   "em ±desvios-padrão da própria série. Serve para ver a sensibilidade na "
+                   "hora — <b>não</b> substitui o cenário oficial da área econômica, que "
+                   "entra pelo caminho 3.</div>"),
+            W.HBox([self.btn_scen_padrao], layout=W.Layout(align_items="center")),
+            self.out_scen_padrao,
+        ])
+        card_padrao.add_class("satui-card")
+
+        # --- card: choque parametrizado -------------------------------------
+        self.dd_scen_base = W.Dropdown(
+            options=list(self._BASE_METODOS), value="revert", description="trajetória base:",
+            style={"description_width": "initial"}, layout=W.Layout(width="330px"))
+        self.fl_shock_mag = W.BoundedFloatText(
+            value=2.0, min=-50.0, max=50.0, step=0.25, description="magnitude:",
+            style={"description_width": "initial"}, layout=W.Layout(width="180px"))
+        self.dd_shock_unit = W.Dropdown(
+            options=[("desvios-padrão da variável", "sd"), ("unidades da variável", "abs")],
+            value="sd", description="em:", style={"description_width": "initial"},
+            layout=W.Layout(width="290px"))
+        self.fl_shock_persist = W.BoundedFloatText(
+            value=1.0, min=0.0, max=1.0, step=0.05, description="persistência:",
+            style={"description_width": "initial"}, layout=W.Layout(width="180px"))
+        self.fl_shock_otim = W.BoundedFloatText(
+            value=0.5, min=0.0, max=3.0, step=0.1, description="otimista = fração do adverso:",
+            style={"description_width": "initial"}, layout=W.Layout(width="320px"))
+        self.btn_scen_choque = W.Button(
+            description="Montar cenários por choque", icon="bolt", button_style="primary",
+            layout=W.Layout(width="auto", min_width="250px"),
+            tooltip="Aplica um choque aditivo à trajetória base da variável de estresse.")
+        self.btn_scen_choque.on_click(self._on_scen_choque)
+        self.out_scen_choque = W.HTML()
+        card_choque = W.VBox([
+            W.HTML("<div class='satui-h'>Caminho 2 — choque parametrizado</div>"),
+            W.HTML("<div class='satui-legend'>O choque é <b>aditivo</b> sobre a trajetória "
+                   "base da variável de estresse. A <b>persistência</b> diz o que acontece "
+                   "com ele ao longo do horizonte: <b>1,0</b> mantém o choque até o fim "
+                   "(deslocamento permanente do nível) e valores menores o fazem decair "
+                   "geometricamente (choque temporário, com a variável voltando à base). "
+                   "Em <b>desvios-padrão</b> a magnitude fica comparável entre variáveis de "
+                   "escalas diferentes.</div>"),
+            W.HBox([self.dd_scen_base, self.fl_shock_mag, self.dd_shock_unit],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            W.HBox([self.fl_shock_persist, self.fl_shock_otim, self.btn_scen_choque],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            self.out_scen_choque,
+        ])
+        card_choque.add_class("satui-card")
+
+        # --- card: cenário manual (colagem) -----------------------------------
+        self.tx_scen_nome = W.Text(value="adverso_economia", description="nome do cenário:",
+                                   style={"description_width": "initial"},
+                                   layout=W.Layout(width="330px"))
+        self.fl_scen_peso = W.BoundedFloatText(
+            value=0.0, min=0.0, max=1.0, step=0.05, description="peso (0 = automático):",
+            style={"description_width": "initial"}, layout=W.Layout(width="260px"))
+        self.dd_scen_dec = W.Dropdown(
+            options=[("ponto decimal (1.25)", "."), ("vírgula decimal (1,25)", ",")],
+            value=".", description="decimal:", style={"description_width": "initial"},
+            layout=W.Layout(width="250px"))
+        self.ta_scen_paste = W.Textarea(
+            placeholder="periodo\tdesemprego\trenda\n2026-01-01\t9.5\t2.1\n…",
+            layout=W.Layout(width="99%", height="170px"))
+        self.btn_scen_modelo = W.Button(
+            description="Gerar modelo para colar", icon="table",
+            layout=W.Layout(width="auto", min_width="230px"),
+            tooltip="Preenche a caixa com a trajetória base no formato certo — edite as "
+                    "colunas (ou cole por cima) e adicione o cenário.")
+        self.btn_scen_modelo.on_click(self._on_scen_modelo)
+        self.btn_scen_add = W.Button(
+            description="Adicionar cenário", icon="plus", button_style="success",
+            layout=W.Layout(width="auto", min_width="190px"),
+            tooltip="Adiciona (ou substitui, se o nome já existir) o cenário colado.")
+        self.btn_scen_add.on_click(self._on_scen_add)
+        self.btn_scen_limpar = W.Button(
+            description="Limpar cenários", icon="trash",
+            layout=W.Layout(width="auto", min_width="180px"),
+            tooltip="Descarta todos os cenários montados (pede confirmação).")
+        self.btn_scen_limpar.on_click(
+            lambda b: self._confirm_twice(b, self._limpar_cenarios))
+        self.out_scen_manual = W.HTML()
+        card_manual = W.VBox([
+            W.HTML("<div class='satui-h'>Caminho 3 — colar o cenário da área econômica</div>"),
+            W.HTML("<div class='satui-help'><div class='ttl'>Formato aceito</div>"
+                   "Uma linha de <b>cabeçalho</b> com os nomes das variáveis (exatamente os "
+                   "nomes das colunas da macro) e <b>uma linha por período</b> do horizonte, "
+                   "separados por <b>TAB</b> (colagem direta do Excel), vírgula ou ponto e "
+                   "vírgula.<ul>"
+                   "<li>Colunas de data/rótulo são <b>ignoradas</b>: o calendário é "
+                   "reconstruído a partir do fim da amostra na frequência da série.</li>"
+                   "<li>Variáveis do modelo que <b>faltarem</b> na colagem são completadas "
+                   "com a trajetória base — a interface diz quais foram.</li>"
+                   "<li>O nº de linhas precisa bater com o <b>horizonte</b>: todos os "
+                   "cenários compartilham o mesmo calendário.</li>"
+                   "<li>Use os nomes <span class='pname'>base</span>, "
+                   "<span class='pname'>otimista</span> e <span class='pname'>adverso</span> "
+                   "para herdar os pesos declarados acima; qualquer outro nome recebe peso "
+                   "próprio (campo ao lado) ou o que sobrar.</li></ul>"
+                   "É assim que o cenário oficial entra: sem redigitar, sem planilha "
+                   "paralela e com o mesmo motor de projeção dos demais.</div>"),
+            W.HBox([self.tx_scen_nome, self.fl_scen_peso, self.dd_scen_dec],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            self.ta_scen_paste,
+            W.HBox([self.btn_scen_modelo, self.btn_scen_add, self.btn_scen_limpar],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            self.out_scen_manual,
+        ])
+        card_manual.add_class("satui-card")
+
+        # --- card: cenários montados -------------------------------------------
+        self.out_scen_resumo = W.HTML()
+        self.out_scen_tabela = W.HTML()
+        self.out_scen_plot = W.HTML()
+        card_montados = W.VBox([
+            W.HTML("<div class='satui-h'>Cenários montados</div>"),
+            W.HTML("<div class='satui-legend'>A área sombreada dos gráficos é o "
+                   "<b>futuro</b> — à esquerda da linha tracejada está o observado, à "
+                   "direita a trajetória de cada cenário. Só as variáveis que <b>diferem</b> "
+                   "entre cenários são desenhadas.</div>"),
+            self.out_scen_resumo, self.out_scen_tabela, self.out_scen_plot,
+        ])
+        card_montados.add_class("satui-card")
+
+        # --- card: projetar ------------------------------------------------------
+        self.btn_project = W.Button(
+            description="Projetar", icon="line-chart", button_style="success",
+            layout=W.Layout(width="auto", min_width="160px"),
+            tooltip="Projeta o modelo vigente sobre cada cenário, com o leque de incerteza.")
+        self.btn_project.on_click(self._on_project)
+        self.cb_proj_plot = W.Checkbox(value=True, indent=False,
+                                       description="desenhar o leque")
+        self.out_proj_status = W.HTML()
+        self.out_proj_timer = W.HTML()
+        self.out_proj_tiles = W.HTML()
+        self.out_proj_plot = W.HTML()
+        self.out_proj_tabela = W.HTML()
+        card_proj = W.VBox([
+            W.HTML("<div class='satui-h'>Projeção em leque</div>"),
+            W.HTML("<div class='satui-legend'>A <b>linha</b> é a trajetória central de cada "
+                   "cenário e a <b>faixa</b> é o intervalo do α escolhido. Leia os dois "
+                   "juntos: a distância entre os cenários mede o efeito do <b>ciclo</b>; a "
+                   "largura da faixa mede a incerteza do <b>modelo</b>. Quando a faixa do "
+                   "base engole o adverso, o cenário não está dizendo mais do que o ruído do "
+                   "próprio ajuste.</div>"),
+            W.HBox([self.btn_project, self.cb_proj_plot],
+                   layout=W.Layout(align_items="center")),
+            self.out_proj_status, self.out_proj_timer, self.out_proj_tiles,
+            self.out_proj_plot, self.out_proj_tabela,
+        ])
+        card_proj.add_class("satui-card")
+
+        # --- card: projeção ponderada ---------------------------------------------
+        self.out_pond_status = W.HTML()
+        self.out_pond_tiles = W.HTML()
+        self.out_pond_tabela = W.HTML()
+        card_pond = W.VBox([
+            W.HTML("<div class='satui-h'>Projeção ponderada (a curva única)</div>"),
+            W.HTML("<div class='satui-legend'>Média das trajetórias dos cenários pelos seus "
+                   "<b>pesos</b> — a curva única que segue para o processo seguinte, "
+                   "equivalente a <code>Projection.weighted()</code>. Ela existe para que "
+                   "não haja duas respostas para a mesma pergunta: o mesmo conjunto de "
+                   "cenários e a mesma projeção alimentam provisionamento, estresse e "
+                   "planejamento.</div>"),
+            self.out_pond_status, self.out_pond_tiles, self.out_pond_tabela,
+        ])
+        card_pond.add_class("satui-card")
+
+        # --- card: exportar --------------------------------------------------------
+        self.dd_export_fmt = W.Dropdown(
+            options=[("TSV — colar no Excel", "tsv"),
+                     ("CSV — ponto decimal, vírgula", "csv"),
+                     ("CSV — vírgula decimal, ponto e vírgula", "csv_br")],
+            value="tsv", description="formato:", style={"description_width": "initial"},
+            layout=W.Layout(width="330px"))
+        self.btn_scen_export = W.Button(
+            description="Exportar projeção", icon="download", button_style="primary",
+            layout=W.Layout(width="auto", min_width="200px"),
+            tooltip="Monta o DataFrame da projeção (ui.projection_frame()) e o texto para "
+                    "copiar.")
+        self.btn_scen_export.on_click(self._on_scen_export)
+        self.out_export_status = W.HTML()
+        self.ta_scen_csv = W.Textarea(
+            placeholder="a projeção exportada aparece aqui — selecione tudo (Ctrl+A) e copie "
+                        "(Ctrl+C)",
+            layout=W.Layout(width="99%", height="170px"))
+        card_export = W.VBox([
+            W.HTML("<div class='satui-h'>Exportar a projeção</div>"),
+            W.HTML("<div class='satui-legend'>Formato longo — uma linha por (cenário, "
+                   "período) com média e banda, mais as linhas do cenário "
+                   "<b>ponderado</b>. O mesmo objeto está em "
+                   "<code>ui.projection_frame()</code> para seguir em código.</div>"),
+            W.HBox([self.dd_export_fmt, self.btn_scen_export],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            self.out_export_status, self.ta_scen_csv,
+        ])
+        card_export.add_class("satui-card")
+
+        self._render_scen_notice()
+        return (card_cfg, card_padrao, card_choque, card_manual, card_montados,
+                card_proj, card_pond, card_export)
+
+    # ------------------------------------------------------------------ pré-requisitos
+    def _render_scen_notice(self):
+        """Diz, no alto da aba, o que falta para projetar (modelo, macro, horizonte)."""
+        if getattr(self, "out_scen_notice", None) is None:
+            return
+        avisos = []
+        if self.series is None:
+            avisos.append("Sem série carregada — traga os dados na aba <b>Série</b>.")
+        elif self.macro is None or not self._macro_cols():
+            avisos.append("Sem variáveis macro: o cenário é uma trajetória macro.")
+        if self.fit_ is None:
+            avisos.append("Nenhum <b>modelo vigente</b> — ajuste na aba <b>Especificação</b> "
+                          "ou adote uma especificação na aba <b>Seleção</b>.")
+        elif self._dirty_since_fit:
+            avisos.append("O ajuste está <b>desatualizado</b> (a especificação mudou): "
+                          "reajuste antes de projetar.")
+        ss = self.scenarios_
+        if ss is not None and len(ss):
+            comp = {s.horizon for s in ss.scenarios}
+            if comp != {int(self.sl_scen_horizon.value)}:
+                avisos.append(
+                    f"Os cenários montados têm {sorted(comp)} período(s) e o horizonte da "
+                    f"tela é {int(self.sl_scen_horizon.value)} — remonte os cenários para o "
+                    "novo horizonte.")
+        self.out_scen_notice.value = "".join(
+            f"<div class='satui-notice'>⚠️ {a}</div>" for a in avisos)
+
+    def _scen_pronto(self, alvo) -> bool:
+        """Valida série + macro antes de montar cenários (mensagem no ``alvo``)."""
+        if self.series is None:
+            alvo.value = ("<div class='satui-notice'>Sem série carregada — traga os dados na "
+                          "aba <b>Série</b> (ou carregue o estudo de referência).</div>")
+            return False
+        if self.macro is None or not self._macro_cols():
+            alvo.value = ("<div class='satui-notice'>Sem variáveis macro carregadas: um "
+                          "cenário é a trajetória futura das macro.</div>")
+            return False
+        return True
+
+    # ------------------------------------------------------------------ pesos
+    def _probs_tupla(self) -> tuple:
+        """Os três pesos (base, otimista, adverso) **normalizados** para somar 1."""
+        p = list(self._scenario_probs())
+        p = [float(x) for x in p[:3]]
+        while len(p) < 3:
+            p.append(0.0)
+        total = float(sum(p))
+        if total <= 0:
+            return (0.5, 0.3, 0.2)
+        return tuple(x / total for x in p)
+
+    def _pesos_por_nome(self) -> dict:
+        """``{'base': w, 'otimista': w, 'adverso': w}`` a partir dos pesos da tela."""
+        p = self._probs_tupla()
+        return {"base": p[0], "otimista": p[1], "adverso": p[2]}
+
+    def _aplica_probs(self, ss) -> dict:
+        """Distribui os pesos entre os cenários do conjunto (soma exatamente 1).
+
+        Precedência: peso declarado para aquele cenário (campo do caminho manual) →
+        peso do nome padrão (base/otimista/adverso) → o que sobrar, dividido
+        igualmente entre os cenários sem peso.
+        """
+        nomes = ss.names()
+        mapa = self._pesos_por_nome()
+        pesos, faltando = [], []
+        for i, nome in enumerate(nomes):
+            p = self._scen_pesos.get(nome, mapa.get(nome))
+            if p is None:
+                faltando.append(i)
+                pesos.append(0.0)
+            else:
+                pesos.append(max(0.0, float(p)))
+        if faltando:
+            resto = 1.0 - float(sum(pesos))
+            fatia = (resto / len(faltando)) if resto > 1e-9 else (1.0 / len(nomes))
+            for i in faltando:
+                pesos[i] = fatia
+        total = float(sum(pesos))
+        if total <= 0:
+            pesos = [1.0 / len(nomes)] * len(nomes)
+            total = 1.0
+        for s, p in zip(ss.scenarios, pesos):
+            s.probability = float(p) / total
+        return {s.name: s.probability for s in ss.scenarios}
+
+    # ------------------------------------------------------------------ construção
+    def _scen_freq(self) -> str:
+        """Frequência do calendário futuro (a da série)."""
+        return self.series.frequency if self.series is not None else "MS"
+
+    def _base_future(self, horizonte=None) -> pd.DataFrame:
+        """Trajetória macro **base** do horizonte corrente (:func:`extend_macro`)."""
+        cols = self._macro_cols()
+        return _E.scenarios.extend_macro(
+            self.macro[cols], int(horizonte or self.sl_scen_horizon.value),
+            freq=self._scen_freq(), method=self.dd_scen_base.value)
+
+    def _adota_cenarios(self, ss, origem=""):
+        """Adota um :class:`ScenarioSet` como o conjunto vigente e repinta a aba."""
+        self.scenarios_ = ss
+        pesos = self._aplica_probs(ss)
+        # a projeção anterior era de outro conjunto de cenários
+        self._invalidate_cenarios("os cenários mudaram")
+        self._render_scenarios()
+        self._render_scen_notice()
+        self._refresh_bar()
+        detalhe = ", ".join(f"{k} {v:.0%}" for k, v in pesos.items())
+        self._log(f"[cenários] {len(ss)} cenário(s) montado(s){' — ' + origem if origem else ''} "
+                  f"· pesos: {detalhe}")
+
+    def _on_scen_padrao(self, b):
+        if not self._scen_pronto(self.out_scen_padrao):
+            return
+        probs = self._probs_tupla()
+        with self._busy(self.btn_scen_padrao, self.btn_scen_choque, self.btn_scen_add,
+                        status=self.out_scen_padrao, msg="montando os cenários…"):
+            try:
+                ss = _E.scenarios.standard_scenarios(
+                    self.macro[self._macro_cols()], horizon=int(self.sl_scen_horizon.value),
+                    freq=self._scen_freq(), stress_var=self._stress_var(),
+                    probabilities=probs)
+            except Exception as exc:  # noqa: BLE001
+                self.out_scen_padrao.value = (
+                    f"<div class='satui-notice'>Não foi possível montar: {exc}</div>")
+                self._log(f"[cenários] erro nos cenários padrão: {exc}")
+                return
+        self._scen_pesos = {}
+        self._adota_cenarios(ss, origem=f"padrão sobre '{self._stress_var()}'")
+        self.out_scen_padrao.value = (
+            "<div class='satui-legend' style='color:var(--ok-ink)'>✓ Base, adverso e otimista "
+            f"montados sobre <b>{self._stress_var()}</b> "
+            f"({int(self.sl_scen_horizon.value)} períodos).</div>")
+
+    def _on_scen_choque(self, b):
+        if not self._scen_pronto(self.out_scen_choque):
+            return
+        var = self._stress_var()
+        if var not in self._macro_cols():
+            self.out_scen_choque.value = (
+                f"<div class='satui-notice'>A variável de estresse <b>{var}</b> não está na "
+                "macro carregada.</div>")
+            return
+        with self._busy(self.btn_scen_choque, self.btn_scen_padrao, self.btn_scen_add,
+                        status=self.out_scen_choque, msg="aplicando o choque…"):
+            try:
+                base = self._base_future()
+                mag = float(self.fl_shock_mag.value)
+                if self.dd_shock_unit.value == "sd":
+                    sd = float(pd.Series(self.macro[var]).std())
+                    if not np.isfinite(sd) or sd <= 0:
+                        raise ValueError(
+                            f"a variável {var!r} não tem variação histórica: use a magnitude "
+                            "em unidades da variável.")
+                    delta = mag * sd
+                else:
+                    delta = mag
+                pesos = self._pesos_por_nome()
+                ss = _E.scenarios.shock_scenarios(
+                    base,
+                    shocks={"adverso": {var: delta},
+                            "otimista": {var: -delta * float(self.fl_shock_otim.value)}},
+                    probabilities={"adverso": pesos["adverso"], "otimista": pesos["otimista"]},
+                    include_base=True, base_probability=pesos["base"])
+                phi = float(self.fl_shock_persist.value)
+                if phi < 0.999:
+                    self._decai_choque(ss, base, var, phi)
+            except Exception as exc:  # noqa: BLE001
+                self.out_scen_choque.value = (
+                    f"<div class='satui-notice'>Não foi possível montar: {exc}</div>")
+                self._log(f"[cenários] erro no choque: {exc}")
+                return
+        self._scen_pesos = {}
+        self._adota_cenarios(ss, origem=f"choque de {delta:+.3f} em '{var}'")
+        persist = ("permanente" if float(self.fl_shock_persist.value) >= 0.999
+                   else f"decaindo a {float(self.fl_shock_persist.value):.2f} por período")
+        self.out_scen_choque.value = (
+            "<div class='satui-legend' style='color:var(--ok-ink)'>✓ Choque de "
+            f"<b>{delta:+.3f}</b> em <b>{var}</b> ({persist}) aplicado sobre a trajetória "
+            "base.</div>")
+
+    @staticmethod
+    def _decai_choque(ss, base: pd.DataFrame, var: str, phi: float) -> None:
+        """Torna o choque **temporário**: o desvio em relação à base decai ``phi^k``.
+
+        :func:`shock_scenarios` aplica um deslocamento constante; com persistência
+        menor que 1 o choque some ao longo do horizonte (a variável volta à base).
+        """
+        b = base[var].to_numpy(dtype=float)
+        for s in ss.scenarios:
+            if s.name == "base" or var not in s.macro.columns:
+                continue
+            incr = s.macro[var].to_numpy(dtype=float) - b
+            decai = float(phi) ** np.arange(len(incr), dtype=float)
+            s.macro[var] = b + incr * decai
+
+    def _on_scen_modelo(self, b):
+        """Preenche a caixa de colagem com a trajetória base (o gabarito do formato)."""
+        if not self._scen_pronto(self.out_scen_manual):
+            return
+        try:
+            base = self._base_future()
+        except Exception as exc:  # noqa: BLE001
+            self.out_scen_manual.value = (
+                f"<div class='satui-notice'>Não foi possível gerar o modelo: {exc}</div>")
+            return
+        dec = self.dd_scen_dec.value
+        texto = base.round(6).to_csv(sep="\t", index_label="periodo", decimal=dec)
+        self.ta_scen_paste.value = texto
+        self.out_scen_manual.value = (
+            "<div class='satui-legend'>Gabarito preenchido com a trajetória <b>base</b> "
+            f"({len(base)} períodos). Edite os valores (ou cole por cima) e clique em "
+            "<i>Adicionar cenário</i>.</div>")
+
+    @staticmethod
+    def _scen_sep(cabecalho: str, decimal: str = ".") -> str:
+        """Separador de coluna do texto colado, decidido pelo **cabeçalho**.
+
+        Não usamos o *sniffer* do pandas: com uma única coluna ele inventa um
+        separador a partir das letras do próprio nome da variável.
+        """
+        if "\t" in cabecalho:
+            return "\t"
+        if ";" in cabecalho:
+            return ";"
+        if "," in cabecalho and decimal != ",":
+            return ","
+        return "\t"          # coluna única (ou vírgula ambígua com decimal vírgula)
+
+    def _parse_scen_paste(self, txt) -> tuple:
+        """Lê o texto colado e devolve ``(macro_futura, ignoradas, completadas)``."""
+        import io as _io
+
+        bruto = str(txt or "").strip()
+        if not bruto:
+            raise ValueError(
+                "cole a trajetória das variáveis (uma linha de cabeçalho e uma linha por "
+                "período) antes de adicionar — ou clique em 'Gerar modelo para colar'.")
+        dec = self.dd_scen_dec.value
+        sep = self._scen_sep(bruto.splitlines()[0], dec)
+        try:
+            df = pd.read_csv(_io.StringIO(bruto), sep=sep, engine="python", decimal=dec)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(
+                f"não consegui ler o texto colado ({type(exc).__name__}). Use uma linha de "
+                "cabeçalho com os nomes das variáveis e uma linha por período, separados "
+                "por TAB, vírgula ou ponto e vírgula.") from None
+        df.columns = [str(c).strip() for c in df.columns]
+        macro_cols = self._macro_cols()
+        numericas = {}
+        for c in df.columns:
+            s = pd.to_numeric(df[c], errors="coerce")
+            if s.notna().any():
+                numericas[c] = s
+        usadas = {c: v for c, v in numericas.items() if c in macro_cols}
+        ignoradas = [c for c in df.columns if c not in usadas]
+        if not usadas:
+            raise ValueError(
+                "nenhuma coluna do texto casa com as variáveis macro carregadas "
+                f"({', '.join(macro_cols) or '—'}). O cabeçalho precisa usar exatamente os "
+                "mesmos nomes.")
+        H = int(self.sl_scen_horizon.value)
+        if len(df) != H:
+            raise ValueError(
+                f"o texto tem {len(df)} linha(s) de dados e o horizonte da tela é {H}. "
+                "Ajuste o horizonte (ou o número de linhas): todos os cenários compartilham "
+                "o mesmo calendário.")
+        idx = _E._engine.future_index(self.macro.index, self._scen_freq(), H)
+        base = self._base_future(H)
+        dados, completadas = {}, []
+        for c in macro_cols:
+            vals = base[c].to_numpy(dtype=float).copy()
+            if c in usadas:
+                colado = usadas[c].to_numpy(dtype=float)[:H]
+                falta = ~np.isfinite(colado)
+                if falta.any():
+                    completadas.append(f"{c} ({int(falta.sum())} período(s) vazio(s))")
+                vals = np.where(falta, vals, colado)
+            else:
+                completadas.append(c)
+            dados[c] = vals
+        return pd.DataFrame(dados, index=idx), ignoradas, completadas
+
+    def _on_scen_add(self, b):
+        if not self._scen_pronto(self.out_scen_manual):
+            return
+        nome = str(self.tx_scen_nome.value or "").strip()
+        if not nome:
+            self.out_scen_manual.value = (
+                "<div class='satui-notice'>Dê um <b>nome</b> ao cenário (ele aparece no "
+                "gráfico, na tabela e na exportação).</div>")
+            return
+        try:
+            futura, ignoradas, completadas = self._parse_scen_paste(self.ta_scen_paste.value)
+        except ValueError as exc:
+            self.out_scen_manual.value = f"<div class='satui-notice'>{exc}</div>"
+            self._log(f"[cenários] colagem recusada: {exc}")
+            return
+        peso = float(self.fl_scen_peso.value)
+        if peso > 0:
+            self._scen_pesos[nome] = peso
+        else:
+            self._scen_pesos.pop(nome, None)
+        anteriores = list(self.scenarios_.scenarios) if self.scenarios_ else []
+        cenarios = [s for s in anteriores if s.name != nome and s.horizon == len(futura)]
+        descartados = [s.name for s in anteriores
+                       if s.name != nome and s.horizon != len(futura)]
+        cenarios.append(_E.scenarios.Scenario(nome, futura))
+        self._adota_cenarios(_E.scenarios.ScenarioSet(cenarios), origem=f"colagem '{nome}'")
+        extras = []
+        if descartados:
+            extras.append("cenários de outro horizonte descartados: <b>"
+                          + ", ".join(descartados) + "</b>")
+        if completadas:
+            extras.append("completadas pela base: <b>" + ", ".join(completadas) + "</b>")
+        if ignoradas:
+            extras.append("colunas ignoradas: " + ", ".join(str(c) for c in ignoradas))
+        self.out_scen_manual.value = (
+            "<div class='satui-legend' style='color:var(--ok-ink)'>✓ Cenário "
+            f"<b>{nome}</b> adicionado ({len(futura)} períodos).</div>"
+            + (f"<div class='satui-legend'>{' · '.join(extras)}</div>" if extras else ""))
+
+    def _limpar_cenarios(self):
+        self.scenarios_ = None
+        self._scen_pesos = {}
+        self._invalidate_cenarios("os cenários foram descartados")
+        self._render_scenarios()
+        self._render_scen_notice()
+        self._refresh_bar()
+        self._log("[cenários] conjunto de cenários descartado.")
+
+    # ------------------------------------------------------------------ render dos cenários
+    def _cols_variantes(self) -> list:
+        """Variáveis cujas trajetórias **diferem** entre os cenários (as que importam)."""
+        ss = self.scenarios_
+        if ss is None or not len(ss):
+            return []
+        cols = [c for c in self._macro_cols() if all(c in s.macro.columns for s in ss.scenarios)]
+        ref = ss.scenarios[0].macro
+
+        def _difere(s, c) -> bool:
+            a = s.macro[c].to_numpy(dtype=float)
+            b = ref[c].to_numpy(dtype=float)
+            return len(a) != len(b) or not np.allclose(a, b, equal_nan=True)
+
+        variam = [c for c in cols
+                  if any(_difere(s, c) for s in ss.scenarios[1:])]
+        if variam:
+            return variam
+        alvo = self._stress_var()
+        return [alvo] if alvo in cols else cols[:3]
+
+    def _render_scenarios(self):
+        """Resumo, tabela das trajetórias e gráfico dos cenários vigentes."""
+        ss = self.scenarios_
+        if ss is None or not len(ss):
+            self.out_scen_resumo.value = (
+                "<div class='satui-legend'>Nenhum cenário montado — use um dos três caminhos "
+                "acima.</div>")
+            self.out_scen_tabela.value = ""
+            self.out_scen_plot.value = ""
+            return
+        tiles = {"cenários": len(ss), "horizonte": int(ss.scenarios[0].horizon),
+                 "variáveis": int(ss.scenarios[0].macro.shape[1])}
+        for s in ss.scenarios:
+            tiles[f"peso {s.name}"] = float(s.probability or 0.0)
+        self.out_scen_resumo.value = self._metric_tiles(tiles)
+
+        cols = self._cols_variantes()
+        linhas = []
+        for s in ss.scenarios:
+            for per, row in s.macro.iterrows():
+                linha = {"cenário": s.name, "período": str(per)[:10]}
+                for c in cols:
+                    linha[c] = float(row[c])
+                linhas.append(linha)
+        self.out_scen_tabela.value = self._df_html(pd.DataFrame(linhas), max_height="300px",
+                                                   precision=3)
+        self.out_scen_plot.value = self._scen_plot_html(cols)
+
+    def _scen_plot_html(self, cols) -> str:
+        """Histórico + trajetória de cada cenário, com o futuro sombreado."""
+        ss = self.scenarios_
+        if ss is None or not cols:
+            return ""
+        try:
+            import matplotlib.pyplot as plt
+        except Exception as exc:  # pragma: no cover - depende do ambiente
+            return f"<div class='satui-legend'>matplotlib indisponível: {exc}</div>"
+        cores = _E.report._palette()
+        paleta = [cores["primaria"], cores["secundaria"], "#2ca02c", "#9467bd", "#ff7f0e"]
+        cols = list(cols)[:4]
+        n = len(cols)
+        fig, axes = plt.subplots(n, 1, figsize=(10.5, 2.1 * n), sharex=True)
+        axes = np.atleast_1d(axes)
+        hist_idx = _E.report._to_ts(self.macro.index)
+        corte = hist_idx[-1]
+        fut_idx = _E.report._to_ts(ss.scenarios[0].macro.index)
+        for i, c in enumerate(cols):
+            ax = axes[i]
+            ax.plot(hist_idx, self.macro[c].to_numpy(dtype=float), color=cores["neutra"],
+                    lw=1.4, label="observado")
+            for j, s in enumerate(ss.scenarios):
+                ax.plot(_E.report._to_ts(s.macro.index), s.macro[c].to_numpy(dtype=float),
+                        color=paleta[j % len(paleta)], lw=1.8, label=s.name)
+            ax.axvspan(corte, fut_idx[-1], color=cores["neutra"], alpha=0.08, zorder=0)
+            ax.axvline(corte, color=cores["neutra"], lw=1.1, ls="--", zorder=1)
+            ax.set_ylabel(c, fontsize=9)
+            ax.grid(alpha=0.25)
+        axes[0].set_title("Trajetórias macro — observado × cenários", fontsize=11)
+        axes[0].legend(loc="best", fontsize=8, ncol=min(4, len(ss) + 1))
+        fig.tight_layout()
+        return self._fig_html(fig, stretch=True)
+
+    # ------------------------------------------------------------------ projeção
+    def _on_project(self, b):
+        if self.fit_ is None or self.model_ is None:
+            self.out_proj_status.value = (
+                "<div class='satui-notice'>Nenhum <b>modelo vigente</b>: ajuste na aba "
+                "<b>Especificação</b> ou adote uma especificação na aba <b>Seleção</b> "
+                "antes de projetar.</div>")
+            return
+        if self.scenarios_ is None or not len(self.scenarios_):
+            self.out_proj_status.value = (
+                "<div class='satui-notice'>Monte ao menos um cenário acima — a projeção é "
+                "<b>condicional</b> a uma trajetória macro.</div>")
+            return
+        alpha = float(self.fl_scen_alpha.value)
+        n_sims = int(self.sl_scen_sims.value)
+        self.out_proj_status.value = ""
+        with self._busy(self.btn_project, self.btn_scen_padrao, self.btn_scen_choque,
+                        self.btn_scen_add, self.btn_scen_export), \
+                self._cronometro(self.out_proj_timer, "projetando os cenários") as decorrido:
+            try:
+                proj = _E.scenarios.project(
+                    self.model_, self.scenarios_, horizon=int(self.sl_scen_horizon.value),
+                    alpha=alpha, n_sims=n_sims, seed=0)
+            except Exception as exc:  # noqa: BLE001
+                self.out_proj_status.value = (
+                    f"<div class='satui-notice'>Não foi possível projetar: {exc}</div>")
+                self._log(f"[projeção] erro: {type(exc).__name__}: {exc}")
+                return
+            secs = decorrido()
+        self.projection_ = proj
+        self.projection_table_ = None
+        pesos = {s.name: float(s.probability or 0.0) for s in self.scenarios_.scenarios}
+        try:
+            self.weighted_ = proj.weighted(pesos)
+        except Exception as exc:  # noqa: BLE001
+            self.weighted_ = None
+            self._log(f"[projeção] projeção ponderada indisponível: {exc}")
+        self._render_projection()
+        self._render_weighted()
+        self._refresh_bar()
+        self.out_proj_status.value = (
+            "<div class='satui-legend' style='color:var(--ok-ink)'>✓ "
+            f"{len(proj.paths)} cenário(s) projetado(s) em {self._fmt_dur(secs)} — leque de "
+            f"{int(round((1 - alpha) * 100))}% "
+            + (f"({n_sims} simulações por cenário)." if n_sims else
+               "(sem simulação: só a trajetória central).") + "</div>")
+        self._log(f"[projeção] {len(proj.paths)} cenário(s) · horizonte {proj.horizon} · "
+                  f"α={alpha:.2f} · {self._fmt_dur(secs)}")
+
+    def _fig_projecao(self):
+        """Leque + divisor histórico/projetado + a curva ponderada."""
+        proj = self.projection_
+        nivel = int(round((1 - proj.alpha) * 100))
+        fig = _E.report.plot_projection(
+            proj, self.series,
+            title=f"Projeção condicional — {self._param_label()} (leque {nivel}%)")
+        ax = fig.axes[0]
+        cores = _E.report._palette()
+        fut = _E.report._to_ts(next(iter(proj.paths.values())).index)
+        corte = _E.report._to_ts(self.series.index)[-1]
+        ax.axvspan(corte, fut[-1], color=cores["neutra"], alpha=0.08, zorder=0)
+        ax.axvline(corte, color=cores["neutra"], lw=1.2, ls="--", zorder=4)
+        ax.annotate("histórico", xy=(corte, 1.0), xycoords=("data", "axes fraction"),
+                    xytext=(-6, -10), textcoords="offset points", ha="right", va="top",
+                    fontsize=8, color=cores["neutra"])
+        ax.annotate("projetado", xy=(corte, 1.0), xycoords=("data", "axes fraction"),
+                    xytext=(6, -10), textcoords="offset points", ha="left", va="top",
+                    fontsize=8, color=cores["neutra"])
+        if self.weighted_ is not None:
+            ax.plot(fut, self.weighted_.to_numpy(dtype=float), color="black", lw=2.2,
+                    ls=":", zorder=5, label="ponderada")
+        ax.set_ylabel(self._param_label())
+        ax.legend(loc="best", fontsize=8, ncol=2)
+        return fig
+
+    def _render_projection(self):
+        proj = self.projection_
+        if proj is None:
+            return
+        ultimo = float(self.series.values.iloc[-1])
+        tiles = {f"{self._param_label()} observado (último)": ultimo}
+        for nome, df in proj.paths.items():
+            tiles[f"{nome} (fim do horizonte)"] = float(df["mean"].iloc[-1])
+        self.out_proj_tiles.value = self._metric_tiles(tiles)
+        if self.cb_proj_plot.value:
+            try:
+                self.out_proj_plot.value = self._fig_html(self._fig_projecao(), stretch=True)
+            except Exception as exc:  # noqa: BLE001
+                self.out_proj_plot.value = (
+                    f"<div class='satui-legend'>Gráfico indisponível: {exc}</div>")
+        else:
+            self.out_proj_plot.value = ""
+        mf = proj.mean_frame()
+        dados = {"período": [str(p)[:10] for p in mf.index]}
+        for c in mf.columns:
+            dados[str(c)] = mf[c].to_numpy(dtype=float)
+        if self.weighted_ is not None:
+            dados["ponderada"] = self.weighted_.to_numpy(dtype=float)
+        self.out_proj_tabela.value = (
+            self._df_html(pd.DataFrame(dados), max_height="320px", precision=5)
+            + "<div class='satui-legend'>Trajetória <b>central</b> de cada cenário na escala "
+              f"do parâmetro ({self._param_label()}). A banda de cada período está na "
+              "exportação, em formato longo.</div>")
+
+    def _render_weighted(self):
+        if self.projection_ is None:
+            return
+        if self.weighted_ is None:
+            self.out_pond_status.value = (
+                "<div class='satui-notice'>Projeção ponderada indisponível — confira os "
+                "<b>pesos</b> dos cenários no topo da aba.</div>")
+            self.out_pond_tiles.value = self.out_pond_tabela.value = ""
+            return
+        w = self.weighted_
+        ultimo = float(self.series.values.iloc[-1])
+        fim = float(w.iloc[-1])
+        pico = float(np.nanmax(w.to_numpy(dtype=float)))
+        self.out_pond_status.value = (
+            "<div class='satui-legend' style='color:var(--ok-ink)'>✓ Curva única calculada "
+            "com os pesos "
+            + ", ".join(f"<b>{s.name}</b> {float(s.probability or 0):.0%}"
+                        for s in self.scenarios_.scenarios) + ".</div>")
+        self.out_pond_tiles.value = self._metric_tiles({
+            "último observado": ultimo, "ponderada (fim)": fim,
+            "variação (p.p.)": (fim - ultimo) * 100.0, "máximo no horizonte": pico})
+        tab = pd.DataFrame({
+            "período": [str(p)[:10] for p in w.index],
+            "ponderada": w.to_numpy(dtype=float),
+            "variação vs. último observado (p.p.)": (w.to_numpy(dtype=float) - ultimo) * 100.0,
+        })
+        self.out_pond_tabela.value = self._df_html(
+            tab, max_height="300px", precision=5,
+            fmt_cols={"variação vs. último observado (p.p.)": "{:+.2f}"})
+
+    # ------------------------------------------------------------------ exportação
+    def projection_frame(self, incluir_ponderada: bool = True) -> pd.DataFrame:
+        """A projeção em **formato longo**, pronta para o processo seguinte.
+
+        Uma linha por (cenário, período) com ``mean``/``lower``/``upper`` na escala
+        do parâmetro, identificada por ``parametro`` e ``segmento``. Com
+        ``incluir_ponderada``, acrescenta as linhas do cenário ``'ponderado'`` (a
+        curva única; sem banda, por ser combinação de cenários).
+        """
+        if self.projection_ is None:
+            raise RuntimeError("nada a exportar: rode a projeção antes.")
+        df = self.projection_.to_frame()
+        if incluir_ponderada and self.weighted_ is not None:
+            w = pd.DataFrame({
+                "cenario": "ponderado",
+                "periodo": list(self.weighted_.index),
+                "mean": self.weighted_.to_numpy(dtype=float),
+                "lower": np.nan, "upper": np.nan, "mean_link": np.nan})
+            df = pd.concat([df, w[[c for c in df.columns if c in w.columns]]],
+                           ignore_index=True)
+        df.insert(0, "parametro", self._param_label())
+        seg = self.series.segment if self.series is not None else ""
+        df.insert(1, "segmento", seg or "—")
+        df["alpha"] = float(self.projection_.alpha)
+        df["modelo"] = self.fit_.model_name if self.fit_ is not None else "—"
+        self.projection_table_ = df
+        return df
+
+    def _on_scen_export(self, b):
+        try:
+            df = self.projection_frame()
+        except RuntimeError as exc:
+            self.out_export_status.value = f"<div class='satui-notice'>{exc}</div>"
+            return
+        sep, dec = {"tsv": ("\t", "."), "csv": (",", "."),
+                    "csv_br": (";", ",")}[self.dd_export_fmt.value]
+        self.ta_scen_csv.value = df.to_csv(sep=sep, index=False, decimal=dec)
+        self.out_export_status.value = (
+            "<div class='satui-legend' style='color:var(--ok-ink)'>✓ "
+            f"{len(df)} linha(s) prontas — selecione tudo (Ctrl+A) e copie (Ctrl+C). O mesmo "
+            "quadro está em <code>ui.projection_frame()</code>.</div>")
+        self._log(f"[projeção] exportadas {len(df)} linha(s) da projeção.")
+
+    # ------------------------------------------------------------------ invalidação
+    def _clear_cenarios_outputs(self):
+        """Zera a aba inteira de cenários (dados novos ⇒ cenários antigos sem sentido)."""
+        self._scen_pesos = {}
+        for w in ("out_scen_padrao", "out_scen_choque", "out_scen_manual", "out_scen_resumo",
+                  "out_scen_tabela", "out_scen_plot", "out_export_status"):
+            widget = getattr(self, w, None)
+            if widget is not None:
+                widget.value = ""
+        for w in ("ta_scen_paste", "ta_scen_csv"):
+            widget = getattr(self, w, None)
+            if widget is not None:
+                widget.value = ""
+        self._invalidate_cenarios("os dados mudaram")
+        self._render_scen_notice()
+
+    def _invalidate_cenarios(self, motivo="o modelo vigente mudou"):
+        """Invalida **a projeção** (não os cenários: a trajetória colada é do usuário)."""
+        tinha = self.projection_ is not None
+        self.projection_ = None
+        self.weighted_ = None
+        self.projection_table_ = None
+        if getattr(self, "out_proj_tabela", None) is None:   # ainda em construção
+            return
+        for w in ("out_proj_tiles", "out_proj_plot", "out_proj_tabela", "out_pond_status",
+                  "out_pond_tiles", "out_pond_tabela"):
+            getattr(self, w).value = ""
+        self.out_proj_status.value = (
+            f"<div class='satui-notice'>⚠️ <b>Projeção desatualizada</b> — {motivo}. "
+            "Clique em <i>Projetar</i>.</div>") if tinha else ""
+
+    # ==================================================================
+    # Aba Backtest — o argumento de defesa perante a validação
+    # ==================================================================
+    def _build_tab_backtest(self):
+        """Cartões da aba **Backtest** (devolve a tupla de filhos do VBox)."""
+        # --- card: configuração e custo -------------------------------------
+        self.sl_bt_min_train = W.BoundedIntText(
+            value=0, min=0, max=500, description="mín. de treino (0 = automático):",
+            style={"description_width": "initial"}, layout=W.Layout(width="330px"))
+        self.sl_bt_horizon = W.BoundedIntText(
+            value=min(6, int(self.sl_horizon.value)), min=1, max=60, description="horizonte:",
+            style={"description_width": "initial"}, layout=W.Layout(width="170px"))
+        self.fl_bt_alpha = W.BoundedFloatText(
+            value=0.10, min=0.01, max=0.50, step=0.05, description="α da banda:",
+            style={"description_width": "initial"}, layout=W.Layout(width="170px"))
+        self.sl_bt_step = W.BoundedIntText(
+            value=1, min=1, max=12, description="passo entre origens:",
+            style={"description_width": "initial"}, layout=W.Layout(width="240px"))
+        self.sl_bt_sims = W.BoundedIntText(
+            value=300, min=20, max=5000, step=50, description="simulações por janela:",
+            style={"description_width": "initial"}, layout=W.Layout(width="260px"))
+        self.btn_bt_info = W.Button(
+            description="Conferir as janelas", icon="calculator",
+            layout=W.Layout(width="auto", min_width="200px"),
+            tooltip="Conta quantas janelas o backtest vai reestimar com estes parâmetros.")
+        self.btn_bt_info.on_click(lambda b: self._render_bt_info())
+        self.out_bt_info = W.HTML()
+        for w in (self.sl_bt_min_train, self.sl_bt_horizon, self.sl_bt_step):
+            w.observe(lambda c: self._render_bt_info(), names="value")
+        card_cfg = W.VBox([
+            W.HTML("<div class='satui-h'>Backtest da projeção — configuração</div>"),
+            W.HTML("<div class='satui-help'><div class='ttl'>O que este backtest responde</div>"
+                   "O erro fora da amostra da aba <b>Seleção</b> mede a <b>trajetória "
+                   "central</b>. Aqui testamos a outra metade da projeção: a <b>banda</b>. "
+                   "O procedimento reestima o modelo janela a janela, projeta o horizonte "
+                   "com a macro <b>efetivamente observada</b> e conta quantas vezes o "
+                   "realizado caiu fora do intervalo. Uma banda de 90% honesta erra ~10% das "
+                   "vezes: errar muito menos é <b>conservadorismo caro</b>, errar muito mais "
+                   "é <b>subestimar a incerteza</b> — e é isso que a validação independente "
+                   "vai perguntar.</div>"),
+            W.HBox([self.sl_bt_min_train, self.sl_bt_horizon, self.fl_bt_alpha],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            W.HBox([self.sl_bt_step, self.sl_bt_sims, self.btn_bt_info],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            self.out_bt_info,
+        ])
+        card_cfg.add_class("satui-card")
+
+        # --- card: rodar -------------------------------------------------------
+        self.btn_backtest = W.Button(
+            description="Rodar backtest", icon="history", button_style="success",
+            layout=W.Layout(width="auto", min_width="190px"),
+            tooltip="Reestima o modelo vigente janela a janela e mede a cobertura dos "
+                    "intervalos (Kupiec e Christoffersen).")
+        self.btn_backtest.on_click(self._on_backtest)
+        self.out_bt_notice = W.HTML()
+        self.out_bt_status = W.HTML()
+        self.out_bt_progress = W.HTML()
+        self.out_bt_timer = W.HTML()
+        self.out_bt_resumo = W.HTML()
+        card_run = W.VBox([
+            W.HTML("<div class='satui-h'>Rodar</div>"),
+            W.HTML("<div class='satui-legend'>Cada janela é um <b>reajuste completo</b> mais "
+                   "uma projeção simulada — é a ação mais cara da interface. O modelo "
+                   "testado é o <b>vigente</b> (o da aba Especificação ou o adotado na "
+                   "Seleção), reconstruído do zero em cada origem, sem ver o futuro.</div>"),
+            W.HBox([self.btn_backtest], layout=W.Layout(align_items="center")),
+            self.out_bt_notice, self.out_bt_status, self.out_bt_progress, self.out_bt_timer,
+            self.out_bt_resumo,
+        ])
+        card_run.add_class("satui-card")
+
+        # --- card: veredito ------------------------------------------------------
+        self.out_bt_placar = W.HTML()
+        self.out_bt_leitura = W.HTML()
+        card_veredito = W.VBox([
+            W.HTML("<div class='satui-h'>Veredito</div>"),
+            self.out_bt_placar, self.out_bt_leitura,
+        ])
+        card_veredito.add_class("satui-card")
+
+        # --- card: erro por horizonte ---------------------------------------------
+        self.out_bt_erros = W.HTML()
+        card_erros = W.VBox([
+            W.HTML("<div class='satui-h'>Erro por horizonte</div>"),
+            W.HTML("<div class='satui-legend'>O erro <b>cresce</b> com o passo à frente — é "
+                   "assim que deve ser. O que interessa é o formato da curva: um salto "
+                   "abrupto num passo específico costuma indicar sazonalidade não modelada "
+                   "ou defasagem mal escolhida. O <b>viés</b> (média do erro) revela "
+                   "projeção sistematicamente otimista ou pessimista.</div>"),
+            self.out_bt_erros,
+        ])
+        card_erros.add_class("satui-card")
+
+        # --- card: cobertura --------------------------------------------------------
+        self.out_bt_cobertura = W.HTML()
+        card_cob = W.VBox([
+            W.HTML("<div class='satui-h'>Cobertura dos intervalos</div>"),
+            W.HTML("<div class='satui-help'><div class='ttl'>Como ler os dois testes</div>"
+                   "<b>Kupiec (POF)</b> — H0: a taxa de violação é a nominal (α). "
+                   "<b>p pequeno rejeita</b>: a banda tem largura errada. "
+                   "<b>Christoffersen</b> — H0: as violações são <b>independentes</b> no "
+                   "tempo. p pequeno indica violações em <i>cluster</i>: a banda até acerta "
+                   "na média, mas falha justamente quando o ciclo vira — o pior momento "
+                   "possível. Passar nos dois é o que sustenta o intervalo perante a "
+                   "validação independente.</div>"),
+            self.out_bt_cobertura,
+        ])
+        card_cob.add_class("satui-card")
+
+        # --- card: gráfico ------------------------------------------------------------
+        self.dd_bt_passo = W.Dropdown(
+            options=[], description="passo à frente:",
+            style={"description_width": "initial"}, layout=W.Layout(width="240px"))
+        self.dd_bt_passo.observe(lambda c: self._render_bt_plot(), names="value")
+        self.out_bt_plot = W.HTML()
+        card_plot = W.VBox([
+            W.HTML("<div class='satui-h'>Realizado × previsto, janela a janela</div>"),
+            W.HTML("<div class='satui-legend'>Para o passo escolhido: o realizado, a "
+                   "projeção daquela origem e a banda. Os pontos destacados são as "
+                   "<b>violações</b> — vale olhar <i>quando</i> elas acontecem, não só "
+                   "quantas.</div>"),
+            W.HBox([self.dd_bt_passo], layout=W.Layout(align_items="center")),
+            self.out_bt_plot,
+        ])
+        card_plot.add_class("satui-card")
+
+        return (card_cfg, card_run, card_veredito, card_erros, card_cob, card_plot)
+
+    # ------------------------------------------------------------------ dimensionamento
+    def _bt_params(self) -> dict:
+        """Parâmetros e nº de janelas do backtest (mesma conta do walk-forward)."""
+        n = len(self.series) if self.series is not None else 0
+        horizonte = int(self.sl_bt_horizon.value)
+        step = max(1, int(self.sl_bt_step.value))
+        min_train = int(self.sl_bt_min_train.value) or max(24, n // 2)
+        origens = n - horizonte + 1 - min_train
+        janelas = int(math.ceil(origens / step)) if origens > 0 else 0
+        return {"n": n, "horizonte": horizonte, "step": step, "min_train": min_train,
+                "janelas": janelas, "pontos": janelas * horizonte,
+                "alpha": float(self.fl_bt_alpha.value), "sims": int(self.sl_bt_sims.value)}
+
+    def _render_bt_info(self):
+        """Dimensiona o backtest e avisa quando ele não vai ter poder estatístico."""
+        if getattr(self, "out_bt_info", None) is None:
+            return None
+        if self.series is None:
+            self.out_bt_info.value = (
+                "<div class='satui-legend'>Carregue uma série na aba <b>Série</b> antes de "
+                "dimensionar o backtest.</div>")
+            return None
+        p = self._bt_params()
+        esperadas = p["pontos"] * p["alpha"]
+        self.out_bt_info.value = self._metric_tiles({
+            "observações": p["n"], "mín. de treino": p["min_train"],
+            "janelas": p["janelas"], "pontos testados": p["pontos"],
+            "cobertura nominal": f"{(1 - p['alpha']) * 100:.0f}%",
+            "violações esperadas": round(esperadas, 1)})
+        avisos = []
+        if p["janelas"] <= 0:
+            avisos.append(
+                "❌ <b>Não sobra janela</b>: com mínimo de treino "
+                f"{p['min_train']} e horizonte {p['horizonte']} não há origem possível em "
+                f"{p['n']} observações. Reduza o horizonte ou o mínimo de treino.")
+        elif esperadas < 3:
+            avisos.append(
+                f"⚠️ Só <b>{esperadas:.1f}</b> violação(ões) esperada(s) em "
+                f"{p['pontos']} pontos: com tão poucos eventos o teste de Kupiec quase nunca "
+                "rejeita — <b>não rejeitar aqui não é aprovação</b>. Amplie a janela "
+                "(mínimo de treino menor) ou trate o resultado como indicativo.")
+        if p["janelas"] * p["sims"] > 60000:
+            avisos.append(
+                f"ℹ️ {p['janelas']} janela(s) × {p['sims']} simulações: conte alguns minutos. "
+                "Ligue <i>Manter cluster ativo</i> se estiver no Databricks.")
+        self.out_bt_info.value += "".join(
+            f"<div class='satui-notice' style='margin-top:8px'>{a}</div>" for a in avisos)
+        return p
+
+    def _bt_prog(self, key, label, status, detail=""):
+        """Cria/atualiza a linha ``key`` da tabela de progresso do backtest."""
+        for row in self._bt_steps:
+            if row["key"] == key:
+                row["status"] = status
+                if detail:
+                    row["detail"] = detail
+                break
+        else:
+            self._bt_steps.append({"key": key, "label": label, "status": status,
+                                   "detail": detail})
+        self._render_progress(self._bt_steps, self.out_bt_progress, "Progresso do backtest")
+
+    # ------------------------------------------------------------------ execução
+    def _on_backtest(self, b):
+        if self.fit_ is None or self.model_ is None:
+            self.out_bt_status.value = (
+                "<div class='satui-notice'>Nenhum <b>modelo vigente</b>: ajuste na aba "
+                "<b>Especificação</b> ou adote uma especificação na aba <b>Seleção</b>.</div>")
+            return
+        p = self._render_bt_info()
+        if p is None or p["janelas"] <= 0:
+            self.out_bt_status.value = (
+                "<div class='satui-notice'>Sem janela de validação: reduza o <b>horizonte</b> "
+                "ou o <b>mínimo de treino</b>.</div>")
+            return
+        self._bt_steps = []
+        self.out_bt_status.value = ""
+        rot_wf = f"Reestimar e projetar {p['janelas']} janela(s) de {p['horizonte']} passo(s)"
+        with self._busy(self.btn_backtest, self.btn_fit_now, self.btn_search, self.btn_project,
+                        self.btn_diag), \
+                self._cronometro(self.out_bt_timer, "backtest em andamento") as decorrido:
+            try:
+                self._bt_prog("wf", rot_wf, "run")
+                wf = _E.selection.backtest_projection(
+                    self.model_, self.series, self.macro,
+                    min_train=int(self.sl_bt_min_train.value) or None,
+                    horizon=p["horizonte"], step=p["step"], alpha=p["alpha"],
+                    n_sims=p["sims"], seed=0)
+            except Exception as exc:  # noqa: BLE001
+                for row in reversed(self._bt_steps):
+                    if row.get("status") == "run":
+                        row["status"] = "err"
+                        row["detail"] = type(exc).__name__
+                        break
+                self._render_progress(self._bt_steps, self.out_bt_progress,
+                                      "Progresso do backtest")
+                self.out_bt_status.value = (
+                    "<div class='satui-notice'>✗ O backtest falhou — veja o <b>Console</b> "
+                    f"(rodapé): {type(exc).__name__}.</div>")
+                self._log(f"[backtest] ERRO: {type(exc).__name__}: {exc}")
+                return
+            secs = decorrido()
+        self._bt_prog("wf", rot_wf, "ok", f"{int(wf.get('n_windows', 0))} janela(s) · "
+                                          f"{self._fmt_dur(secs)}")
+        cov = wf.get("coverage")
+        self._bt_prog("cov", "Cobertura, Kupiec e Christoffersen",
+                      "ok" if cov is not None and len(cov) else "skip",
+                      "" if cov is not None and len(cov) else "sem bandas registradas")
+        self.backtest_ = wf
+        self.coverage_ = cov
+        self._bt_secs = secs
+        self._render_backtest()
+        self._refresh_bar()
+        n_win = int(wf.get("n_windows", 0))
+        self._log(f"[backtest] {n_win} janela(s) · RMSE {wf.get('rmse', float('nan')):.5f} · "
+                  f"{self._fmt_dur(secs)}")
+
+    # ------------------------------------------------------------------ leitura
+    def _bt_erros_por_passo(self, bands) -> pd.DataFrame:
+        """RMSE/MAE/MAPE e viés por passo à frente (mais a linha agregada)."""
+        linhas = []
+        for passo, g in bands.groupby("passo", sort=True):
+            real = g["real"].to_numpy(dtype=float)
+            prev = g["previsto"].to_numpy(dtype=float)
+            m = np.isfinite(real) & np.isfinite(prev)
+            if not m.any():
+                continue
+            met = _E.selection._oos_metrics(real[m], prev[m])
+            linhas.append({"passo": str(int(passo)), "n": int(m.sum()),
+                           "RMSE": met["rmse"], "MAE": met["mae"], "MAPE": met["mape"],
+                           "viés": float(np.mean(real[m] - prev[m]))})
+        real = bands["real"].to_numpy(dtype=float)
+        prev = bands["previsto"].to_numpy(dtype=float)
+        m = np.isfinite(real) & np.isfinite(prev)
+        if m.any():
+            met = _E.selection._oos_metrics(real[m], prev[m])
+            linhas.append({"passo": "todos", "n": int(m.sum()), "RMSE": met["rmse"],
+                           "MAE": met["mae"], "MAPE": met["mape"],
+                           "viés": float(np.mean(real[m] - prev[m]))})
+        return pd.DataFrame(linhas)
+
+    @staticmethod
+    def _css_pnaorejeita(v):
+        """p-valor de teste cuja **nula é o resultado desejado** (Kupiec,
+        Christoffersen): p grande (não rejeita) é o bom resultado — o oposto de
+        :meth:`_css_pvalor`."""
+        try:
+            p = float(v)
+        except (TypeError, ValueError):
+            return ""
+        if p != p:
+            return "color:var(--muted)"
+        if p > 0.10:
+            return "color:var(--ok-tx);font-weight:600"
+        if p > 0.05:
+            return "color:var(--warn-tx);font-weight:600"
+        return "color:var(--bad-tx);background-color:var(--bad-bg);font-weight:600"
+
+    @staticmethod
+    def _css_cobertura_factory(nominal):
+        """Colore a cobertura empírica pela distância da nominal (fecha sobre ela)."""
+        alvo = float(nominal)
+
+        def _css(v):
+            try:
+                x = float(v)
+            except (TypeError, ValueError):
+                return ""
+            if x != x:
+                return "color:var(--muted)"
+            d = abs(x - alvo)
+            if d <= 0.03:
+                return "color:var(--ok-tx);background-color:var(--ok-bg);font-weight:600"
+            if d <= 0.07:
+                return "color:var(--warn-tx);background-color:var(--warn-bg);font-weight:600"
+            return "color:var(--bad-tx);background-color:var(--bad-bg);font-weight:600"
+
+        return _css
+
+    def _bt_blocos(self, cov, wf) -> list:
+        """Placar do backtest: cobertura, Kupiec e Christoffersen (o pior passo)."""
+        tot = cov[cov["passo"] == "todos"]
+        blocos = []
+        if not len(tot):
+            return blocos
+        r = tot.iloc[0]
+        nominal = float(r["nominal"])
+        emp = float(r["cobertura"]) if pd.notna(r["cobertura"]) else np.nan
+        n = int(r["n"])
+        viol = int(r["violacoes"])
+        d = abs(emp - nominal) if np.isfinite(emp) else np.nan
+        nivel = "na" if not np.isfinite(d) else ("ok" if d <= 0.03 else
+                                                 ("warn" if d <= 0.07 else "bad"))
+        blocos.append({
+            "bloco": "Cobertura das bandas", "nivel": nivel,
+            "veredito": ("—" if not np.isfinite(emp) else f"{emp:.1%} vs {nominal:.0%} nominal"),
+            "detalhe": f"{viol} violação(ões) em {n} ponto(s) testado(s)",
+            "falhas": 0, "n": 1, "teste": "cobertura"})
+        p_kup = float(r["kupiec_pvalue"]) if pd.notna(r["kupiec_pvalue"]) else np.nan
+        nivel_k = "na" if not np.isfinite(p_kup) else ("ok" if p_kup > 0.05 else "bad")
+        blocos.append({
+            "bloco": "Kupiec (POF)", "nivel": nivel_k,
+            "veredito": ("inconclusivo" if not np.isfinite(p_kup) else
+                         ("não rejeita a cobertura nominal" if p_kup > 0.05
+                          else "rejeita a cobertura nominal")),
+            "detalhe": (f"LR = {float(r['kupiec_stat']):.3f} · p = {p_kup:.4f}"
+                        if np.isfinite(p_kup) else "sem observações válidas"),
+            "falhas": 0, "n": 1, "teste": "Kupiec"})
+        passos = cov[cov["passo"] != "todos"]
+        ps = passos["christoffersen_pvalue"].astype(float)
+        if len(ps) and ps.notna().any():
+            pior = passos.loc[ps.idxmin()]
+            p_chr = float(pior["christoffersen_pvalue"])
+            nivel_c = "ok" if p_chr > 0.05 else "bad"
+            detalhe = (f"pior passo: {pior['passo']} · LR = "
+                       f"{float(pior['christoffersen_stat']):.3f} · p = {p_chr:.4f}")
+            veredito = ("violações independentes" if p_chr > 0.05
+                        else "violações em cluster")
+        else:
+            nivel_c, veredito = "na", "inconclusivo"
+            detalhe = ("sem violações suficientes para identificar a cadeia — "
+                       "trate como não testado")
+        blocos.append({"bloco": "Christoffersen (independência)", "nivel": nivel_c,
+                       "veredito": veredito, "detalhe": detalhe, "falhas": 0, "n": 1,
+                       "teste": "Christoffersen"})
+        return blocos
+
+    def _bt_leitura_html(self, cov, wf) -> str:
+        """A frase de defesa do modelo — em português, com os números na mão."""
+        tot = cov[cov["passo"] == "todos"]
+        if not len(tot):
+            return ""
+        r = tot.iloc[0]
+        nominal = float(r["nominal"])
+        emp = float(r["cobertura"]) if pd.notna(r["cobertura"]) else np.nan
+        n, viol = int(r["n"]), int(r["violacoes"])
+        if not np.isfinite(emp) or n == 0:
+            return ("<div class='satui-help'><div class='ttl'>Leitura</div>Nenhum ponto com "
+                    "banda válida: sem cobertura para avaliar. Aumente as <b>simulações por "
+                    "janela</b> ou reduza o horizonte — sem banda não há o que defender."
+                    "</div>")
+        p_kup = float(r["kupiec_pvalue"]) if pd.notna(r["kupiec_pvalue"]) else np.nan
+        frases = [f"As bandas de <b>{nominal:.0%}</b> cobriram <b>{emp:.1%}</b> dos {n} "
+                  f"pontos projetados fora da amostra ({viol} violação(ões))."]
+        if not np.isfinite(p_kup):
+            frases.append("O teste de <b>Kupiec</b> não pôde ser calculado — trate a "
+                          "cobertura como <b>não testada</b>.")
+            recado = ("Sem teste, o intervalo não está validado: amplie a janela de backtest "
+                      "antes de levar a banda para a governança.")
+        elif p_kup > 0.05 and abs(emp - nominal) <= 0.07:
+            frases.append(f"<b>Kupiec não rejeita</b> a cobertura nominal (p = {p_kup:.3f}): "
+                          "a diferença é compatível com variação amostral.")
+            recado = ("Este é o resultado que sustenta o intervalo perante a validação "
+                      "independente — registre a janela, o horizonte e o α junto do número.")
+        elif emp < nominal:
+            frases.append(f"<b>Kupiec rejeita</b> (p = {p_kup:.3f}): há <b>violações demais</b> "
+                          "— o intervalo é estreito demais para a incerteza real.")
+            recado = ("A banda subestima o risco. Caminhos: covariância <b>HAC</b>, incluir a "
+                      "dinâmica que sobrou no resíduo (aba <b>Diagnóstico</b>) ou aumentar o "
+                      "número de simulações; se o resíduo tem <i>clusters</i> de "
+                      "volatilidade, a banda do cenário base nunca cobrirá o estresse — use "
+                      "o cenário adverso para essa pergunta.")
+        else:
+            frases.append(f"<b>Kupiec rejeita</b> (p = {p_kup:.3f}): há <b>violações de "
+                          "menos</b> — o intervalo é largo demais.")
+            recado = ("Bandas conservadoras demais custam caro: tudo cabe dentro delas e o "
+                      "intervalo deixa de informar. Vale rever o horizonte, o α e o pool de "
+                      "resíduos usado na simulação.")
+        rmse = wf.get("rmse", np.nan)
+        if np.isfinite(rmse):
+            frases.append(f"A trajetória central errou, em média, <b>{float(rmse):.5f}</b> "
+                          f"(RMSE, escala de {self._param_label()}) em "
+                          f"{int(wf.get('n_windows', 0))} janela(s).")
+        return ("<div class='satui-help'><div class='ttl'>Leitura</div>"
+                + " ".join(frases) + f"<div style='margin-top:6px'>{recado}</div></div>")
+
+    def _render_backtest(self):
+        """Placar, leitura, erro por horizonte, cobertura e gráfico."""
+        wf = self.backtest_
+        if wf is None:
+            return
+        bands = wf.get("bands")
+        cov = self.coverage_
+        self.out_bt_resumo.value = self._metric_tiles({
+            "janelas": int(wf.get("n_windows", 0)),
+            "RMSE": float(wf.get("rmse", np.nan)),
+            "MAE": float(wf.get("mae", np.nan)),
+            "MAPE": f"{float(wf.get('mape', np.nan)) * 100:.1f}%",
+            "tempo": self._fmt_dur(self._bt_secs) if self._bt_secs else "—"})
+        if bands is None or not len(bands):
+            self.out_bt_status.value = (
+                "<div class='satui-notice'>O backtest rodou, mas nenhuma banda pôde ser "
+                "calculada — sem bandas não há teste de cobertura.</div>")
+            return
+        self.out_bt_erros.value = self._df_html(
+            self._bt_erros_por_passo(bands), max_height="280px",
+            fmt_cols={"RMSE": "{:.5f}", "MAE": "{:.5f}", "viés": "{:+.5f}"},
+            pct_cols=["MAPE"], precision=5)
+
+        if cov is not None and len(cov):
+            nominal = float(cov["nominal"].iloc[0])
+            vis = pd.DataFrame({
+                "passo": [str(p) for p in cov["passo"]],
+                "n": cov["n"].to_numpy(dtype=int),
+                "violações": cov["violacoes"].to_numpy(dtype=int),
+                "cobertura nominal": cov["nominal"].to_numpy(dtype=float),
+                "cobertura empírica": cov["cobertura"].to_numpy(dtype=float),
+                "Kupiec (LR)": cov["kupiec_stat"].to_numpy(dtype=float),
+                "p Kupiec": cov["kupiec_pvalue"].to_numpy(dtype=float),
+                "Christoffersen (LR)": cov["christoffersen_stat"].to_numpy(dtype=float),
+                "p Christoffersen": cov["christoffersen_pvalue"].to_numpy(dtype=float),
+                "veredito": [{True: "✓ cobertura ok", False: "✗ cobertura fora"}.get(
+                    self._ok3(v), "—") for v in cov["ok"]],
+            })
+            self.out_bt_cobertura.value = self._df_html(
+                vis, max_height="320px",
+                color_map={"cobertura empírica": self._css_cobertura_factory(nominal),
+                           "p Kupiec": self._css_pnaorejeita,
+                           "p Christoffersen": self._css_pnaorejeita,
+                           "veredito": self._css_coerencia},
+                pct_cols=["cobertura nominal", "cobertura empírica"],
+                fmt_cols={"Kupiec (LR)": "{:.3f}", "Christoffersen (LR)": "{:.3f}"},
+                precision=4)
+            blocos = self._bt_blocos(cov, wf)
+            self.out_bt_placar.value = self._placar_html(blocos) if blocos else ""
+            self.out_bt_leitura.value = self._bt_leitura_html(cov, wf)
+            ruins = [b["bloco"] for b in blocos if b["nivel"] == "bad"]
+            self.out_bt_status.value = (
+                "<div class='satui-legend' style='color:var(--ok-ink)'>✓ Backtest concluído "
+                "sem reprovação nos testes de cobertura.</div>" if not ruins else
+                "<div class='satui-legend' style='color:var(--bad-ink)'>Atenção: "
+                f"<b>{', '.join(ruins)}</b> — veja a leitura abaixo.</div>")
+        else:
+            self.out_bt_cobertura.value = (
+                "<div class='satui-legend'>Cobertura indisponível para estes parâmetros.</div>")
+
+        passos = sorted({int(p) for p in bands["passo"].unique()})
+        self.dd_bt_passo.options = [(f"{p} período(s) à frente", p) for p in passos]
+        if passos:
+            self.dd_bt_passo.value = passos[0]
+        self._render_bt_plot()
+
+    def _render_bt_plot(self):
+        """Realizado × previsto do passo escolhido, com as violações marcadas."""
+        if getattr(self, "out_bt_plot", None) is None:
+            return
+        wf = self.backtest_
+        bands = wf.get("bands") if wf else None
+        if bands is None or not len(bands) or self.dd_bt_passo.value is None:
+            self.out_bt_plot.value = ""
+            return
+        try:
+            import matplotlib.pyplot as plt
+        except Exception as exc:  # pragma: no cover - depende do ambiente
+            self.out_bt_plot.value = f"<div class='satui-legend'>matplotlib indisponível: {exc}</div>"
+            return
+        passo = int(self.dd_bt_passo.value)
+        sub = bands[bands["passo"] == passo].sort_values("periodo")
+        if not len(sub):
+            self.out_bt_plot.value = ""
+            return
+        cores = _E.report._palette()
+        x = _E.report._to_ts(pd.Index(list(sub["periodo"])))
+        real = sub["real"].to_numpy(dtype=float)
+        prev = sub["previsto"].to_numpy(dtype=float)
+        lo = sub["lower"].to_numpy(dtype=float)
+        hi = sub["upper"].to_numpy(dtype=float)
+        viol = sub["violacao"].to_numpy(dtype=float) == 1.0
+        nivel = int(round((1 - float(wf.get("alpha", 0.10))) * 100))
+        fig, ax = plt.subplots(figsize=(10.5, 4.4))
+        if np.isfinite(lo).any():
+            ax.fill_between(x, lo, hi, color=cores["primaria"], alpha=0.15,
+                            label=f"banda {nivel}%")
+        ax.plot(x, real, color=cores["neutra"], lw=1.6, label="realizado")
+        ax.plot(x, prev, color=cores["primaria"], lw=1.8, label="previsto")
+        if viol.any():
+            ax.scatter(np.asarray(x)[viol], real[viol], color=cores["secundaria"], s=42,
+                       zorder=5, label=f"violações ({int(viol.sum())})")
+        ax.set_title(f"Backtest — {passo} período(s) à frente ({self._param_label()})",
+                     fontsize=11)
+        ax.set_ylabel(self._param_label())
+        ax.legend(loc="best", fontsize=8, ncol=2)
+        ax.grid(alpha=0.25)
+        fig.tight_layout()
+        self.out_bt_plot.value = self._fig_html(fig, stretch=True)
+
+    # ------------------------------------------------------------------ invalidação
+    def _clear_backtest_outputs(self):
+        """Zera a aba de backtest (dados novos ⇒ backtest antigo sem sentido)."""
+        for w in ("out_bt_info", "out_bt_resumo", "out_bt_progress", "out_bt_timer"):
+            widget = getattr(self, w, None)
+            if widget is not None:
+                widget.value = ""
+        self._bt_steps = []
+        self._bt_secs = None
+        self._invalidate_backtest("os dados mudaram")
+
+    def _invalidate_backtest(self, motivo="o modelo vigente mudou"):
+        """Invalida o backtest (ele pertencia ao ajuste anterior)."""
+        tinha = self.backtest_ is not None
+        self.backtest_ = None
+        self.coverage_ = None
+        if getattr(self, "out_bt_cobertura", None) is None:   # ainda em construção
+            return
+        for w in ("out_bt_placar", "out_bt_leitura", "out_bt_erros", "out_bt_cobertura",
+                  "out_bt_plot", "out_bt_status"):
+            getattr(self, w).value = ""
+        self.dd_bt_passo.options = []
+        self.out_bt_notice.value = (
+            f"<div class='satui-notice'>⚠️ <b>Backtest desatualizado</b> — {motivo}. "
+            "Clique em <i>Rodar backtest</i>.</div>") if tinha else ""
+
+    # ==================================================================
     # Configuração declarativa (StudyConfig)
     # ==================================================================
     def _stress_var(self) -> str:
@@ -3136,6 +4597,19 @@ class SatelliteUI:
             pills.append(self._pill(
                 f"diagnóstico: {len(ruins)} bloco(s) reprovado(s)" if ruins
                 else "diagnóstico: sem reprovações", "red" if ruins else "green"))
+        if self.scenarios_ is not None and len(self.scenarios_):
+            pills.append(self._pill(f"cenários: {len(self.scenarios_)}", "muted"))
+        if self.projection_ is not None:
+            pills.append(self._pill(f"projeção: {self.projection_.horizon} períodos", "green"))
+        if self.coverage_ is not None and len(self.coverage_):
+            tot = self.coverage_[self.coverage_["passo"] == "todos"]
+            if len(tot):
+                cob = float(tot["cobertura"].iloc[0])
+                nom = float(tot["nominal"].iloc[0])
+                ok = self._ok3(tot["ok"].iloc[0])
+                pills.append(self._pill(
+                    f"cobertura: {cob:.0%} de {nom:.0%}",
+                    "green" if ok is True else ("yellow" if ok is None else "red")))
         self.bar.value = "<div class='satui-bar'>" + "".join(pills) + "</div>"
 
     # ------------------------------------------------------------------ display

@@ -6,8 +6,11 @@ Cobrem o esqueleto e as abas já preenchidas: construção a partir de
 temporal, nomes definitivos das abas, relatório de estacionariedade, ajuste único
 com tabela de coeficientes, o ida-e-volta com :class:`StudyConfig`, a **busca
 champion-challenger** (dimensionamento da grade, ranking, motivo do descarte,
-escolha manual e Diebold-Mariano) e a **bateria de diagnóstico** (placar por
-família, tabela completa, leitura em texto e invalidação).
+escolha manual e Diebold-Mariano), a **bateria de diagnóstico** (placar por
+família, tabela completa, leitura em texto e invalidação), os **cenários e a
+projeção** (padrão, choque com persistência, colagem da trajetória, leque,
+projeção ponderada e exportação) e o **backtest de cobertura** (erro por
+horizonte, Kupiec/Christoffersen, veredito e gráfico das violações).
 
 Tudo roda em séries sintéticas **curtas** e grades minúsculas (2 candidatas, 2
 defasagens, 1 variável por especificação) — a busca completa é do usuário, não
@@ -520,6 +523,263 @@ def test_troca_de_dados_zera_selecao_e_diagnostico():
 
 
 # ======================================================================
+# Aba Cenários & Projeção
+# ======================================================================
+def _ui_com_ajuste(n=72, horizonte=6):
+    """Interface já ajustada e com o horizonte de projeção curto (teste rápido)."""
+    ui = _ui_pronta_para_ajuste(n=n)
+    ui.btn_fit_now.click()
+    assert ui.fit_ is not None, ui.out_fit_status.value
+    ui.sl_scen_horizon.value = horizonte
+    ui.sl_scen_sims.value = 120                # banda simulada, mas barata
+    ui.dd_stress_var.value = "desemprego"
+    return ui
+
+
+def test_cenarios_padrao_um_clique():
+    ui = _ui_com_ajuste()
+    ui.btn_scen_padrao.click()
+    ss = ui.scenarios_
+    assert ss is not None, ui.out_scen_padrao.value
+    assert set(ss.names()) == {"base", "adverso", "otimista"}
+    assert all(s.horizon == 6 for s in ss.scenarios)
+    pesos = ss.probabilities()                 # levanta se não somarem 1
+    assert pesos["base"] == pytest.approx(0.5)
+    # o adverso precisa mesmo estressar a variável escolhida
+    adv = ss.get("adverso").macro["desemprego"].to_numpy()
+    base = ss.get("base").macro["desemprego"].to_numpy()
+    assert (adv > base).all()
+    assert "cenário" in ui.out_scen_tabela.value and "adverso" in ui.out_scen_tabela.value
+    assert "<img" in ui.out_scen_plot.value    # trajetórias com o futuro sombreado
+
+
+def test_choque_com_persistencia_decai():
+    """Persistência < 1 torna o choque temporário (a variável volta à base)."""
+    ui = _ui_com_ajuste()
+    ui.fl_shock_mag.value = 2.0
+    ui.fl_shock_persist.value = 0.5
+    ui.btn_scen_choque.click()
+    ss = ui.scenarios_
+    assert ss is not None, ui.out_scen_choque.value
+    desvio = (ss.get("adverso").macro["desemprego"].to_numpy()
+              - ss.get("base").macro["desemprego"].to_numpy())
+    assert desvio[0] > 0
+    assert desvio[1] == pytest.approx(desvio[0] * 0.5, rel=1e-6)
+    assert desvio[-1] < desvio[0] / 10
+
+    ui.fl_shock_persist.value = 1.0            # permanente: choque constante
+    ui.btn_scen_choque.click()
+    desvio2 = (ui.scenarios_.get("adverso").macro["desemprego"].to_numpy()
+               - ui.scenarios_.get("base").macro["desemprego"].to_numpy())
+    assert desvio2[-1] == pytest.approx(desvio2[0])
+
+
+def test_cenario_colado_completa_as_variaveis_que_faltam():
+    """O caminho que mais falta: colar a trajetória que veio da área econômica."""
+    ui = _ui_com_ajuste()
+    ui.btn_scen_padrao.click()
+    ui.ta_scen_paste.value = "desemprego\n" + "\n".join(f"{9 + 0.5 * i:.2f}" for i in range(6))
+    ui.tx_scen_nome.value = "economia"
+    ui.fl_scen_peso.value = 0.25
+    ui.btn_scen_add.click()
+    ss = ui.scenarios_
+    assert "economia" in ss.names(), ui.out_scen_manual.value
+    cen = ss.get("economia")
+    assert len(cen.macro) == 6
+    assert cen.macro["desemprego"].iloc[0] == pytest.approx(9.0)
+    # as variáveis ausentes na colagem vêm da trajetória base, e a tela diz quais
+    assert "completadas pela base" in ui.out_scen_manual.value
+    assert "renda" in ui.out_scen_manual.value
+    assert set(cen.macro.columns) == set(ui._macro_cols())
+    assert sum(s.probability for s in ss.scenarios) == pytest.approx(1.0)
+
+
+def test_cenario_colado_com_numero_de_linhas_errado_recusa():
+    ui = _ui_com_ajuste()
+    ui.ta_scen_paste.value = "desemprego\n9.0\n9.1"       # 2 linhas, horizonte 6
+    ui.btn_scen_add.click()
+    assert ui.scenarios_ is None
+    assert "horizonte da tela é 6" in ui.out_scen_manual.value
+
+
+def test_gabarito_de_colagem_traz_a_trajetoria_base():
+    ui = _ui_com_ajuste()
+    ui.btn_scen_modelo.click()
+    linhas = ui.ta_scen_paste.value.strip().splitlines()
+    assert len(linhas) == 7                              # cabeçalho + horizonte
+    assert "desemprego" in linhas[0]
+    # o gabarito colado de volta reproduz o cenário base
+    ui.tx_scen_nome.value = "base_editada"
+    ui.btn_scen_add.click()
+    assert "base_editada" in ui.scenarios_.names(), ui.out_scen_manual.value
+
+
+def test_projecao_em_leque_e_ponderada():
+    ui = _ui_com_ajuste()
+    ui.btn_scen_padrao.click()
+    ui.btn_project.click()
+    proj = ui.projection_
+    assert proj is not None, ui.out_proj_status.value
+    assert set(proj.paths) == {"base", "adverso", "otimista"}
+    assert proj.horizon == 6
+    # bandas de verdade (simulação ligada)
+    assert proj.paths["base"]["lower"].notna().all()
+    # o cenário adverso precisa doer: a partir do 2º período (a macro entra com
+    # defasagem 1, então o 1º passo ainda usa a macro observada)
+    assert (proj.paths["adverso"]["mean"].iloc[1:]
+            > proj.paths["otimista"]["mean"].iloc[1:]).all()
+    assert "<img" in ui.out_proj_plot.value
+    for nome in ("base", "adverso", "otimista", "ponderada"):
+        assert nome in ui.out_proj_tabela.value, nome
+    # a curva única: entre o otimista e o adverso, período a período
+    w = ui.weighted_
+    assert w is not None and len(w) == 6
+    assert (w.to_numpy() <= proj.paths["adverso"]["mean"].to_numpy() + 1e-12).all()
+    assert (w.to_numpy() >= proj.paths["otimista"]["mean"].to_numpy() - 1e-12).all()
+    assert "ponderada" in ui.out_pond_tabela.value
+    assert "último observado" in ui.out_pond_tiles.value
+
+
+def test_exportacao_da_projecao():
+    ui = _ui_com_ajuste()
+    ui.btn_scen_padrao.click()
+    ui.btn_project.click()
+    df = ui.projection_frame()
+    for col in ("parametro", "segmento", "cenario", "periodo", "mean", "lower", "upper"):
+        assert col in df.columns, col
+    assert "ponderado" in set(df["cenario"])            # a curva única vai junto
+    assert len(df) == 6 * 4                             # 3 cenários + ponderado
+    ui.dd_export_fmt.value = "csv_br"
+    ui.btn_scen_export.click()
+    texto = ui.ta_scen_csv.value
+    assert texto.splitlines()[0].count(";") >= 6        # ponto e vírgula p/ Excel pt-BR
+    assert "ponderado" in texto
+    assert ui.projection_table_ is not None
+
+
+def test_projecao_exige_modelo_e_cenario():
+    ui = _ui()
+    ui.btn_project.click()
+    assert ui.projection_ is None
+    assert "modelo vigente" in ui.out_proj_status.value
+
+    ui2 = _ui_com_ajuste(n=60)
+    ui2.btn_project.click()                             # sem cenário montado
+    assert ui2.projection_ is None
+    assert "cenário" in ui2.out_proj_status.value
+
+
+def test_projecao_invalidada_mas_cenarios_preservados():
+    """Mexer no modelo derruba a projeção — a trajetória montada é do usuário."""
+    ui = _ui_com_ajuste()
+    ui.btn_scen_padrao.click()
+    ui.btn_project.click()
+    assert ui.projection_ is not None
+    ui.tx_ar_orders.value = "2"                         # especificação mudou
+    assert ui.projection_ is None and ui.weighted_ is None
+    assert ui.out_proj_tabela.value == ""
+    assert "desatualizada" in ui.out_proj_status.value
+    assert ui.scenarios_ is not None and len(ui.scenarios_) == 3
+
+
+# ======================================================================
+# Aba Backtest
+# ======================================================================
+def _ui_para_backtest(n=60):
+    ui = _ui_pronta_para_ajuste(n=n)
+    ui.btn_fit_now.click()
+    ui.sl_bt_min_train.value = 44
+    ui.sl_bt_horizon.value = 2
+    ui.sl_bt_sims.value = 60                            # bandas baratas
+    return ui
+
+
+def test_dimensionamento_das_janelas_do_backtest():
+    ui = _ui_para_backtest()
+    p = ui._render_bt_info()
+    assert p["janelas"] == 60 - 2 + 1 - 44
+    assert p["pontos"] == p["janelas"] * 2
+    assert "violações esperadas" in ui.out_bt_info.value
+    ui.sl_bt_min_train.value = 70                       # maior que a série
+    assert ui._bt_params()["janelas"] == 0
+    ui.btn_backtest.click()
+    assert ui.backtest_ is None
+    assert "Sem janela de validação" in ui.out_bt_status.value
+
+
+def test_backtest_cobertura_kupiec_e_christoffersen():
+    ui = _ui_para_backtest()
+    ui.btn_backtest.click()
+    wf = ui.backtest_
+    assert wf is not None, ui.out_bt_status.value
+    assert wf["n_windows"] > 0
+    bandas = wf["bands"]
+    assert set(("passo", "previsto", "lower", "upper", "real", "violacao")) <= set(bandas.columns)
+
+    cov = ui.coverage_
+    assert cov is not None and "todos" in [str(p) for p in cov["passo"]]
+    for col in ("cobertura", "kupiec_pvalue", "christoffersen_pvalue"):
+        assert col in cov.columns, col
+
+    # veredito visível: placar + leitura em texto com os números
+    placar = ui.out_bt_placar.value
+    assert "Cobertura das bandas" in placar and "Kupiec" in placar
+    assert "Christoffersen" in placar
+    leitura = ui.out_bt_leitura.value
+    assert "cobriram" in leitura and "Kupiec" in leitura
+    assert "RMSE" in leitura
+    # erro por horizonte e tabela de cobertura
+    erros = ui.out_bt_erros.value
+    assert "RMSE" in erros and "MAPE" in erros and "viés" in erros
+    tabela = ui.out_bt_cobertura.value
+    assert "cobertura empírica" in tabela and "p Kupiec" in tabela
+    # progresso por etapa e gráfico das violações
+    assert "Progresso do backtest" in ui.out_bt_progress.value
+    assert "concluída" in ui.out_bt_progress.value
+    assert ui.dd_bt_passo.options and "<img" in ui.out_bt_plot.value
+    ui.dd_bt_passo.value = 2
+    assert "<img" in ui.out_bt_plot.value
+
+
+def test_backtest_erros_por_passo_crescem_com_o_horizonte():
+    ui = _ui_para_backtest()
+    ui.btn_backtest.click()
+    tab = ui._bt_erros_por_passo(ui.backtest_["bands"])
+    assert list(tab["passo"]) == ["1", "2", "todos"]
+    assert (tab["n"] > 0).all()
+    assert tab.loc[tab["passo"] == "2", "RMSE"].iloc[0] > 0
+
+
+def test_backtest_sem_modelo_e_invalidacao():
+    ui = _ui()
+    ui.btn_backtest.click()
+    assert ui.backtest_ is None
+    assert "modelo vigente" in ui.out_bt_status.value
+
+    ui2 = _ui_para_backtest()
+    ui2.btn_backtest.click()
+    assert ui2.backtest_ is not None
+    ui2.tx_ar_orders.value = "2"
+    assert ui2.backtest_ is None and ui2.coverage_ is None
+    assert "desatualizado" in ui2.out_bt_notice.value
+    assert ui2.out_bt_cobertura.value == "" and ui2.out_bt_plot.value == ""
+
+
+def test_troca_de_dados_zera_cenarios_e_backtest():
+    ui = _ui_para_backtest()
+    ui.sl_scen_horizon.value = 4
+    ui.btn_scen_padrao.click()
+    ui.btn_project.click()
+    ui.btn_backtest.click()
+    outra = _sintetico(n=48, seed=11)
+    ui.set_data(outra.series, outra.macro)
+    assert ui.scenarios_ is None and ui.projection_ is None and ui.weighted_ is None
+    assert ui.backtest_ is None and ui.coverage_ is None
+    assert ui.out_scen_tabela.value == "" and ui.out_bt_cobertura.value == ""
+    assert ui.ta_scen_csv.value == ""
+
+
+# ======================================================================
 # Tema
 # ======================================================================
 def _htmls(widget, acc=None):
@@ -559,6 +819,23 @@ def test_html_da_selecao_e_do_diagnostico_usa_tokens_de_tema():
     ui.btn_search.click()
     ui.btn_dm.click()
     ui.btn_diag.click()
+    ui.cb_dark.value = True
+    for html in _htmls(ui.panel):
+        if "<style>" in html:
+            continue
+        achados = _HEX.findall(html)
+        assert not achados, f"hex fixo no HTML gerado: {achados[:3]} em {html[:120]!r}"
+
+
+def test_html_de_cenarios_e_backtest_usa_tokens_de_tema():
+    """Idem nas abas de projeção e backtest (leque, placar de cobertura, tabelas)."""
+    ui = _ui_para_backtest()
+    ui.sl_scen_horizon.value = 4
+    ui.sl_scen_sims.value = 60
+    ui.btn_scen_padrao.click()
+    ui.btn_project.click()
+    ui.btn_scen_export.click()
+    ui.btn_backtest.click()
     ui.cb_dark.value = True
     for html in _htmls(ui.panel):
         if "<style>" in html:
