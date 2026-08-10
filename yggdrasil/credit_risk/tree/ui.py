@@ -12,7 +12,10 @@ sobre o DataFrame e o alvo reais. Recursos:
 - **discriminação ao vivo** por amostra: KS/AUC (classificação) ou R² (regressão);
 - tabela de folhas com **PSI por amostra** e **p-valor** do teste entre folhas adjacentes;
 - gráficos por tarefa: ROC/KS/taxa-default/distribuição (clf) ou boxplot/histograma (reg);
-- travar folhas como finais (cadeado), podar, resetar e exportar o DataFrame rotulado.
+- travar folhas como finais (cadeado), podar, resetar e exportar o DataFrame rotulado;
+- **cenários nomeados em memória** (aba Avançado): salve versões da árvore na
+  sessão, restaure depois (desfazível) e compare-as lado a lado com a atual —
+  os cenários NÃO são gravados em disco (para persistir use Salvar/JSON ou MLflow).
 
     from yggdrasil.credit_risk.tree import TreeSegmenterUI
     ui = TreeSegmenterUI(df, target="target", task_type="classification",
@@ -539,6 +542,9 @@ class TreeSegmenterUI:
         self._undo: list = []        # pilha de estados p/ desfazer splits/fusões
         self._redo: list = []        # pilha de estados p/ refazer
         self._log_lines: list = []   # buffer do console (últimas 40 linhas) — ver _log
+        # cenários nomeados EM MEMÓRIA (nome → to_dict() + locked + linha-resumo):
+        # vivem SÓ nesta sessão — fechar o notebook os descarta. Ver card "Cenários".
+        self._scenarios: dict = {}
 
         # máscaras de amostra (fixas) e amostras ≠ referência (ex.: OOT)
         if sample_col is not None:
@@ -772,6 +778,15 @@ class TreeSegmenterUI:
         self.btn_diff = mk("Comparar com árvore B", "warning",
                            "Carrega outra árvore (JSON) e compara com a atual", "exchange")
         self.out_diff = W.HTML()
+        # ---- cenários nomeados EM MEMÓRIA (card "Cenários", aba Avançado) ----
+        self.tx_scn_name = W.Text(description="nome", placeholder="ex.: v1 · 8 folhas",
+                                  layout=W.Layout(width="40%"), style=dstyle)
+        self.btn_scn_save = mk("Salvar cenário", "success",
+                               "Guarda a árvore ATUAL como cenário nomeado em memória "
+                               "(vale só nesta sessão; não grava em disco)", "bookmark")
+        self.out_scn_summary = W.HTML()   # mini-tabela resumo (atual + cenários)
+        self.box_scn_list = W.VBox([])    # linhas: nome + Restaurar/Comparar/remover
+        self.out_scn_diff = W.HTML()      # resultado da comparação cenário × atual
         # concentração das folhas no auto-fit — REPRESENTATIVIDADE GLOBAL (% da
         # carteira inteira). Cada uma só atua se o respectivo checkbox estiver marcado.
         self.cb_autoconc_min = W.Checkbox(value=True, indent=False,
@@ -1056,6 +1071,7 @@ class TreeSegmenterUI:
         self.btn_sql.on_click(self._on_sql)
         self.dd_fallback.observe(self._on_fallback, names="value")
         self.btn_diff.on_click(self._on_diff)
+        self.btn_scn_save.on_click(self._on_scn_save)
         self.btn_autofit.on_click(self._on_autofit)
         self.btn_mlflow.on_click(self._on_mlflow)
         self.btn_clear_log.on_click(self._on_clear_log)
@@ -1818,6 +1834,20 @@ class TreeSegmenterUI:
             W.HTML("<div class='treeui-legend'>Carrega outra árvore salva em JSON e compara com a "
                    "atual: migração de folhas, concordância e métricas lado a lado.</div>"),
             W.HBox([self.tx_diff_path, self.btn_diff]), self.out_diff]); card_diff.add_class("treeui-card")
+        self.btn_scn_save.layout.width = "auto"
+        card_scn = W.VBox([
+            W.HTML("<div class='treeui-h'>Cenários (em memória · só nesta sessão)</div>"),
+            W.HTML("<div class='treeui-legend'>Guarde versões nomeadas da árvore e compare-as "
+                   "sem sair da interface: <b>Salvar cenário</b> fotografa a estrutura atual "
+                   "(condições, apelidos, fallback e folhas travadas); <b>Restaurar</b> volta a "
+                   "árvore para a foto (desfazível com ↶ Desfazer); <b>Comparar com o atual</b> "
+                   "mostra concordância, migração de folhas e Δ de métricas. Os cenários vivem "
+                   "<b>apenas nesta sessão</b> (memória do kernel) — para persistir em disco use "
+                   "Salvar (JSON) ou o MLflow, na aba Exportar.</div>"),
+            W.HBox([self.tx_scn_name, self.btn_scn_save],
+                   layout=W.Layout(align_items="center")),
+            self.out_scn_summary, self.box_scn_list, self.out_scn_diff])
+        card_scn.add_class("treeui-card")
         card_sug.layout.width = "36%"
         card_merge.layout.width = "32%"
         card_prune.layout.width = "30%"
@@ -1825,7 +1855,7 @@ class TreeSegmenterUI:
             W.HBox([card_sug, card_merge, card_prune],
                    layout=W.Layout(justify_content="space-between", width="100%",
                                    align_items="stretch")),
-            card_imp, card_sql, card_diff,
+            card_imp, card_sql, card_diff, card_scn,
             # validação regulatória (monotonicidade/calibração/backtest + relatório)
             # movida para cá: é uma etapa de fechamento, não da decisão de segmentação.
             sep_val, card_validacao])
@@ -2903,6 +2933,10 @@ class TreeSegmenterUI:
         if self.out_sql.value.strip():
             self.out_sql.value = ("-- Árvore alterada — SQL desatualizado. Clique em "
                                   "'Gerar SQL (CASE WHEN)' para regenerar.")
+        # a mini-tabela de cenários compara com o estado ATUAL — acompanha as
+        # mutações (custo ~zero: metrics/psi memoizados por versão da árvore) e
+        # marca uma comparação já renderizada como desatualizada
+        self._refresh_scn_panel(stale_diff=True)
         # preview interativo aberto: re-renderiza imagem + hit-map (a árvore mudou);
         # fechado, nada a fazer — o próximo "Ver árvore" já desenha o estado novo
         if self._tree_img_visible():
@@ -3340,6 +3374,23 @@ class TreeSegmenterUI:
         except Exception as e:
             self.out_sql.value = f"-- Erro ao gerar SQL: {type(e).__name__}: {e}"
 
+    def _diff_html(self, d, label_a=None, label_b=None) -> str:
+        """Renderização COMPARTILHADA da comparação de duas árvores (saída de
+        ``diff_trees``): concordância, tabela-resumo (folhas + Δ de métricas) e
+        crosstab de migração de notas. Usada pelo card "Comparar duas árvores"
+        (JSON em disco) e pelo card "Cenários" (versões em memória). ``label_a``/
+        ``label_b`` (já escapados p/ HTML) identificam A e B quando informados."""
+        mig = d["migracao"].copy()
+        mig.index = [f"A·{i}" for i in mig.index]
+        mig.columns = [f"B·{c}" for c in mig.columns]
+        rotulo = (f" · A = {label_a} · B = {label_b}" if (label_a or label_b) else "")
+        return (f"<div class='treeui-legend'>Concordância de folhas (A=B): "
+                f"<b>{d['concordancia']:.1%}</b>{rotulo}</div>"
+                + self._df_html(d["resumo"], center=True)
+                + "<div class='treeui-h' style='margin-top:8px'>Migração de folhas "
+                  "(linhas = árvore A · colunas = árvore B)</div>"
+                + mig.to_html(border=0))
+
     def _on_diff(self, _):
         from .segmenter import TreeSegmenter
         path = (self.tx_diff_path.value or "").strip()
@@ -3355,17 +3406,174 @@ class TreeSegmenterUI:
                 self.out_diff.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro ao "
                                        f"comparar: {type(e).__name__}: {e}</div>")
                 return
-            mig = d["migracao"].copy()
-            mig.index = [f"A·{i}" for i in mig.index]
-            mig.columns = [f"B·{c}" for c in mig.columns]
-            html = (f"<div class='treeui-legend'>Concordância de folhas (A=B): "
-                    f"<b>{d['concordancia']:.1%}</b></div>"
-                    + self._df_html(d["resumo"], center=True)
-                    + "<div class='treeui-h' style='margin-top:8px'>Migração de folhas "
-                      "(linhas = árvore A · colunas = árvore B)</div>"
-                    + mig.to_html(border=0))
-            self.out_diff.value = html
+            self.out_diff.value = self._diff_html(d)
             self._log(f"Comparação concluída — concordância {d['concordancia']:.1%}.")
+
+    # ==================================================================
+    # Cenários nomeados EM MEMÓRIA (card "Cenários", aba Avançado)
+    #   nome → {"data": to_dict(), "locked": folhas travadas, "resumo": linha da
+    #   mini-tabela}. Vivem SÓ nesta sessão (memória do kernel): fechar/reiniciar
+    #   o notebook os descarta — persistência de verdade é Salvar (JSON)/MLflow.
+    #   Restaurar passa pelo _checkpoint (desfazível com ↶); Comparar reconstrói
+    #   o cenário em memória via from_dict sobre o MESMO df, compartilhando o
+    #   cache de máscaras (_prime_mask_cache) p/ não recomputar condições iguais.
+    # ==================================================================
+    def _scn_resumo_row(self, seg) -> dict:
+        """Linha da mini-tabela de cenários: nº de folhas, discriminação por
+        amostra (KS/AUC na classificação · R² na regressão) e PSI máximo."""
+        row = {"folhas": int(sum(s["is_leaf"] for s in seg.segments.values()))}
+        try:
+            m = seg.metrics()                     # memoizado por versão da árvore
+            cols = [("KS", "KS"), ("AUC", "AUC")] if self._is_clf else [("R2", "R²")]
+            for _, r in m.iterrows():
+                for col, rot in cols:
+                    v = r.get(col)
+                    if pd.notna(v):
+                        row[f"{rot} · {r['amostra']}"] = round(float(v), 4)
+        except Exception:
+            pass                                  # sem métricas → linha só com folhas
+        if self.sample_col is not None:
+            try:
+                p = seg.psi()
+                if len(p):
+                    row["PSI máx"] = round(float(p["psi"].max()), 4)
+            except Exception:
+                pass
+        return row
+
+    def _scn_row(self, nome):
+        """Linha da lista de cenários: nome + botões Restaurar / Comparar / remover."""
+        res = self._scenarios[nome]["resumo"]
+        lab = W.HTML(f"<div style='font-size:12.5px'>🔖 <b>{_esc(nome)}</b> "
+                     f"<span style='color:var(--muted)'>· {res.get('folhas', '?')} "
+                     "folhas</span></div>",
+                     layout=W.Layout(flex="1 1 auto", min_width="120px"))
+        bt_r = W.Button(description="Restaurar", icon="history",
+                        tooltip="Volta a árvore para este cenário "
+                                "(desfazível com ↶ Desfazer)",
+                        layout=W.Layout(width="120px"))
+        bt_c = W.Button(description="Comparar com o atual", icon="exchange",
+                        button_style="warning",
+                        tooltip="Reconstrói o cenário em memória e o compara com a "
+                                "árvore atual (concordância, migração e Δ de métricas)",
+                        layout=W.Layout(width="190px"))
+        bt_x = W.Button(description="✕", tooltip="Remove o cenário desta sessão",
+                        layout=W.Layout(width="34px"))
+        bt_r.on_click(lambda b, n=nome: self._on_scn_restore(n, b))
+        bt_c.on_click(lambda b, n=nome: self._on_scn_compare(n, b))
+        bt_x.on_click(lambda b, n=nome: self._on_scn_remove(n))
+        return W.HBox([lab, bt_r, bt_c, bt_x],
+                      layout=W.Layout(width="100%", align_items="center",
+                                      margin="1px 0"))
+
+    def _refresh_scn_panel(self, stale_diff=False, rebuild_rows=False):
+        """Atualiza o card de cenários: a mini-tabela resumo (estado ATUAL na 1ª
+        linha + um cenário por linha) acompanha toda mutação; as LINHAS de botões
+        só são reconstruídas com ``rebuild_rows=True`` (salvar/remover — recriar
+        widgets a cada _refresh acumularia instâncias no registry do ipywidgets).
+        ``stale_diff=True`` marca uma comparação já renderizada como desatualizada
+        (a árvore atual ou a lista de cenários mudou)."""
+        if rebuild_rows:
+            for row in self.box_scn_list.children:   # libera os widgets antigos
+                for w in row.children:
+                    w.close()
+                row.close()
+            self.box_scn_list.children = tuple(self._scn_row(n)
+                                               for n in self._scenarios)
+        if not self._scenarios:
+            self._set_html(self.out_scn_summary, "scn_summary",
+                           "<div class='treeui-legend'><i>Nenhum cenário salvo ainda — dê um "
+                           "nome (opcional) e clique em <b>Salvar cenário</b>.</i></div>")
+            if stale_diff:
+                self.out_scn_diff.value = ""
+            return
+        rows = [{"cenário": "— atual —", **self._scn_resumo_row(self.seg)}]
+        rows += [{"cenário": nome, **scn["resumo"]}
+                 for nome, scn in self._scenarios.items()]
+        self._set_html(self.out_scn_summary, "scn_summary",
+                       self._df_html(pd.DataFrame(rows), center=True))
+        if stale_diff and self.out_scn_diff.value:
+            self.out_scn_diff.value = (
+                "<div style='font-size:12px;color:var(--warn-tx);background:var(--warn-bg);"
+                "border-radius:6px;padding:4px 8px;display:inline-block'>⚠️ Árvore ou "
+                "cenários alterados — comparação desatualizada. Clique em <b>Comparar com "
+                "o atual</b> para recalcular.</div>")
+
+    def _on_scn_save(self, _):
+        nome = (self.tx_scn_name.value or "").strip()
+        if not nome:                              # sem nome → nome sequencial
+            nome = f"cenário {len(self._scenarios) + 1}"
+        sobrescreve = nome in self._scenarios
+        self._scenarios[nome] = {
+            "data": self.seg.to_dict(),           # estrutura + apelidos + fallback
+            "locked": set(self.locked),           # folhas travadas acompanham a foto
+            # resumo calculado UMA vez no save (a foto não muda; metrics/psi do
+            # estado atual são memoizados → custo ~zero)
+            "resumo": self._scn_resumo_row(self.seg),
+        }
+        self.tx_scn_name.value = ""
+        self._refresh_scn_panel(rebuild_rows=True)
+        self._log(f"Cenário '{nome}' " + ("sobrescrito" if sobrescreve else "salvo")
+                  + " em memória — vale só nesta sessão (p/ disco: Salvar JSON/MLflow).")
+
+    def _on_scn_restore(self, nome, botao=None):
+        """Volta a árvore para o cenário ``nome`` — passa pelo :meth:`_checkpoint`,
+        logo é desfazível com ↶ Desfazer (a estrutura; o fallback segue a foto)."""
+        scn = self._scenarios.get(nome)
+        if scn is None:
+            return
+        antes = self._delta_snapshot()
+        self._checkpoint()                        # restaurar é desfazível
+        data = scn["data"]
+        meta = data.get("meta", {})
+        # máscaras vivas → cache por condições: segmentos iguais entre o estado
+        # atual e o cenário não são recalculados (mesma amortização do undo/redo)
+        self.seg._prime_mask_cache()
+        self.seg._load_segments(data["segments"])
+        nomes = meta.get("leaf_names") or {}
+        self.seg.leaf_names = {sid: str(n) for sid, n in nomes.items()
+                               if n and sid in self.seg.segments
+                               and self.seg.segments[sid]["is_leaf"]}
+        self.seg.fallback = meta.get("fallback")
+        # espelha o fallback restaurado no dropdown (observer re-loga se mudar)
+        self.dd_fallback.value = ("pior_nota" if self.seg.fallback == "pior_nota"
+                                  else None)
+        self.locked = set(scn.get("locked") or set()) & set(self.seg.segments)
+        self._pending = None
+        self._refresh()
+        self._log_delta(f"cenário '{nome}' restaurado", antes)
+
+    def _on_scn_compare(self, nome, botao=None):
+        """Compara a árvore ATUAL (A) com o cenário ``nome`` (B) reconstruído em
+        memória sobre o MESMO DataFrame, e renderiza no card (helper comum)."""
+        from .segmenter import TreeSegmenter
+        scn = self._scenarios.get(nome)
+        if scn is None:
+            return
+        botoes = (botao,) if botao is not None else ()
+        with self._busy(*botoes, status=self.out_scn_diff,
+                        msg="comparando o cenário com a árvore atual…"):
+            try:
+                # prime → cache compartilhado: o from_dict reusa as máscaras dos
+                # segmentos que o cenário tem em comum com a árvore atual
+                cache = self.seg._prime_mask_cache()
+                other = TreeSegmenter.from_dict(scn["data"], self.df,
+                                                mask_cache=cache)
+                d = self.seg.diff_trees(other)
+            except Exception as e:
+                self.out_scn_diff.value = (
+                    f"<div style='color:var(--bad-tx);font-size:12px'>Erro ao comparar: "
+                    f"{type(e).__name__}: {e}</div>")
+                return
+            self.out_scn_diff.value = self._diff_html(
+                d, label_a="árvore atual", label_b=f"cenário '{_esc(nome)}'")
+            self._log(f"Comparação com o cenário '{nome}' — concordância "
+                      f"{d['concordancia']:.1%}.")
+
+    def _on_scn_remove(self, nome):
+        if self._scenarios.pop(nome, None) is not None:
+            self._refresh_scn_panel(stale_diff=True, rebuild_rows=True)
+            self._log(f"Cenário '{nome}' removido da sessão.")
 
     def _on_autofit(self, _):
         sid = self._selected_leaf()

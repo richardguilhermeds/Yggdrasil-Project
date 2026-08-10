@@ -5309,13 +5309,16 @@ class TreeSegmenter:
 
     def _prime_mask_cache(self):
         """Registra as máscaras VIVAS (por condições) no cache, para um restore
-        seguinte (undo/redo) reusar as inalteradas em vez de recomputá-las."""
+        seguinte (undo/redo) reusar as inalteradas em vez de recomputá-las.
+        Devolve o próprio cache — pode ser passado a :meth:`from_dict` via
+        ``mask_cache`` para amortecer reconstruções em memória (cenários)."""
         cache = self._mask_cache_by_conds
         if len(cache) > 4000:
             cache.clear()
         for s in self.segments.values():
             cache.setdefault(self._conds_key(self._conditions_json(s["conditions"])),
                              s["mask"])
+        return cache
 
     def _load_segments(self, segs: dict):
         """Reconstrói self.segments a partir da forma serializada. Reusa máscaras
@@ -5347,8 +5350,16 @@ class TreeSegmenter:
         return path
 
     @classmethod
-    def from_dict(cls, data: dict, df: pd.DataFrame, verbose: bool = False):
-        """Reconstrói um segmentador a partir de `to_dict()` + um DataFrame."""
+    def from_dict(cls, data: dict, df: pd.DataFrame, verbose: bool = False,
+                  mask_cache: dict | None = None):
+        """Reconstrói um segmentador a partir de `to_dict()` + um DataFrame.
+
+        ``mask_cache`` (opcional): cache condições→máscara de OUTRA árvore sobre
+        o **mesmo** ``df`` (o dict devolvido por :meth:`_prime_mask_cache`). O
+        cache passa a ser COMPARTILHADO com a nova instância: segmentos cujas
+        condições coincidem reusam a máscara pronta em vez de recomputá-la —
+        amortiza reconstruções em memória (ex.: comparação de cenários na UI).
+        Só passe um cache construído sobre o MESMO DataFrame."""
         meta = data.get("meta", {})
         # date_col entrou no meta depois (JSONs antigos não têm a chave → None);
         # se o df fornecido não tiver a coluna, degrada para None em vez de
@@ -5367,6 +5378,8 @@ class TreeSegmenter:
                   verbose=verbose)
         # fallback persistido (JSONs antigos não têm a chave → None = sem fallback)
         seg.fallback = meta.get("fallback")
+        if mask_cache is not None:      # cache compartilhado (mesmo df) — ver docstring
+            seg._mask_cache_by_conds = mask_cache
         seg._load_segments(data["segments"])
         # apelidos de negócio por folha (JSONs antigos não têm a chave → {});
         # entradas cujo sid não é folha desta estrutura são descartadas

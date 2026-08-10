@@ -606,6 +606,23 @@ def test_diff_trees_task_incompativel():
         a.diff_trees(b)
 
 
+def test_from_dict_mask_cache_compartilhado(task):
+    """`from_dict(..., mask_cache=...)` (cenários em memória): reconstrução sobre
+    o MESMO df reusa as máscaras vivas registradas por `_prime_mask_cache` —
+    mesmo objeto por segmento (nada recomputado) e cache compartilhado."""
+    seg = _mk(task)
+    seg.grow("score", splits=[0.8])
+    d = seg.to_dict()
+    cache = seg._prime_mask_cache()               # devolve o cache primado
+    novo = TreeSegmenter.from_dict(d, seg.df, mask_cache=cache)
+    assert set(novo.segments) == set(seg.segments)
+    for sid, s in seg.segments.items():           # máscara REUSADA (identidade)
+        assert novo.segments[sid]["mask"] is s["mask"]
+    assert novo._mask_cache_by_conds is seg._mask_cache_by_conds
+    # e o diff das duas árvores idênticas concorda 100%
+    assert seg.diff_trees(novo)["concordancia"] == pytest.approx(1.0)
+
+
 # ----------------------------------------------------------------------
 # Excel multi-abas (gated por openpyxl — dependência OPCIONAL)
 # ----------------------------------------------------------------------

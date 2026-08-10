@@ -552,6 +552,43 @@ def test_ui_diff_de_arvores(task, tmp_path):
     assert "Concord" in ui.out_diff.value and "Erro" not in ui.out_diff.value
 
 
+def test_ui_cenarios_salvar_comparar_restaurar(task):
+    """Cenários em memória: salvar → mutar → comparar (diff não-vazio) →
+    restaurar volta ao estado salvo (e é desfazível via ↶)."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        # árvore com 1 split → salva como cenário 'v1'
+        ui.dd_leaf.value = "root"
+        ui.dd_feature.value = "score"
+        ui.tg_mode.value = "Manual"
+        ui.tx_cuts.value = "0.8"
+        ui._on_preview(None); ui._on_split(None)
+        n_cen = _nleaf(ui)
+        ui.tx_scn_name.value = "v1"
+        ui._on_scn_save(None)
+        assert "v1" in ui._scenarios
+        segs_salvos = ui._scenarios["v1"]["data"]["segments"]
+        # mini-tabela resume o estado atual + o cenário; lista ganha os botões
+        assert "atual" in ui.out_scn_summary.value and "v1" in ui.out_scn_summary.value
+        assert len(ui.box_scn_list.children) == 1
+        # muta a árvore (recolhe o split de volta à raiz) → diverge do cenário
+        ui._on_collapse(None)
+        n_mut = _nleaf(ui)
+        assert n_mut != n_cen
+        # comparar com o atual: diff não-vazio, renderizado pelo helper comum
+        ui._on_scn_compare("v1")
+        assert "Concord" in ui.out_scn_diff.value and "Erro" not in ui.out_scn_diff.value
+        assert "Migração de folhas" in ui.out_scn_diff.value
+        assert "cenário" in ui.out_scn_diff.value        # rótulo A = atual · B = cenário
+        # restaurar volta EXATAMENTE ao estado salvo…
+        ui._on_scn_restore("v1")
+        assert _nleaf(ui) == n_cen
+        assert ui.seg.to_dict()["segments"] == segs_salvos
+        # …e é desfazível: o ↶ devolve a árvore mutada (pós-auto-fit)
+        ui._on_undo(None)
+        assert _nleaf(ui) == n_mut
+
+
 def test_ui_plots_especificos_por_task(task):
     ui = _build(task)
     with contextlib.redirect_stdout(io.StringIO()):
