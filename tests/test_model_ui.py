@@ -329,6 +329,34 @@ def test_metrics_ci_na_tabela_por_checkbox():
     assert "var(--sub-ink)'>[" not in ui.out_metrics.value
 
 
+def test_shap_local_card():
+    """Card SHAP local: 'Calcular SHAP' popula o seletor do dependence; o botão
+    renderiza o gráfico; o campo de índice valida a linha (aviso amigável para
+    índice inexistente) e o waterfall da observação é renderizado."""
+    pytest.importorskip("shap")
+    ui = _build()
+    # sem modelo treinado: guardas amigáveis, sem exceção nem render
+    ui._on_shap_dep(None)
+    ui._on_shap_row(None)
+    assert ui.out_shap_dep.value == "" and ui.out_shap_row.value == ""
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.seg.fit()
+        ui._on_shap(None)                   # calcula SHAP e popula o seletor
+    assert len(ui.dd_shap_dep.options) >= 1
+    ui.dd_shap_dep.value = ui.dd_shap_dep.options[0][1]
+    ui._on_shap_dep(None)
+    assert "<img" in ui.out_shap_dep.value  # dependence renderizado (PNG inline)
+    # índice inexistente → aviso amigável, sem gráfico
+    ui.tx_shap_row.value = "999999"
+    ui._on_shap_row(None)
+    assert "<img" not in ui.out_shap_row.value
+    assert "existente" in ui.out_shap_row.value
+    # índice válido → waterfall renderizado
+    ui.tx_shap_row.value = str(ui.seg.df.index[0])
+    ui._on_shap_row(None)
+    assert "<img" in ui.out_shap_row.value
+
+
 def test_toggle_monotonicidade_ignorado_sem_suporte():
     """Toggle marcado + algoritmo sem suporte: o fit via UI NÃO repassa a opção
     (nem aviso, nem restrição) — a linha fica oculta, mas o valor persiste."""

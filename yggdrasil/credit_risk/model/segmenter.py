@@ -4542,11 +4542,11 @@ class ModelSegmenter:
         return fig
 
     # ---- SHAP ----
-    def _shap_inputs(self, sample=None, sample_size=2000):
-        """(estimador, X_transformado_df, nomes) — para SHAP. Em pipelines,
-        transforma com o pré-processador e usa o estimador final."""
-        sub = self._frame(sample)
-        X = sub[self.model_features]
+    def _shap_transform(self, X) -> tuple:
+        """(estimador_final, X_transformado_df) — aplica o pré-processador do
+        pipeline (quando houver) a linhas CRUAS de ``X`` e devolve o estimador
+        final, para alimentar o SHAP. Compartilhado por :meth:`_shap_inputs`
+        (amostra inteira) e pelos caminhos por linha/lote (reason codes)."""
         est, pre = self.model, None
         try:
             if hasattr(self.model, "named_steps") and "est" in self.model.named_steps:
@@ -4563,7 +4563,14 @@ class ModelSegmenter:
             Xt = pd.DataFrame(np.asarray(Xt), columns=names, index=X.index)
         else:
             Xt = X
-            names = list(self.model_features)
+        return est, Xt
+
+    def _shap_inputs(self, sample=None, sample_size=2000):
+        """(estimador, X_transformado_df, nomes) — para SHAP. Em pipelines,
+        transforma com o pré-processador e usa o estimador final."""
+        sub = self._frame(sample)
+        est, Xt = self._shap_transform(sub[self.model_features])
+        names = list(Xt.columns)
         if sample_size and len(Xt) > sample_size:
             Xt = Xt.sample(sample_size, random_state=self.random_state)
         return est, Xt, names
@@ -4721,6 +4728,222 @@ class ModelSegmenter:
         fig.tight_layout()
         plt.close(fig)          # tira do Gcf: evita re-exibição inline e vazamento de figuras
         return fig
+
+    # ---- SHAP local: dependence · explicação por linha · reason codes ----
+    def _group_shap_matrix(self, sv, Xs) -> pd.DataFrame:
+        """Agrega a matriz de SHAP ``(linhas × colunas transformadas)`` por
+        variável ORIGINAL: soma as colunas geradas por cada variável (as
+        *dummies* de uma categórica entram juntas — ver
+        :meth:`_original_feature_of`). Devolve DataFrame ``(linhas × variáveis)``
+        alinhado ao índice de ``Xs``."""
+        sv = np.asarray(sv)
+        groups: dict = {}
+        for j, c in enumerate(Xs.columns):
+            groups.setdefault(self._original_feature_of(str(c)), []).append(j)
+        data = {orig: sv[:, cols].sum(axis=1) for orig, cols in groups.items()}
+        return pd.DataFrame(data, index=Xs.index)
+
+    def shap_contributions(self, sample=None, sample_size=2000) -> pd.DataFrame:
+        """Contribuições SHAP **por variável original**, linha a linha: DataFrame
+        ``(linhas × variáveis do modelo)`` com a soma das colunas transformadas de
+        cada variável (dummies de categórica agregadas), alinhado à amostra usada
+        no cache de :meth:`shap_values`. Base para o dependence
+        (:meth:`plot_shap_dependence`) e para os reason codes
+        (:meth:`reason_codes`)."""
+        sv, Xs = self.shap_values(sample, sample_size)
+        return self._group_shap_matrix(sv, Xs)
+
+    def plot_shap_dependence(self, feature, sample=None, sample_size=2000,
+                             figsize=(7.0, 4.4), dpi=150, save_path=None, ax=None):
+        """Dependence SHAP por variável ORIGINAL: dispersão do valor da variável
+        (eixo X) × contribuição SHAP agregada pela variável (eixo Y — dummies de
+        categórica somadas). Numéricas viram dispersão contínua; categóricas,
+        dispersão por categoria (com *jitter*) e a média por categoria marcada.
+        Matplotlib puro — não depende dos gráficos nativos do ``shap``."""
+        M = self.shap_contributions(sample, sample_size)
+        if feature not in M.columns:
+            raise ValueError(f"'{feature}' não é variável do modelo. "
+                             f"Opções: {sorted(M.columns)}")
+        contrib = M[feature].to_numpy(dtype="float64")
+        vals = self.df.loc[M.index, feature]
+        fig, ax = _new_ax(figsize, dpi, ax)
+        if self._detect_kind(feature) == "num":
+            v = pd.to_numeric(vals, errors="coerce").to_numpy(dtype="float64")
+            ok = np.isfinite(v)
+            ax.scatter(v[ok], contrib[ok], s=14, alpha=0.45, color="#3b6ea5",
+                       edgecolors="none")
+            if (~ok).any():                     # faltantes não têm posição no eixo X
+                ax.text(0.02, 0.03,
+                        f"faltantes: n={int((~ok).sum())} · contribuição média "
+                        f"{float(np.mean(contrib[~ok])):+.4f}",
+                        transform=ax.transAxes, fontsize=8, color="#889")
+            ax.set_xlabel(self.label(feature), fontsize=9)
+        else:
+            s = pd.Series(np.where(vals.isna(), "(faltante)", vals.astype(str)),
+                          index=vals.index)
+            medias = (pd.Series(contrib, index=s.index).groupby(s).mean()
+                      .sort_values())
+            cats = list(medias.index)
+            rng = np.random.default_rng(self.random_state)
+            for i, c in enumerate(cats):
+                m = (s == c).to_numpy()
+                x = i + rng.uniform(-0.18, 0.18, int(m.sum()))
+                ax.scatter(x, contrib[m], s=12, alpha=0.4, color="#3b6ea5",
+                           edgecolors="none")
+                mu = float(medias[c])           # média da categoria em destaque
+                ax.plot([i - 0.3, i + 0.3], [mu, mu], color="#d6453e", lw=2.2,
+                        solid_capstyle="round", zorder=3)
+            ax.set_xticks(range(len(cats)))
+            ax.set_xticklabels([self._truncate_label(c, 16) for c in cats],
+                               rotation=30, ha="right", fontsize=8)
+            ax.set_xlabel(f"{self.label(feature)} (média por categoria em vermelho)",
+                          fontsize=9)
+        ax.axhline(0.0, color="#889", lw=0.8, ls="--")
+        ax.set_ylabel("contribuição SHAP (agregada pela variável)", fontsize=9)
+        ax.grid(alpha=0.12)
+        ax.set_title(f"SHAP — dependence · {self._truncate_label(self.label(feature))}",
+                     fontsize=11, fontweight="bold", color="#15324a")
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def _shap_row(self, index, sample=None, sample_size=2000, background=100):
+        """Valores SHAP (por coluna transformada) de UMA linha do ``df``. Reusa o
+        cache de :meth:`shap_values` quando a linha caiu na amostra; senão calcula
+        só para ela, com um pequeno ``background`` da própria amostra (necessário
+        aos explicadores que precisam de base). Devolve ``(sv_linha, x_linha)``."""
+        if index not in self.df.index:
+            raise KeyError(f"Índice {index!r} não existe no DataFrame do segmenter.")
+        sv, Xs = self.shap_values(sample, sample_size)
+        try:
+            pos = int(Xs.index.get_indexer([index])[0])
+        except Exception:
+            pos = -1
+        if pos >= 0:
+            return np.asarray(sv)[pos], Xs.iloc[pos]
+        from ...interpretability.shap_explain import compute_shap
+        rows = [index] + [i for i in Xs.index[:background] if i != index]
+        est, Xt = self._shap_transform(self.df.loc[rows, self.model_features])
+        sv2, _ = compute_shap(est, Xt, problem_type=self.task_type, sample_size=None)
+        return np.asarray(sv2)[0], Xt.iloc[0]
+
+    def row_contributions(self, index, sample=None, sample_size=2000) -> pd.DataFrame:
+        """Contribuições SHAP de UMA observação, agregadas por variável original.
+        Devolve ``[variavel, variavel_label, valor, contribuicao]`` ordenado por
+        |contribuição| decrescente; ``valor`` é o valor CRU da variável na linha.
+        Em ``.attrs``: ``score`` (score cru da linha, 0–1 na classificação) e
+        ``base_value`` — obtido por diferença (``score − Σ contribuições``), o que
+        garante que o gráfico feche EXATAMENTE no score da linha mesmo quando o
+        explicador trabalha noutra escala (ex.: log-odds)."""
+        if self.model is None:
+            raise RuntimeError("Ajuste/defina o modelo antes (fit / set_model).")
+        sv_row, x_row = self._shap_row(index, sample, sample_size)
+        contrib: dict = {}
+        for j, c in enumerate(x_row.index):
+            orig = self._original_feature_of(str(c))
+            contrib[orig] = contrib.get(orig, 0.0) + float(sv_row[j])
+        rows = []
+        for var, v in contrib.items():
+            raw = self.df.loc[index, var] if var in self.df.columns else None
+            if raw is None or pd.isna(raw):
+                valor = "(faltante)"
+            elif isinstance(raw, (int, float, np.floating, np.integer)):
+                valor = _fmt(raw)
+            else:
+                valor = str(raw)
+            rows.append({"variavel": var, "variavel_label": self.label(var),
+                         "valor": valor, "contribuicao": v})
+        out = pd.DataFrame(rows)
+        out = (out.reindex(out["contribuicao"].abs().sort_values(ascending=False).index)
+               .reset_index(drop=True))
+        score = float(self._predict_score_array(
+            self.model, self.df.loc[[index], self.model_features])[0])
+        out.attrs["score"] = score
+        out.attrs["base_value"] = score - float(out["contribuicao"].sum())
+        out.attrs["index"] = index
+        return out
+
+    def explain_row(self, index, top_n=10, sample=None, sample_size=2000,
+                    figsize=(7.6, 4.8), dpi=150, save_path=None, ax=None):
+        """Waterfall horizontal (barh) da observação ``index``: parte do valor-base
+        e acumula as top-N contribuições SHAP (por variável original, dummies
+        agregadas) até o score da linha; as demais variáveis entram somadas numa
+        única barra. Rótulos usam ``feature_labels`` + o valor cru da variável.
+        Vermelho empurra o score para CIMA; azul, para baixo. Dados em
+        :meth:`row_contributions`."""
+        rc = self.row_contributions(index, sample=sample, sample_size=sample_size)
+        base = float(rc.attrs["base_value"])
+        score = float(rc.attrs["score"])
+        itens = [(f"{self._truncate_label(r['variavel_label'], 24)} = "
+                  f"{self._truncate_label(r['valor'], 14)}", float(r["contribuicao"]))
+                 for _, r in rc.head(top_n).iterrows()]
+        if len(rc) > top_n:
+            resto = float(rc.iloc[top_n:]["contribuicao"].sum())
+            itens.append((f"(demais {len(rc) - top_n} variáveis)", resto))
+        fig, ax = _new_ax(figsize, dpi, ax)
+        cum = base
+        for i, (_lab, c) in enumerate(itens):
+            left = cum if c >= 0 else cum + c
+            ax.barh(i, abs(c), left=left,
+                    color=("#d6453e" if c >= 0 else "#3b6ea5"),
+                    alpha=0.9, edgecolor="#27324a", linewidth=0.4, height=0.62)
+            ax.text(left + abs(c), i, f" {c:+.4f}", va="center", ha="left",
+                    fontsize=8, color="#33424f")
+            cum += c
+        ax.axvline(base, color="#889", lw=1.0, ls="--")
+        ax.axvline(score, color="#15324a", lw=1.2, ls=":")
+        ax.set_yticks(range(len(itens)))
+        ax.set_yticklabels([lab for lab, _ in itens], fontsize=8)
+        ax.invert_yaxis()                        # maior contribuição no topo
+        ax.set_xlabel(f"base {base:+.4f}  →  score {score:.4f} (escala crua)",
+                      fontsize=9)
+        ax.grid(axis="x", alpha=0.12)
+        ax.set_title(f"SHAP — explicação da linha {index!r}",
+                     fontsize=11, fontweight="bold", color="#15324a")
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
+
+    def reason_codes(self, X=None, top_n=3, use_labels=False, prefix="motivo_",
+                     sample=None, sample_size=2000) -> pd.DataFrame:
+        """Top-N motivos (*reason codes*) por linha: as variáveis de maior
+        |contribuição SHAP| agregada por variável original, com o sinal —
+        ``(+)`` empurra o score para cima, ``(-)`` para baixo. Sem ``X``, usa a
+        amostra do cache de :meth:`shap_values` (``sample``/``sample_size``); com
+        ``X`` (lote a escorar), calcula SHAP para TODAS as linhas de ``X`` —
+        caminho pandas (na escoragem Spark distribuída os motivos não são
+        anexados; ver :meth:`apply_spark`). Devolve DataFrame com as colunas
+        ``{prefix}1..{prefix}N`` (ex.: ``motivo_1``), alinhado ao índice das
+        linhas explicadas. Requer o pacote opcional ``shap``."""
+        try:
+            import shap                                    # noqa: F401
+        except ImportError as e:
+            raise ImportError("reason_codes requer o pacote opcional 'shap' — "
+                              "pip install shap") from e
+        if self.model is None:
+            raise RuntimeError("Ajuste/defina o modelo antes (fit / set_model).")
+        if X is None:
+            M = self.shap_contributions(sample, sample_size)
+        else:
+            from ...interpretability.shap_explain import compute_shap
+            X = self._apply_derived(pd.DataFrame(X))
+            est, Xt = self._shap_transform(X[self.model_features])
+            sv, _ = compute_shap(est, Xt, problem_type=self.task_type,
+                                 sample_size=None)
+            M = self._group_shap_matrix(sv, Xt)
+        A = M.to_numpy(dtype="float64")
+        names = [str(self.label(c)) if use_labels else str(c) for c in M.columns]
+        ordem = np.argsort(-np.abs(A), axis=1)             # |contribuição| desc
+        k = max(1, min(int(top_n), A.shape[1]))
+        linhas = np.arange(len(A))
+        out = {}
+        for j in range(k):
+            idx = ordem[:, j]
+            sinal = np.where(A[linhas, idx] >= 0, "(+)", "(-)")
+            out[f"{prefix}{j + 1}"] = [f"{names[i]} {s}" for i, s in zip(idx, sinal)]
+        return pd.DataFrame(out, index=M.index)
 
     # ------------------------------------------------------------------
     # D) Score → Ratings
@@ -5937,13 +6160,21 @@ class ModelSegmenter:
         return pd.DataFrame(rows)
 
     def predict(self, X: pd.DataFrame, col_score="score", col_rating="rating",
-                col_value=None, ruler_sample=None) -> pd.DataFrame:
+                col_value=None, ruler_sample=None, col_reasons=None,
+                reasons_top_n=3) -> pd.DataFrame:
         """Aplica modelo (+rating) a novos dados. Devolve score e rating por linha.
 
         Se ``col_value`` for informado (ex.: ``"valor_previsto"``), anexa também o
         **valor previsto do alvo daquele rating** — a régua de :meth:`rating_ruler`
         calibrada na amostra ``ruler_sample`` (DES por padrão), i.e. o alvo
-        previsto por rating."""
+        previsto por rating.
+
+        Se ``col_reasons`` for informado (ex.: ``"motivo"``), anexa as colunas
+        ``motivo_1..motivo_N`` (``N = reasons_top_n``) com os principais motivos
+        (*reason codes*) de cada linha via :meth:`reason_codes` — a variável de
+        maior |contribuição SHAP| e o sinal. Requer o pacote opcional ``shap`` e
+        custa um cálculo de SHAP sobre TODO o ``X`` (caminho pandas; a escoragem
+        Spark distribuída não anexa motivos — ver :meth:`apply_spark`)."""
         if self.model is None:
             raise RuntimeError("Ajuste/defina o modelo antes (fit / set_model).")
         X = self._apply_derived(X)        # recria variáveis derivadas a partir da origem
@@ -5962,6 +6193,10 @@ class ModelSegmenter:
                                           col_value=col_value)
                 mapping = dict(zip(ruler[col_rating], ruler[col_value]))
                 out[col_value] = out[col_rating].map(mapping)
+        if col_reasons:                   # motivos SHAP por linha (opcional)
+            rc = self.reason_codes(X=X, top_n=int(reasons_top_n),
+                                   prefix=f"{col_reasons}_")
+            out = out.join(rc)
         return out
 
     def _labels_from_bins(self, col, bins, feature, others="(outros)") -> pd.Series:
@@ -6234,7 +6469,12 @@ class ModelSegmenter:
         Requisito do caminho distribuído: o pacote ``yggdrasil`` deve estar
         **instalado nos executores** (biblioteca do cluster) — o normal no Databricks
         — pois o modelo/estratégia de rating são desserializados lá. Sem isso (com
-        ``probe=True``) a escoragem cai no legado automaticamente."""
+        ``probe=True``) a escoragem cai no legado automaticamente.
+
+        Nota: os *reason codes* (motivos SHAP por linha — :meth:`reason_codes`)
+        NÃO são anexados na escoragem Spark: o custo do SHAP dentro da UDF
+        distribuída é proibitivo (fica para uma evolução futura). Para obtê-los,
+        use :meth:`predict` com ``col_reasons`` no caminho pandas."""
         if self.model is None:
             raise RuntimeError("Ajuste/defina o modelo antes (fit / set_model).")
         try:

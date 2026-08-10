@@ -1001,6 +1001,40 @@ def test_shap_importance(seg):
     assert len(imp) >= 1 and (imp["mean_abs_shap"] >= 0).all()
 
 
+def test_shap_local_dependence_explain_row_reason_codes(seg):
+    """SHAP local: dependence (numérica e categórica), waterfall de uma linha
+    (aditividade base + Σ contribuições = score) e reason codes por lote,
+    inclusive integrados ao predict via col_reasons."""
+    pytest.importorskip("shap")
+    import matplotlib
+    matplotlib.use("Agg")
+    seg.fit("random_forest", hyperparams={"n_estimators": 30})
+    # dependence: numérica (dispersão) e categórica (dummies agregadas por categoria)
+    assert seg.plot_shap_dependence("feat_00", sample_size=200) is not None
+    assert seg.plot_shap_dependence("feat_cat", sample_size=200) is not None
+    with pytest.raises(ValueError, match="não é variável do modelo"):
+        seg.plot_shap_dependence("nao_existe", sample_size=200)
+    # explain_row: contribuições por variável original + waterfall
+    idx = seg.df.index[0]
+    rc = seg.row_contributions(idx, sample_size=200)
+    assert {"variavel", "variavel_label", "valor", "contribuicao"}.issubset(rc.columns)
+    assert set(rc["variavel"]) == set(seg.model_features)          # dummies agregadas
+    fechamento = rc.attrs["base_value"] + rc["contribuicao"].sum()
+    assert np.isclose(fechamento, rc.attrs["score"], atol=1e-6)    # waterfall fecha no score
+    assert seg.explain_row(idx, top_n=4, sample_size=200) is not None
+    # reason_codes: colunas motivo_1..N com "variavel (+/-)" por linha
+    codes = seg.reason_codes(X=seg.df.head(15), top_n=3)
+    assert list(codes.columns) == ["motivo_1", "motivo_2", "motivo_3"]
+    assert len(codes) == 15
+    assert codes["motivo_1"].str.contains(r"\((\+|-)\)$", regex=True).all()
+    vars_ok = codes["motivo_1"].str.replace(r" \((\+|-)\)$", "", regex=True)
+    assert vars_ok.isin(seg.model_features).all()
+    # integração no predict (caminho pandas)
+    out = seg.predict(seg.df.head(10), col_reasons="motivo", reasons_top_n=2)
+    assert {"score", "motivo_1", "motivo_2"}.issubset(out.columns)
+    assert "motivo_3" not in out.columns
+
+
 def test_sem_sample_col():
     df = _synthetic("classification").drop(columns=["amostra"])
     seg = ModelSegmenter(df, target="target", task_type="classification",

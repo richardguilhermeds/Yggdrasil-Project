@@ -1181,6 +1181,28 @@ class ModelSegmenterUI:
         self.out_model_c = W.HTML()
         self.out_shap = W.HTML()
         self.out_shap_rel = W.HTML()       # importância relativa por variável (categóricas agregadas)
+        # --- SHAP local: dependence por variável + explicação de uma linha ---
+        self.dd_shap_dep = W.Dropdown(options=[], description="Variável:",
+                                      style={"description_width": "initial"},
+                                      layout=W.Layout(width="45%"))
+        self.btn_shap_dep = W.Button(description="Dependence", icon="area-chart")
+        self.btn_shap_dep.tooltip = ("Dispersão do valor da variável × contribuição SHAP "
+                                     "agregada pela variável original (as dummies de uma "
+                                     "categórica entram somadas). Clique em 'Calcular "
+                                     "SHAP' antes para preencher o seletor.")
+        self.tx_shap_row = W.Text(value="", placeholder="índice da linha (ex.: 0)",
+                                  description="Linha:",
+                                  style={"description_width": "initial"},
+                                  layout=W.Layout(width="45%"))
+        self.btn_shap_row = W.Button(description="Explicar linha", icon="search")
+        self.btn_shap_row.tooltip = ("Waterfall da observação: valor-base + top "
+                                     "contribuições SHAP por variável até o score da "
+                                     "linha (vermelho empurra o score para cima; azul, "
+                                     "para baixo). Informe um índice do DataFrame.")
+        self.out_shap_dep = W.HTML()
+        self.out_shap_row = W.HTML()
+        self.btn_shap_dep.on_click(self._on_shap_dep)
+        self.btn_shap_row.on_click(self._on_shap_row)
         self.btn_fit.on_click(self._on_fit)
         self.btn_shap.on_click(self._on_shap)
         self.dd_algo.observe(lambda c: (self._sync_algo_visibility(), self._mark_dirty()),
@@ -1318,6 +1340,23 @@ class ModelSegmenterUI:
                                    "variável original).</div>"),
                             self.out_shap_rel],
                            layout=W.Layout(width="45%"))]),
+            # SHAP local: dependence por variável + waterfall de uma observação
+            W.HBox([
+                W.VBox([W.HTML("<div class='mseg-h'>SHAP — dependence por variável</div>"),
+                        W.HTML("<div class='mseg-legend'>Valor da variável × contribuição SHAP "
+                               "<b>agregada pela variável original</b> (dummies de categórica "
+                               "somadas). Calcule o SHAP para preencher o seletor.</div>"),
+                        W.HBox([self.dd_shap_dep, self.btn_shap_dep]),
+                        self.out_shap_dep],
+                       layout=W.Layout(width="49.5%")),
+                W.VBox([W.HTML("<div class='mseg-h'>SHAP — explicar uma linha (waterfall)</div>"),
+                        W.HTML("<div class='mseg-legend'>Do valor-base ao score da observação: "
+                               "top contribuições por variável (vermelho empurra o score para "
+                               "cima; azul, para baixo) e as demais somadas.</div>"),
+                        W.HBox([self.tx_shap_row, self.btn_shap_row]),
+                        self.out_shap_row],
+                       layout=W.Layout(width="49.5%")),
+            ], layout=W.Layout(justify_content="space-between")),
         ], layout=W.Layout(padding="2px"))
         self._sync_algo_visibility()
 
@@ -3430,10 +3469,67 @@ class ModelSegmenterUI:
             # ao lado do beeswarm — substitui a importância por coluna dummy
             self.out_shap_rel.value = self._fig_html(
                 self.seg.plot_shap_importance_relative(sample_size=800, figsize=(6.0, 3.4)))
+            # seletor do dependence: variáveis originais em ordem de importância
+            # (o cache de shap_values já está quente — custo desprezível)
+            grp = self.seg.shap_importance_grouped(sample_size=800)
+            self.dd_shap_dep.options = self._opts(list(grp["variavel"]))
             self._log("[shap] gráficos gerados.")
         except Exception as e:
             self.out_shap.value = f"<i>SHAP indisponível: {e}</i>"
             self._log(f"[shap] erro: {e}")
+
+    def _parse_row_index(self, txt):
+        """Converte o texto digitado num rótulo EXISTENTE do índice do df —
+        tenta como string, int e float; devolve None quando não encontra."""
+        txt = str(txt).strip()
+        if not txt:
+            return None
+        idx = self.seg.df.index
+        for conv in (str, int, float):
+            try:
+                v = conv(txt)
+            except (TypeError, ValueError):
+                continue
+            try:
+                if v in idx:
+                    return v
+            except TypeError:
+                continue
+        return None
+
+    def _on_shap_dep(self, b):
+        if self.seg.score_ is None:
+            self._log("[shap] treine o modelo primeiro.")
+            return
+        feat = self.dd_shap_dep.value
+        if not feat:
+            self.out_shap_dep.value = ("<i>Clique em 'Calcular SHAP' para preencher o "
+                                       "seletor e escolha a variável.</i>")
+            return
+        try:
+            self.out_shap_dep.value = self._fig_html(
+                self.seg.plot_shap_dependence(feat, sample_size=800, figsize=(6.4, 3.8)))
+            self._log(f"[shap] dependence de {self.seg.label(feat)} gerado.")
+        except Exception as e:
+            self.out_shap_dep.value = f"<i>SHAP indisponível: {e}</i>"
+            self._log(f"[shap] erro no dependence: {e}")
+
+    def _on_shap_row(self, b):
+        if self.seg.score_ is None:
+            self._log("[shap] treine o modelo primeiro.")
+            return
+        idx = self._parse_row_index(self.tx_shap_row.value)
+        if idx is None:
+            self.out_shap_row.value = ("<i>Informe um índice existente no DataFrame "
+                                       f"(ex.: <code>{self.seg.df.index[0]!r}</code>).</i>")
+            return
+        try:
+            self.out_shap_row.value = self._fig_html(
+                self.seg.explain_row(idx, sample_size=800, figsize=(6.4, 3.8)))
+            self._log(f"[shap] explicação da linha {idx!r} gerada.")
+        except Exception as e:
+            self.out_shap_row.value = f"<i>SHAP indisponível: {e}</i>"
+            self._log(f"[shap] erro no explain_row: {e}")
 
     # ------------------------------------------------------ Aba Backward Elimination
     def _on_backelim(self, b):
