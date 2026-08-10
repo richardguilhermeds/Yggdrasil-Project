@@ -195,6 +195,7 @@ Todos centralizados em **[`notebooks/tutoriais/`](https://github.com/richardguil
 | 07 | [Esteira ML + MLflow](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/07_tutorial_esteira_ml_mlflow.ipynb) |
 | 08 | [Capital econômico (ASRF, Monte Carlo, alocação de Euler)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/08_tutorial_capital_economico.ipynb) |
 | 09 | [Modelos econométricos satélite (ARDL, fator Z, projeção por cenários)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/09_tutorial_modelos_econometricos.ipynb) |
+| 10 | [Esteira de seleção de variáveis (etapas plugáveis, funil, relatório e política)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/10_tutorial_selecao_variaveis.ipynb) |
 
 > 📖 **Metodologia** (o *porquê* dos métodos, como KS, PSI/CSI, WoE/IV, ratings com fusão monotônica, SHAP e veredito de EDA): [`docs/metodologia.md`](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/docs/metodologia.md).
 > 🌳 **Árvore de segmentação unificada (classificação & regressão):** [`docs/credit-risk/tree-segmenter.md`](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/docs/credit-risk/tree-segmenter.md).
