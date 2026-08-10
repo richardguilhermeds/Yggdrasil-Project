@@ -29,6 +29,11 @@ caso particular (:func:`two_state_matrix`), útil também para conectar **capita
 e provisão** via migração entre **estágios** (Stage 1/2/3, IFRS 9 /
 Resolução CMN 4.966/2021).
 
+A matriz de transição pode vir pronta (agência, sistema interno) ou ser
+**estimada do painel observado** por :func:`estimate_transition_matrix`
+(coorte ou duração/gerador) e **condicionada ao ciclo** por
+:func:`zshift_transition_matrix` (deslocamento z dos limiares da cópula).
+
 Contexto regulatório: Resolução CMN 4.557/2017 (ICAAP), 4.966/2021 (estágios) e
 o arcabouço IRB de Basileia (modelo estrutural de fator único subjacente).
 """
@@ -38,6 +43,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Union
 
 import numpy as np
+import pandas as pd
 from scipy.stats import norm
 
 from .measures import DEFAULT_CONFIDENCE, LossDistribution
@@ -394,9 +400,240 @@ def two_state_matrix(pd: float) -> tuple[np.ndarray, List[str], np.ndarray]:
     return transition_matrix, ratings, values
 
 
+# ======================================================================
+# Estimação empírica da matriz de transição (coorte / duração)
+# ======================================================================
+def estimate_transition_matrix(
+    df: pd.DataFrame,
+    id_col: str,
+    rating_col: str,
+    period_col: str,
+    method: str = "cohort",
+    smoothing: Optional[float] = None,
+    ratings: Optional[Sequence] = None,
+) -> tuple[np.ndarray, list]:
+    """Estima a matriz de transição de rating a partir de um painel observado.
+
+    Recebe um painel longo (uma linha por entidade × período) e conta as
+    migrações entre observações **consecutivas** de cada entidade. Dois
+    estimadores clássicos:
+
+    * ``method='cohort'`` — **coorte**: frequência relativa dos pares
+      consecutivos ``(rating_t, rating_{t+1})`` por linha de origem. É o
+      estimador de máxima verossimilhança da cadeia em tempo discreto.
+    * ``method='duration'`` — **duração**: estima o **gerador** em tempo
+      contínuo ``Λ`` (intensidades ``λ_ij = N_ij / T_i``, com ``N_ij`` o nº de
+      migrações ``i→j`` observadas e ``T_i`` o tempo de exposição na origem,
+      aqui aproximado pelo nº de pares consecutivos com origem ``i``) e devolve
+      ``expm(Λ)`` — a matriz de 1 período implícita pelo gerador. Aproveita
+      melhor migrações raras (um caminho ``A→B→D`` informa a célula ``A→D``
+      mesmo sem observação direta).
+
+    Parameters
+    ----------
+    df:
+        Painel longo com ao menos as colunas ``id_col``, ``rating_col`` e
+        ``period_col``. Linhas com rating ausente são descartadas; pares
+        ``(id, período)`` duplicados geram erro (ambiguidade de trajetória).
+    id_col, rating_col, period_col:
+        Nomes das colunas de entidade, rating e período (qualquer tipo
+        ordenável — inteiro, data etc.). Observações consecutivas de uma mesma
+        entidade formam um par de migração, mesmo com lacunas de período.
+    method:
+        ``'cohort'`` (padrão) ou ``'duration'`` (exige ``scipy``, já
+        dependência do pacote).
+    smoothing:
+        Suavização aditiva opcional (``>= 0``): soma esta constante a cada
+        célula de contagem antes de normalizar, preenchendo células vazias
+        (no modo duração, apenas as células fora da diagonal do gerador, e
+        apenas em linhas com alguma exposição observada). ``None``/0 desliga.
+    ratings:
+        Ordem dos estados, do **melhor** ao **pior** (default por último),
+        seguindo a convenção do módulo. Se ``None``, usa os valores únicos em
+        ordem crescente (``sorted``) — passe explicitamente quando a ordem
+        lexicográfica não refletir a régua de risco.
+
+    Returns
+    -------
+    tuple[np.ndarray, list]
+        ``(transition_matrix, ratings)`` — a matriz ``(n, n)`` com linhas
+        normalizadas (soma 1) e os rótulos na ordem das linhas/colunas,
+        prontos para o :class:`MigrationModel`.
+
+    Notes
+    -----
+    * Estados sem nenhuma observação de origem recebem linha identidade
+      (permanecem onde estão) — não há informação para estimar a saída.
+    * O **pior** estado (última posição da régua) é tratado como *default* e,
+      se for empiricamente absorvente (nenhuma saída observada), a linha é
+      preservada como absorvente exata mesmo sob suavização.
+    """
+    if method not in ("cohort", "duration"):
+        raise ValueError(f"method deve ser 'cohort' ou 'duration'; recebido {method!r}.")
+    if smoothing is not None:
+        smoothing = float(smoothing)
+        if smoothing < 0.0:
+            raise ValueError(f"smoothing deve ser >= 0; recebido {smoothing!r}.")
+    for col in (id_col, rating_col, period_col):
+        if col not in df.columns:
+            raise ValueError(f"Coluna {col!r} não encontrada no DataFrame.")
+
+    data = df[[id_col, rating_col, period_col]].dropna(subset=[rating_col])
+    if data.duplicated(subset=[id_col, period_col]).any():
+        raise ValueError(
+            "Há pares (id, período) duplicados no painel — a trajetória de "
+            "rating fica ambígua. Remova ou agregue as duplicatas antes."
+        )
+
+    # Régua de estados (melhor → pior). Sem `ratings`, ordem crescente dos valores.
+    if ratings is None:
+        ratings = sorted(pd.unique(data[rating_col]))
+    else:
+        ratings = list(ratings)
+        desconhecidos = set(pd.unique(data[rating_col])) - set(ratings)
+        if desconhecidos:
+            raise ValueError(
+                f"Ratings presentes nos dados mas fora de `ratings`: {sorted(map(str, desconhecidos))}."
+            )
+    n = len(ratings)
+    if n < 2:
+        raise ValueError("São necessários ao menos 2 estados de rating para estimar transições.")
+
+    # Pares consecutivos por entidade (ordenados por período dentro do id).
+    data = data.sort_values([id_col, period_col], kind="mergesort")
+    codes = pd.Categorical(data[rating_col], categories=ratings).codes.astype(int)
+    ids = data[id_col].to_numpy()
+    same_id = ids[1:] == ids[:-1]
+    orig = codes[:-1][same_id]
+    dest = codes[1:][same_id]
+    if orig.size == 0:
+        raise ValueError(
+            "Nenhum par consecutivo de observações por entidade — é preciso ao "
+            "menos uma entidade com 2+ períodos."
+        )
+
+    counts = np.zeros((n, n), dtype=float)
+    np.add.at(counts, (orig, dest), 1.0)
+
+    # Default (pior estado) empiricamente absorvente? (nenhuma saída observada)
+    worst = n - 1
+    saidas_default = counts[worst].sum() - counts[worst, worst]
+    default_absorvente = saidas_default == 0.0
+
+    identidade = np.eye(n)
+    if method == "cohort":
+        obs = counts.sum(axis=1) > 0                        # linhas com alguma origem
+        smoothed = counts.copy()
+        if smoothing:
+            smoothed[obs] += smoothing                      # só onde há informação
+        row_sums = smoothed.sum(axis=1)
+        tm = identidade.copy()                              # linhas sem origem: permanece
+        tm[obs] = smoothed[obs] / row_sums[obs, None]
+    else:  # duration
+        from scipy.linalg import expm                       # scipy já é dependência
+
+        exposicao = counts.sum(axis=1)                      # T_i ≈ nº de pares com origem i
+        n_off = counts.copy()
+        if smoothing:
+            n_off = n_off + smoothing
+        np.fill_diagonal(n_off, 0.0)
+        lam = np.zeros((n, n), dtype=float)
+        obs = exposicao > 0
+        lam[obs] = n_off[obs] / exposicao[obs, None]
+        if default_absorvente:
+            lam[worst] = 0.0                                # sem intensidade de saída
+        np.fill_diagonal(lam, -lam.sum(axis=1))             # linhas do gerador somam 0
+        tm = expm(lam)
+        # Higiene numérica do expm: recorta negativos ínfimos e renormaliza.
+        tm = np.clip(tm, 0.0, 1.0)
+        tm /= tm.sum(axis=1, keepdims=True)
+
+    if default_absorvente:
+        tm[worst] = identidade[worst]                       # absorvente exato, mesmo suavizando
+    return tm, ratings
+
+
+# ======================================================================
+# Condicionamento ao ciclo (z-shift dos limiares da cópula)
+# ======================================================================
+def zshift_transition_matrix(
+    transition_matrix: np.ndarray,
+    z: float,
+    rho: float,
+) -> np.ndarray:
+    """Condiciona a matriz de transição ao ciclo via **deslocamento z** dos limiares.
+
+    Converte cada linha em limiares da cópula (:func:`migration_thresholds`),
+    desloca-os pela carga sistêmica ``√ρ · z`` e reconverte em probabilidades
+    pela normal acumulada:
+
+    ``P'(destino ∈ k piores) = Φ( z_k − √ρ · z )``
+
+    **Convenção de sinal** — a mesma do fator sistêmico deste módulo (retorno
+    latente ``X`` alto = destino melhor) e do ``Z`` de Vasicek do pacote
+    econométrico (:func:`~yggdrasil.credit_risk.econometric.transforms.vasicek_z`,
+    ``Z`` alto = ciclo benigno):
+
+    * ``z > 0`` — ciclo **benigno**: os limiares caem, a massa migra para
+      estados **melhores** (menos *downgrade*/*default*);
+    * ``z < 0`` — ciclo **adverso**: mais massa nos estados piores;
+    * ``z = 0`` — devolve a matriz original (idempotência).
+
+    O resultado é uma matriz *point-in-time* condicionada ao ciclo, útil para
+    cenários e testes de estresse de migração.
+
+    Parameters
+    ----------
+    transition_matrix:
+        Matriz ``(n_origem, n_destino)`` na convenção do módulo (colunas do
+        melhor ao pior estado; linhas somam ~1).
+    z:
+        Realização do fator sistêmico (aprox. ``N(0, 1)``); ver convenção acima.
+    rho:
+        Correlação de ativos ``ρ`` em ``[0, 1)`` — o peso do fator sistêmico.
+        Com ``ρ = 0`` o ciclo não carrega e a matriz não muda.
+
+    Returns
+    -------
+    np.ndarray
+        Matriz condicionada, mesmas dimensões, linhas normalizadas. Estados
+        absorventes (ex.: *default* com linha degenerada) são preservados para
+        qualquer ``z`` — limiares ``±inf`` seguem ``±inf`` após o deslocamento.
+
+    Notes
+    -----
+    É um **deslocamento puro** dos limiares (estilo índice de ciclo de
+    crédito), que mantém a escala unitária do retorno latente e garante a
+    idempotência em ``z = 0`` — e não a lei condicional exata do fator único,
+    que ainda reescalaria os limiares por ``1/√(1−ρ)``.
+    """
+    tm = np.asarray(transition_matrix, dtype=float)
+    if not (0.0 <= rho < 1.0):
+        raise ValueError(f"rho deve estar em [0, 1); recebido {rho!r}.")
+    z = float(z)
+    thresholds = migration_thresholds(tm)                   # valida a matriz também
+    n_from, n_to = tm.shape
+
+    # Desloca as fronteiras pela carga sistêmica e reconverte em acumuladas
+    # "a partir do pior" (a mesma convenção de migration_thresholds).
+    shifted = thresholds - np.sqrt(rho) * z                 # (n_from, n_to-1)
+    cum = norm.cdf(shifted)                                 # acumuladas crescentes
+    cum_full = np.concatenate(
+        [np.zeros((n_from, 1)), cum, np.ones((n_from, 1))], axis=1
+    )
+    probs_from_worst = np.diff(cum_full, axis=1)            # (n_from, n_to)
+    out = probs_from_worst[:, ::-1]                         # melhor → pior
+    # Higiene numérica: recorta resíduos de arredondamento e renormaliza.
+    out = np.clip(out, 0.0, 1.0)
+    out /= out.sum(axis=1, keepdims=True)
+    return out
+
+
 __all__ = [
     "migration_thresholds",
     "MigrationModel",
     "simulate_creditmetrics",
     "two_state_matrix",
+    "estimate_transition_matrix",
+    "zshift_transition_matrix",
 ]

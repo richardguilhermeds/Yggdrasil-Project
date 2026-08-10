@@ -282,3 +282,124 @@ def test_convergence_shape():
     df = convergence(port, n_grid=(2_000, 10_000), q=0.99, seed=0)
     assert list(df["n_cenarios"]) == [2_000, 10_000]
     assert (df["VaR"] > df["EL"]).all()
+
+
+# ----------------------------------------------------------------------
+# Migração: estimação empírica (coorte/duração) + z-shift do ciclo
+# ----------------------------------------------------------------------
+TM_3E = np.array([
+    [0.90, 0.08, 0.02],
+    [0.10, 0.82, 0.08],
+    [0.00, 0.00, 1.00],       # default absorvente
+])
+RATINGS_3E = ["A", "B", "D"]
+
+
+def _painel_migracao(tm, ratings, n_ids=3_000, n_periodos=8, seed=0):
+    """Painel longo simulado de uma cadeia de Markov com matriz conhecida."""
+    rng = np.random.default_rng(seed)
+    n = len(ratings)
+    estados = np.empty((n_ids, n_periodos), dtype=int)
+    estados[:, 0] = rng.integers(0, n - 1, size=n_ids)      # começa fora do default
+    cum = np.cumsum(tm, axis=1)
+    for t in range(1, n_periodos):
+        u = rng.random(n_ids)
+        estados[:, t] = (u[:, None] > cum[estados[:, t - 1], :]).sum(axis=1)
+    return pd.DataFrame({
+        "id": np.repeat(np.arange(n_ids), n_periodos),
+        "safra": np.tile(np.arange(n_periodos), n_ids),
+        "rating": np.asarray(ratings, dtype=object)[estados.ravel()],
+    })
+
+
+def test_estimate_cohort_recovers_known_matrix():
+    from yggdrasil.credit_risk.capital.migration import estimate_transition_matrix
+    df = _painel_migracao(TM_3E, RATINGS_3E, seed=42)
+    tm_hat, labels = estimate_transition_matrix(
+        df, "id", "rating", "safra", method="cohort", ratings=RATINGS_3E)
+    assert labels == RATINGS_3E
+    assert np.allclose(tm_hat.sum(axis=1), 1.0)
+    assert np.allclose(tm_hat, TM_3E, atol=0.02)            # recupera a matriz geradora
+    assert np.allclose(tm_hat[-1], [0.0, 0.0, 1.0])         # default absorvente exato
+
+
+def test_estimate_duration_valid_and_close():
+    from yggdrasil.credit_risk.capital.migration import estimate_transition_matrix
+    df = _painel_migracao(TM_3E, RATINGS_3E, seed=42)
+    tm_hat, _ = estimate_transition_matrix(
+        df, "id", "rating", "safra", method="duration", ratings=RATINGS_3E)
+    assert np.allclose(tm_hat.sum(axis=1), 1.0)
+    assert (tm_hat >= 0).all() and (tm_hat <= 1).all()
+    assert np.allclose(tm_hat[-1], [0.0, 0.0, 1.0])         # gerador preserva o absorvente
+    # expm do gerador ~ matriz de coorte (mesma ordem de grandeza por célula)
+    assert np.allclose(tm_hat, TM_3E, atol=0.05)
+
+
+def test_estimate_smoothing_fills_empty_cells_keeps_absorbing():
+    from yggdrasil.credit_risk.capital.migration import estimate_transition_matrix
+    # Painel mínimo: A→D nunca observado; D observado apenas como absorvente.
+    df = pd.DataFrame({
+        "id":     [1, 1, 1, 2, 2, 3, 3, 3, 4, 4],
+        "safra":  [0, 1, 2, 0, 1, 0, 1, 2, 0, 1],
+        "rating": ["A", "A", "A", "A", "B", "B", "B", "D", "D", "D"],
+    })
+    tm_sem, _ = estimate_transition_matrix(df, "id", "rating", "safra",
+                                           ratings=["A", "B", "D"])
+    assert tm_sem[0, 2] == 0.0                              # célula vazia fica zero
+    tm_com, _ = estimate_transition_matrix(df, "id", "rating", "safra",
+                                           ratings=["A", "B", "D"], smoothing=0.5)
+    assert tm_com[0, 2] > 0.0                               # suavização preenche
+    assert np.allclose(tm_com.sum(axis=1), 1.0)
+    assert np.allclose(tm_com[-1], [0.0, 0.0, 1.0])         # absorvente intacto
+
+
+def test_estimate_rejects_bad_input():
+    from yggdrasil.credit_risk.capital.migration import estimate_transition_matrix
+    df = pd.DataFrame({"id": [1, 1], "safra": [0, 1], "rating": ["A", "B"]})
+    with pytest.raises(ValueError):
+        estimate_transition_matrix(df, "id", "rating", "safra", method="xxx")
+    with pytest.raises(ValueError):
+        estimate_transition_matrix(df, "id", "rating", "safra", smoothing=-1.0)
+    dup = pd.DataFrame({"id": [1, 1], "safra": [0, 0], "rating": ["A", "B"]})
+    with pytest.raises(ValueError):                          # (id, período) duplicado
+        estimate_transition_matrix(dup, "id", "rating", "safra")
+
+
+def test_zshift_identity_at_zero():
+    from yggdrasil.credit_risk.capital.migration import zshift_transition_matrix
+    same = zshift_transition_matrix(TM_3E, z=0.0, rho=0.2)
+    assert np.allclose(same, TM_3E, atol=1e-9)              # idempotência em z=0
+    # rho=0: o ciclo não carrega — matriz inalterada para qualquer z.
+    assert np.allclose(zshift_transition_matrix(TM_3E, z=-3.0, rho=0.0), TM_3E, atol=1e-9)
+
+
+def test_zshift_adverse_increases_downgrade():
+    from yggdrasil.credit_risk.capital.migration import zshift_transition_matrix
+    piora = zshift_transition_matrix(TM_3E, z=-2.0, rho=0.2)    # z<0 = ciclo adverso
+    melhora = zshift_transition_matrix(TM_3E, z=+2.0, rho=0.2)  # z>0 = ciclo benigno
+    assert np.allclose(piora.sum(axis=1), 1.0)
+    assert np.allclose(melhora.sum(axis=1), 1.0)
+    for i in range(2):                                       # linhas vivas (A e B)
+        # adverso: mais massa nos estados piores que o atual e mais default
+        assert piora[i, -1] > TM_3E[i, -1]
+        assert piora[i, i + 1:].sum() > TM_3E[i, i + 1:].sum()
+        # benigno: menos default
+        assert melhora[i, -1] < TM_3E[i, -1]
+    # o estado absorvente não se move em nenhum cenário
+    assert np.allclose(piora[-1], [0.0, 0.0, 1.0])
+    assert np.allclose(melhora[-1], [0.0, 0.0, 1.0])
+    with pytest.raises(ValueError):
+        zshift_transition_matrix(TM_3E, z=1.0, rho=1.5)
+
+
+def test_estimate_feeds_migration_model():
+    from yggdrasil.credit_risk.capital.migration import (
+        MigrationModel, estimate_transition_matrix, zshift_transition_matrix)
+    df = _painel_migracao(TM_3E, RATINGS_3E, n_ids=500, n_periodos=6, seed=1)
+    tm_hat, labels = estimate_transition_matrix(
+        df, "id", "rating", "safra", ratings=RATINGS_3E, smoothing=0.5)
+    tm_pit = zshift_transition_matrix(tm_hat, z=-1.0, rho=0.15)
+    model = MigrationModel(tm_pit, ratings=labels, values=np.array([1.0, 0.95, 0.4]))
+    dist = model.simulate(exposures=[1e6, 5e5], ratings_idx=[0, 1],
+                          n_scenarios=5_000, seed=3)
+    assert np.isfinite(dist.el)
