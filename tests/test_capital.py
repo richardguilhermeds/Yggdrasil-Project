@@ -16,6 +16,8 @@ from yggdrasil.credit_risk.capital import (
     LossDistribution,
     Portfolio,
     Segment,
+    apply_scenario,
+    scenario_capital,
 )
 from yggdrasil.credit_risk.capital.asrf import asrf_capital, conditional_pd, capital_ratio
 from yggdrasil.credit_risk.capital.measures import (
@@ -282,6 +284,104 @@ def test_convergence_shape():
     df = convergence(port, n_grid=(2_000, 10_000), q=0.99, seed=0)
     assert list(df["n_cenarios"]) == [2_000, 10_000]
     assert (df["VaR"] > df["EL"]).all()
+
+
+# ----------------------------------------------------------------------
+# Estresse: cenário macro → carteira estressada → capital (stress.py)
+# ----------------------------------------------------------------------
+def test_scenario_capital_adverse_increases_el_and_var():
+    port = toy_multifactor()
+    df = scenario_capital(port, {"adverso": {"pd_mult": 2.0, "lgd_mult": 1.1}}, engine="asrf")
+    assert list(df["cenario"]) == ["base", "adverso"]      # base entra como referência
+    base = df[df.cenario == "base"].iloc[0]
+    adv = df[df.cenario == "adverso"].iloc[0]
+    assert adv["EL"] > base["EL"] and adv["VaR"] > base["VaR"]
+    assert adv["delta_EL"] > 0 and adv["delta_CE"] > 0
+    assert base["delta_EL"] == pytest.approx(0.0) and base["delta_CE"] == pytest.approx(0.0)
+
+
+def test_scenario_capital_identity_zero_delta():
+    port = toy_multifactor()
+    df = scenario_capital(port, {"base": {"pd_mult": 1.0, "lgd_mult": 1.0}}, engine="asrf")
+    assert list(df["cenario"]) == ["base"]                 # sem linha duplicada de base
+    row = df.iloc[0]
+    assert row["delta_EL"] == pytest.approx(0.0, abs=1e-9)
+    assert row["delta_VaR"] == pytest.approx(0.0, abs=1e-9)
+    assert row["delta_CE"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_scenario_capital_monte_carlo_engine():
+    port = toy_multifactor()
+    df = scenario_capital(port, {"adverso": {"pd_mult": 1.5}},
+                          engine="monte_carlo", n_scenarios=20_000, seed=0)
+    base = df[df.cenario == "base"].iloc[0]
+    adv = df[df.cenario == "adverso"].iloc[0]
+    assert np.isfinite(adv["ES"]) and adv["ES"] >= adv["VaR"]
+    assert adv["EL"] > base["EL"] and adv["VaR"] > base["VaR"]
+
+
+def test_apply_scenario_abs_and_validation():
+    port = toy_multifactor()
+    p2 = apply_scenario(port, {"pd_abs": 0.10, "lgd_abs": 0.5})
+    assert all(s.pd == pytest.approx(0.10) for s in p2.segments)
+    assert all(s.lgd == pytest.approx(0.5) for s in p2.segments)
+    assert port.segments[0].pd == pytest.approx(0.05)      # original intocada
+    with pytest.raises(ValueError):
+        apply_scenario(port, {"pd_mult": 1.2, "pd_abs": 0.1})   # mult e abs juntos
+    with pytest.raises(ValueError):
+        apply_scenario(port, {"chave_errada": 1.0})
+    with pytest.raises(ValueError):
+        scenario_capital(port, {"x": {"pd_mult": -1.0}})
+    with pytest.raises(ValueError):
+        scenario_capital(port, {"x": {}}, engine="motor_inexistente")
+
+
+def test_scenario_capital_conditional_z():
+    # Carteira homogênea: o Z implicado reproduz exatamente o estresse direto.
+    port = Portfolio([Segment("s", pd=0.03, lgd=0.5, ead=1e6, rho=0.12, n_obligors=10_000)])
+    df = scenario_capital(port, {"adverso": {"pd_mult": 2.0}}, engine="asrf", conditional_z=True)
+    adv = df[df.cenario == "adverso"].iloc[0]
+    assert adv["z_implicito"] < 0                          # cenário ruim → Z na cauda inferior
+    assert adv["EL"] == pytest.approx(0.06 * 0.5 * 1e6)    # PD condicionada == PD × mult
+    # Heterogênea: o MESMO Z estressa mais o segmento de rho maior.
+    port2 = Portfolio([Segment("baixo", pd=0.03, lgd=0.5, ead=1e6, rho=0.04),
+                       Segment("alto", pd=0.03, lgd=0.5, ead=1e6, rho=0.20)])
+    stressed = apply_scenario(port2, {"pd_mult": 2.0}, conditional_z=True)
+    p_baixo, p_alto = stressed.segments[0].pd, stressed.segments[1].pd
+    assert p_alto > p_baixo > 0.03
+
+
+def test_scenario_capital_from_projection_ducktype():
+    port = toy_multifactor()
+
+    class _Proj:
+        kind = "pd"
+
+        def __init__(self, paths):
+            self.paths = paths
+
+    paths = {"base": pd.DataFrame({"mean": np.full(6, 0.02)}),
+             "adverso": pd.DataFrame({"mean": np.full(6, 0.05)})}
+    df = scenario_capital(port, _Proj(paths), engine="asrf")
+    assert set(df["cenario"]) == {"base", "adverso"}
+    base = df[df.cenario == "base"].iloc[0]
+    adv = df[df.cenario == "adverso"].iloc[0]
+    assert base["delta_EL"] == pytest.approx(0.0)          # mult 1.0 no cenário base
+    assert adv["EL"] == pytest.approx(2.5 * base["EL"])    # mult 0.05/0.02 nas PDs → EL 2.5×
+
+    # ScenarioSet-like sem model → erro amigável; com model fake → projeta e segue.
+    class _FakeSet:
+        scenarios = []
+
+    with pytest.raises(ValueError):
+        scenario_capital(port, _FakeSet())
+
+    class _FakeModel:
+        def project(self, scenarios, horizon=None, **kw):
+            return _Proj(paths)
+
+    df2 = scenario_capital(port, _FakeSet(), model=_FakeModel(), engine="asrf")
+    assert set(df2["cenario"]) == {"base", "adverso"}
 
 
 # ----------------------------------------------------------------------

@@ -36,6 +36,11 @@ Alocação e uso gerencial
     :func:`euler_allocation` (contribuição à cauda), :func:`raroc`,
     :func:`raroc_table`.
 
+Estresse de cenário macro (elo com os modelos satélite)
+    :func:`scenario_capital` (cenário → carteira estressada → capital),
+    :func:`apply_scenario` — aceita dict simples de choques, ``Projection`` ou
+    ``ScenarioSet`` + modelo satélite (:mod:`..econometric`, sob demanda).
+
 Validação
     :func:`sensitivity`, :func:`correlation_stress`, :func:`benchmark`,
     :func:`pillar1_comparison`, :func:`backtest_expected_loss`,
@@ -94,6 +99,9 @@ from .migration import (
 # --- alocação e uso gerencial ------------------------------------------
 from .allocation import euler_allocation, raroc, raroc_table
 
+# --- estresse de cenário macro (elo com os satélites) ------------------
+from .stress import SHOCK_KEYS, apply_scenario, scenario_capital
+
 # --- insumos: correlações e parâmetros ---------------------------------
 from .correlation import (
     asset_correlation_mle,
@@ -141,6 +149,8 @@ __all__ = [
     "MigrationModel", "simulate_creditmetrics", "migration_thresholds", "two_state_matrix",
     # alocação
     "euler_allocation", "raroc", "raroc_table",
+    # estresse de cenário macro
+    "scenario_capital", "apply_scenario", "SHOCK_KEYS",
     # correlações
     "asset_correlation_moments", "asset_correlation_mle", "asset_params_mle",
     "factor_correlation_matrix", "nearest_correlation", "is_positive_definite",
