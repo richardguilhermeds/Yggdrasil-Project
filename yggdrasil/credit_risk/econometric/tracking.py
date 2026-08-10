@@ -41,12 +41,40 @@ def _log_metric_safe(mlflow, nome: str, valor) -> None:
         mlflow.log_metric(nome, v)
 
 
+def _coverage_table(backtest):
+    """Normaliza o insumo de cobertura de intervalos numa tabela por passo.
+
+    Aceita a própria tabela de
+    :func:`~yggdrasil.credit_risk.econometric.selection.interval_coverage`
+    (DataFrame), o dict de
+    :func:`~yggdrasil.credit_risk.econometric.selection.backtest_projection`
+    (chave ``coverage``) ou o dict de um ``walk_forward`` com bandas (chave
+    ``bands``, cobertura calculada aqui). Devolve ``None`` se não há o que medir.
+    """
+    import pandas as pd
+
+    if backtest is None:
+        return None
+    if isinstance(backtest, pd.DataFrame):
+        return backtest
+    if isinstance(backtest, dict):
+        if backtest.get("coverage") is not None:
+            return backtest["coverage"]
+        bands = backtest.get("bands")
+        if bands is not None and len(bands):
+            from .selection import interval_coverage
+
+            return interval_coverage(bands, backtest.get("alpha"))
+    return None
+
+
 def log_satellite_run(
     fit: "FitResult",
     *,
     series=None,
     projection: "Projection" = None,
     search: "SearchResult" = None,
+    backtest=None,
     params: Optional[dict] = None,
     tags: Optional[dict] = None,
     experiment: Optional[str] = None,
@@ -69,8 +97,16 @@ def log_satellite_run(
     projection:
         Uma :class:`Projection` (para o gráfico em leque e a tabela de projeção).
     search:
-        Um :class:`SearchResult` (loga o RMSE fora da amostra do melhor modelo e
-        salva o ranking champion-challenger).
+        Um :class:`SearchResult` (loga o RMSE fora da amostra — e a cobertura de
+        intervalos, quando presente no ranking — do melhor modelo e salva o
+        ranking champion-challenger).
+    backtest:
+        O backtest de cobertura de intervalos: o dict de
+        :func:`~yggdrasil.credit_risk.econometric.selection.backtest_projection`
+        (ou de um ``walk_forward`` com bandas), ou a própria tabela de
+        :func:`~yggdrasil.credit_risk.econometric.selection.interval_coverage`.
+        Loga cobertura empírica × nominal e os p-valores de Kupiec e
+        Christoffersen; salva a tabela por passo como artefato.
     params, tags:
         Extras do usuário, mesclados aos base.
     experiment, run_name, artifacts_dir:
@@ -118,6 +154,30 @@ def log_satellite_run(
                 _log_metric_safe(mlflow, "oos_rmse_melhor", float(qual["oos_rmse"].iloc[0]))
                 if "vs_arima" in qual.columns:
                     _log_metric_safe(mlflow, "vs_arima_melhor", float(qual["vs_arima"].iloc[0]))
+                # cobertura de intervalos do melhor (colunas aditivas do ranking)
+                if "cobertura" in qual.columns:
+                    _log_metric_safe(mlflow, "cobertura_melhor", qual["cobertura"].iloc[0])
+                if "kupiec_pvalue" in qual.columns:
+                    _log_metric_safe(mlflow, "kupiec_pvalue_melhor", qual["kupiec_pvalue"].iloc[0])
+
+        # ── backtest de projeções: cobertura de intervalos ──────────
+        cov_table = None
+        if backtest is not None:
+            try:
+                cov_table = _coverage_table(backtest)
+            except Exception as exc:  # noqa: BLE001
+                mlflow.set_tag("backtest_error", str(exc)[:200])
+            if cov_table is not None and len(cov_table):
+                tot = cov_table[cov_table["passo"] == "todos"]
+                tot = tot.iloc[0] if len(tot) else cov_table.iloc[-1]
+                _log_metric_safe(mlflow, "cobertura_intervalo", tot.get("cobertura"))
+                _log_metric_safe(mlflow, "cobertura_nominal", tot.get("nominal"))
+                _log_metric_safe(mlflow, "kupiec_stat", tot.get("kupiec_stat"))
+                _log_metric_safe(mlflow, "kupiec_pvalue", tot.get("kupiec_pvalue"))
+                h1 = cov_table[cov_table["passo"] == 1]
+                if len(h1):  # independência das violações no 1º passo (cadeia limpa)
+                    _log_metric_safe(mlflow, "christoffersen_pvalue_h1",
+                                     h1.iloc[0].get("christoffersen_pvalue"))
 
         # ── tags ────────────────────────────────────────────────────
         base_tags = {"framework": "yggdrasil-ml", "model_type": "satellite_econometric",
@@ -134,6 +194,8 @@ def log_satellite_run(
                 projection.to_frame().to_csv(os.path.join(tmp, "projecao.csv"), index=False)
             if search is not None:
                 search.ranking.to_csv(os.path.join(tmp, "ranking.csv"), index=False)
+            if cov_table is not None and len(cov_table):
+                cov_table.to_csv(os.path.join(tmp, "backtest_cobertura.csv"), index=False)
             mlflow.log_artifacts(tmp, artifact_path="tables")
         except Exception as exc:  # noqa: BLE001
             mlflow.set_tag("tables_error", str(exc)[:200])

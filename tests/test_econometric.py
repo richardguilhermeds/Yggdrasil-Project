@@ -52,6 +52,12 @@ from yggdrasil.credit_risk.econometric import diagnostics as diag  # noqa: E402
 from yggdrasil.credit_risk.econometric import series as S  # noqa: E402
 from yggdrasil.credit_risk.econometric import transforms as tf  # noqa: E402
 from yggdrasil.credit_risk.econometric.config import StudyConfig  # noqa: E402
+from yggdrasil.credit_risk.econometric.selection import (  # noqa: E402
+    backtest_projection,
+    christoffersen_independence,
+    interval_coverage,
+    kupiec_pof,
+)
 
 
 # ======================================================================
@@ -436,6 +442,114 @@ def test_search_with_link_in_model_kwargs():
     assert res.best is not None and res.best_spec is not None
     assert (res.ranking["status"] == "qualificado").any()
     assert not res.ranking["status"].astype(str).str.startswith("erro").any()
+
+
+# ======================================================================
+# backtest de projeções: cobertura de intervalos (Kupiec/Christoffersen)
+# ======================================================================
+def test_kupiec_pof_calibration():
+    rng = np.random.default_rng(0)
+    v = (rng.random(400) < 0.10).astype(float)  # taxa de violação = nominal (10%)
+    k = kupiec_pof(v, alpha=0.10)
+    assert k["pvalue"] > 0.05 and k["n"] == 400
+    assert kupiec_pof(np.ones(100), alpha=0.10)["pvalue"] < 1e-10  # 100% de violações
+    assert kupiec_pof(np.zeros(50), alpha=0.10)["pvalue"] < 0.05   # banda larga demais
+    assert kupiec_pof(np.array([np.nan]), alpha=0.10)["n"] == 0    # NaN ignorado, vazio não quebra
+
+
+def test_christoffersen_independence_detects_clusters():
+    dep = np.zeros(200)
+    dep[50:80] = 1.0  # violações em bloco (dependência forte)
+    assert christoffersen_independence(dep)["pvalue"] < 1e-6
+    rng = np.random.default_rng(0)
+    iid = (rng.random(400) < 0.10).astype(float)  # violações independentes
+    assert christoffersen_independence(iid)["pvalue"] > 0.05
+    assert np.isnan(christoffersen_independence(np.zeros(30))["pvalue"])  # degenerada
+
+
+def test_backtest_projection_well_specified_covers_nominal():
+    # modelo bem especificado no DGP: cobertura ~nominal e Kupiec não rejeita
+    syn = S.simulate_pd_series(seed=40)
+    spec = Specification(exog={"desemprego": [1], "renda": [0]}, ar=1, link="logit")
+    bt = backtest_projection(lambda s, m: ARDL(s, m, spec), syn.series, syn.macro,
+                             min_train=72, horizon=6, alpha=0.10, n_sims=300)
+    cov = bt["coverage"]
+    assert set(cov["passo"]) == {1, 2, 3, 4, 5, 6, "todos"}
+    tot = cov[cov["passo"] == "todos"].iloc[0]
+    assert 0.80 <= tot["cobertura"] <= 0.97  # perto do nominal 90%
+    assert tot["nominal"] == pytest.approx(0.90)
+    # no 1º passo a sequência de violações não tem sobreposição de horizontes —
+    # é a cadeia limpa para os testes; cobertura correta não é rejeitada
+    h1 = cov[cov["passo"] == 1].iloc[0]
+    assert h1["kupiec_pvalue"] > 0.05 and bool(h1["ok"])
+    bands = bt["bands"]
+    assert len(bands) == bt["n_windows"] * 6
+    assert (bands["upper"] >= bands["lower"]).all()
+
+
+def test_interval_coverage_rejects_narrow_bands():
+    # backtest_projection aceita a instância do modelo (reconstruída por janela)
+    syn = S.simulate_pd_series(seed=40)
+    spec = Specification(exog={"desemprego": [1], "renda": [0]}, ar=1, link="logit")
+    bt = backtest_projection(ARDL(syn.series, syn.macro, spec),
+                             min_train=96, horizon=3, alpha=0.10, n_sims=200)
+    tot_ok = bt["coverage"][bt["coverage"]["passo"] == "todos"].iloc[0]
+    assert tot_ok["kupiec_pvalue"] > 0.05  # bandas honestas: não rejeita
+    # bandas artificialmente estreitas -> violações demais -> Kupiec rejeita
+    bands = bt["bands"].copy()
+    centro = (bands["lower"] + bands["upper"]) / 2.0
+    meia = (bands["upper"] - bands["lower"]) / 2.0
+    bands["lower"] = centro - 0.05 * meia
+    bands["upper"] = centro + 0.05 * meia
+    dentro = (bands["real"] >= bands["lower"]) & (bands["real"] <= bands["upper"])
+    bands["violacao"] = (~dentro).astype(float)
+    cov = interval_coverage(bands, alpha=0.10)
+    tot = cov[cov["passo"] == "todos"].iloc[0]
+    assert tot["kupiec_pvalue"] < 1e-6 and not tot["ok"]
+    assert tot["cobertura"] < tot_ok["cobertura"]
+
+
+def test_search_ranking_exposes_coverage_columns():
+    syn = S.simulate_pd_series(seed=40)
+    res = search(syn.series, syn.macro, candidates=["desemprego", "renda"],
+                 expected_signs={"desemprego": 1, "renda": -1},
+                 grid_kwargs={"lag_set": (0, 1), "max_vars": 1, "max_specs": 10},
+                 horizon=6, min_train=84, vif_max=8.0, include_benchmarks=True,
+                 band_sims=150)
+    assert {"cobertura", "kupiec_pvalue"} <= set(res.ranking.columns)
+    qual = res.ranking[res.ranking["status"] == "qualificado"]
+    assert qual["cobertura"].notna().all()
+    assert ((qual["cobertura"] >= 0) & (qual["cobertura"] <= 1)).all()
+    # band_sims=0 desliga o backtest (colunas existem, mas vazias)
+    res0 = search(syn.series, syn.macro, candidates=["desemprego"],
+                  expected_signs={"desemprego": 1},
+                  grid_kwargs={"lag_set": (0,), "max_vars": 1, "max_specs": 4},
+                  horizon=6, min_train=96, include_benchmarks=False, band_sims=0)
+    assert res0.ranking["cobertura"].isna().all()
+
+
+def test_log_satellite_run_logs_backtest_coverage(tmp_path):
+    mlflow = pytest.importorskip("mlflow")
+    import matplotlib
+    matplotlib.use("Agg")
+    from yggdrasil.credit_risk.econometric import tracking
+
+    syn = S.simulate_pd_series(seed=40)
+    spec = Specification(exog={"desemprego": [1], "renda": [0]}, ar=1, link="logit")
+    m = ARDL(syn.series, syn.macro, spec)
+    fr = m.fit()
+    bt = backtest_projection(m, min_train=96, horizon=3, alpha=0.10, n_sims=150)
+    prev_uri = mlflow.get_tracking_uri()
+    try:
+        mlflow.set_tracking_uri((tmp_path / "mlruns").as_uri())
+        run_id = tracking.log_satellite_run(fr, backtest=bt, run_name="teste_backtest")
+        run = mlflow.get_run(run_id)
+    finally:
+        mlflow.set_tracking_uri(prev_uri)
+    mets = run.data.metrics
+    assert {"cobertura_intervalo", "kupiec_pvalue", "kupiec_stat"} <= set(mets)
+    assert mets["cobertura_nominal"] == pytest.approx(0.90)
+    assert 0.0 <= mets["cobertura_intervalo"] <= 1.0
 
 
 def test_report_figures_render():

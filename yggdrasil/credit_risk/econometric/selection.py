@@ -20,6 +20,13 @@ Validação fora da amostra — :func:`walk_forward`, :func:`diebold_mariano`
     **benchmarks ingênuos** e o ARIMA, com o teste de **Diebold-Mariano** para a
     significância da diferença de acurácia.
 
+Backtest de projeções — :func:`backtest_projection`, :func:`interval_coverage`
+    A ponta que faltava da validação: as **bandas** ``[lower, upper]`` da
+    :class:`~.base.Projection` também são testáveis. Cobertura empírica por
+    horizonte contra a nominal ``1−α``, com os testes de **Kupiec** (POF, razão
+    de verossimilhança binomial) e **Christoffersen** (independência das
+    violações via cadeia de Markov de 1ª ordem).
+
 Ranking — :func:`search`, :func:`compare`
     Reúne tudo num ranking champion-challenger reprodutível por configuração.
 """
@@ -164,6 +171,9 @@ def walk_forward(
     min_train: Optional[int] = None,
     horizon: int = 1,
     step: int = 1,
+    alpha: float = 0.10,
+    band_sims: int = 0,
+    seed: int = 0,
 ) -> dict:
     """Validação **walk-forward** (expanding window) — o padrão-ouro (Guia §4.3).
 
@@ -172,17 +182,28 @@ def walk_forward(
     ``build(series_treino, macro_treino)`` devolve um modelo **não ajustado** (é
     reajustado a cada janela).
 
+    Com ``band_sims > 0`` registra também, por janela, as bandas ``[lower,
+    upper]`` de nível ``1−alpha`` da :class:`~.base.Projection` (via
+    ``model.project`` com a macro **observada** do período de teste) e o
+    realizado — o insumo do backtest de cobertura de intervalos
+    (:func:`interval_coverage` / :func:`backtest_projection`).
+
     Returns
     -------
     dict
         ``rmse``/``mae``/``mape`` (escala original), ``errors`` (vetor de erros por
-        (origem, passo), para o Diebold-Mariano), ``n_windows`` e ``horizon``.
+        (origem, passo), para o Diebold-Mariano), ``n_windows``, ``horizon`` e
+        ``alpha``. Com ``band_sims > 0``, também ``bands``: DataFrame com uma
+        linha por (origem, passo) e colunas ``origem, periodo, passo, previsto,
+        lower, upper, real, violacao`` (``violacao`` fica ``NaN`` na janela em que
+        a banda não pôde ser calculada); senão ``bands`` é ``None``.
     """
     rs: RiskSeries = as_risk_series(series)
     y = rs.values
     n = len(y)
     min_train = min_train or max(24, n // 2)
     preds_all, act_all, errors = [], [], []
+    band_rows: list[dict] = []
     n_windows = 0
     for t in range(min_train, n - horizon + 1, step):
         idx_tr = y.index[:t]
@@ -203,14 +224,46 @@ def walk_forward(
         preds_all.append(p)
         act_all.append(a)
         errors.append(a - p)
+        if band_sims:
+            # bandas da projeção condicionada à macro observada do teste; um DataFrame
+            # vazio serve de "cenário" para modelos univariados (ARIMA puro, AR)
+            lo = np.full(horizon, np.nan)
+            hi = np.full(horizon, np.nan)
+            try:
+                fut = macro.loc[idx_te] if macro is not None else pd.DataFrame(index=idx_te)
+                proj = model.project({"observado": fut}, horizon=horizon,
+                                     alpha=alpha, n_sims=band_sims, seed=seed)
+                pf = proj.paths["observado"]
+                arr_lo = pf["lower"].to_numpy(dtype=float)[:horizon]
+                arr_hi = pf["upper"].to_numpy(dtype=float)[:horizon]
+                lo[:len(arr_lo)] = arr_lo
+                hi[:len(arr_hi)] = arr_hi
+            except Exception:  # noqa: BLE001 - banda indisponível não derruba a janela
+                pass
+            for j in range(len(a)):
+                band_rows.append({"origem": idx_tr[-1], "periodo": idx_te[j],
+                                  "passo": j + 1, "previsto": p[j],
+                                  "lower": lo[j], "upper": hi[j], "real": a[j]})
         n_windows += 1
+    bands = None
+    if band_sims:
+        bands = pd.DataFrame(band_rows, columns=["origem", "periodo", "passo",
+                                                 "previsto", "lower", "upper", "real"])
+        dentro = (bands["real"] >= bands["lower"]) & (bands["real"] <= bands["upper"])
+        valida = bands[["lower", "upper", "real"]].notna().all(axis=1)
+        # violação = realizado fora da banda; NaN quando a banda não existe (a
+        # comparação com NaN daria False e viraria violação espúria)
+        bands["violacao"] = np.where(valida.to_numpy(), (~dentro).to_numpy(dtype=float), np.nan)
+        bands.attrs["alpha"] = float(alpha)
     if not preds_all:
         return {"rmse": np.nan, "mae": np.nan, "mape": np.nan,
-                "errors": np.array([]), "n_windows": 0, "horizon": horizon}
+                "errors": np.array([]), "n_windows": 0, "horizon": horizon,
+                "alpha": float(alpha), "bands": bands}
     actuals = np.concatenate(act_all)
     preds = np.concatenate(preds_all)
     out = _oos_metrics(actuals, preds)
-    out.update({"errors": np.concatenate(errors), "n_windows": n_windows, "horizon": horizon})
+    out.update({"errors": np.concatenate(errors), "n_windows": n_windows,
+                "horizon": horizon, "alpha": float(alpha), "bands": bands})
     return out
 
 
@@ -252,6 +305,243 @@ def diebold_mariano(errors_a: np.ndarray, errors_b: np.ndarray, *, h: int = 1,
         pval = 2.0 * float(stats.norm.sf(abs(dm)))
     better = "a" if dbar < 0 else "b"
     return {"stat": float(dm), "pvalue": pval, "n": m, "better": better}
+
+
+# ======================================================================
+# Backtest de projeções: cobertura de intervalos (Kupiec e Christoffersen)
+# ======================================================================
+def kupiec_pof(violations, alpha: float) -> dict:
+    """Teste de **Kupiec** (1995, *proportion of failures*) da taxa de violações.
+
+    ``H0``: a probabilidade de violação da banda é a nominal ``alpha`` (banda de
+    nível ``1−alpha``). Razão de verossimilhança binomial, ``LR ~ χ²(1)`` sob
+    ``H0``. ``violations`` é a sequência de 0/1 (``NaN`` é ignorado).
+
+    Returns
+    -------
+    dict
+        ``stat``, ``pvalue``, ``n`` (observações válidas), ``violations`` (nº de
+        violações) e ``rate`` (taxa empírica de violação).
+    """
+    v = np.asarray(violations, dtype=float)
+    v = v[np.isfinite(v)]
+    n = int(v.size)
+    x = int(np.round(float(v.sum())))
+    if n == 0 or not (0.0 < alpha < 1.0):
+        return {"stat": np.nan, "pvalue": np.nan, "n": n, "violations": x, "rate": np.nan}
+    phat = x / n
+
+    def _ll(p: float) -> float:
+        p = min(max(p, 1e-12), 1.0 - 1e-12)
+        return x * np.log(p) + (n - x) * np.log(1.0 - p)
+
+    lr = max(0.0, -2.0 * (_ll(alpha) - _ll(phat)))
+    return {"stat": float(lr), "pvalue": float(stats.chi2.sf(lr, df=1)),
+            "n": n, "violations": x, "rate": float(phat)}
+
+
+def christoffersen_independence(violations) -> dict:
+    """Teste de **Christoffersen** (1998) de independência das violações.
+
+    ``H0``: as violações são independentes no tempo (sem *clusters*). Razão de
+    verossimilhança de uma cadeia de Markov de 1ª ordem sobre a sequência 0/1
+    (probabilidade de violação condicionada ao estado anterior), ``LR ~ χ²(1)``.
+    Sequência degenerada (sem violações, ou só violações) não identifica a cadeia
+    — devolve ``NaN``. ``NaN`` na entrada é ignorado.
+    """
+    v = np.asarray(violations, dtype=float)
+    v = v[np.isfinite(v)].astype(int)
+    n = int(v.size)
+    if n < 2:
+        return {"stat": np.nan, "pvalue": np.nan, "n": n}
+    prev, curr = v[:-1], v[1:]
+    n00 = int(np.sum((prev == 0) & (curr == 0)))
+    n01 = int(np.sum((prev == 0) & (curr == 1)))
+    n10 = int(np.sum((prev == 1) & (curr == 0)))
+    n11 = int(np.sum((prev == 1) & (curr == 1)))
+    if (n01 + n11) == 0 or (n00 + n10) == 0:
+        return {"stat": np.nan, "pvalue": np.nan, "n": n,
+                "transitions": (n00, n01, n10, n11)}
+
+    def _ll(p: float, zeros: int, ones: int) -> float:
+        # zeros·log(1−p) + ones·log(p), com a convenção 0·log 0 = 0
+        p = min(max(p, 1e-12), 1.0 - 1e-12)
+        return zeros * np.log(1.0 - p) + ones * np.log(p)
+
+    pi = (n01 + n11) / (n00 + n01 + n10 + n11)
+    pi01 = n01 / (n00 + n01) if (n00 + n01) else 0.0
+    pi11 = n11 / (n10 + n11) if (n10 + n11) else 0.0
+    ll_restrito = _ll(pi, n00 + n10, n01 + n11)
+    ll_livre = _ll(pi01, n00, n01) + _ll(pi11, n10, n11)
+    lr = max(0.0, -2.0 * (ll_restrito - ll_livre))
+    return {"stat": float(lr), "pvalue": float(stats.chi2.sf(lr, df=1)), "n": n,
+            "transitions": (n00, n01, n10, n11)}
+
+
+def _coverage_row(viol, alpha: float, *, passo, independence: bool) -> dict:
+    """Uma linha da tabela de cobertura (por passo ou agregada)."""
+    kup = kupiec_pof(viol, alpha)
+    n, x = kup["n"], kup["violations"]
+    if independence:
+        ind = christoffersen_independence(viol)
+    else:
+        ind = {"stat": np.nan, "pvalue": np.nan}
+    ok = bool(kup["pvalue"] > 0.05) if np.isfinite(kup["pvalue"]) else None
+    return {"passo": passo if passo is not None else "todos", "n": n,
+            "violacoes": x, "nominal": 1.0 - float(alpha),
+            "cobertura": (1.0 - x / n) if n else np.nan,
+            "kupiec_stat": kup["stat"], "kupiec_pvalue": kup["pvalue"],
+            "christoffersen_stat": ind["stat"], "christoffersen_pvalue": ind["pvalue"],
+            "ok": ok}
+
+
+def interval_coverage(bands, alpha: Optional[float] = None) -> pd.DataFrame:
+    """Cobertura empírica dos intervalos de projeção, por horizonte.
+
+    ``bands`` é o DataFrame devolvido por :func:`walk_forward` com ``band_sims >
+    0`` (ou o próprio dict do walk-forward / de :func:`backtest_projection`).
+    Para cada ``passo`` (1..H) compara a fração de realizados dentro de
+    ``[lower, upper]`` com a **cobertura nominal** ``1−alpha`` e aplica:
+
+    * **Kupiec (POF)** — a taxa de violações é a nominal? (:func:`kupiec_pof`);
+    * **Christoffersen** — as violações são independentes no tempo, ou vêm em
+      *clusters*? (:func:`christoffersen_independence`, sobre a sequência de
+      violações do passo ordenada pela origem da janela).
+
+    A última linha (``passo='todos'``) agrega todos os passos — só Kupiec: a
+    ordem temporal de horizontes sobrepostos não define uma cadeia para o teste
+    de independência. ``ok`` = Kupiec não rejeita a cobertura nominal a 5%.
+    """
+    if isinstance(bands, Mapping):
+        alpha = alpha if alpha is not None else bands.get("alpha")
+        bands = bands.get("bands")
+    if bands is None or len(bands) == 0:
+        raise ValueError(
+            "sem bandas registradas: rode walk_forward(..., band_sims>0) "
+            "ou backtest_projection()."
+        )
+    if alpha is None:
+        alpha = bands.attrs.get("alpha") if hasattr(bands, "attrs") else None
+    if alpha is None:
+        raise ValueError("alpha nominal desconhecido: passe alpha= (o mesmo da projeção).")
+    df = bands.sort_values(["passo", "origem"]) if "origem" in bands.columns else bands
+    rows = [
+        _coverage_row(g["violacao"].to_numpy(dtype=float), alpha,
+                      passo=int(passo), independence=True)
+        for passo, g in df.groupby("passo", sort=True)
+    ]
+    rows.append(_coverage_row(df["violacao"].to_numpy(dtype=float), alpha,
+                              passo=None, independence=False))
+    return pd.DataFrame(rows)
+
+
+def _clone_build(model: SatelliteModel) -> Callable:
+    """``build(series, macro)`` que reconstrói um modelo *igual* ao dado.
+
+    Reaproveita os hiperparâmetros do construtor guardados como atributos
+    homônimos no objeto (``spec``, ``order``, ``rho``, ``cov_type``, ...). Para
+    um modelo cujo estado não siga essa convenção, passe um ``build`` explícito
+    a :func:`backtest_projection`.
+    """
+    import inspect
+
+    cls = type(model)
+    alias = {"exog": "exog_spec"}  # ARIMA guarda o parâmetro 'exog' em 'exog_spec'
+    try:
+        params = [p for p in list(inspect.signature(cls.__init__).parameters.values())[1:]
+                  if p.kind not in (inspect.Parameter.VAR_POSITIONAL,
+                                    inspect.Parameter.VAR_KEYWORD)]
+        names = [p.name for p in params]
+    except (TypeError, ValueError):  # pragma: no cover - construtores exóticos
+        names = []
+
+    def build(s, m):
+        kwargs = {}
+        for nm in names:
+            if nm in ("series", "macro"):
+                continue
+            val = getattr(model, alias.get(nm, nm), None)
+            if val is not None:
+                kwargs[nm] = val
+        return cls(s, m, **kwargs) if "macro" in names else cls(s, **kwargs)
+
+    return build
+
+
+def backtest_projection(
+    model,
+    series=None,
+    macro: Optional[pd.DataFrame] = None,
+    *,
+    min_train: Optional[int] = None,
+    horizon: int = 6,
+    step: int = 1,
+    alpha: float = 0.10,
+    n_sims: int = 500,
+    seed: int = 0,
+) -> dict:
+    """Backtest das **projeções com intervalo** de um modelo satélite.
+
+    Conveniência sobre :func:`walk_forward` + :func:`interval_coverage`:
+    reestima o modelo janela a janela, projeta ``horizon`` passos com bandas de
+    nível ``1−alpha`` condicionadas à macro **observada** do período de teste e
+    mede a cobertura empírica dos intervalos com os testes de Kupiec e
+    Christoffersen — bandas honestas cobrem ~``1−alpha`` dos realizados; bandas
+    estreitas demais acumulam violações e o Kupiec rejeita.
+
+    Parameters
+    ----------
+    model:
+        Um :class:`~.base.SatelliteModel` (ajustado ou não — é **reconstruído**
+        por janela com os mesmos hiperparâmetros) **ou** um ``build(series,
+        macro) -> modelo`` como no :func:`walk_forward`.
+    series, macro:
+        Série e macro do estudo. Com um modelo, os padrões são ``model.series``
+        e ``model.macro``.
+    min_train, horizon, step, alpha, n_sims, seed:
+        Como no :func:`walk_forward` (``n_sims`` = ``band_sims``, nº de
+        simulações *bootstrap* das bandas por janela).
+
+    Returns
+    -------
+    dict
+        O dict do :func:`walk_forward` (métricas, ``errors``, ``bands``) mais
+        ``coverage``: a tabela de :func:`interval_coverage` por passo (última
+        linha ``'todos'``).
+    """
+    if isinstance(model, SatelliteModel):
+        series = series if series is not None else getattr(model, "series", None)
+        macro = macro if macro is not None else getattr(model, "macro", None)
+        build = _clone_build(model)
+    elif callable(model):
+        build = model
+    else:
+        raise TypeError("model deve ser um SatelliteModel ou um build(series, macro) -> modelo.")
+    if series is None:
+        raise ValueError("forneça 'series' (ou um modelo construído com a série).")
+    wf = walk_forward(build, series, macro, min_train=min_train, horizon=horizon,
+                      step=step, alpha=alpha, band_sims=max(1, int(n_sims)), seed=seed)
+    bands = wf.get("bands")
+    wf["coverage"] = (interval_coverage(bands, alpha)
+                      if bands is not None and len(bands) else None)
+    return wf
+
+
+def _coverage_cols(wf: dict) -> dict:
+    """Colunas de cobertura para o ranking, de um walk-forward com bandas."""
+    out = {"cobertura": np.nan, "kupiec_pvalue": np.nan}
+    bands = wf.get("bands")
+    if bands is None or not len(bands):
+        return out
+    try:
+        cov = interval_coverage(bands, wf.get("alpha"))
+    except Exception:  # noqa: BLE001 - cobertura indisponível não derruba o ranking
+        return out
+    tot = cov[cov["passo"] == "todos"]
+    if len(tot) and int(tot["n"].iloc[0]) > 0:
+        out["cobertura"] = float(tot["cobertura"].iloc[0])
+        out["kupiec_pvalue"] = float(tot["kupiec_pvalue"].iloc[0])
+    return out
 
 
 # ======================================================================
@@ -300,6 +590,8 @@ def search(
     require_signs: bool = True,
     include_benchmarks: bool = True,
     grid_kwargs: Optional[dict] = None,
+    alpha: float = 0.10,
+    band_sims: int = 200,
 ) -> SearchResult:
     """Executa a busca champion-challenger sobre uma grade (Guia §4).
 
@@ -309,6 +601,12 @@ def search(
     (``"oos_rmse"`` padrão, ou ``"aic"``/``"bic"``) e reajusta a melhor na amostra
     cheia. Se ``include_benchmarks``, adiciona ARIMA e ingênuos ao ranking e a
     razão ``vs_arima`` (RMSE relativo).
+
+    Com ``band_sims > 0`` (padrão), o ranking traz também o **backtest de
+    cobertura** dos intervalos de projeção de nível ``1−alpha``: ``cobertura``
+    (empírica, agregada nos passos) e ``kupiec_pvalue``
+    (:func:`interval_coverage` sobre as bandas do walk-forward) — ponto extra de
+    desempate entre modelos com RMSE parecido. ``band_sims=0`` desliga.
 
     ``grid`` pode ser dado direto; senão é construído de ``candidates`` (+
     ``expected_signs``) via :func:`make_grid` (parâmetros extra em ``grid_kwargs``).
@@ -348,12 +646,15 @@ def search(
             status = f"reprovado: VIF={mvif:.1f}>{vif_max}"
         row = {"modelo": spec.describe(), "status": status, "n_vars": spec.n_terms(),
                "AIC": fr.aic, "BIC": fr.bic, "max_vif": mvif, "sinais_ok": ok_sign,
-               "oos_rmse": np.nan, "oos_mae": np.nan}
+               "oos_rmse": np.nan, "oos_mae": np.nan,
+               "cobertura": np.nan, "kupiec_pvalue": np.nan}
         if status == "qualificado":
             wf = walk_forward(lambda s, m: model_cls(s, m, spec, **model_kwargs),
-                              rs, macro, min_train=min_train, horizon=horizon)
+                              rs, macro, min_train=min_train, horizon=horizon,
+                              alpha=alpha, band_sims=band_sims)
             row["oos_rmse"] = wf["rmse"]
             row["oos_mae"] = wf["mae"]
+            row.update(_coverage_cols(wf))
             qualified.append((spec, wf["rmse"], wf["errors"]))
         rows.append(row)
 
@@ -363,11 +664,13 @@ def search(
         for name, build in _benchmark_builds(rs.kind, 12).items():
             try:
                 wf = walk_forward(build, rs, macro if "ARIMA" not in name else None,
-                                  min_train=min_train, horizon=horizon)
+                                  min_train=min_train, horizon=horizon,
+                                  alpha=alpha, band_sims=band_sims)
                 benchmarks[name] = wf
                 rows.append({"modelo": name, "status": "benchmark", "n_vars": 0,
                              "AIC": np.nan, "BIC": np.nan, "max_vif": np.nan,
-                             "sinais_ok": None, "oos_rmse": wf["rmse"], "oos_mae": wf["mae"]})
+                             "sinais_ok": None, "oos_rmse": wf["rmse"], "oos_mae": wf["mae"],
+                             **_coverage_cols(wf)})
                 if name.startswith("ARIMA"):
                     arima_rmse = wf["rmse"]
             except Exception:  # noqa: BLE001
@@ -439,6 +742,10 @@ __all__ = [
     "spec_max_vif",
     "walk_forward",
     "diebold_mariano",
+    "kupiec_pof",
+    "christoffersen_independence",
+    "interval_coverage",
+    "backtest_projection",
     "SearchResult",
     "search",
     "compare",
