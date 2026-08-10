@@ -178,6 +178,14 @@ def log_capital_run(
         _log_metric_safe(mlflow, "CE_var", result.economic_capital(metric="var"))
         _log_metric_safe(mlflow, "CE_es", result.economic_capital(metric="es"))
 
+        # ── incerteza amostral (ruído de Monte Carlo) do VaR e do ES ────
+        # Erro-padrão do quantil (estatísticas de ordem) e da média da cauda
+        # (bootstrap) — insumo do diagnóstico de convergência do run. Em
+        # distribuições ponderadas (analíticas) os métodos retornam NaN e o
+        # _log_metric_safe simplesmente não loga.
+        _log_metric_safe(mlflow, "VaR_se", dist.var_se(result.q))
+        _log_metric_safe(mlflow, "ES_se", dist.es_se(result.q, seed=result.seed))
+
         # ── benefício de diversificação (se segment_losses disponível) ──
         try:
             div = result.diversification_benefit()

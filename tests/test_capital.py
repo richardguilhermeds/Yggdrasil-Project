@@ -81,6 +81,58 @@ def test_measures_reject_bad_input():
 
 
 # ----------------------------------------------------------------------
+# IC de VaR/ES (estatísticas de ordem + bootstrap da cauda)
+# ----------------------------------------------------------------------
+def test_var_ci_coverage_normal():
+    """O IC por estatísticas de ordem cobre o quantil teórico ~95% das vezes."""
+    from scipy.stats import norm
+
+    rng = np.random.default_rng(123)
+    q, alpha, n, n_rep = 0.95, 0.05, 1_000, 200
+    teorico = float(norm.ppf(q))                       # quantil verdadeiro da N(0,1)
+    cobre = 0
+    for _ in range(n_rep):
+        ld = LossDistribution(rng.standard_normal(n))
+        lo, hi = ld.var_ci(q, alpha)
+        assert lo <= hi
+        cobre += int(lo <= teorico <= hi)
+    cobertura = cobre / n_rep
+    # cobertura garantida >= 1-alpha (IC conservador); tolerância p/ ruído de simulação
+    assert 0.92 <= cobertura <= 1.0
+
+
+def test_es_ci_and_se_empirical():
+    rng = np.random.default_rng(0)
+    ld = LossDistribution(rng.gamma(2.0, 50_000, size=50_000))
+    lo, hi = ld.es_ci(0.99, n_boot=300, seed=42)
+    assert lo <= ld.es(0.99) <= hi                     # banda envolve o ES pontual
+    assert ld.es_ci(0.99, n_boot=300, seed=42) == (lo, hi)   # reprodutível c/ semente
+    assert ld.var_se(0.99) > 0
+    assert ld.es_se(0.99, n_boot=300, seed=42) > 0
+    var_lo, var_hi = ld.var_ci(0.99)
+    assert var_lo <= ld.var(0.99) <= var_hi
+
+
+def test_ci_weighted_nan_and_summary_columns():
+    # Distribuição ponderada (analítica): banda não se aplica -> NaN, sem quebrar.
+    vals = np.array([0.0, 100.0, 200.0, 300.0])
+    probs = np.array([0.7, 0.2, 0.07, 0.03])
+    ld = LossDistribution(vals, weights=probs)
+    assert all(np.isnan(x) for x in ld.var_ci(0.95))
+    assert all(np.isnan(x) for x in ld.es_ci(0.95, seed=1))
+    assert np.isnan(ld.var_se(0.95)) and np.isnan(ld.es_se(0.95))
+    df = ld.summary()
+    for col in ("VaR_lo", "VaR_hi", "ES_lo", "ES_hi"):
+        assert col in df.columns
+        assert df[col].isna().all()
+    # Amostral: bandas finitas envolvendo a estimativa pontual.
+    emp = LossDistribution(np.random.default_rng(1).gamma(2.0, 1.0, size=20_000))
+    dfe = emp.summary(confidence_levels=(0.99,), n_boot=100, seed=7)
+    assert dfe.loc[0, "VaR_lo"] <= dfe.loc[0, "VaR"] <= dfe.loc[0, "VaR_hi"]
+    assert dfe.loc[0, "ES_lo"] <= dfe.loc[0, "ES"] <= dfe.loc[0, "ES_hi"]
+
+
+# ----------------------------------------------------------------------
 # Segment / Portfolio (contrato)
 # ----------------------------------------------------------------------
 def test_segment_validation():

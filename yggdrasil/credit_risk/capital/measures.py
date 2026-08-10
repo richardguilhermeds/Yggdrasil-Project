@@ -59,6 +59,13 @@ def _check_q(q: float) -> float:
     return q
 
 
+def _check_alpha(alpha: float) -> float:
+    alpha = float(alpha)
+    if not (0.0 < alpha < 1.0):
+        raise ValueError(f"A significância alpha deve estar em (0, 1); recebido {alpha!r}.")
+    return alpha
+
+
 # ======================================================================
 # Funções de medida sobre uma amostra empírica de perdas
 # ======================================================================
@@ -173,6 +180,7 @@ class LossDistribution:
             self.weights = w / total                    # normaliza para somar 1
         self._expected = None if expected is None else float(expected)
         self.name = name
+        self._sorted: Optional[np.ndarray] = None      # cache p/ estatísticas de ordem
 
     # ------------------------------------------------------------------
     # Núcleo: quantil respeitando pesos (empírico OU ponderado)
@@ -243,19 +251,166 @@ class LossDistribution:
         return self.var(q)
 
     # ------------------------------------------------------------------
+    # Incerteza amostral: IC e erro-padrão do VaR e do ES
+    # ------------------------------------------------------------------
+    def _sorted_losses(self) -> np.ndarray:
+        """Perdas ordenadas (memoizado) — base das estatísticas de ordem."""
+        if self._sorted is None:
+            self._sorted = np.sort(self.losses)
+        return self._sorted
+
+    def var_ci(self, q: float = DEFAULT_CONFIDENCE, alpha: float = 0.05) -> tuple:
+        """Intervalo de confiança não-paramétrico do VaR por estatísticas de ordem.
+
+        Numa amostra empírica de tamanho ``n``, o número de observações abaixo
+        do quantil verdadeiro segue ``Binomial(n, q)``; os *ranks* que deixam
+        ``alpha/2`` de probabilidade em cada cauda delimitam o intervalo
+        ``[x_(l), x_(u)]`` com cobertura ≥ ``1 − alpha``, sem hipótese sobre a
+        forma da cauda. Em ``q`` muito alto com poucos cenários os *ranks* são
+        truncados nos extremos da amostra (a banda "cola" no máximo observado)
+        — sinal de que faltam cenários, ver
+        :func:`~yggdrasil.credit_risk.capital.validation.convergence`.
+
+        Distribuições **ponderadas** (grade analítica, ex.: recursão de
+        Panjer) não têm erro amostral a quantificar: retorna ``(nan, nan)``
+        mantendo a interface única.
+
+        Parameters
+        ----------
+        q:
+            Nível de confiança do VaR.
+        alpha:
+            Significância do intervalo (``0.05`` → IC de 95%).
+
+        Returns
+        -------
+        tuple
+            ``(lo, hi)`` na mesma unidade monetária de ``losses``.
+        """
+        q = _check_q(q)
+        alpha = _check_alpha(alpha)
+        if self.weights is not None:                   # analítica: banda não se aplica
+            return (float("nan"), float("nan"))
+        from scipy.stats import binom                  # import tardio (padrão do pacote)
+
+        v = self._sorted_losses()
+        n = v.size
+        # Ranks 1..n pela binomial exata: P(B < l) < alpha/2 e P(B > u−1) ≤ alpha/2.
+        lo_rank = int(binom.ppf(alpha / 2.0, n, q))
+        hi_rank = int(binom.ppf(1.0 - alpha / 2.0, n, q)) + 1
+        lo_idx = min(max(lo_rank, 1), n) - 1           # ranks 1..n → índices 0..n−1
+        hi_idx = min(max(hi_rank, 1), n) - 1
+        return (float(v[lo_idx]), float(v[hi_idx]))
+
+    def _es_tail_boot(self, q: float, n_boot: int, seed: Optional[int]) -> np.ndarray:
+        """Médias *bootstrap* da cauda empírica (perdas ≥ VaR no nível ``q``)."""
+        var = self.var(q)
+        tail = self.losses[self.losses >= var]
+        if tail.size == 0:                             # degenerado: cauda vazia
+            return np.array([var])
+        rng = np.random.default_rng(seed)
+        m = tail.size
+        boot = np.empty(int(n_boot))
+        for b in range(int(n_boot)):                   # laço evita matriz n_boot×m em memória
+            boot[b] = float(np.mean(tail[rng.integers(0, m, size=m)]))
+        return boot
+
+    def es_ci(
+        self,
+        q: float = DEFAULT_CONFIDENCE,
+        alpha: float = 0.05,
+        n_boot: int = 500,
+        seed: Optional[int] = None,
+    ) -> tuple:
+        """Intervalo de confiança do ES por *bootstrap* da cauda empírica.
+
+        Reamostra com reposição as perdas ``≥ VaR_q`` e recalcula a média da
+        cauda ``n_boot`` vezes; a banda é o intervalo percentílico
+        ``[alpha/2, 1 − alpha/2]`` das médias reamostradas. Condiciona no VaR
+        pontual (não propaga a incerteza de localização do quantil), o que
+        tende a subestimar levemente a banda — suficiente como diagnóstico do
+        ruído de Monte Carlo.
+
+        Distribuições **ponderadas** (analíticas) retornam ``(nan, nan)``,
+        mantendo a interface única.
+
+        Parameters
+        ----------
+        q:
+            Nível de confiança do ES.
+        alpha:
+            Significância do intervalo (``0.05`` → IC de 95%).
+        n_boot:
+            Número de reamostragens *bootstrap*.
+        seed:
+            Semente do gerador (reprodutibilidade).
+
+        Returns
+        -------
+        tuple
+            ``(lo, hi)`` na mesma unidade monetária de ``losses``.
+        """
+        q = _check_q(q)
+        alpha = _check_alpha(alpha)
+        n_boot = int(n_boot)
+        if n_boot < 1:
+            raise ValueError(f"n_boot deve ser >= 1; recebido {n_boot!r}.")
+        if self.weights is not None:                   # analítica: banda não se aplica
+            return (float("nan"), float("nan"))
+        boot = self._es_tail_boot(q, n_boot, seed)
+        return (float(np.quantile(boot, alpha / 2.0)),
+                float(np.quantile(boot, 1.0 - alpha / 2.0)))
+
+    def var_se(self, q: float = DEFAULT_CONFIDENCE, alpha: float = 0.05) -> float:
+        """Erro-padrão aproximado do VaR: meia-largura do IC de :meth:`var_ci`
+        dividida pelo quantil normal ``z_{1−alpha/2}``. ``nan`` para
+        distribuições ponderadas (analíticas)."""
+        lo, hi = self.var_ci(q, alpha)
+        if not (np.isfinite(lo) and np.isfinite(hi)):
+            return float("nan")
+        from scipy.stats import norm                   # import tardio (padrão do pacote)
+        z = float(norm.ppf(1.0 - _check_alpha(alpha) / 2.0))
+        return float((hi - lo) / (2.0 * z))
+
+    def es_se(
+        self,
+        q: float = DEFAULT_CONFIDENCE,
+        n_boot: int = 500,
+        seed: Optional[int] = None,
+    ) -> float:
+        """Erro-padrão do ES: desvio-padrão das médias *bootstrap* da cauda
+        (ver :meth:`es_ci`). ``nan`` para distribuições ponderadas (analíticas)."""
+        if self.weights is not None:
+            return float("nan")
+        boot = self._es_tail_boot(_check_q(q), max(int(n_boot), 2), seed)
+        return float(np.std(boot, ddof=1)) if boot.size > 1 else 0.0
+
+    # ------------------------------------------------------------------
     # Resumo tabular
     # ------------------------------------------------------------------
     def summary(
         self,
         confidence_levels: Sequence[float] = (0.99, 0.995, 0.999, 0.9997),
         metric: str = "var",
+        alpha: float = 0.05,
+        n_boot: int = 500,
+        seed: Optional[int] = None,
     ) -> pd.DataFrame:
-        """Tabela de EL, VaR, ES e CE em vários níveis de confiança."""
+        """Tabela de EL, VaR, ES e CE em vários níveis de confiança.
+
+        Inclui as bandas de incerteza amostral ``VaR_lo``/``VaR_hi``
+        (estatísticas de ordem, :meth:`var_ci`) e ``ES_lo``/``ES_hi``
+        (*bootstrap* da cauda, :meth:`es_ci`), no nível ``1 − alpha``. Em
+        distribuições ponderadas (analíticas) as bandas são ``NaN`` — não há
+        ruído amostral a quantificar.
+        """
         el = self.el
         linhas = []
         for q in confidence_levels:
             var = self.var(q)
             es = self.es(q)
+            var_lo, var_hi = self.var_ci(q, alpha)
+            es_lo, es_hi = self.es_ci(q, alpha, n_boot=n_boot, seed=seed)
             linhas.append(
                 {
                     "nivel_confianca": q,
@@ -265,6 +420,10 @@ class LossDistribution:
                     "CE_var": var - el,
                     "CE_es": es - el,
                     "CE": (var - el) if metric == "var" else (es - el),
+                    "VaR_lo": var_lo,
+                    "VaR_hi": var_hi,
+                    "ES_lo": es_lo,
+                    "ES_hi": es_hi,
                 }
             )
         return pd.DataFrame(linhas)
