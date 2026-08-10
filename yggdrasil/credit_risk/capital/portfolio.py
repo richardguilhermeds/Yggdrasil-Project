@@ -257,7 +257,11 @@ class Portfolio:
     ) -> "SimulationResult":
         """Simulação de **Monte Carlo multifatorial** — a "versão 2".
 
-        Ver :func:`yggdrasil.credit_risk.capital.monte_carlo.simulate`.
+        Ver :func:`yggdrasil.credit_risk.capital.monte_carlo.simulate`. Opções
+        extras (ex.: ``copula="t"``/``t_dof`` para dependência de cauda e
+        ``lgd_dist="beta"`` para LGD Beta com *moment matching*) passam por
+        ``**kwargs`` — e, por consequência, chegam também às rotinas de
+        validação que simulam via este método.
         """
         from .monte_carlo import simulate
         return simulate(self, n_scenarios=n_scenarios, q=q, seed=seed, **kwargs)

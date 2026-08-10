@@ -207,6 +207,94 @@ def test_migration_reference_is_origin_not_best():
 
 
 # ----------------------------------------------------------------------
+# Monte Carlo: cópula t e LGD beta
+# ----------------------------------------------------------------------
+def test_mc_defaults_reproduce_legacy_path():
+    """Regressão: defaults (gaussiana + normal-clipada) reproduzem o algoritmo
+    histórico bit a bit — mesma ordem de sorteios, mesmas contas."""
+    port = Portfolio([
+        Segment("a", pd=0.05, lgd=0.60, ead=2e6, rho=0.12, n_obligors=10_000,
+                factor="F1", lgd_vol=0.20),
+        Segment("b", pd=0.02, lgd=0.40, ead=3e6, rho=0.06, n_obligors=10_000,
+                factor="F2", lgd_vol=0.0),
+    ], factor_corr=[[1.0, 0.3], [0.3, 1.0]], factor_names=["F1", "F2"])
+    n, seed, c = 5_000, 42, 0.4
+    sim = port.simulate(n, q=0.999, seed=seed, stochastic_lgd=True, pd_lgd_corr=c)
+
+    # réplica manual do algoritmo pré-cópula (um bloco, granular)
+    rng = np.random.default_rng(seed)
+    L = np.linalg.cholesky(np.asarray(port.factor_corr, dtype=float))
+    Y = (rng.standard_normal((n, 2)) @ L.T)[:, port.factor_of()]
+    inv_pd = norm.ppf(np.clip(port.pds(), 1e-12, 1 - 1e-12))
+    rhos = port.rhos()
+    cond = norm.cdf((inv_pd[None, :] - np.sqrt(rhos)[None, :] * Y)
+                    / np.sqrt(1.0 - rhos)[None, :])
+    zeta = rng.standard_normal((n, 2))
+    lat = -c * Y + np.sqrt(1.0 - c ** 2) * zeta
+    lgd_eff = np.clip(port.lgds()[None, :] + port.lgd_vols()[None, :] * lat, 0.0, 1.0)
+    esperado = (cond * lgd_eff * port.eads()[None, :]).sum(axis=1)
+    np.testing.assert_array_equal(sim.losses, esperado)
+
+    # explicitar os defaults novos não muda nada (mesmo fluxo do RNG)
+    sim2 = port.simulate(n, q=0.999, seed=seed, stochastic_lgd=True, pd_lgd_corr=c,
+                         copula="gaussian", lgd_dist="normal")
+    np.testing.assert_array_equal(sim.losses, sim2.losses)
+
+
+def test_mc_t_copula_fattens_tail_and_preserves_el():
+    port = toy_portfolio()
+    n, seed = 100_000, 7
+    g = port.simulate(n, q=0.999, seed=seed)
+    t4 = port.simulate(n, q=0.999, seed=seed, copula="t", t_dof=4.0)
+    # ν baixo ⇒ dependência de cauda ⇒ VaR 99,9% maior que o gaussiano
+    assert t4.var() > g.var()
+    # limiar t_ν⁻¹(PD) preserva a PD incondicional ⇒ EL empírica ≈ analítica
+    assert t4.losses.mean() == pytest.approx(port.expected_loss(), rel=0.05)
+
+
+def test_mc_beta_lgd_bounds_and_no_atoms():
+    """LGD beta respeita [0, 1] com média/desvio casados e sem a massa
+    artificial em 0/1 que o clipping da normal cria."""
+    # pd≈1 e rho=0 ⇒ fração de default ~1: a perda por cenário revela a LGD.
+    def _lgds(dist):
+        p = Portfolio([Segment("s", pd=1.0, lgd=0.5, ead=1.0, rho=0.0,
+                               n_obligors=10_000, factor="F", lgd_vol=0.3)])
+        return p.simulate(40_000, q=0.999, seed=3, stochastic_lgd=True,
+                          pd_lgd_corr=0.4, lgd_dist=dist).losses
+
+    lgd_beta, lgd_norm = _lgds("beta"), _lgds("normal")
+    atoms = lambda x: float(np.mean((x <= 1e-9) | (x >= 1.0 - 1e-9)))
+    assert lgd_beta.min() >= 0.0 and lgd_beta.max() <= 1.0
+    # moment matching: média e desvio reproduzidos
+    assert lgd_beta.mean() == pytest.approx(0.5, abs=0.01)
+    assert lgd_beta.std() == pytest.approx(0.3, abs=0.01)
+    # normal-clipada concentra massa nas bordas; a beta não
+    assert atoms(lgd_norm) > 0.02
+    assert atoms(lgd_beta) < 1e-3
+
+
+def test_mc_t_copula_with_beta_lgd_smoke():
+    # combinação t + beta: perdas finitas, não-negativas e limitadas por LGD·EAD
+    port = Portfolio([Segment("veic", pd=0.03, lgd=0.40, ead=5e6, rho=0.08,
+                              n_obligors=40_000, factor="veic", lgd_vol=0.25)])
+    sim = port.simulate(30_000, q=0.999, seed=1, copula="t", t_dof=6.0,
+                        stochastic_lgd=True, pd_lgd_corr=0.3, lgd_dist="beta")
+    assert np.isfinite(sim.losses).all()
+    assert sim.losses.min() >= 0.0
+    assert sim.losses.max() <= 5e6  # perda ≤ EAD (LGD ∈ [0, 1], fração ≤ 1)
+
+
+def test_mc_copula_params_validated():
+    port = toy_portfolio()
+    with pytest.raises(ValueError):
+        port.simulate(1_000, seed=0, copula="clayton")
+    with pytest.raises(ValueError):
+        port.simulate(1_000, seed=0, copula="t", t_dof=0.0)
+    with pytest.raises(ValueError):
+        port.simulate(1_000, seed=0, lgd_dist="lognormal")
+
+
+# ----------------------------------------------------------------------
 # Visualizações (matplotlib Agg)
 # ----------------------------------------------------------------------
 def test_report_plots_return_figures():

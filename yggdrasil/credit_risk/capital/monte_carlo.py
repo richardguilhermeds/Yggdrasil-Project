@@ -20,6 +20,13 @@ correlação entre fatores, o modelo captura o **benefício de diversificação*
 cartão, consignado e veículos não estressam ao mesmo tempo com a mesma
 intensidade —, que o Pilar 1 ignora por construção.
 
+Extensões opcionais de :func:`simulate`: ``copula="t"`` adiciona **dependência
+de cauda** entre os latentes (mistura qui-quadrado — choque de variância comum
+por cenário) e ``lgd_dist="beta"`` troca a LGD normal-clipada por uma **Beta
+com *moment matching***, de suporte natural em ``[0, 1]``. Os defaults
+(``copula="gaussian"``, ``lgd_dist="normal"``) preservam o comportamento
+histórico exato.
+
 Validação de sanidade (guia, bloco E): com **um único fator** e carteira
 **granular** (``granular=True``), a simulação reproduz o ASRF analítico.
 
@@ -34,7 +41,7 @@ from typing import TYPE_CHECKING, List, Optional
 
 import numpy as np
 import pandas as pd
-from scipy.stats import norm
+from scipy.stats import beta as beta_dist, norm, t as student_t
 
 from .measures import DEFAULT_CONFIDENCE, LossDistribution
 
@@ -172,6 +179,9 @@ def simulate(
     stochastic_lgd: bool = False,
     pd_lgd_corr: float = 0.0,
     rho_default: float = 0.15,
+    copula: str = "gaussian",
+    t_dof: float = 8.0,
+    lgd_dist: str = "normal",
     antithetic: bool = False,
     store_segment_losses: bool = True,
     block_size: int = 50_000,
@@ -204,6 +214,33 @@ def simulate(
         com ``stochastic_lgd=True``.
     rho_default:
         ``rho`` usado nos segmentos com ``rho=None``.
+    copula:
+        Cópula dos latentes: ``"gaussian"`` (padrão — comportamento histórico)
+        ou ``"t"`` (cópula t de Student com ``t_dof`` graus de liberdade). A
+        cópula t introduz **dependência de cauda**: além dos fatores
+        correlacionados, todos os latentes do cenário compartilham um choque de
+        variância comum ``W = ν/χ²_ν``. Construção do latente de *default*:
+        ``X = √W · (√ρ·Y + √(1−ρ)·ε) ~ t_ν``, com ``Y`` o fator gaussiano e
+        ``ε`` idiossincrático normal — a mistura ``√W`` multiplica o par
+        completo (fator **e** idiossincrático), o que caracteriza a cópula t
+        completa. O *default* ocorre quando ``X ≤ t_ν⁻¹(PD)``: o limiar usa o
+        **quantil da t** (não ``Φ⁻¹``) para preservar a PD incondicional — e
+        portanto a EL — sob o latente t. Condicional a ``(Y, W)``, ``ε`` é
+        normal padrão e a PD condicional fica
+        ``Φ( (t_ν⁻¹(PD)/√W − √ρ·Y) / √(1−ρ) )``.
+    t_dof:
+        Graus de liberdade ``ν`` da cópula t (só usado com ``copula="t"``).
+        ``ν`` baixo (ex.: 4) engorda a cauda; ``ν → ∞`` recupera a gaussiana.
+    lgd_dist:
+        Distribuição da LGD estocástica: ``"normal"`` (padrão — normal clipada
+        em ``[0, 1]``, comportamento histórico, que concentra massa artificial
+        nas bordas) ou ``"beta"`` (Beta com *moment matching*: ``α``/``β``
+        derivados de média ``lgd`` e desvio ``lgd_vol``, suporte natural em
+        ``[0, 1]``). A correlação adversa PD–LGD é preservada por transformação
+        de quantil do mesmo latente sistêmico: ``u = F(latente)`` (CDF normal
+        ou t, conforme a cópula) e ``LGD = Beta⁻¹(u; α, β)``. Casos degenerados
+        (``lgd_vol = 0`` ou média em ``{0, 1}``) permanecem determinísticos;
+        desvio inviável (``σ² ≥ μ(1−μ)``) é truncado ao máximo atingível.
     antithetic:
         Variáveis **antitéticas** (redução de variância): metade dos sorteios do
         fator usa ``+z`` e a outra metade ``−z``.
@@ -225,6 +262,17 @@ def simulate(
         raise ValueError(f"q deve estar em (0, 1); recebido {q!r}.")
     if not (0.0 <= pd_lgd_corr < 1.0):
         raise ValueError("pd_lgd_corr deve estar em [0, 1).")
+    copula = str(copula).lower()
+    if copula not in ("gaussian", "t"):
+        raise ValueError(f"copula deve ser 'gaussian' ou 't'; recebido {copula!r}.")
+    if copula == "t":
+        t_dof = float(t_dof)
+        if not np.isfinite(t_dof) or t_dof <= 0.0:
+            raise ValueError(
+                f"t_dof (graus de liberdade da cópula t) deve ser > 0; recebido {t_dof!r}.")
+    lgd_dist = str(lgd_dist).lower()
+    if lgd_dist not in ("normal", "beta"):
+        raise ValueError(f"lgd_dist deve ser 'normal' ou 'beta'; recebido {lgd_dist!r}.")
 
     rng = np.random.default_rng(seed)
 
@@ -239,10 +287,28 @@ def simulate(
     F = portfolio.n_factors
 
     L = _safe_cholesky(portfolio.factor_corr)           # (F, F)
-    inv_pd = norm.ppf(np.clip(pds, 1e-12, 1 - 1e-12))   # limiar de default por segmento
+    pd_clip = np.clip(pds, 1e-12, 1 - 1e-12)
+    if copula == "t":
+        # Limiar no quantil da t_ν: como o latente é t_ν, é o t_ν⁻¹(PD) que
+        # preserva a PD incondicional (e a EL) — ver docstring de ``copula``.
+        inv_pd = student_t.ppf(pd_clip, df=t_dof)
+    else:
+        inv_pd = norm.ppf(pd_clip)                      # limiar de default por segmento
     sqrt_rho = np.sqrt(rhos)
     sqrt_1mrho = np.sqrt(1.0 - rhos)
     ead_per_obl = eads / np.maximum(n_obl, 1)
+
+    # Parâmetros da Beta por segmento (moment matching de média/desvio) quando
+    # ``lgd_dist='beta'``. Segmento degenerado (vol 0 ou média em {0, 1}) fica
+    # determinístico; desvio inviável (σ² ≥ μ(1−μ)) é truncado ao máximo.
+    if lgd_dist == "beta":
+        mu = lgds
+        beta_ok = (lgd_vols > 0) & (mu > 0.0) & (mu < 1.0)
+        var_max = np.clip(mu * (1.0 - mu), 1e-300, None)
+        sd_eff = np.where(beta_ok, np.minimum(lgd_vols, 0.995 * np.sqrt(var_max)), 1.0)
+        conc = np.where(beta_ok, var_max / sd_eff ** 2 - 1.0, 2.0)   # α + β
+        beta_a = np.clip(mu * conc, 1e-12, None)
+        beta_b = np.clip((1.0 - mu) * conc, 1e-12, None)
 
     total_losses = np.empty(n_scenarios, dtype=float)
     seg_losses = (np.empty((n_scenarios, n_seg), dtype=float)
@@ -261,9 +327,21 @@ def simulate(
         Y = z @ L.T                                     # cov(Y) = factor_corr
         Y_seg = Y[:, fac_of]                            # (m, n_seg) fator de cada segmento
 
+        # ---- mistura da cópula t: choque de variância comum W = ν/χ²_ν ----
+        # O fator misto é Y_t = √W·Y; a mistura entra na PD condicional pelo
+        # limiar reescalado t_ν⁻¹(PD)/√W (equivalente, dividindo o latente
+        # X = √W·(√rho·Y + √(1−rho)·ε) por √W).
+        if copula == "t":
+            w_chi = rng.chisquare(t_dof, size=m)
+            sqrt_w = np.sqrt(t_dof / np.maximum(w_chi, 1e-300))
+            thresh = inv_pd[None, :] / sqrt_w[:, None]
+        else:
+            thresh = inv_pd[None, :]
+
         # ---- PD condicional ao cenário (Vasicek): baixo Y = ruim ----------
-        # p = N( (N⁻¹(PD) − √rho · Y) / √(1−rho) )
-        cond_pd = norm.cdf((inv_pd[None, :] - sqrt_rho[None, :] * Y_seg) / sqrt_1mrho[None, :])
+        # gaussiana: p = N( (N⁻¹(PD) − √rho · Y) / √(1−rho) )
+        # t:        p = N( (t_ν⁻¹(PD)/√W − √rho · Y) / √(1−rho) )
+        cond_pd = norm.cdf((thresh - sqrt_rho[None, :] * Y_seg) / sqrt_1mrho[None, :])
 
         # ---- fração/nº de defaults ---------------------------------------
         if granular:
@@ -276,10 +354,30 @@ def simulate(
         if stochastic_lgd and np.any(lgd_vols > 0):
             zeta = rng.standard_normal((m, n_seg))
             # latente da LGD: componente sistêmica (−Y: cenário ruim → LGD alta)
-            # + idiossincrática. corr(latente_LGD, fator) = pd_lgd_corr.
+            # + idiossincrática. corr(latente_LGD, fator) = pd_lgd_corr. Na
+            # cópula t, o latente recebe o MESMO √W do default (dependência de
+            # cauda PD–LGD) e vira t_ν; a CDF da t devolve o uniforme.
             lgd_lat = (-pd_lgd_corr * Y_seg
                        + np.sqrt(1.0 - pd_lgd_corr ** 2) * zeta)
-            lgd_eff = np.clip(lgds[None, :] + lgd_vols[None, :] * lgd_lat, 0.0, 1.0)
+            u_lgd = (student_t.cdf(sqrt_w[:, None] * lgd_lat, df=t_dof)
+                     if copula == "t" else None)
+            if lgd_dist == "beta":
+                # Transformação de quantil: u = F(latente) → Beta⁻¹(u; α, β).
+                if u_lgd is None:
+                    u_lgd = norm.cdf(lgd_lat)
+                u_lgd = np.clip(u_lgd, 1e-12, 1.0 - 1e-12)
+                lgd_eff = np.where(
+                    beta_ok[None, :],
+                    beta_dist.ppf(u_lgd, beta_a[None, :], beta_b[None, :]),
+                    lgds[None, :])
+            elif u_lgd is not None:
+                # cópula t + marginal normal-clipada: o quantil normal do
+                # uniforme preserva a marginal histórica sob o latente t.
+                z_lgd = norm.ppf(np.clip(u_lgd, 1e-12, 1.0 - 1e-12))
+                lgd_eff = np.clip(lgds[None, :] + lgd_vols[None, :] * z_lgd, 0.0, 1.0)
+            else:
+                # caminho histórico (gaussiana + normal-clipada), bit a bit.
+                lgd_eff = np.clip(lgds[None, :] + lgd_vols[None, :] * lgd_lat, 0.0, 1.0)
         else:
             lgd_eff = lgds[None, :]
 
