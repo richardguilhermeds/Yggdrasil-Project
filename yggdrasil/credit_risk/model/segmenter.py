@@ -2555,13 +2555,40 @@ class ModelSegmenter:
                     timeout=None, random_state=None, fit_best=True, verbose=False,
                     progress_callback=None, log_mlflow=False, mlflow_experiment=None,
                     mlflow_run_name=None, search_space=None, register_model=False,
-                    mlflow_model_name=None, class_balance=None, monotone=None):
+                    mlflow_model_name=None, class_balance=None, monotone=None,
+                    cv=None, time_aware=False, stability_penalty=None, pruner=None):
         """Otimização bayesiana de hiperparâmetros com **Optuna** (dependência
         core). Treina na referência (DES) e avalia no OOT (se houver alvo;
         senão, num split 75/25 do DES), maximizando **AUC** (classificação) ou
         **R²** (regressão). Guarda o resultado em ``self.tuning_`` (e o estudo em
         ``self.study_``); com ``fit_best=True`` reajusta o modelo com os melhores
         hiperparâmetros. Algoritmos tunáveis: :data:`TUNABLE_ALGORITHMS`.
+
+        ``cv`` (opcional): ``None`` (default) mantém a validação única acima;
+        um inteiro ``k ≥ 2`` valida cada trial por **validação cruzada na
+        referência (DES)** — ``StratifiedKFold`` na classificação, ``KFold`` na
+        regressão — e o objetivo vira a **média dos folds**. Com
+        ``time_aware=True`` (requer ``cv`` e ``date_col``), os folds são
+        **temporais por safra**: as safras (``date_col``) são partidas em ``k``
+        blocos contíguos e cada bloco (do 2º em diante) é validado com treino em
+        todos os anteriores (janela expansiva — ``k−1`` folds).
+
+        ``stability_penalty`` (opcional): ``λ ≥ 0`` **penaliza instabilidade**
+        no objetivo de cada trial::
+
+            objetivo = métrica_val − λ·max(0, PSI_des→val − 0,10)
+                                   − λ·max(0, métrica_treino − métrica_val − 0,05)
+
+        onde o PSI é o do score treino→validação (média dos folds com CV) e o
+        segundo termo é o **gap de overfit** (AUC na classificação; R² na
+        regressão). As componentes ficam em ``trial.user_attrs['objetivo']``
+        (``metric_val``, ``metric_treino``, ``gap_treino_val``,
+        ``psi_score_des_val``, ``pen_psi``, ``pen_gap``, ``lambda``, ``valor``).
+
+        ``pruner`` (opcional): ``'median'`` liga o ``MedianPruner`` do Optuna —
+        com CV, a média parcial dos folds é reportada por fold e trials pouco
+        promissores são **podados** antes de completar todos os folds (também
+        aceita uma instância de ``optuna.pruners.BasePruner``).
 
         ``search_space`` (opcional): sobrescreve quais hiperparâmetros são
         buscados e seus intervalos — dict ``{nome: {type, low, high, log?, step?,
@@ -2598,7 +2625,9 @@ class ModelSegmenter:
 
         ``progress_callback`` (opcional): chamado após CADA trial com
         ``(n_concluidos, n_total, melhor_valor)`` — útil p/ barra de progresso na
-        UI. Exceções no callback são ignoradas (não derrubam o tuning)."""
+        UI; com CV, também após cada fold do trial em curso (mesma assinatura).
+        Exceções no callback são ignoradas (não derrubam o tuning). O
+        cancelamento (:meth:`cancel_tuning`) também responde por fold."""
         optuna = _require("optuna", "optuna")
         from sklearn.model_selection import train_test_split
 
@@ -2614,32 +2643,76 @@ class ModelSegmenter:
         feats = list(features) if features is not None else self.selected_features()
         if not feats:
             feats = list(self.candidates)
+        # --- validação: única (OOT/split) ou cruzada (cv=k; temporal opcional) --
+        if cv is not None:
+            cv = int(cv)
+            if cv < 2:
+                raise ValueError("cv deve ser um inteiro ≥ 2 (ou None para a "
+                                 "validação única OOT/split).")
+        if time_aware and cv is None:
+            raise ValueError("time_aware=True requer cv=k (folds temporais "
+                             "contíguos por safra).")
+        if time_aware and self.date_col is None:
+            raise ValueError("time_aware=True requer um segmenter com date_col "
+                             "(coluna de safra).")
+        lam = 0.0 if stability_penalty is None else float(stability_penalty)
+        if lam < 0:
+            raise ValueError("stability_penalty (λ) deve ser ≥ 0.")
 
         tr = self._frame(self.ref_sample)
         tr = tr[tr[self.target].notna()]
-        va = None
-        oot = self._oot_sample()
-        if oot and oot != self.ref_sample:
-            vf = self._frame(oot)
-            vf = vf[vf[self.target].notna()]
-            if len(vf) >= 50:
-                va = vf
-        used_oot = va is not None          # o OOT de fato virou a validação?
-        if va is None:                     # sem OOT com alvo → split do DES
-            strat = tr[self.target].astype(int) if is_clf else None
-            tr, va = train_test_split(tr, test_size=0.25, random_state=random_state,
-                                      stratify=strat)
-        ytr = tr[self.target].astype(int) if is_clf else tr[self.target]
-        yva = va[self.target].astype(int) if is_clf else va[self.target]
-        Xtr, Xva = tr[feats], va[feats]
-        # `va is not None` é SEMPRE verdadeiro após o split acima — sem used_oot,
-        # um OOT de <50 linhas cairia no holdout do DES mas seria rotulado como OOT
-        # (tag MLflow enganosa para governança).
-        val_sample = oot if used_oot else "split"
-        # contagens (n_neg, n_pos) do TREINO do estudo, p/ o balanceamento de
-        # classes (scale_pos_weight etc.) quando o trial o ligar.
-        n_pos_tr = int((ytr == 1).sum()) if is_clf else 0
-        n_neg_tr = (int(len(ytr)) - n_pos_tr) if is_clf else 0
+        # fold_data: lista de (Xtr, ytr, Xva, yva) — 1 tupla na validação única;
+        # k folds (ou k−1 temporais) com cv. O objetivo do trial é a média.
+        fold_data = []
+        if cv is not None:
+            Xd = tr[feats]
+            yd = tr[self.target].astype(int) if is_clf else tr[self.target]
+            if time_aware:
+                # folds TEMPORAIS por safra: safras ordenadas partidas em k blocos
+                # contíguos; treino = blocos anteriores, validação = bloco corrente
+                # (janela expansiva ⇒ k−1 folds, sem vazamento de futuro).
+                datas = tr[self.date_col]
+                safras = np.sort(datas.dropna().unique())
+                grupos = [g for g in np.array_split(safras, cv) if len(g)]
+                if len(grupos) < 2:
+                    raise ValueError(f"Safras insuficientes ({len(safras)}) para "
+                                     f"cv={cv} temporal (time_aware=True).")
+                d_arr = datas.to_numpy()
+                for i in range(1, len(grupos)):
+                    m_tr = np.isin(d_arr, np.concatenate(grupos[:i]))
+                    m_va = np.isin(d_arr, grupos[i])
+                    fold_data.append((Xd[m_tr], yd[m_tr], Xd[m_va], yd[m_va]))
+                val_sample = f"cv{cv}_temporal"
+            else:
+                from sklearn.model_selection import KFold, StratifiedKFold
+                splitter = (StratifiedKFold if is_clf else KFold)(
+                    n_splits=cv, shuffle=True, random_state=random_state)
+                for idx_tr, idx_va in splitter.split(Xd, yd):
+                    fold_data.append((Xd.iloc[idx_tr], yd.iloc[idx_tr],
+                                      Xd.iloc[idx_va], yd.iloc[idx_va]))
+                val_sample = f"cv{cv}"
+            Xtr = Xd                       # p/ resolução de monotonicidade abaixo
+        else:
+            va = None
+            oot = self._oot_sample()
+            if oot and oot != self.ref_sample:
+                vf = self._frame(oot)
+                vf = vf[vf[self.target].notna()]
+                if len(vf) >= 50:
+                    va = vf
+            used_oot = va is not None          # o OOT de fato virou a validação?
+            if va is None:                     # sem OOT com alvo → split do DES
+                strat = tr[self.target].astype(int) if is_clf else None
+                tr, va = train_test_split(tr, test_size=0.25, random_state=random_state,
+                                          stratify=strat)
+            ytr = tr[self.target].astype(int) if is_clf else tr[self.target]
+            yva = va[self.target].astype(int) if is_clf else va[self.target]
+            Xtr, Xva = tr[feats], va[feats]
+            # `va is not None` é SEMPRE verdadeiro após o split acima — sem used_oot,
+            # um OOT de <50 linhas cairia no holdout do DES mas seria rotulado como OOT
+            # (tag MLflow enganosa para governança).
+            val_sample = oot if used_oot else "split"
+            fold_data.append((Xtr, ytr, Xva, yva))
         # restrições de monotonicidade (opcional): resolvidas UMA vez fora do
         # objective (as direções univariadas e os nomes pós-transformação não
         # mudam entre trials) e injetadas no estimador de CADA trial.
@@ -2648,6 +2721,16 @@ class ModelSegmenter:
         if mono_dirs:
             mono_params, mono_pandas = self._monotone_est_params(algorithm, mono_dirs,
                                                                  Xtr, feats)
+
+        metric_key = "auc" if is_clf else "r2"
+
+        def _nanmean(vals):
+            """Média ignorando NaN; NaN se nada sobrar (sem RuntimeWarning)."""
+            arr = np.asarray([v for v in vals if v == v], dtype="float64")
+            return float(arr.mean()) if arr.size else float("nan")
+
+        def _round6(v):
+            return round(v, 6) if v == v else float("nan")
 
         def objective(trial):
             from ...monitoring import psi as _psi_num
@@ -2660,38 +2743,100 @@ class ModelSegmenter:
             if is_clf:
                 cb_flag = (bool(trial.suggest_categorical("class_balance", [False, True]))
                            if class_balance is None else bool(class_balance))
-            counts = None
-            fit_kw = {}
-            if cb_flag:
-                if algorithm == "gradient_boosting":
-                    fit_kw["est__sample_weight"] = _balanced_sample_weight(ytr)
-                else:
-                    counts = (n_neg_tr, n_pos_tr)
-            pipe = self._build_pipeline(feats, algorithm, hp, transform=transform,
-                                        class_counts=counts)
-            if mono_params:
-                self._set_monotone_on_pipe(pipe, mono_params, mono_pandas)
-            pipe.fit(Xtr, ytr, **fit_kw)
-            s = self._predict_score_array(pipe, Xva)
-            s_tr = self._predict_score_array(pipe, Xtr)
-            # grupo MODELAGEM (qualidade na validação) + o valor-objetivo
-            if is_clf:
-                modelagem = classification_metrics(yva, s)
-                valor = modelagem.get("auc", float("nan"))
+            # um passo por fold: métricas de validação, métrica de treino (p/ o
+            # gap de overfit) e PSI treino→validação. Na validação única (cv=None)
+            # há 1 fold e o comportamento é idêntico ao histórico.
+            fold_mods, fold_vals, fold_trs, fold_psis = [], [], [], []
+            n_tr_l, n_va_l = [], []
+            last_err = None
+            for k_i, (Xtr_f, ytr_f, Xva_f, yva_f) in enumerate(fold_data):
+                try:
+                    counts, fit_kw = None, {}
+                    if cb_flag:
+                        if algorithm == "gradient_boosting":
+                            fit_kw["est__sample_weight"] = _balanced_sample_weight(ytr_f)
+                        else:
+                            n_pos_f = int((ytr_f == 1).sum())
+                            counts = (int(len(ytr_f)) - n_pos_f, n_pos_f)
+                    pipe = self._build_pipeline(feats, algorithm, hp, transform=transform,
+                                                class_counts=counts)
+                    if mono_params:
+                        self._set_monotone_on_pipe(pipe, mono_params, mono_pandas)
+                    pipe.fit(Xtr_f, ytr_f, **fit_kw)
+                    s = self._predict_score_array(pipe, Xva_f)
+                    s_tr = self._predict_score_array(pipe, Xtr_f)
+                    m_va = (classification_metrics(yva_f, s) if is_clf
+                            else regression_metrics(yva_f, s))
+                    m_tr = (classification_metrics(ytr_f, s_tr) if is_clf
+                            else regression_metrics(ytr_f, s_tr))
+                    try:              # PSI é MONITORAMENTO — não pode derrubar o trial
+                        _psi_val = round(float(_psi_num(s_tr, s)), 6)
+                    except Exception:
+                        _psi_val = float("nan")
+                    fold_mods.append(m_va)
+                    fold_vals.append(float(m_va.get(metric_key, float("nan"))))
+                    fold_trs.append(float(m_tr.get(metric_key, float("nan"))))
+                    fold_psis.append(_psi_val)
+                    n_tr_l.append(int(len(Xtr_f)))
+                    n_va_l.append(int(len(Xva_f)))
+                except Exception as e:     # fold degenerado (ex.: classe única) — pula
+                    last_err = e
+                    continue
+                if len(fold_data) > 1 and k_i < len(fold_data) - 1:
+                    # progresso por FOLD (mantém a UI viva em trials longos de CV)
+                    if progress_callback is not None:
+                        try:
+                            try:
+                                best = float(study.best_value)
+                            except Exception:  # noqa: BLE001 - ainda sem trial completo
+                                best = float("nan")
+                            progress_callback(trial.number, n_trials, best)
+                        except Exception:  # noqa: BLE001 - progresso é cosmético
+                            pass
+                    # pruning (opcional): reporta a média parcial dos folds
+                    if pruner is not None:
+                        trial.report(_nanmean(fold_vals), step=k_i)
+                        if trial.should_prune():
+                            raise optuna.TrialPruned()
+                if self._tuning_cancel.is_set():   # cancelamento responde por fold
+                    break
+            if not fold_mods:
+                if last_err is not None:           # TODOS os folds falharam → trial FAILED
+                    raise last_err
+                return float("-1e9")               # cancelado antes do 1º fold
+            # agregação: média dos folds (1 fold ⇒ valores idênticos ao histórico)
+            if len(fold_mods) == 1:
+                modelagem = fold_mods[0]
             else:
-                modelagem = regression_metrics(yva, s)
-                valor = modelagem.get("r2", float("nan"))
-            # grupo MONITORAMENTO (estabilidade/volumetria)
-            try:                          # PSI é MONITORAMENTO — não pode derrubar o trial
-                _psi_val = round(float(_psi_num(s_tr, s)), 6)
-            except Exception:
-                _psi_val = float("nan")
+                chaves = sorted(set().union(*(m.keys() for m in fold_mods)))
+                modelagem = {k: _round6(_nanmean([float(m.get(k, float("nan")))
+                                                  for m in fold_mods]))
+                             for k in chaves}
+            valor_base = _nanmean(fold_vals)
+            metric_tr = _nanmean(fold_trs)
+            gap = metric_tr - valor_base if (metric_tr == metric_tr
+                                             and valor_base == valor_base) else float("nan")
+            psi_val = _nanmean(fold_psis)
             monitoramento = {
-                "psi_score_des_val": _psi_val,
-                "n_treino": int(len(Xtr)), "n_validacao": int(len(Xva)),
+                "psi_score_des_val": _round6(psi_val),
+                "n_treino": int(np.mean(n_tr_l)), "n_validacao": int(np.mean(n_va_l)),
             }
+            if len(fold_data) > 1:
+                monitoramento["cv_folds"] = int(len(fold_mods))
+            # objetivo penalizado por instabilidade: excesso de PSI (>0,10) e gap
+            # de overfit treino−validação (>0,05), ambos escalados por λ. NaN em
+            # PSI/gap não penaliza (monitoramento nunca derruba o trial).
+            pen_psi = lam * max(0.0, psi_val - 0.10) if (lam > 0 and psi_val == psi_val) else 0.0
+            pen_gap = lam * max(0.0, gap - 0.05) if (lam > 0 and gap == gap) else 0.0
+            valor = valor_base - pen_psi - pen_gap
             trial.set_user_attr("modelagem", modelagem)
             trial.set_user_attr("monitoramento", monitoramento)
+            trial.set_user_attr("objetivo", {
+                "metric_val": _round6(valor_base), "metric_treino": _round6(metric_tr),
+                "gap_treino_val": _round6(gap), "psi_score_des_val": _round6(psi_val),
+                "lambda": lam, "pen_psi": _round6(pen_psi), "pen_gap": _round6(pen_gap),
+                "valor": _round6(valor),
+            })
             trial.set_user_attr("val_sample", val_sample)
             return float(valor) if np.isfinite(valor) else float("-1e9")
 
@@ -2702,8 +2847,20 @@ class ModelSegmenter:
         # ativo — um clear aqui apagaria um cancelamento pedido nessa janela. O
         # chamador (UI) limpa a flag na main thread ANTES de habilitar o botão; e
         # este método a deixa limpa NO FIM (para o próximo tuning).
+        # pruner opcional: 'median' → MedianPruner; também aceita uma instância.
+        # Só é acionado quando há passos intermediários (CV com ≥2 folds).
+        pruner_obj = None
+        if pruner is not None:
+            if isinstance(pruner, str):
+                if pruner.lower() != "median":
+                    raise ValueError("pruner: use None, 'median' ou uma instância "
+                                     "de optuna.pruners.BasePruner.")
+                pruner_obj = optuna.pruners.MedianPruner()
+            else:
+                pruner_obj = pruner
         study = optuna.create_study(direction="maximize",
-                                    sampler=optuna.samplers.TPESampler(seed=random_state))
+                                    sampler=optuna.samplers.TPESampler(seed=random_state),
+                                    pruner=pruner_obj)
         callbacks = []
 
         def _cancel_cb(study, trial):           # cancelamento pedido pela UI/usuário
@@ -2740,13 +2897,23 @@ class ModelSegmenter:
             # produziu métrica válida — não reajustar com hiperparâmetros de um trial
             # degenerado (o "best" seria arbitrário).
             degenerate = bool(n_ok) and np.isfinite(best_val) and best_val <= -1e8
+            n_pruned = sum(1 for t in study.trials
+                           if t.state == optuna.trial.TrialState.PRUNED)
             self.tuning_ = {"algorithm": algorithm, "metric": "auc" if is_clf else "r2",
                             "n_trials": n_ok, "n_failed": n_failed,
+                            "n_pruned": n_pruned,
                             "best_value": (round(best_val, 6)
                                            if (n_ok and not degenerate) else float("nan")),
                             "best_params": (dict(study.best_params)
                                             if (n_ok and not degenerate) else {}),
-                            "degenerate": degenerate, "cancelled": cancelled}
+                            "degenerate": degenerate, "cancelled": cancelled,
+                            # escolhas de validação/estabilidade (persistidas também
+                            # nos params do run-pai do MLflow — governança)
+                            "cv": cv, "time_aware": bool(time_aware and cv),
+                            "stability_penalty": (lam if stability_penalty is not None
+                                                  else None),
+                            "pruner": (pruner if isinstance(pruner, (str, type(None)))
+                                       else type(pruner).__name__)}
             if degenerate and verbose:
                 print("[tune_optuna] aviso: todos os trials produziram métrica inválida "
                       "(AUC/R² não-finito) — modelo NÃO reajustado.")
@@ -2887,7 +3054,8 @@ class ModelSegmenter:
                 # parâmetros do trial (os hiperparâmetros sugeridos)
                 mlflow.log_params({f"hp/{k}": v for k, v in trial.params.items()})
                 # métricas agrupadas: prefixo por finalidade -> "abas" na leitura
-                for grupo in ("modelagem", "monitoramento"):
+                # ('objetivo' traz as componentes do valor penalizado, se houver)
+                for grupo in ("modelagem", "monitoramento", "objetivo"):
                     for nome, valor in (trial.user_attrs.get(grupo) or {}).items():
                         try:
                             v = float(valor)
@@ -2913,11 +3081,22 @@ class ModelSegmenter:
                 "n_trials": len(study.trials), "n_features": len(feats),
                 "metric": "auc" if is_clf else "r2", "direction": "maximize",
             })
+            # escolhas de validação/estabilidade do tuning (governança): CV,
+            # split temporal, λ da penalização e pruner — vindas de self.tuning_.
+            tun = getattr(self, "tuning_", None) or {}
+            mlflow.log_params({
+                "cv": tun.get("cv") or "nenhum (OOT/split)",
+                "time_aware": bool(tun.get("time_aware")),
+                "stability_penalty": (tun.get("stability_penalty")
+                                      if tun.get("stability_penalty") is not None
+                                      else "nenhuma"),
+                "pruner": tun.get("pruner") or "nenhum",
+            })
             mlflow.log_params({f"melhor_hp/{k}": v for k, v in study.best_params.items()})
             if study.best_value is not None and np.isfinite(study.best_value):
                 mlflow.log_metric("melhor/objetivo", float(study.best_value))
             best = study.best_trial
-            for grupo in ("modelagem", "monitoramento"):
+            for grupo in ("modelagem", "monitoramento", "objetivo"):
                 for nome, valor in (best.user_attrs.get(grupo) or {}).items():
                     try:
                         v = float(valor)

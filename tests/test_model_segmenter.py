@@ -1542,6 +1542,58 @@ def test_tune_optuna_algoritmo_nao_tunavel(task):
             seg.tune_optuna(algorithm="linear", n_trials=3)
 
 
+def test_tune_optuna_cv_penalizado(task):
+    # CV (k-fold na referência) + objetivo penalizado por instabilidade (λ) +
+    # pruner mediano: roda, best_params existe e cada trial guarda as
+    # componentes do objetivo em user_attrs['objetivo'].
+    pytest.importorskip("optuna")
+    df = _synthetic(task, n=1000, seed=9)
+    seg = ModelSegmenter(df, target="target", task_type=task, sample_col="amostra",
+                         ref_sample="DES", date_col="dt_ref", verbose=False)
+    seg.auto_select(min_iv=0.0)
+    res = seg.tune_optuna(algorithm="random_forest", n_trials=3, cv=2,
+                          stability_penalty=1.0, pruner="median", fit_best=False)
+    assert res["n_trials"] == 3 and res["best_params"]
+    assert res["cv"] == 2 and res["stability_penalty"] == 1.0
+    assert res["pruner"] == "median" and res["n_pruned"] == 0   # sem poda em 3 trials
+    tr = seg.study_.trials[0]
+    obj = tr.user_attrs["objetivo"]
+    assert {"metric_val", "metric_treino", "gap_treino_val", "psi_score_des_val",
+            "lambda", "pen_psi", "pen_gap", "valor"} <= set(obj)
+    assert obj["lambda"] == 1.0
+    # o valor do trial É o objetivo penalizado (métrica − penalizações)
+    assert tr.value == pytest.approx(obj["valor"], abs=1e-5)
+    assert obj["valor"] == pytest.approx(
+        obj["metric_val"] - obj["pen_psi"] - obj["pen_gap"], abs=1e-5)
+    # métricas agregadas por fold seguem nos grupos históricos
+    assert tr.user_attrs["monitoramento"]["cv_folds"] == 2
+    assert tr.user_attrs["val_sample"] == "cv2"
+    with pytest.raises(ValueError, match="cv"):
+        seg.tune_optuna(algorithm="random_forest", n_trials=1, cv=1)
+
+
+def test_tune_optuna_cv_temporal():
+    # time_aware=True: folds contíguos por safra (janela expansiva) e guardas
+    # amigáveis (requer cv=k e date_col).
+    pytest.importorskip("optuna")
+    df = _synthetic("classification", n=1000, seed=10)
+    seg = ModelSegmenter(df, target="target", task_type="classification",
+                         sample_col="amostra", ref_sample="DES", date_col="dt_ref",
+                         verbose=False)
+    seg.auto_select(min_iv=0.0)
+    res = seg.tune_optuna(algorithm="logistica", n_trials=2, cv=3, time_aware=True,
+                          fit_best=False)
+    assert res["n_trials"] == 2 and res["time_aware"] is True
+    assert seg.study_.trials[0].user_attrs["val_sample"] == "cv3_temporal"
+    with pytest.raises(ValueError, match="time_aware"):
+        seg.tune_optuna(algorithm="logistica", n_trials=1, time_aware=True)
+    seg2 = ModelSegmenter(df.drop(columns=["dt_ref"]), target="target",
+                          task_type="classification", sample_col="amostra",
+                          ref_sample="DES", verbose=False)
+    with pytest.raises(ValueError, match="date_col"):
+        seg2.tune_optuna(algorithm="logistica", n_trials=1, cv=2, time_aware=True)
+
+
 def test_ui_tune_optuna(task):
     pytest.importorskip("optuna")
     pytest.importorskip("ipywidgets")

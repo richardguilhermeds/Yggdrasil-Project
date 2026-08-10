@@ -357,6 +357,35 @@ def test_shap_local_card():
     assert "<img" in ui.out_shap_row.value
 
 
+def test_tuning_cv_e_lambda_na_ui():
+    """Gaveta do tuning: controles 'CV (k)' e 'penalizar instabilidade (λ)' com
+    defaults desligados; `_on_tune` traduz 0 ⇒ None e repassa cv/stability_penalty
+    ao tune_optuna; o resumo final exibe as escolhas."""
+    ui = _build()
+    assert ui.dd_tune_cv.value == 0 and ui.fl_tune_lambda.value == 0.0
+    captured = {}
+
+    def fake_tune(**kw):                   # evita um tuning real (lento) no teste
+        captured.update(kw)
+        return {"algorithm": kw.get("algorithm"), "metric": "auc", "n_trials": 1,
+                "n_failed": 0, "n_pruned": 0, "best_value": 0.75,
+                "best_params": {"n_estimators": 100}, "degenerate": False,
+                "cancelled": False, "cv": kw.get("cv"), "time_aware": False,
+                "stability_penalty": kw.get("stability_penalty"), "pruner": None}
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.seg.fit()                       # _finish_tune re-renderiza as métricas
+        ui.dd_tune_cv.value = 3
+        ui.fl_tune_lambda.value = 0.5
+        ui.seg.tune_optuna = fake_tune
+        ui._on_tune(None)
+        ui._tune_thread.join(timeout=60)
+    assert captured["cv"] == 3
+    assert captured["stability_penalty"] == 0.5
+    assert "CV k=3" in ui.out_tune.value and "λ=0.5" in ui.out_tune.value
+    assert "média dos folds" in ui.out_tune.value
+
+
 def test_toggle_monotonicidade_ignorado_sem_suporte():
     """Toggle marcado + algoritmo sem suporte: o fit via UI NÃO repassa a opção
     (nem aviso, nem restrição) — a linha fica oculta, mas o valor persiste."""

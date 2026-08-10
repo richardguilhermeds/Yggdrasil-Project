@@ -2637,11 +2637,37 @@ class ModelSegmenterUI:
                 row = W.HBox([cb, lo, hi])
             self._sp_rows[name] = row
             rows.append(row)
+        # --- validação e estabilidade do tuning: CV (k) + penalização λ ------
+        self.dd_tune_cv = W.Dropdown(
+            options=[("desligado — OOT/split", 0)] + [(str(k), k) for k in range(2, 11)],
+            value=0, description="CV (k):",
+            style={"description_width": "initial"}, layout=W.Layout(width="240px"))
+        self.dd_tune_cv.tooltip = (
+            "Validação cruzada do tuning: cada trial é avaliado por k-fold na "
+            "referência (estratificado na classificação; KFold na regressão) e o "
+            "objetivo vira a MÉDIA dos folds. Desligado, avalia uma única vez no "
+            "OOT (ou num split 75/25 da referência).")
+        self.fl_tune_lambda = W.BoundedFloatText(
+            value=0.0, min=0.0, max=100.0, step=0.5,
+            description="penalizar instabilidade (λ):",
+            style={"description_width": "initial"}, layout=W.Layout(width="250px"))
+        self.fl_tune_lambda.tooltip = (
+            "λ > 0 desconta do objetivo de cada trial o excesso de instabilidade: "
+            "objetivo = métrica − λ·max(0, PSI treino→validação − 0,10) − "
+            "λ·max(0, gap treino−validação − 0,05). 0 = desligado.")
+        row_stab = W.HBox([self.dd_tune_cv, self.fl_tune_lambda],
+                          layout=W.Layout(align_items="center"))
         inner = W.VBox([
             W.HTML("<div class='mseg-legend'>Marque quais hiperparâmetros o Optuna deve "
                    "buscar e ajuste o intervalo <b>[mín, máx]</b>. Desmarcados ficam no "
                    "valor padrão do algoritmo. Os limites se ajustam ao algoritmo "
                    "escolhido — edite à vontade.</div>"),
+            W.HTML("<div class='mseg-legend'><b>CV (k)</b> valida cada trial por "
+                   "validação cruzada na referência (média dos folds) em vez de uma "
+                   "única validação; <b>λ</b> penaliza trials instáveis — PSI do score "
+                   "treino→validação acima de 0,10 e gap de overfit treino−validação "
+                   "acima de 0,05 descontam o objetivo, escalados por λ.</div>"),
+            row_stab,
         ] + rows)
         self.box_tuning_space = W.Accordion(children=[inner])
         self.box_tuning_space.set_title(
@@ -3108,6 +3134,11 @@ class ModelSegmenterUI:
         # os trials e para o re-ajuste final com os melhores hiperparâmetros.
         monotone = ("auto" if (self.cb_monotone.value
                                and algo in MONOTONE_ALGORITHMS) else None)
+        # validação/estabilidade (gaveta do tuning): CV (k) — 0 = desligado — e
+        # λ da penalização por instabilidade (PSI/gap de overfit); 0 = desligado.
+        cv_k = int(self.dd_tune_cv.value) or None
+        lam = float(self.fl_tune_lambda.value or 0.0)
+        stability_penalty = lam if lam > 0 else None
 
         # O tuning roda numa thread de FUNDO para a UI seguir responsiva — assim o
         # botão "Cancelar" (que chama seg.cancel_tuning()) é processado enquanto o
@@ -3124,7 +3155,9 @@ class ModelSegmenterUI:
                                            register_model=log_mlflow,
                                            mlflow_model_name=model_name,
                                            class_balance=class_balance,
-                                           monotone=monotone)
+                                           monotone=monotone,
+                                           cv=cv_k,
+                                           stability_penalty=stability_penalty)
             except Exception as e:
                 self.pb_tune.bar_style = "danger"
                 self.out_tune.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro no "
@@ -3178,10 +3211,20 @@ class ModelSegmenterUI:
         _fail = res.get("n_failed") or 0
         _fail_txt = (f" · <span style='color:var(--warn-ink)'>{_fail} trial(s) falharam "
                      "(ignorados)</span>" if _fail else "")
+        # escolhas de validação/estabilidade (quando ligadas): CV, λ e pruning
+        _cfg = []
+        if res.get("cv"):
+            _cfg.append(f"CV k={res['cv']}" + (" temporal" if res.get("time_aware") else ""))
+        if res.get("stability_penalty"):
+            _cfg.append(f"λ={res['stability_penalty']:g} (objetivo penalizado)")
+        if res.get("n_pruned"):
+            _cfg.append(f"{res['n_pruned']} trial(s) podados")
+        _cfg_txt = (" · " + " · ".join(_cfg)) if _cfg else ""
         self.out_tune.value = (
             f"<div class='mseg-legend'><b>Optuna</b> · {res['n_trials']} trials · melhor "
-            f"<b>{res['metric'].upper()} = {res['best_value']:.4f}</b> (no OOT/validação)"
-            f"{_fail_txt}<br>{bp}</div>")
+            f"<b>{res['metric'].upper()} = {res['best_value']:.4f}</b> "
+            f"({'média dos folds' if res.get('cv') else 'no OOT/validação'})"
+            f"{_cfg_txt}{_fail_txt}<br>{bp}</div>")
         if log_mlflow:
             _mod = self.tx_model.value or "(artefato, sem registry)"
             _mlflow_msg = f" Trials + modelo registrados no MLflow (modelo: {_mod})."
