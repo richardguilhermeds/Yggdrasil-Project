@@ -37,7 +37,11 @@ fatores exigida pela simulação multifatorial. :func:`nearest_correlation` e
 Recomendação prática do guia: **comparar** os ``ρ`` estimados com os valores
 regulatórios do IRB de Basileia (varejo: 0,03–0,16; corporativo: 0,12–0,24)
 como teste de sanidade — divergências grandes sinalizam série curta, mistura de
-safras heterogêneas ou quebra estrutural.
+safras heterogêneas ou quebra estrutural. A **incerteza** de ``ρ`` é tratada
+por :func:`asset_correlation_ci` (bootstrap em blocos, que preserva a
+autocorrelação da série) e o :func:`rho_sanity_report` consolida, por
+segmento, estimativas, IC e o confronto com as faixas IRB
+(:data:`IRB_RETAIL_RHO`, :data:`IRB_CORPORATE_RHO`).
 
 Contexto regulatório: Resolução CMN 4.557/2017 (ICAAP) e 4.966/2021; Basileia
 II/III, abordagem IRB (correlação de ativos regulatória).
@@ -88,15 +92,25 @@ def _bivariate_normal_cdf(z: float, rho: float) -> float:
     É a probabilidade **conjunta** de dois devedores idênticos entrarem em
     *default* simultaneamente sob Vasicek com correlação de ativos ``ρ``.
     """
-    # Integral 1-D **determinística** (evita o ruído quasi-Monte-Carlo do
-    # ``multivariate_normal.cdf`` em 2-D, que muda entre chamadas nos mesmos
-    # dados): Φ₂(z, z; ρ) = ∫_{-∞}^{z} φ(x)·Φ((z − ρx)/√(1 − ρ²)) dx.
     rho = float(np.clip(rho, -0.999999, 0.999999))
     if abs(rho) < 1e-12:
         return float(norm.cdf(z)) ** 2
-    s = np.sqrt(1.0 - rho * rho)
-    val, _ = quad(lambda x: norm.pdf(x) * norm.cdf((z - rho * x) / s),
-                  -np.inf, z, limit=200)
+    if rho > 0.0:
+        # Representação de Vasicek: Φ₂(z, z; ρ) = E_Y[ p(Y)² ] com
+        # p(y) = Φ((z − √ρ·y)/√(1−ρ)). Quadratura de Gauss–Hermite cacheada —
+        # ordens de grandeza mais rápida que `quad`, o que viabiliza o
+        # bootstrap de ρ (milhares de reestimações por chamada).
+        nodes, weights = _gauss_hermite_nodes(96)
+        p_y = norm.cdf((z - np.sqrt(rho) * nodes) / np.sqrt(1.0 - rho))
+        val = float(np.sum(weights * p_y * p_y))
+    else:
+        # ρ < 0 não tem a representação de fator único; integral 1-D
+        # **determinística** (evita o ruído quasi-Monte-Carlo do
+        # ``multivariate_normal.cdf`` 2-D, que muda entre chamadas nos mesmos
+        # dados): Φ₂(z, z; ρ) = ∫_{-∞}^{z} φ(x)·Φ((z − ρx)/√(1 − ρ²)) dx.
+        s = np.sqrt(1.0 - rho * rho)
+        val, _ = quad(lambda x: norm.pdf(x) * norm.cdf((z - rho * x) / s),
+                      -np.inf, z, limit=200)
     return float(np.clip(val, 0.0, 1.0))
 
 
@@ -180,16 +194,21 @@ def asset_correlation_moments(default_rates: ArrayLike) -> float:
 # ======================================================================
 # (ii) Máxima verossimilhança — mistura binomial de Vasicek
 # ======================================================================
+_GH_CACHE: dict = {}
+
+
 def _gauss_hermite_nodes(n_nodes: int = 96) -> tuple[np.ndarray, np.ndarray]:
     """Nós/pesos de Gauss–Hermite *probabilístico* para integrar contra ``φ(y)``.
 
     ``hermegauss`` (Hermite_e) usa peso ``exp(−y²/2)``; dividindo os pesos por
     ``√(2π)`` obtém-se ``∫ φ(y) g(y) dy ≈ Σ w_i g(y_i)`` com ``φ`` a densidade
-    normal padrão. Assim não é preciso mudar variável.
+    normal padrão. Assim não é preciso mudar variável. O resultado é cacheado
+    por ``n_nodes`` (os nós são reutilizados milhares de vezes no bootstrap).
     """
-    nodes, weights = np.polynomial.hermite_e.hermegauss(n_nodes)
-    weights = weights / np.sqrt(2.0 * np.pi)
-    return nodes, weights
+    if n_nodes not in _GH_CACHE:
+        nodes, weights = np.polynomial.hermite_e.hermegauss(n_nodes)
+        _GH_CACHE[n_nodes] = (nodes, weights / np.sqrt(2.0 * np.pi))
+    return _GH_CACHE[n_nodes]
 
 
 def _neg_loglik_vasicek(
@@ -250,7 +269,9 @@ def asset_params_mle(
     exposures: ArrayLike,
     *,
     n_nodes: int = 96,
-) -> tuple[float, float]:
+    rho_starts: tuple = (0.02, 0.08, 0.15, 0.25),
+    return_details: bool = False,
+) -> Union[tuple[float, float], dict]:
     """Estima ``(pd, ρ)`` por **máxima verossimilhança** (mistura de Vasicek).
 
     A cada período ``t`` observam-se ``k_t`` *defaults* em ``n_t`` obligores. A
@@ -263,6 +284,16 @@ def asset_params_mle(
     (``pd = Φ(a)``, ``ρ = sigmoide(b)``) via
     :func:`scipy.optimize.minimize` (Nelder–Mead, robusto e sem gradiente).
 
+    **Multi-start.** A superfície da log-verossimilhança tem curvatura fraca em
+    ``ρ`` (platôs) e um único chute pode deixar o Nelder–Mead estacionar longe
+    do ótimo. Varre-se uma grade de ``ρ`` inicial (``rho_starts``) e fica-se
+    com a melhor log-verossimilhança entre os chutes. Se **nenhum** chute
+    melhora a própria verossimilhança inicial (otimizador estacionado) ou todos
+    divergem, aplica-se um *fallback* declarado: ``ρ`` pelo
+    :func:`asset_correlation_moments` sobre a série ``k/n`` e ``pd`` pela
+    fração agregada de *defaults* — com aviso e flag ``fallback_momentos`` no
+    retorno detalhado.
+
     Parameters
     ----------
     defaults:
@@ -272,12 +303,22 @@ def asset_params_mle(
     n_nodes:
         Número de nós de Gauss–Hermite (padrão 96; mais nós = mais precisão,
         mas ``hermegauss`` fica instável acima de ~120 nós).
+    rho_starts:
+        Grade de valores iniciais de ``ρ`` (em ``(0, 1)``) para o multi-start.
+    return_details:
+        Se ``True``, retorna um ``dict`` com diagnóstico da otimização em vez
+        da tupla ``(pd, rho)``.
 
     Returns
     -------
     (pd, rho): tuple[float, float]
         PD incondicional e correlação de ativos, ambos em ``(0, 1)`` e ``ρ``
-        prendido em ``[0, 0.999]``.
+        prendido em ``[0, 0.999]`` (padrão, ``return_details=False``).
+    dict
+        Com ``return_details=True``: ``{'pd', 'rho', 'loglik',
+        'fallback_momentos', 'convergiu', 'rho_starts'}``, onde ``loglik`` é a
+        log-verossimilhança no ponto retornado e ``fallback_momentos`` indica
+        que a MLE falhou e o resultado veio do método dos momentos.
 
     Notes
     -----
@@ -316,29 +357,78 @@ def asset_params_mle(
             stacklevel=2,
         )
 
+    rho_starts = tuple(float(r) for r in rho_starts)
+    if len(rho_starts) == 0 or any(not (0.0 < r < 1.0) for r in rho_starts):
+        raise ValueError("rho_starts deve conter ao menos um valor em (0, 1).")
+
     from scipy.special import gammaln
     # log C(n, k) constante em (pd, ρ) — pré-calculado uma vez.
     log_binom = gammaln(n + 1.0) - gammaln(k + 1.0) - gammaln(n - k + 1.0)
     nodes, weights = _gauss_hermite_nodes(n_nodes)
 
-    # Chute inicial: PD = fração média de defaults; ρ moderado (0.1).
+    # Chute de PD comum a todos os starts: fração agregada de defaults.
     pd0 = float(np.clip(np.sum(k) / np.sum(n), _EPS, 1.0 - _EPS))
     a0 = float(norm.ppf(pd0))
-    b0 = float(np.log(0.1 / 0.9))   # sigmoide⁻¹(0.10)
+    args = (k, n, nodes, weights, log_binom)
 
-    res = minimize(
-        _neg_loglik_vasicek,
-        x0=np.array([a0, b0]),
-        args=(k, n, nodes, weights, log_binom),
-        method="Nelder-Mead",
-        options={"xatol": 1e-6, "fatol": 1e-6, "maxiter": 2000},
-    )
-    a_hat, b_hat = res.x
-    pd_hat = float(norm.cdf(a_hat))
-    rho_hat = float(1.0 / (1.0 + np.exp(-b_hat)))
-    rho_hat = float(np.clip(rho_hat, _RHO_FLOOR, _RHO_CEIL))
-    pd_hat = float(np.clip(pd_hat, _EPS, 1.0 - _EPS))
-    return pd_hat, rho_hat
+    # Multi-start sobre a grade de ρ inicial: guarda, por chute, o resultado e
+    # o valor da função objetivo NO chute (p/ detectar otimizador estacionado).
+    ensaios: list[tuple] = []
+    for rho0 in rho_starts:
+        b0 = float(np.log(rho0 / (1.0 - rho0)))          # sigmoide⁻¹(rho0)
+        x0 = np.array([a0, b0])
+        f0 = float(_neg_loglik_vasicek(x0, *args))
+        res = minimize(
+            _neg_loglik_vasicek,
+            x0=x0,
+            args=args,
+            method="Nelder-Mead",
+            options={"xatol": 1e-6, "fatol": 1e-6, "maxiter": 2000},
+        )
+        ensaios.append((res, f0))
+
+    validos = [(res, f0) for res, f0 in ensaios
+               if np.isfinite(res.fun) and res.fun < 1e11]
+    # Falha declarada: divergiu (nenhum resultado finito) ou estacionou no
+    # chute (nenhum start melhorou a própria verossimilhança inicial).
+    divergiu = len(validos) == 0
+    estacionou = (not divergiu
+                  and not any(res.fun < f0 - 1e-9 for res, f0 in validos))
+
+    if divergiu or estacionou:
+        import warnings
+        motivo = "divergiu" if divergiu else "estacionou no chute inicial"
+        warnings.warn(
+            f"MLE de (pd, ρ) {motivo}; aplicando fallback pelo método dos "
+            "momentos sobre a série de taxas de default (k/n).",
+            stacklevel=2,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")              # evita aviso duplicado
+            rho_hat = float(asset_correlation_moments(k / n))
+        pd_hat = pd0
+        b_fb = float(np.log(max(rho_hat, _EPS) / max(1.0 - rho_hat, _EPS)))
+        loglik = -float(_neg_loglik_vasicek(np.array([a0, b_fb]), *args))
+        fallback, convergiu = True, False
+    else:
+        best, _ = min(validos, key=lambda rf: rf[0].fun)
+        a_hat, b_hat = best.x
+        pd_hat = float(np.clip(norm.cdf(a_hat), _EPS, 1.0 - _EPS))
+        rho_hat = float(np.clip(1.0 / (1.0 + np.exp(-b_hat)),
+                                _RHO_FLOOR, _RHO_CEIL))
+        loglik = -float(best.fun)
+        fallback, convergiu = False, bool(best.success)
+
+    if not return_details:
+        return pd_hat, rho_hat
+    return {
+        "pd": pd_hat,
+        "rho": rho_hat,
+        "loglik": loglik,
+        "fallback_momentos": fallback,
+        "convergiu": convergiu,
+        "rho_starts": rho_starts,
+    }
 
 
 def asset_correlation_mle(
@@ -354,6 +444,248 @@ def asset_correlation_mle(
     """
     _, rho = asset_params_mle(defaults, exposures, n_nodes=n_nodes)
     return rho
+
+
+# ======================================================================
+# Incerteza de ρ — bootstrap em blocos e relatório de sanidade
+# ======================================================================
+def asset_correlation_ci(
+    default_rates: ArrayLike,
+    n_boot: int = 1000,
+    block: int = 4,
+    alpha: float = 0.05,
+    method: str = "moments",
+    seed: Optional[int] = None,
+    *,
+    exposures: Optional[ArrayLike] = None,
+    n_nodes: int = 64,
+) -> dict:
+    """Intervalo de confiança de ``ρ`` por **bootstrap em blocos**.
+
+    Séries de taxa de *default* são curtas e **autocorrelacionadas** (o ciclo
+    econômico persiste por vários períodos); o bootstrap i.i.d. clássico
+    embaralharia essa dependência e subestimaria a incerteza. Usa-se aqui o
+    *moving block bootstrap*: sorteiam-se blocos contíguos de ``block``
+    períodos (com reposição), concatenados até recompor o tamanho original da
+    série, e reestima-se ``ρ`` em cada réplica. O IC é o intervalo
+    **percentílico** ``[α/2, 1−α/2]`` da distribuição bootstrap.
+
+    Parameters
+    ----------
+    default_rates:
+        Série histórica de taxas de *default* por período (proporções em
+        ``[0, 1]``).
+    n_boot:
+        Número de réplicas bootstrap.
+    block:
+        Comprimento do bloco (períodos contíguos preservados por sorteio).
+        Blocos maiores preservam mais autocorrelação, mas reduzem a
+        diversidade das réplicas; 4 é um padrão razoável para séries anuais.
+    alpha:
+        Nível de significância do IC bilateral (``0.05`` ⇒ IC de 95%).
+    method:
+        ``'moments'`` reestima via :func:`asset_correlation_moments` (rápido);
+        ``'mle'`` via :func:`asset_params_mle` (exige ``exposures`` e é
+        **caro**: uma otimização multi-start por réplica — prefira ``n_boot``
+        menor).
+    seed:
+        Semente do gerador (reprodutibilidade).
+    exposures:
+        Obligores em risco por período, alinhados a ``default_rates``.
+        Obrigatório com ``method='mle'`` (as contagens de *default* são
+        reconstruídas como ``k_t = round(DR_t · n_t)``).
+    n_nodes:
+        Nós de Gauss–Hermite repassados à MLE (só com ``method='mle'``).
+
+    Returns
+    -------
+    dict
+        ``{'rho', 'ic_inferior', 'ic_superior', 'alpha', 'metodo', 'n_boot',
+        'block', 'rhos_boot'}`` — estimativa pontual na série original, limites
+        do IC e o vetor bootstrap completo (p/ histogramas ou ICs em outro
+        nível).
+    """
+    dr = _as_1d(default_rates, name="default_rates")
+    if np.any((dr < 0) | (dr > 1)):
+        raise ValueError("default_rates deve conter proporções em [0, 1].")
+    T = dr.size
+    if T < 2:
+        raise ValueError("São necessários ao menos 2 períodos para o bootstrap.")
+    if n_boot < 1:
+        raise ValueError("n_boot deve ser >= 1.")
+    if not (0.0 < alpha < 1.0):
+        raise ValueError("alpha deve estar em (0, 1).")
+    if block < 1:
+        raise ValueError("block deve ser >= 1.")
+    block = int(min(block, T))
+    if method not in ("moments", "mle"):
+        raise ValueError("method deve ser 'moments' ou 'mle'.")
+
+    n_arr: Optional[np.ndarray] = None
+    if method == "mle":
+        if exposures is None:
+            raise ValueError(
+                "method='mle' exige `exposures` (obligores por período) para "
+                "reconstruir as contagens de default.")
+        n_arr = _as_1d(exposures, name="exposures")
+        if n_arr.shape != dr.shape:
+            raise ValueError(
+                f"exposures {n_arr.shape} e default_rates {dr.shape} têm "
+                "tamanhos distintos.")
+        if np.any(n_arr <= 0):
+            raise ValueError("exposures deve ser > 0 em todos os períodos.")
+
+    def _rho(idx: np.ndarray) -> float:
+        """Reestima ρ no reamostrado ``idx`` pelo método escolhido."""
+        if method == "moments":
+            return float(asset_correlation_moments(dr[idx]))
+        k_b = np.rint(dr[idx] * n_arr[idx])
+        _, rho_b = asset_params_mle(k_b, n_arr[idx], n_nodes=n_nodes)
+        return float(rho_b)
+
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")     # avisos de série curta por réplica
+        rho_ponto = _rho(np.arange(T))
+        rng = np.random.default_rng(seed)
+        n_blocks = -(-T // block)           # ceil(T / block)
+        rhos = np.empty(n_boot, dtype=float)
+        for i in range(n_boot):
+            starts = rng.integers(0, T - block + 1, size=n_blocks)
+            idx = (starts[:, None] + np.arange(block)[None, :]).ravel()[:T]
+            rhos[i] = _rho(idx)
+
+    lo, hi = np.quantile(rhos, [alpha / 2.0, 1.0 - alpha / 2.0])
+    return {
+        "rho": rho_ponto,
+        "ic_inferior": float(lo),
+        "ic_superior": float(hi),
+        "alpha": float(alpha),
+        "metodo": method,
+        "n_boot": int(n_boot),
+        "block": int(block),
+        "rhos_boot": rhos,
+    }
+
+
+# Faixas IRB por tipo de segmento (aceita os nomes em inglês e em pt-BR).
+_BANDAS_IRB = {
+    "retail": IRB_RETAIL_RHO,
+    "varejo": IRB_RETAIL_RHO,
+    "corporate": IRB_CORPORATE_RHO,
+    "corporativo": IRB_CORPORATE_RHO,
+}
+
+
+def _banda_irb(tipo) -> tuple[str, tuple[float, float]]:
+    """Resolve o tipo de segmento na faixa IRB correspondente."""
+    chave = str(tipo).strip().lower()
+    if chave not in _BANDAS_IRB:
+        raise ValueError(
+            f"segment_type {tipo!r} inválido; use 'retail'/'varejo' ou "
+            "'corporate'/'corporativo'.")
+    faixa = _BANDAS_IRB[chave]
+    nome = "retail" if faixa is IRB_RETAIL_RHO else "corporate"
+    return nome, faixa
+
+
+def rho_sanity_report(
+    default_rates_by_segment: Union[dict, pd.DataFrame],
+    segment_type: Union[str, dict] = "retail",
+    *,
+    exposures_by_segment: Optional[dict] = None,
+    n_boot: int = 500,
+    block: int = 4,
+    alpha: float = 0.05,
+    seed: Optional[int] = None,
+) -> pd.DataFrame:
+    """Relatório de sanidade de ``ρ`` por segmento contra as faixas IRB.
+
+    Consolida, para cada segmento, as estimativas de correlação de ativos
+    (momentos e, quando houver exposições, MLE), o IC por bootstrap em blocos
+    (:func:`asset_correlation_ci`, método dos momentos) e o confronto com a
+    faixa de referência do IRB (:data:`IRB_RETAIL_RHO` ou
+    :data:`IRB_CORPORATE_RHO`). É a materialização do teste de sanidade
+    recomendado no guia: ``ρ`` muito fora da faixa sinaliza série curta,
+    mistura de safras heterogêneas ou quebra estrutural.
+
+    Parameters
+    ----------
+    default_rates_by_segment:
+        ``dict`` nome → série de taxas de *default* (proporções em ``[0, 1]``)
+        ou ``DataFrame`` com uma coluna por segmento (linhas = períodos).
+    segment_type:
+        ``'retail'``/``'varejo'`` ou ``'corporate'``/``'corporativo'`` — a
+        faixa IRB usada no confronto. Aceita também ``dict`` nome → tipo para
+        misturar segmentos de faixas distintas (ausentes caem em ``'retail'``).
+    exposures_by_segment:
+        ``dict`` opcional nome → obligores por período; segmentos presentes
+        ganham a coluna ``rho_mle`` (contagens reconstruídas como
+        ``round(DR_t · n_t)``); ausentes ficam com ``NaN``.
+    n_boot, block, alpha, seed:
+        Parâmetros repassados a :func:`asset_correlation_ci`.
+
+    Returns
+    -------
+    pd.DataFrame
+        Uma linha por segmento com colunas ``segmento``, ``tipo``,
+        ``rho_momentos``, ``rho_mle``, ``ic_inferior``, ``ic_superior``,
+        ``faixa_irb_min``, ``faixa_irb_max`` e ``fora_da_faixa`` (``True`` se
+        **alguma** estimativa pontual disponível cair fora da faixa IRB).
+    """
+    if isinstance(default_rates_by_segment, pd.DataFrame):
+        if default_rates_by_segment.shape[1] == 0:
+            raise ValueError("default_rates_by_segment não tem colunas.")
+        series = {str(c): default_rates_by_segment[c]
+                  for c in default_rates_by_segment.columns}
+    elif isinstance(default_rates_by_segment, dict):
+        if len(default_rates_by_segment) == 0:
+            raise ValueError("default_rates_by_segment está vazio.")
+        series = {str(k): v for k, v in default_rates_by_segment.items()}
+    else:
+        raise ValueError(
+            "default_rates_by_segment deve ser dict ou pandas.DataFrame.")
+
+    import warnings
+    linhas = []
+    for nome, serie in series.items():
+        dr = _as_1d(serie, name=f"segmento {nome!r}")
+        if np.any((dr < 0) | (dr > 1)):
+            raise ValueError(f"Segmento {nome!r} tem taxas fora de [0, 1].")
+        tipo = (segment_type.get(nome, "retail")
+                if isinstance(segment_type, dict) else segment_type)
+        tipo_nome, (faixa_lo, faixa_hi) = _banda_irb(tipo)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # avisos de série curta por segmento
+            rho_mom = float(asset_correlation_moments(dr))
+            ci = asset_correlation_ci(dr, n_boot=n_boot, block=block,
+                                      alpha=alpha, method="moments", seed=seed)
+            rho_mle = float("nan")
+            if exposures_by_segment is not None and nome in exposures_by_segment:
+                n_seg = _as_1d(exposures_by_segment[nome],
+                               name=f"exposures do segmento {nome!r}")
+                if n_seg.shape != dr.shape:
+                    raise ValueError(
+                        f"exposures do segmento {nome!r} não alinham com a "
+                        "série de taxas.")
+                _, rho_mle = asset_params_mle(np.rint(dr * n_seg), n_seg)
+                rho_mle = float(rho_mle)
+
+        estimativas = [rho_mom] + ([rho_mle] if np.isfinite(rho_mle) else [])
+        fora = any(not (faixa_lo <= e <= faixa_hi) for e in estimativas)
+        linhas.append({
+            "segmento": nome,
+            "tipo": tipo_nome,
+            "rho_momentos": rho_mom,
+            "rho_mle": rho_mle,
+            "ic_inferior": ci["ic_inferior"],
+            "ic_superior": ci["ic_superior"],
+            "faixa_irb_min": float(faixa_lo),
+            "faixa_irb_max": float(faixa_hi),
+            "fora_da_faixa": bool(fora),
+        })
+    return pd.DataFrame(linhas)
 
 
 # ======================================================================
@@ -621,6 +953,8 @@ __all__ = [
     "asset_correlation_moments",
     "asset_correlation_mle",
     "asset_params_mle",
+    "asset_correlation_ci",
+    "rho_sanity_report",
     "macro_factor_correlation",
     "factor_correlation_matrix",
     "nearest_correlation",

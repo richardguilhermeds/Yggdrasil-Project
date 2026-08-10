@@ -403,3 +403,81 @@ def test_estimate_feeds_migration_model():
     dist = model.simulate(exposures=[1e6, 5e5], ratings_idx=[0, 1],
                           n_scenarios=5_000, seed=3)
     assert np.isfinite(dist.el)
+
+
+# ----------------------------------------------------------------------
+# Incerteza de rho: bootstrap em blocos, multi-start na MLE e sanidade
+# ----------------------------------------------------------------------
+def _serie_vasicek(T, rho, pd_incond, seed):
+    """Taxas de default simuladas do modelo de Vasicek de fator único."""
+    from scipy.stats import norm
+    rng = np.random.default_rng(seed)
+    y = rng.standard_normal(T)
+    return norm.cdf((norm.ppf(pd_incond) - np.sqrt(rho) * y) / np.sqrt(1.0 - rho))
+
+
+def test_asset_correlation_ci_contains_true_rho():
+    from yggdrasil.credit_risk.capital.correlation import asset_correlation_ci
+    dr = _serie_vasicek(60, rho=0.15, pd_incond=0.02, seed=2)
+    res = asset_correlation_ci(dr, n_boot=300, block=4, alpha=0.05, seed=7)
+    assert res["ic_inferior"] <= 0.15 <= res["ic_superior"]   # cobre o rho verdadeiro
+    assert res["ic_inferior"] <= res["rho"] <= res["ic_superior"]
+    assert res["rhos_boot"].shape == (300,)
+    # reprodutível com a mesma semente
+    res2 = asset_correlation_ci(dr, n_boot=300, block=4, alpha=0.05, seed=7)
+    assert res2["ic_inferior"] == res["ic_inferior"]
+    assert res2["ic_superior"] == res["ic_superior"]
+    # MLE exige exposições para reconstruir as contagens
+    with pytest.raises(ValueError):
+        asset_correlation_ci(dr, n_boot=10, method="mle")
+    with pytest.raises(ValueError):
+        asset_correlation_ci(dr, alpha=1.5)
+
+
+def test_asset_params_mle_multistart_not_worse():
+    from scipy.stats import norm
+    from yggdrasil.credit_risk.capital.correlation import asset_params_mle
+    rng = np.random.default_rng(5)
+    T, n_oblig, rho_true, pd_true = 20, 500, 0.12, 0.03
+    y = rng.standard_normal(T)
+    p = norm.cdf((norm.ppf(pd_true) - np.sqrt(rho_true) * y) / np.sqrt(1 - rho_true))
+    k = rng.binomial(n_oblig, p)
+    n = np.full(T, n_oblig)
+    multi = asset_params_mle(k, n, return_details=True)
+    single = asset_params_mle(k, n, rho_starts=(0.10,), return_details=True)
+    # multi-start nunca piora a log-verossimilhança vs chute único
+    assert multi["loglik"] >= single["loglik"] - 1e-6
+    assert not multi["fallback_momentos"]
+    assert multi["rho"] == pytest.approx(rho_true, abs=0.08)
+    # retorno-tupla (compatibilidade) bate com o detalhado
+    pd_hat, rho_hat = asset_params_mle(k, n)
+    assert pd_hat == pytest.approx(multi["pd"])
+    assert rho_hat == pytest.approx(multi["rho"])
+    with pytest.raises(ValueError):                          # grade inválida
+        asset_params_mle(k, n, rho_starts=())
+
+
+def test_rho_sanity_report_flags_out_of_range():
+    from yggdrasil.credit_risk.capital.correlation import (
+        IRB_CORPORATE_RHO, IRB_RETAIL_RHO, rho_sanity_report)
+    series = {
+        "alto": _serie_vasicek(40, rho=0.50, pd_incond=0.05, seed=3),
+        "ok": _serie_vasicek(40, rho=0.08, pd_incond=0.03, seed=4),
+    }
+    rep = rho_sanity_report(series, segment_type="retail",
+                            n_boot=100, block=4, seed=1).set_index("segmento")
+    assert bool(rep.loc["alto", "fora_da_faixa"])            # rho~0.5 >> teto retail
+    assert not bool(rep.loc["ok", "fora_da_faixa"])
+    assert rep.loc["ok", "faixa_irb_min"] == IRB_RETAIL_RHO[0]
+    assert rep.loc["ok", "faixa_irb_max"] == IRB_RETAIL_RHO[1]
+    assert (rep.loc["alto", "ic_inferior"]
+            <= rep.loc["alto", "rho_momentos"]
+            <= rep.loc["alto", "ic_superior"])
+    assert rep["rho_mle"].isna().all()                       # sem exposições -> NaN
+    # tipo por segmento via dict: 'alto' avaliado na faixa corporativa
+    rep2 = rho_sanity_report({"alto": series["alto"]},
+                             segment_type={"alto": "corporate"},
+                             n_boot=50, seed=1).iloc[0]
+    assert rep2["tipo"] == "corporate"
+    assert rep2["faixa_irb_max"] == IRB_CORPORATE_RHO[1]
+    assert bool(rep2["fora_da_faixa"])                       # 0.5 > 0.24
