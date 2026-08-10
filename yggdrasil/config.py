@@ -17,7 +17,7 @@ apenas gera a predição e atribui o grupo homogêneo, sem nenhuma análise extr
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import pandas as pd
 
@@ -45,6 +45,11 @@ class ColumnConfig:
     analysis_samples:
         Conjunto de amostras que recebem análise completa. Amostras fora desse
         conjunto são *scoring-only*.
+    id_col:
+        Coluna identificadora da entidade (contrato/cliente) ao longo das
+        safras. Opcional (default ``None``); quando configurada habilita as
+        análises de migração de rating entre períodos
+        (:mod:`yggdrasil.monitoring.migration`).
     """
 
     feature_prefix: str = "feat_"
@@ -55,6 +60,7 @@ class ColumnConfig:
     dev_sample: str = "DES"
     oot_sample: str = "OOT"
     analysis_samples: Tuple[str, ...] = ("DES", "OOT")
+    id_col: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Garante que dev/oot estejam sempre entre as amostras de análise.

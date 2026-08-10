@@ -96,7 +96,12 @@ def log_pipeline_run(
 
     ``strategies`` são as estratégias de rating **ajustadas** da esteira; quando
     informadas, sua serialização vai para o artefato ``ratings.json`` (raiz do
-    run), reaplicável sem refit via :func:`yggdrasil.ratings.apply_ratings`."""
+    run), reaplicável sem refit via :func:`yggdrasil.ratings.apply_ratings`.
+
+    Quando ``cfg.id_col`` está configurado (e presente em ``df_scored``), a
+    matriz de migração de cada rating entre as amostras de desenvolvimento e
+    *out-of-time* (:func:`~yggdrasil.monitoring.rating_migration_matrix`) é
+    logada como artefato opcional em ``migration/`` (CSV, heatmap e resumo)."""
     import mlflow
     from mlflow.models.signature import infer_signature
 
@@ -191,6 +196,36 @@ def log_pipeline_run(
                 perf, m, save_path=os.path.join(perf_dir, f"{m}_over_time.png"))
             plt.close(fig)
         mlflow.log_artifacts(perf_dir, artifact_path="performance")
+
+        # ── artefatos: migração de ratings entre amostras (opcional) ────
+        # Requer ``cfg.id_col`` configurado e presente na base scorada; matriz
+        # observada dev → oot por rating (contagem, %, heatmap e resumo).
+        if cfg.id_col and cfg.id_col in df_scored.columns:
+            from ..monitoring import (plot_migration_matrix,
+                                      rating_migration_matrix)
+
+            mig_dir = os.path.join(tmp, "migration")
+            os.makedirs(mig_dir, exist_ok=True)
+            alguma = False
+            for col in rating_cols:
+                metodo = col.replace("rating_", "")
+                try:
+                    mig = rating_migration_matrix(
+                        df_scored, col, cfg, cfg.dev_sample, cfg.oot_sample)
+                except ValueError as exc:
+                    # sem entidade em comum / período vazio → anota e segue
+                    mlflow.set_tag(f"migration_{metodo}_skip", str(exc)[:250])
+                    continue
+                mig.counts.to_csv(os.path.join(mig_dir, f"migration_{metodo}_counts.csv"))
+                mig.pct.to_csv(os.path.join(mig_dir, f"migration_{metodo}_pct.csv"))
+                fig = plot_migration_matrix(
+                    mig, save_path=os.path.join(mig_dir, f"migration_{metodo}.png"))
+                plt.close(fig)
+                mlflow.log_dict({**mig.summary, "nota": mig.nota},
+                                f"migration/migration_{metodo}_resumo.json")
+                alguma = True
+            if alguma:
+                mlflow.log_artifacts(mig_dir, artifact_path="migration")
 
         # ── artefatos: tabela de lift por amostra (classificação) ───────
         if problem_type == "classification":
