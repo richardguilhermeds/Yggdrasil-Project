@@ -493,12 +493,16 @@ class TreeSegmenterUI:
     def __init__(self, df, target="target", task_type="classification",
                  sample_col=None, ref_sample="DES",
                  feature_labels=None, problem_label=None, features=None, tree_samples=None, date_col=None,
-                 allow_interactive_tree=None):
+                 allow_interactive_tree=None, weight_col=None):
         # task_type: "classification" (alvo binário) ou "regression" (alvo
         # contínuo) — define métricas, IV, cor e os gráficos exibidos.
         # tree_samples: amostras cujo alvo médio aparece nas folhas da árvore.
         # None = todas; ex.: tree_samples=["DES","OOT"] mostra só DES e OOT.
         # date_col: coluna de data/safra — FORA da modelagem, só p/ gráficos no tempo.
+        # weight_col: coluna de PESO/EXPOSIÇÃO (ex.: saldo) — FORA da modelagem;
+        # liga a visão dupla contratos × saldo no cartão da folha, na tabela de
+        # folhas, no TSV e no Excel. Sem ela, a tela não muda em nada. FASE 1:
+        # exibição apenas — split e binning ótimo seguem NÃO ponderados.
         self.task_type = task_type
         self._is_clf = task_type == "classification"
         self._risk_label = problem_label or target   # rótulo do alvo na UI
@@ -521,13 +525,14 @@ class TreeSegmenterUI:
         self._kwargs = dict(target=target, task_type=task_type, sample_col=sample_col,
                             ref_sample=ref_sample, feature_labels=feature_labels,
                             problem_label=problem_label,
-                            date_col=date_col, verbose=False)
+                            date_col=date_col, weight_col=weight_col, verbose=False)
         self.df = df
         self.target = target
         self.sample_col = sample_col
         self.ref_sample = ref_sample
+        self.weight_col = weight_col
         if features is None:
-            skip = {target, sample_col, date_col}
+            skip = {target, sample_col, date_col, weight_col}
             skip.discard(None)
             # datas/datetime nunca são variáveis do modelo (mesmo sem date_col)
             skip |= {c for c in df.columns
@@ -1474,6 +1479,17 @@ class TreeSegmenterUI:
         # ABA ③ DIAGNÓSTICO — folhas · discriminação · métricas · bootstrap · qualidade
         # ================================================================
         _ref = self.ref_sample
+        # visão dupla contratos × saldo: só entra na legenda com weight_col definida
+        _wleg = ""
+        if self.seg.weight_col is not None:
+            _wc = _esc(str(self.seg.weight_col))
+            _wleg = (f"<br><b>% saldo</b> e <b>… pond.</b> = visão dupla <b>contratos "
+                     f"&times; saldo</b>: o % do saldo da folha (soma de <b>{_wc}</b> "
+                     f"sobre o total) e o {self._risk_label} médio <b>ponderado</b> por "
+                     f"<b>{_wc}</b>. Compare com o % de contratos: divergência grande "
+                     "= a folha concentra exposição fora de proporção ao nº de "
+                     "contratos. A <b>árvore em si continua não ponderada</b> — "
+                     "critério de split e binning ótimo olham contrato a contrato.")
         tbl_legend = W.HTML(
             "<div class='treeui-legend'>"
             f"<b>PSI por amostra</b> (estabilidade da folha entre {_ref} e a amostra): "
@@ -1495,7 +1511,8 @@ class TreeSegmenterUI:
             f"tem {self._risk_label} igual em {_ref} e OOT. Semântica <b>inversa</b> à do p (irmãs): "
             "<span style='color:var(--ok-tx)'>p alto (&gt;0,05)</span> ⇒ estimativa <b>estável</b> entre as amostras; "
             "<span style='background:var(--bad-bg);padding:1px 5px;border-radius:3px'>p baixo (em vermelho)</span> "
-            f"⇒ a estimativa <b>deslocou</b> de {_ref} para OOT (folha pouco aderente).</div>")
+            f"⇒ a estimativa <b>deslocou</b> de {_ref} para OOT (folha pouco aderente)."
+            + _wleg + "</div>")
         table_scroll = W.Box([self.out_table],
                              layout=W.Layout(overflow="auto", width="100%",
                                              max_height="420px"))
@@ -2453,7 +2470,9 @@ class TreeSegmenterUI:
             sty = sty.map(p_bg, subset=["p_vs_prox"])
         if "p_des_oot" in lv.columns:
             sty = sty.map(p_stab_bg, subset=["p_des_oot"])
-        fmt = {"repr_%": "{:.1f}"}
+        # "saldo_%" (visão dupla contratos × saldo) usa a mesma casa decimal do
+        # repr_% — a chave é ignorada quando a coluna não está na tabela
+        fmt = {"repr_%": "{:.1f}", "saldo_%": "{:.1f}"}
         if "apelido" in lv.columns:          # texto LIVRE do usuário → escapa p/ HTML
             fmt["apelido"] = _esc
         for c in lv.columns:
@@ -2554,11 +2573,28 @@ class TreeSegmenterUI:
 
         sec_h = ("<div class='treeui-h' style='margin-top:11px'>{}</div>").format
 
+        # VISÃO DUPLA contratos × saldo: com weight_col configurada, o cartão ganha
+        # o % do SALDO ao lado do % de contratos e o alvo médio PONDERADO (como
+        # sublinha dos chips de alvo). Sem weight_col, nada abaixo é acionado.
+        wcol = self.seg.weight_col
+
+        def pond_txt(sample=None):
+            """'pond. X%' com o alvo ponderado pelo saldo ('' sem weight_col)."""
+            if wcol is None:
+                return ""
+            v = self.seg.weighted_value(sid, sample)
+            return "pond. " + ("—" if pd.isna(v) else f"{v * 100:.2f}%")
+
         if self.sample_col is None:
             rep = 100 * n / len(self.df) if len(self.df) else 0.0
             cells = (chip("Volumetria", f"{n:,}".replace(",", "."))
-                     + chip("Repr.", f"{rep:.1f}%")
-                     + chip(self._risk_label, f"{self._node_value(sid) * 100:.2f}%"))
+                     + chip("Repr.", f"{rep:.1f}%"))
+            if wcol is not None:
+                ws = self.seg.weight_share(sid)
+                cells += chip("Repr. saldo", "—" if pd.isna(ws) else f"{ws:.1f}%",
+                              sub=f"% de {_esc(str(wcol))}")
+            cells += chip(self._risk_label, f"{self._node_value(sid) * 100:.2f}%",
+                          sub=pond_txt() or None)
             return head + f"<div class='treeui-metrics'>{cells}</div>"
 
         sm = self._sample_masks
@@ -2567,6 +2603,10 @@ class TreeSegmenterUI:
 
         # 1) Volumetria & representatividade da folha por amostra
         sec1 = chip("Volumetria", f"{n:,}".replace(",", "."))
+        if wcol is not None:      # % do SALDO da carteira (não por amostra)
+            ws = self.seg.weight_share(sid)
+            sec1 += chip("Repr. saldo", "—" if pd.isna(ws) else f"{ws:.1f}%",
+                         sub=f"% de {_esc(str(wcol))} na carteira")
         for a in samples_all:
             m = sm.get(a)
             tot = int(m.sum()) if m is not None else 0
@@ -2574,18 +2614,27 @@ class TreeSegmenterUI:
             sec1 += chip(f"Repr. {ab(a)}", "—" if pd.isna(rp) else f"{rp:.1f}%")
 
         # 2) alvo médio (DES e demais) + incremento de cada amostra vs DES
+        #    (com weight_col, a sublinha traz também o alvo PONDERADO pelo saldo)
         pd_ref = self._node_value(sid, self.ref_sample)
+        sub_ref = "referência"
+        if wcol is not None:
+            sub_ref += " · " + pond_txt(self.ref_sample)
         sec2 = chip(f"{self._risk_label} {self.ref_sample}",
-                    "—" if pd.isna(pd_ref) else f"{pd_ref * 100:.2f}%", sub="referência")
+                    "—" if pd.isna(pd_ref) else f"{pd_ref * 100:.2f}%", sub=sub_ref)
         for a in self._pd_nonref:
             v = self._node_value(sid, a)
+            pond = pond_txt(a)
             if pd.isna(v) or pd.isna(pd_ref):
-                sec2 += chip(f"{self._risk_label} {ab(a)}", "—" if pd.isna(v) else f"{v * 100:.2f}%")
+                sec2 += chip(f"{self._risk_label} {ab(a)}",
+                             "—" if pd.isna(v) else f"{v * 100:.2f}%",
+                             sub=pond or None)
                 continue
             d = (v - pd_ref) * 100      # incremento em pontos percentuais
             sig = "+" if d >= 0 else "−"
             dcol = "var(--bad-tx)" if d > 0 else "var(--ok-tx)"   # alvo subindo = pior (vermelho)
             sub = f"<span style='color:{dcol}'>Δ vs DES {sig}{abs(d):.2f} p.p.</span>"
+            if pond:
+                sub += f" · {pond}"
             sec2 += chip(f"{self._risk_label} {ab(a)}", f"{v * 100:.2f}%", sub=sub)
 
         # 3) Aderência DES → amostra (teste de hipótese: nome + p-valor)
@@ -2664,10 +2713,16 @@ class TreeSegmenterUI:
             "<span style='color:var(--gauge-warn)'>■</span> 0,10–0,25 atenção &nbsp; "
             "<span style='color:var(--gauge-bad)'>■</span> &gt;0,25 crítico</div>")
 
+        # com weight_col, os títulos avisam que a leitura é dupla (contratos × saldo)
+        _h1 = "Volumetria &amp; representatividade"
+        _h2 = f"{self._risk_mean} &amp; incremento vs DES"
+        if wcol is not None:
+            _h1 += " (contratos &times; saldo)"
+            _h2 += f" &middot; pond. por {_esc(str(wcol))}"
         out = (head
-               + sec_h("Volumetria &amp; representatividade")
+               + sec_h(_h1)
                + f"<div class='treeui-metrics'>{sec1}</div>"
-               + sec_h(f"{self._risk_mean} &amp; incremento vs DES")
+               + sec_h(_h2)
                + f"<div class='treeui-metrics'>{sec2}</div>")
         h0_css = "font-size:10.5px;color:var(--sub-ink);margin:1px 0 6px;line-height:1.5"
         if test_rows:
@@ -2730,13 +2785,18 @@ class TreeSegmenterUI:
         # Colunas em blocos legíveis: identificação · % por amostra · alvo médio
         # por amostra (só as que têm alvo) · PSI por amostra · teste de hipótese.
         # `headers` renomeia só a EXIBIÇÃO (a formatação segue pelos nomes reais).
+        # Com weight_col configurada, entram as colunas da VISÃO DUPLA contratos ×
+        # saldo (saldo_% e as ponderadas) — elas só existem em leaves() nesse caso,
+        # então o `in lv.columns` já garante que nada muda sem pesos.
         cols = ["folha"]
         headers = {"folha": "folha", "apelido": "apelido", "descricao": "descrição"}
         if "apelido" in lv.columns:          # só existe quando há apelido definido
             cols.append("apelido")
         cols.append("descricao")
         if self.sample_col is None:
-            for c, h in (("repr_%", "repr. %"), ("valor_medio", self._risk_mean)):
+            for c, h in (("repr_%", "repr. %"), ("saldo_%", "% saldo"),
+                         ("valor_medio", self._risk_mean),
+                         ("valor_medio_pond", f"{self._risk_mean} pond.")):
                 if c in lv.columns:
                     cols.append(c); headers[c] = h
         else:
@@ -2744,10 +2804,15 @@ class TreeSegmenterUI:
                 c = f"repr_{a}_%"
                 if c in lv.columns:
                     cols.append(c); headers[c] = f"% {ab(a)}"
+            if "saldo_%" in lv.columns:      # % do SALDO da carteira (todas as amostras)
+                cols.append("saldo_%"); headers["saldo_%"] = "% saldo"
             for a in [self.ref_sample] + self._pd_nonref:    # alvo DES · alvo OOT
                 c = f"valor_{a}"
                 if c in lv.columns:
                     cols.append(c); headers[c] = f"{self._risk_label} {ab(a)}"
+                cp = f"valor_pond_{a}"       # alvo PONDERADO pelo saldo, na amostra
+                if cp in lv.columns:
+                    cols.append(cp); headers[cp] = f"{self._risk_label} {ab(a)} pond."
             for a in self._nonref:                           # PSI OOT · PSI ESTAB
                 c = f"psi_{a}"
                 if c in lv.columns:
@@ -2775,13 +2840,15 @@ class TreeSegmenterUI:
     def _leaves_tsv(self):
         """Tabela de folhas em TSV (tab = coluna) — cola direto no Excel como células
         numéricas de verdade. Números com PONTO decimal; as colunas de % (repr. por
-        amostra) saem como FRAÇÃO (0–1), prontas p/ formatar como % no Excel."""
+        amostra e % do saldo, quando há ``weight_col``) saem como FRAÇÃO (0–1),
+        prontas p/ formatar como % no Excel."""
         lv, cols, headers = self._leaf_table_spec()
 
         def fmt(col, v):
             if pd.isna(v):
                 return ""                       # vazio (não "—") p/ a célula ficar limpa
-            if col == "repr_%" or (col.startswith("repr_") and col.endswith("_%")):
+            if col in ("repr_%", "saldo_%") or (col.startswith("repr_")
+                                                and col.endswith("_%")):
                 return f"{v / 100:.4f}"         # FRAÇÃO (não multiplicado) — Excel formata como %
             if col.startswith("pd_"):           # alvo (LGD/PD) — fração 0–1, ponto decimal
                 return f"{v:.4f}"

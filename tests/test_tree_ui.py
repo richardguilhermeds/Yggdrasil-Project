@@ -992,3 +992,34 @@ def test_ui_spark_card_erro_resumido_no_card(task):
     assert "❌" in ui.out_spark_progress.value      # etapa marcada com erro
     assert any("ERRO" in l for l in ui._log_lines)  # detalhe no console
     assert not ui.btn_spark_apply.disabled          # botão re-habilitado
+
+
+def test_ui_weight_col_visao_dupla_contratos_saldo(task):
+    """Com `weight_col`, o cartão da folha ganha o % do SALDO e o alvo ponderado,
+    e as colunas novas aparecem na tabela de folhas e no TSV copiável."""
+    df = make_df(task, n=4000, seed=5)
+    df["saldo"] = np.where(df["score"] > 0.9, 900.0, 100.0)
+    ui = _build(task, df=df, weight_col="saldo")
+    assert ui.seg.weight_col == "saldo"
+    assert "saldo" not in ui.features            # peso não é variável candidata
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+    _lv, cols, headers = ui._leaf_table_spec()
+    assert headers.get("saldo_%") == "% saldo"
+    assert any(c.startswith("valor_pond_") for c in cols)
+    assert "% saldo" in ui.out_table.value        # tabela renderizada
+    assert "% saldo" in ui._leaves_tsv().splitlines()[0]
+    card = ui._leaf_header_html()
+    assert "Repr. saldo" in card and "pond." in card
+
+
+def test_ui_sem_weight_col_tela_intocada(task):
+    """Sem `weight_col` (padrão), nada da visão dupla aparece na tela."""
+    ui = _build(task)
+    assert ui.seg.weight_col is None
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+    _lv, cols, _headers = ui._leaf_table_spec()
+    assert not [c for c in cols if c == "saldo_%" or "pond" in str(c)]
+    assert "% saldo" not in ui._leaves_tsv() and "% saldo" not in ui.out_table.value
+    assert "Repr. saldo" not in ui._leaf_header_html()

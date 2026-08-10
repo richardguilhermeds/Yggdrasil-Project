@@ -832,3 +832,126 @@ def test_apply_table_pandas_progresso(seg):
     # etapas na ordem run→ok, sem as etapas Spark (ler tabela / gravar)
     assert eventos == [("aplicar", "run"), ("aplicar", "ok"),
                        ("resumo", "run"), ("resumo", "ok"), ("done", "ok")]
+
+
+# ----------------------------------------------------------------------
+# PESOS DE EXPOSIÇÃO (weight_col) — visão dupla contratos × saldo (fase 1)
+# ----------------------------------------------------------------------
+def _df_pesos(task, n=1500, seed=7):
+    """Base com peso (saldo) CONCENTRADO nas linhas de score alto (⇒ o % do saldo
+    da folha diverge do % de contratos) e também nas garantias piores (⇒ dentro da
+    MESMA folha o alvo ponderado difere do alvo simples)."""
+    df = make_df(task, n=n, seed=seed, com_oot=True)
+    df["saldo"] = (np.where(df["score"] > 0.9, 900.0, 100.0)
+                   * np.where(df["garantia"].isin(["C", "D"]), 3.0, 1.0))
+    return df
+
+
+def _seg_pesos(task, df=None, **kw):
+    seg = _mk(task, df=_df_pesos(task) if df is None else df,
+              weight_col="saldo", **kw)
+    seg.grow("score", splits=[0.9])
+    return seg
+
+
+def test_weight_col_saldo_diverge_de_contratos_e_bate_np_average(task):
+    """Com pesos concentrados, `saldo_%` diverge de `repr_%` na mesma folha, e o
+    alvo ponderado reproduz exatamente o np.average calculado à mão."""
+    seg = _seg_pesos(task)
+    lv = seg.leaves()
+    assert {"saldo_%", "valor_medio_pond", "valor_pond_DES",
+            "valor_pond_OOT"}.issubset(lv.columns)
+    # as duas visões fecham 100%, mas folha a folha são bem diferentes
+    assert lv["saldo_%"].sum() == pytest.approx(100.0, abs=0.3)
+    assert (lv["saldo_%"] - lv["repr_%"]).abs().max() > 5.0
+    for sid, esperado_pond in zip(lv["segmento"], lv["valor_medio_pond"]):
+        m = seg.segments[sid]["mask"] & (seg.df["amostra"] == "DES")
+        y = seg.df.loc[m, "target"].to_numpy(dtype="float64")
+        w = seg.df.loc[m, "saldo"].to_numpy(dtype="float64")
+        assert esperado_pond == pytest.approx(np.average(y, weights=w), abs=1e-4)
+        # weight_share = fração do saldo total nesta folha
+        share = 100 * seg.df.loc[seg.segments[sid]["mask"], "saldo"].sum() \
+            / seg.df["saldo"].sum()
+        assert seg.weight_share(sid) == pytest.approx(share, abs=1e-9)
+    # ponderar muda o número (pesos não uniformes dentro da folha)
+    assert (lv["valor_medio"] - lv["valor_medio_pond"]).abs().max() > 1e-3
+
+
+def test_weight_col_fora_da_modelagem_e_split_nao_ponderado(task):
+    """FASE 1: o peso NÃO é variável candidata e NÃO entra no critério de split —
+    a árvore sai idêntica à construída sem `weight_col`."""
+    df = _df_pesos(task)
+    com = _mk(task, df=df, weight_col="saldo")
+    sem = _mk(task, df=df.drop(columns=["saldo"]))
+    assert "saldo" not in set(com.variable_iv("root")["variavel"])
+    com.fit_auto(max_depth=2, verbose=False)
+    sem.fit_auto(max_depth=2, verbose=False)
+    assert list(com.leaves()["descricao"]) == list(sem.leaves()["descricao"])
+
+
+def test_sem_weight_col_nada_muda(seg):
+    """Sem `weight_col`, as colunas ponderadas não existem e os helpers devolvem
+    NaN — o caso padrão fica intocado."""
+    seg.grow("score", splits=[0.9])
+    lv = seg.leaves()
+    assert seg.weight_col is None
+    assert not [c for c in lv.columns if c == "saldo_%" or "pond" in str(c)]
+    sid = lv["segmento"].iloc[0]
+    assert np.isnan(seg.weight_share(sid)) and np.isnan(seg.weighted_value(sid))
+
+
+def test_weight_col_nan_fica_fora_das_somas(task):
+    """Peso ausente (NaN) não entra nem na soma do saldo nem na média ponderada."""
+    df = _df_pesos(task, n=900, seed=11)
+    df.loc[df.index[:250], "saldo"] = np.nan
+    seg = _seg_pesos(task, df=df)
+    lv = seg.leaves()
+    assert lv["saldo_%"].sum() == pytest.approx(100.0, abs=0.3)
+    sid = lv["segmento"].iloc[0]
+    m = (seg.segments[sid]["mask"] & (seg.df["amostra"] == "DES")
+         & seg.df["saldo"].notna())
+    esperado = np.average(seg.df.loc[m, "target"], weights=seg.df.loc[m, "saldo"])
+    assert seg.weighted_value(sid, "DES") == pytest.approx(esperado, abs=1e-9)
+
+
+def test_weight_col_invalida_levanta_erro(task):
+    df = _df_pesos(task, n=400)
+    with pytest.raises(ValueError, match="não está no DataFrame"):
+        _mk(task, df=df, weight_col="nao_existe")
+    txt = df.assign(saldo_txt="x")
+    with pytest.raises(ValueError, match="numérica"):
+        _mk(task, df=txt, weight_col="saldo_txt")
+    neg = df.copy()
+    neg.loc[neg.index[:5], "saldo"] = -1.0
+    with pytest.raises(ValueError, match="NEGATIVO"):
+        _mk(task, df=neg, weight_col="saldo")
+
+
+def test_weight_col_roundtrip_to_dict_e_json_antigo(task):
+    seg = _seg_pesos(task)
+    d = seg.to_dict()
+    assert d["meta"]["weight_col"] == "saldo"
+    novo = TreeSegmenter.from_dict(d, seg.df)
+    assert novo.weight_col == "saldo" and "saldo_%" in novo.leaves().columns
+    # JSON ANTIGO (sem a chave) carrega com weight_col=None
+    antigo_meta = dict(d)
+    antigo_meta["meta"] = {k: v for k, v in d["meta"].items() if k != "weight_col"}
+    antigo = TreeSegmenter.from_dict(antigo_meta, seg.df)
+    assert antigo.weight_col is None and "saldo_%" not in antigo.leaves().columns
+    # df sem a coluna de peso: degrada p/ None em vez de quebrar a carga
+    degradado = TreeSegmenter.from_dict(d, seg.df.drop(columns=["saldo"]))
+    assert degradado.weight_col is None
+
+
+def test_to_excel_traz_visao_dupla(task, tmp_path):
+    openpyxl = pytest.importorskip("openpyxl")
+    seg = _seg_pesos(task)
+    p = str(tmp_path / "pesos.xlsx")
+    seg.to_excel(p)
+    ws = openpyxl.load_workbook(p)["Folhas"]
+    cab = [c.value for c in ws[1]]
+    assert "saldo_%" in cab and "valor_medio_pond" in cab
+    col = cab.index("saldo_%") + 1
+    # % do saldo sai como FRAÇÃO 0–1 com formato de porcentagem no Excel
+    assert 0.0 <= ws.cell(row=2, column=col).value <= 1.0
+    assert ws.cell(row=2, column=col).number_format == "0.00%"

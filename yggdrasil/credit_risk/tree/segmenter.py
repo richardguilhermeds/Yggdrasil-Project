@@ -315,7 +315,15 @@ def _emit_progress(cb, key: str, label: str, status: str, detail: str = "") -> N
 class TreeSegmenter:
     """Árvore de segmentação unificada (classificação/regressão) com binning
     ótimo/manual, poda e PSI. O comportamento por tipo de alvo é escolhido por
-    ``task_type`` ("classification" p/ alvo · "regression" p/ alvo)."""
+    ``task_type`` ("classification" p/ alvo · "regression" p/ alvo).
+
+    ``weight_col`` (opcional): coluna de PESO/EXPOSIÇÃO (ex.: saldo do contrato)
+    que habilita a **visão dupla contratos × saldo** — a tabela de folhas e o
+    cartão da folha passam a mostrar, além de ``n`` e % de contratos, o % do
+    SALDO (soma dos pesos da folha / total) e o alvo médio PONDERADO pelos pesos
+    (``saldo_%`` · ``valor_medio_pond`` · ``valor_pond_<amostra>``). **Fase 1 —
+    exibição apenas**: o critério de split e o binning ótimo continuam NÃO
+    ponderados (contrato a contrato); ponderar os cortes é fase 2 futura."""
 
     # PREVIEW interativo (plot_tree_hitmap): a figura da árvore cresce ∝ nº de
     # folhas (X_GAP por folha), então uma árvore grande vira um PNG gigantesco
@@ -337,6 +345,7 @@ class TreeSegmenter:
         problem_label: str | None = None,
         min_leaf_rows: int = 50,
         date_col: str | None = None,
+        weight_col: str | None = None,
         verbose: bool = True,
     ):
         if task_type not in TASK_TYPES:
@@ -398,6 +407,29 @@ class TreeSegmenter:
         if date_col is not None and date_col not in self.df.columns:
             raise ValueError(f"Coluna de data '{date_col}' não está no DataFrame "
                              f"(colunas: {list(self.df.columns)}).")
+        # coluna de PESO/EXPOSIÇÃO (ex.: saldo): NUNCA entra na modelagem (fica
+        # fora das variáveis candidatas) e habilita a visão dupla contratos ×
+        # saldo em leaves()/UI/exports. FASE 1: exibição apenas — split e binning
+        # ótimo seguem NÃO ponderados (fase 2 futura). Pesos NaN são tratados
+        # como ausentes (fora das somas/médias ponderadas).
+        self.weight_col = weight_col
+        if weight_col is not None:
+            if weight_col not in self.df.columns:
+                raise ValueError(
+                    f"Coluna de peso '{weight_col}' não está no DataFrame "
+                    f"(colunas: {list(self.df.columns)}).")
+            if not pd.api.types.is_numeric_dtype(self.df[weight_col]):
+                raise ValueError(
+                    f"Coluna de peso '{weight_col}' precisa ser numérica "
+                    f"(dtype atual: {self.df[weight_col].dtype}).")
+            w = self.df[weight_col].astype("float64")
+            if (w.dropna() < 0).any():
+                raise ValueError(
+                    f"Coluna de peso '{weight_col}' tem valor NEGATIVO — pesos "
+                    "de exposição devem ser ≥ 0.")
+            self._weights = w
+        else:
+            self._weights = None
         # rótulos amigáveis por variável para a descrição por extenso
         self.feature_labels = feature_labels or {}
         # APELIDOS DE NEGÓCIO por folha: sid -> texto livre (ex.: "Baixo risco
@@ -487,8 +519,9 @@ class TreeSegmenter:
         o alvo, a coluna de amostra, a coluna de data de referência (``date_col``)
         e **qualquer coluna datetime** — uma data nunca é variável do modelo aqui
         (e o optbinning não a bina). Para datas que não sejam datetime (ex.: safra
-        yyyymm inteira), passe ``date_col`` no construtor para excluí-la também."""
-        skip = {self.target, self.sample_col, self.date_col}
+        yyyymm inteira), passe ``date_col`` no construtor para excluí-la também.
+        A coluna de peso (``weight_col``) também fica fora — peso não é variável."""
+        skip = {self.target, self.sample_col, self.date_col, self.weight_col}
         skip.discard(None)
         for c in self.df.columns:
             try:
@@ -1448,6 +1481,43 @@ class TreeSegmenter:
         sub = self.df.loc[mask, self.target]
         return float(sub.mean()) if len(sub) else float("nan")
 
+    # ------------------------------------------------------------------
+    # PESOS DE EXPOSIÇÃO (weight_col) — visão dupla contratos × saldo.
+    #   FASE 1: exibição apenas — split/binning seguem NÃO ponderados.
+    # ------------------------------------------------------------------
+    def _wmean(self, mask) -> float:
+        """Alvo médio PONDERADO pelos pesos nas linhas de ``mask``. Linhas com
+        alvo ou peso faltante ficam fora; ``NaN`` sem par (alvo, peso) válido."""
+        y = self.df.loc[mask, self.target].to_numpy(dtype="float64")
+        w = self._weights[mask].to_numpy(dtype="float64")
+        ok = ~np.isnan(y) & ~np.isnan(w)
+        y, w = y[ok], w[ok]
+        if not len(y) or w.sum() <= 0:
+            return float("nan")
+        return float(np.average(y, weights=w))
+
+    def weight_share(self, sid: str) -> float:
+        """% do SALDO da carteira no segmento ``sid``: soma dos pesos
+        (``weight_col``) das linhas do segmento ÷ soma total, ×100. ``NaN`` sem
+        ``weight_col`` configurada ou com soma total nula."""
+        if self.weight_col is None:
+            return float("nan")
+        total = float(self._weights.sum())
+        if not total:
+            return float("nan")
+        return float(100.0 * self._weights[self.segments[sid]["mask"]].sum() / total)
+
+    def weighted_value(self, sid: str, sample: str | None = None) -> float:
+        """Alvo médio PONDERADO pelos pesos (``weight_col``) no segmento ``sid``,
+        restrito à amostra ``sample`` quando informada. ``NaN`` sem
+        ``weight_col`` ou sem par (alvo, peso) válido no recorte."""
+        if self.weight_col is None:
+            return float("nan")
+        mask = self.segments[sid]["mask"]
+        if sample is not None and sample in self._sample_masks:
+            mask = mask & self._sample_masks[sample]
+        return self._wmean(mask)
+
     def _leaf_order(self, ascending: bool = True) -> list:
         """sids das folhas na ordem esquerda→direita (memoizado por versão da árvore)."""
         return self._agg_memo(("leaf_order", ascending),
@@ -1517,6 +1587,8 @@ class TreeSegmenter:
     def _compute_leaves(self, ascending: bool = True, with_psi: bool = False,
                         with_test: bool = False, test: str = "mannwhitney") -> pd.DataFrame:
         linhas, n_total = [], len(self.df)
+        # total de SALDO (soma dos pesos) p/ a visão dupla contratos × saldo
+        w_total = float(self._weights.sum()) if self.weight_col is not None else 0.0
         for sid, seg in self.segments.items():
             if not seg["is_leaf"]:
                 continue
@@ -1534,13 +1606,31 @@ class TreeSegmenter:
                 "profundidade": seg["depth"],
                 "n": len(sub),
                 "repr_%": round(100 * len(sub) / n_total, 1) if n_total else 0.0,
-                "valor_medio": round(pd_m, 4) if not pd.isna(pd_m) else np.nan,
-                "valor_std": round(sub[self.target].std(), 4),
             }
+            # visão dupla (weight_col): % do SALDO da folha, ao lado do % de
+            # contratos — as colunas SÓ existem quando weight_col foi definida
+            if self.weight_col is not None:
+                w_leaf = float(self._weights[seg["mask"]].sum())
+                row["saldo_%"] = round(100 * w_leaf / w_total, 1) if w_total else 0.0
+            row["valor_medio"] = round(pd_m, 4) if not pd.isna(pd_m) else np.nan
+            if self.weight_col is not None:
+                # alvo médio PONDERADO na referência (mesma base do valor_medio)
+                if self.sample_col is not None:
+                    vp = self._wmean(seg["mask"] & self._mask_ref)
+                    if pd.isna(vp):
+                        vp = self._wmean(seg["mask"])
+                else:
+                    vp = self._wmean(seg["mask"])
+                row["valor_medio_pond"] = round(vp, 4) if not pd.isna(vp) else np.nan
+            row["valor_std"] = round(sub[self.target].std(), 4)
             if self.sample_col is not None:
                 for amostra in self.df[self.sample_col].dropna().unique():
                     s_am = sub.loc[sub[self.sample_col] == amostra, self.target]
                     row[f"valor_{amostra}"] = round(s_am.mean(), 4) if len(s_am) else np.nan
+                    if self.weight_col is not None:   # alvo PONDERADO por amostra
+                        vpa = self._wmean(seg["mask"] & self._sample_masks[amostra])
+                        row[f"valor_pond_{amostra}"] = (round(vpa, 4)
+                                                        if not pd.isna(vpa) else np.nan)
             linhas.append(row)
         # nota = POSIÇÃO esquerda→direita na árvore (ver _leaf_order); assim os
         # números sempre leem 1, 2, 3 da esquerda p/ a direita no plot_tree.
@@ -5789,6 +5879,7 @@ class TreeSegmenter:
                 "sample_col": self.sample_col,
                 "ref_sample": self.ref_sample,
                 "date_col": self.date_col,
+                "weight_col": self.weight_col,
                 "min_leaf_rows": self.min_leaf_rows,
                 "feature_labels": dict(self.feature_labels),
                 "problem_label": self.problem_label,
@@ -5877,11 +5968,18 @@ class TreeSegmenter:
         date_col = meta.get("date_col")
         if date_col is not None and date_col not in df.columns:
             date_col = None
+        # weight_col entrou no meta depois (JSONs antigos → None); se o df
+        # fornecido não tiver a coluna, degrada para None — a visão dupla é só
+        # exibição (a estrutura da árvore não depende dos pesos).
+        weight_col = meta.get("weight_col")
+        if weight_col is not None and weight_col not in df.columns:
+            weight_col = None
         seg = cls(df, target=meta.get("target", "target"),
                   task_type=meta.get("task_type", "classification"),
                   sample_col=meta.get("sample_col"),
                   ref_sample=meta.get("ref_sample", "DES"),
                   date_col=date_col,
+                  weight_col=weight_col,
                   feature_labels=meta.get("feature_labels"),
                   problem_label=meta.get("problem_label"),
                   min_leaf_rows=meta.get("min_leaf_rows", 50),
@@ -6155,7 +6253,9 @@ class TreeSegmenter:
         Abas geradas (uma aba indisponível é pulada — ex.: PSI sem ``sample_col``):
 
         - **Folhas** — tabela completa numérica das folhas (com PSI e teste de
-          hipótese entre folhas adjacentes, quando aplicável);
+          hipótese entre folhas adjacentes, quando aplicável; com ``weight_col``
+          configurada, sai também a visão dupla contratos × saldo — ``saldo_%``,
+          ``valor_medio_pond`` e ``valor_pond_<amostra>``);
         - **Métricas por amostra** — :meth:`metrics`;
         - **PSI** — resumo por amostra (:meth:`psi`) e, logo abaixo, o detalhe
           da contribuição por folha (:meth:`psi_detalhe`);
@@ -6180,12 +6280,14 @@ class TreeSegmenter:
         from openpyxl.utils import get_column_letter
 
         # colunas exibidas como % no Excel: {coluna: divisor} — representativi-
-        # dade vem 0–100 (÷100); na classificação, alvo/taxa já são frações (÷1)
+        # dade e % do saldo (visão dupla de weight_col) vêm 0–100 (÷100); na
+        # classificação, alvo/taxa (inclusive as ponderadas) já são frações (÷1)
         def _pct_cols(df: pd.DataFrame) -> dict:
             cols = {}
             for c in df.columns:
                 cs = str(c)
-                if cs == "repr_%" or (cs.startswith("repr_") and cs.endswith("_%")):
+                if (cs in ("repr_%", "saldo_%")
+                        or (cs.startswith("repr_") and cs.endswith("_%"))):
                     cols[c] = 100.0
                 elif self._is_clf and (cs.startswith("valor_") or cs == "valor_medio"
                                        or cs == "taxa_default"):
