@@ -532,6 +532,7 @@ class TreeSegmenterUI:
         self.spark_result = None      # último Spark DataFrame com a régua aplicada
         self._undo: list = []        # pilha de estados p/ desfazer splits/fusões
         self._redo: list = []        # pilha de estados p/ refazer
+        self._log_lines: list = []   # buffer do console (últimas 40 linhas) — ver _log
 
         # máscaras de amostra (fixas) e amostras ≠ referência (ex.: OOT)
         if sample_col is not None:
@@ -961,8 +962,12 @@ class TreeSegmenterUI:
         self.btn_split.on_click(self._on_split)
         self.btn_lock.on_click(self._on_lock)
         self.btn_unlock.on_click(self._on_unlock)
-        self.btn_prune.on_click(self._on_prune)
-        self.btn_reset.on_click(self._on_reset)
+        # poda e reset são destrutivos: exigem confirmação em 2 cliques (o 1º
+        # arma o botão como "Confirmar?"; sem o 2º em 5 s ele desarma sozinho)
+        self.btn_prune.on_click(
+            lambda b: self._confirm_twice(b, lambda: self._on_prune(None)))
+        self.btn_reset.on_click(
+            lambda b: self._confirm_twice(b, lambda: self._on_reset(None)))
         self.btn_export.on_click(self._on_export)
         self.dd_leaf.observe(self._on_leaf_change, names="value")
         self.dd_test.observe(lambda _: self._refresh_table(), names="value")
@@ -1040,7 +1045,8 @@ class TreeSegmenterUI:
         self.btn_img_undo.on_click(self._on_undo)
         self.btn_img_redo.on_click(self._on_redo)
         self.btn_img_autofit.on_click(self._on_autofit)
-        self.btn_img_reset.on_click(self._on_reset)
+        self.btn_img_reset.on_click(
+            lambda b: self._confirm_twice(b, lambda: self._on_reset(None)))
         self.tg_mode.observe(self._on_mode_change, names="value")
         self.dd_feature.observe(self._on_feature_change, names="value")
         self.cb_minbin.observe(lambda _: self._sync_optbin_visibility(), names="value")
@@ -1772,31 +1778,95 @@ class TreeSegmenterUI:
 
     def _on_keepalive(self, change):
         from ...utils.keepalive import ClusterKeepAlive
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            if change["new"]:
-                if self._keepalive is None:
-                    self._keepalive = ClusterKeepAlive(interval_seconds=120)
-                if not self._keepalive.has_spark():
-                    self._suspend_ka = True
-                    self.cb_keepalive.value = False          # reverte o toggle
-                    self._suspend_ka = False
-                    self.cb_keepalive.description = "☕ Manter cluster ativo"
-                    print("[keepalive] nenhuma SparkSession ativa — este recurso só tem "
+        if change["new"]:
+            if self._keepalive is None:
+                self._keepalive = ClusterKeepAlive(interval_seconds=120)
+            if not self._keepalive.has_spark():
+                self._suspend_ka = True
+                self.cb_keepalive.value = False          # reverte o toggle
+                self._suspend_ka = False
+                self.cb_keepalive.description = "☕ Manter cluster ativo"
+                self._log("[keepalive] nenhuma SparkSession ativa — este recurso só tem "
                           "efeito no Databricks (ou com Spark local).")
-                    return
-                self._keepalive.start()
-                self.cb_keepalive.description = "☕ Cluster ativo ✓"
-                print("[keepalive] ligado — um job Spark mínimo a cada 2 min mantém o "
+                return
+            self._keepalive.start()
+            self.cb_keepalive.description = "☕ Cluster ativo ✓"
+            self._log("[keepalive] ligado — um job Spark mínimo a cada 2 min mantém o "
                       "cluster ativo enquanto a interface estiver aberta. Desligue ao "
                       "terminar para o cluster poder hibernar normalmente.")
-            else:
-                if getattr(self, "_suspend_ka", False):
-                    return
-                if self._keepalive is not None:
-                    self._keepalive.stop()
-                self.cb_keepalive.description = "☕ Manter cluster ativo"
-                print("[keepalive] desligado.")
+        else:
+            if getattr(self, "_suspend_ka", False):
+                return
+            if self._keepalive is not None:
+                self._keepalive.stop()
+            self.cb_keepalive.description = "☕ Manter cluster ativo"
+            self._log("[keepalive] desligado.")
+
+    # ==================================================================
+    # Helpers de UX — console com histórico, estado "ocupado" e confirmação
+    # em dois cliques (mesma mecânica do ModelSegmenterUI)
+    # ==================================================================
+    def _log(self, msg):
+        # mantém só as últimas 40 linhas: reescreve a área (clear_output) em vez
+        # de apagar o histórico a cada ação — as mensagens das ações anteriores
+        # continuam visíveis no console, sem acumular indefinidamente o estado
+        # do W.Output (que trafega pelo comm).
+        self._log_lines.append(str(msg))
+        if len(self._log_lines) > 40:
+            self._log_lines = self._log_lines[-40:]
+        with self.out_log:
+            self.out_log.clear_output(wait=True)
+            print("\n".join(self._log_lines))
+
+    @contextmanager
+    def _busy(self, *botoes, status=None, msg="processando…"):
+        """Desabilita ``botoes`` enquanto uma ação síncrona roda e mostra um
+        aviso "ocupado" em ``status`` (widget HTML). Ao sair, re-habilita os
+        botões SEMPRE (mesmo com exceção) e limpa o status apenas se o handler
+        não o substituiu por um resultado/erro próprio."""
+        busy_html = f"<div class='treeui-legend'><i>⏳ {msg}</i></div>"
+        for b in botoes:
+            b.disabled = True
+        if status is not None:
+            status.value = busy_html
+        try:
+            yield
+        finally:
+            for b in botoes:
+                b.disabled = False
+            if status is not None and status.value == busy_html:
+                status.value = ""
+
+    def _confirm_twice(self, btn, action, timeout=5.0):
+        """Confirmação em DOIS cliques para ações destrutivas: o 1º clique arma o
+        botão (vira "Confirmar?" em vermelho por ``timeout`` segundos), o 2º
+        clique executa ``action``. Sem o 2º clique, o botão desarma sozinho."""
+        import threading
+        import time
+        if not hasattr(btn, "_cc_desc"):            # guarda o rótulo/estilo originais
+            btn._cc_desc = btn.description
+            btn._cc_style = btn.button_style
+        now = time.monotonic()
+        armado = getattr(btn, "_cc_armed", 0.0)
+        if armado and now - armado <= timeout:      # 2º clique dentro da janela
+            btn._cc_armed = 0.0
+            btn.description = btn._cc_desc
+            btn.button_style = btn._cc_style
+            action()
+            return
+        btn._cc_armed = now                         # 1º clique: arma
+        btn.description = "Confirmar?"
+        btn.button_style = "danger"
+
+        def _revert():
+            # só desarma se ainda for ESTA armada (não houve 2º clique/rearme)
+            if getattr(btn, "_cc_armed", 0.0) == now:
+                btn._cc_armed = 0.0
+                btn.description = btn._cc_desc
+                btn.button_style = btn._cc_style
+        t = threading.Timer(timeout, _revert)
+        t.daemon = True         # não segura o encerramento do processo/kernel
+        t.start()
 
     # ==================================================================
     # Render
@@ -2744,20 +2814,18 @@ class TreeSegmenterUI:
 
     def _on_collapse(self, _):
         sid = self._selected_leaf()
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            if sid is None or sid not in self.seg.segments:
-                print("Nenhuma folha selecionada."); return
-            parent = self.seg.segments[sid]["parent"]
-            if parent is None:
-                print("Esta folha é a raiz — não há pai para recolher."); return
-            redo_bak = list(self._redo)
-            self._checkpoint()
-            try:
-                self.seg.collapse(parent)
-            except Exception as e:
-                self._revert_checkpoint(redo_bak)
-                print("Erro ao recolher:", type(e).__name__, e); return
+        if sid is None or sid not in self.seg.segments:
+            self._log("Nenhuma folha selecionada."); return
+        parent = self.seg.segments[sid]["parent"]
+        if parent is None:
+            self._log("Esta folha é a raiz — não há pai para recolher."); return
+        redo_bak = list(self._redo)
+        self._checkpoint()
+        try:
+            self.seg.collapse(parent)
+        except Exception as e:
+            self._revert_checkpoint(redo_bak)
+            self._log(f"Erro ao recolher: {type(e).__name__}: {e}"); return
         self.locked &= set(self.seg.segments)
         self._pending = None
         self._refresh()
@@ -2766,23 +2834,21 @@ class TreeSegmenterUI:
 
     def _on_merge(self, side):
         sid = self._selected_leaf()
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            if sid is None or sid not in self.seg.segments:
-                print("Selecione uma folha."); return
-            parent = self.seg.segments[sid]["parent"]
-            before = set(self.seg.segments)
-            redo_bak = list(self._redo)
-            self._checkpoint()
-            try:
-                self.seg.merge_leaf(sid, side=side)
-            except Exception as e:
-                self._revert_checkpoint(redo_bak)
-                print("Erro ao unir folhas:", type(e).__name__, e); return
-            if set(self.seg.segments) == before:      # no-op (ex.: vizinha não é folha)
-                self._revert_checkpoint(redo_bak)
-                print("Nada a unir deste lado (a vizinha não é uma folha terminal).")
-                return
+        if sid is None or sid not in self.seg.segments:
+            self._log("Selecione uma folha."); return
+        parent = self.seg.segments[sid]["parent"]
+        before = set(self.seg.segments)
+        redo_bak = list(self._redo)
+        self._checkpoint()
+        try:
+            self.seg.merge_leaf(sid, side=side)
+        except Exception as e:
+            self._revert_checkpoint(redo_bak)
+            self._log(f"Erro ao unir folhas: {type(e).__name__}: {e}"); return
+        if set(self.seg.segments) == before:      # no-op (ex.: vizinha não é folha)
+            self._revert_checkpoint(redo_bak)
+            self._log("Nada a unir deste lado (a vizinha não é uma folha terminal).")
+            return
         self.locked &= set(self.seg.segments)
         self._pending = None
         novos = [i for i in self.seg.segments
@@ -2795,19 +2861,17 @@ class TreeSegmenterUI:
 
     def _on_merge_missing(self, _):
         sid = self._selected_leaf()
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            if sid is None or sid not in self.seg.segments:
-                print("Selecione a folha POPULADA de destino."); return
-            before = set(self.seg.segments)
-            redo_bak = list(self._redo)
-            self._checkpoint()
-            self.seg.merge_missing(sid)
-            if set(self.seg.segments) == before:
-                self._undo.pop()                 # nada mudou — não polui o histórico
-                self._redo[:] = redo_bak         # ...nem destrói a pilha de refazer
-                self._sync_undo_buttons()
-                return
+        if sid is None or sid not in self.seg.segments:
+            self._log("Selecione a folha POPULADA de destino."); return
+        before = set(self.seg.segments)
+        redo_bak = list(self._redo)
+        self._checkpoint()
+        self.seg.merge_missing(sid)
+        if set(self.seg.segments) == before:
+            self._undo.pop()                 # nada mudou — não polui o histórico
+            self._redo[:] = redo_bak         # ...nem destrói a pilha de refazer
+            self._sync_undo_buttons()
+            return
         self.locked &= set(self.seg.segments)
         self._pending = None
         novos = [i for i in self.seg.segments
@@ -2819,30 +2883,31 @@ class TreeSegmenterUI:
 
     def _on_suggest(self, _):
         sid = self._selected_leaf()
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            if sid is None:
-                print("Selecione uma folha."); return
+        if sid is None:
+            self._log("Selecione uma folha."); return
+        # (não inclui btn_img_suggest: seu disabled é CONTEXTUAL — _refresh_img_bar
+        # o desabilita p/ nós internos e o _busy não pode re-habilitá-lo à força)
+        with self._busy(self.btn_suggest, msg="procurando a melhor variável…"):
             sug = self.seg.suggest_split(sid)
             if sug["feature"] is None:
-                print("Nenhuma variável informativa para esta folha — IV muito baixo.")
+                self._log("Nenhuma variável informativa para esta folha — IV muito baixo.")
                 return
             if sug["feature"] in list(self.dd_feature.options):
                 self.dd_feature.value = sug["feature"]
             self.tg_mode.value = "Ótimo"
             lbl = self.seg.feature_labels.get(sug["feature"], sug["feature"])
-            print(f"Sugestão para esta folha: dividir por '{lbl}' "
-                  f"(IV={sug['iv']:.4f}, {sug['forca']}).")
-            print("Já deixei a variável selecionada no modo Ótimo — "
-                  "rode o 👁 Preview e depois Criar segmento.")
+            self._log(f"Sugestão para esta folha: dividir por '{lbl}' "
+                      f"(IV={sug['iv']:.4f}, {sug['forca']}).")
+            self._log("Já deixei a variável selecionada no modo Ótimo — "
+                      "rode o 👁 Preview e depois Criar segmento.")
 
     def _on_suggest3(self, _):
         sid = self._selected_leaf()
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            if sid is None:
-                self.out_suggest.value = "<i>Selecione uma folha na aba Construir.</i>"
-                return
+        if sid is None:
+            self.out_suggest.value = "<i>Selecione uma folha na aba Construir.</i>"
+            return
+        with self._busy(self.btn_suggest3, status=self.out_suggest,
+                        msg="rankeando os melhores splits…"):
             try:
                 sug = self.seg.suggest_splits(sid, top=5)
             except Exception as e:
@@ -2851,17 +2916,16 @@ class TreeSegmenterUI:
                 return
             if sug.empty:
                 self.out_suggest.value = "<i>Nenhuma variável informativa para esta folha.</i>"
-                print("Sugestão: nenhuma variável com IV suficiente nesta folha.")
+                self._log("Sugestão: nenhuma variável com IV suficiente nesta folha.")
                 return
             disp = sug.copy()
             disp["passa_teste"] = disp["passa_teste"].map({True: "✅", False: "—"})
             disp = disp.rename(columns={"n_bins": "nº bins", "passa_teste": "passa teste"})
             self.out_suggest.value = self._df_html(disp, center=True, color=True)
-            print(f"TOP {len(sug)} splits sugeridos para a folha selecionada.")
+            self._log(f"TOP {len(sug)} splits sugeridos para a folha selecionada.")
 
     def _on_importance(self, _):
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
+        with self._busy(self.btn_importance, msg="calculando a importância…"):
             try:
                 fi = self.seg.feature_importance()
             except Exception as e:
@@ -2913,26 +2977,24 @@ class TreeSegmenterUI:
             self.out_importance.value = self._styler_html(sty)
             self.out_importance_chart.value = chart
             self.out_importance_legend.value = dic
-            print("Importância das variáveis na árvore calculada.")
+            self._log("Importância das variáveis na árvore calculada.")
 
     def _on_sql(self, _):
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            tbl = (self.tx_sql_table.value or "minha_tabela").strip()
-            try:
-                self.out_sql.value = self.seg.to_sql(table=tbl)
-                print("SQL gerado — selecione tudo na caixa e copie (Ctrl+C).")
-            except Exception as e:
-                self.out_sql.value = f"-- Erro ao gerar SQL: {type(e).__name__}: {e}"
+        tbl = (self.tx_sql_table.value or "minha_tabela").strip()
+        try:
+            self.out_sql.value = self.seg.to_sql(table=tbl)
+            self._log("SQL gerado — selecione tudo na caixa e copie (Ctrl+C).")
+        except Exception as e:
+            self.out_sql.value = f"-- Erro ao gerar SQL: {type(e).__name__}: {e}"
 
     def _on_diff(self, _):
         from .segmenter import TreeSegmenter
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            path = (self.tx_diff_path.value or "").strip()
-            if not path:
-                self.out_diff.value = "<i>Informe o caminho do JSON da árvore B.</i>"
-                return
+        path = (self.tx_diff_path.value or "").strip()
+        if not path:
+            self.out_diff.value = "<i>Informe o caminho do JSON da árvore B.</i>"
+            return
+        with self._busy(self.btn_diff, status=self.out_diff,
+                        msg="comparando as duas árvores…"):
             try:
                 other = TreeSegmenter.load(path, self.df)
                 d = self.seg.diff_trees(other)
@@ -2950,7 +3012,7 @@ class TreeSegmenterUI:
                       "(linhas = árvore A · colunas = árvore B)</div>"
                     + mig.to_html(border=0))
             self.out_diff.value = html
-            print(f"Comparação concluída — concordância {d['concordancia']:.1%}.")
+            self._log(f"Comparação concluída — concordância {d['concordancia']:.1%}.")
 
     def _on_autofit(self, _):
         sid = self._selected_leaf()
@@ -2959,17 +3021,17 @@ class TreeSegmenterUI:
         criterion = self.dd_criterion.value
         cmin = float(self.sl_autoconc_min.value) if self.cb_autoconc_min.value else None
         cmax = float(self.sl_autoconc_max.value) if self.cb_autoconc_max.value else None
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            alvo = self._leaf_label(sid) if so_folha else "TODA A CARTEIRA"
-            lim = []
-            if cmin is not None:
-                lim.append(f"folha ≥ {cmin:.1%}")
-            if cmax is not None:
-                lim.append(f"quebra ≤ {cmax:.0%}")
-            slim = (", " + " · ".join(lim)) if lim else ""
-            scrit = "" if criterion == "optbin" else f", critério={criterion}"
-            print(f"Auto-fit em '{alvo}' (profundidade ≤ {depth}{slim}{scrit})…")
+        alvo = self._leaf_label(sid) if so_folha else "TODA A CARTEIRA"
+        lim = []
+        if cmin is not None:
+            lim.append(f"folha ≥ {cmin:.1%}")
+        if cmax is not None:
+            lim.append(f"quebra ≤ {cmax:.0%}")
+        slim = (", " + " · ".join(lim)) if lim else ""
+        scrit = "" if criterion == "optbin" else f", critério={criterion}"
+        self._log(f"Auto-fit em '{alvo}' (profundidade ≤ {depth}{slim}{scrit})…")
+        with self._busy(self.btn_autofit, self.btn_img_autofit,
+                        msg="rodando o auto-fit…"):
             redo_bak = list(self._redo)
             self._checkpoint()
             try:
@@ -2978,39 +3040,37 @@ class TreeSegmenterUI:
                                   from_scratch=not so_folha)
             except Exception as e:
                 self._revert_checkpoint(redo_bak)
-                print("Erro no auto-fit:", type(e).__name__, e); return
-        if so_folha:
-            self.locked &= set(self.seg.segments)   # só folhas removidas saem
-        else:
-            self.locked.clear()
-        self._pending = None
-        self._refresh()
-        if so_folha and sid in self.seg.segments and not self.seg.segments[sid]["is_leaf"]:
-            novas = [s for s, v in self.seg.segments.items()
-                     if v["is_leaf"] and self.seg._is_descendant_or_self(s, sid)]
-            if novas:
-                self.dd_leaf.value = novas[0]
-        with self.out_log:
+                self._log(f"Erro no auto-fit: {type(e).__name__}: {e}"); return
+            if so_folha:
+                self.locked &= set(self.seg.segments)   # só folhas removidas saem
+            else:
+                self.locked.clear()
+            self._pending = None
+            self._refresh()
+            if so_folha and sid in self.seg.segments and not self.seg.segments[sid]["is_leaf"]:
+                novas = [s for s, v in self.seg.segments.items()
+                         if v["is_leaf"] and self.seg._is_descendant_or_self(s, sid)]
+                if novas:
+                    self.dd_leaf.value = novas[0]
             n = sum(s["is_leaf"] for s in self.seg.segments.values())
             escopo = "nesta folha" if so_folha else "na árvore"
-            print(f"Auto-fit concluído {escopo}: {n} folhas no total. "
-                  "Refine à mão: funda, recolha ou divida onde quiser.")
+            self._log(f"Auto-fit concluído {escopo}: {n} folhas no total. "
+                      "Refine à mão: funda, recolha ou divida onde quiser.")
 
     def _on_mlflow(self, _):
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            exp = self.tx_experiment.value.strip() or None
-            run = self.tx_runname.value.strip() or None
-            model_name = self.tx_model.value.strip() or None
-            uc = self.cb_uc.value
-            if uc and not model_name:
-                print("Para registrar no Unity Catalog, informe o nome no formato "
+        exp = self.tx_experiment.value.strip() or None
+        run = self.tx_runname.value.strip() or None
+        model_name = self.tx_model.value.strip() or None
+        uc = self.cb_uc.value
+        if uc and not model_name:
+            self._log("Para registrar no Unity Catalog, informe o nome no formato "
                       "catalogo.schema.modelo.")
-                return
-            if uc and model_name.count(".") != 2:
-                print(f"Nome UC inválido: '{model_name}'. Use 3 níveis: catalogo.schema.modelo.")
-                return
-            print("Salvando no MLflow…")
+            return
+        if uc and model_name.count(".") != 2:
+            self._log(f"Nome UC inválido: '{model_name}'. Use 3 níveis: catalogo.schema.modelo.")
+            return
+        self._log("Salvando no MLflow…")
+        with self._busy(self.btn_mlflow, msg="registrando no MLflow…"):
             try:
                 rid = self.seg.log_to_mlflow(
                     experiment=exp, run_name=run,
@@ -3021,46 +3081,47 @@ class TreeSegmenterUI:
                 msg = f"✓ Run {rid[:8]}… salvo (régua, métricas e modelo pyfunc)."
                 if model_name:
                     msg += f"\nModelo registrado em '{model_name}' — nova versão no Model Registry."
-                    print(msg)
-                    print(f"Para scoring: mlflow.pyfunc.load_model('models:/{model_name}/<versão>')"
-                          " e use .predict.")
+                    self._log(msg)
+                    self._log(f"Para scoring: mlflow.pyfunc.load_model('models:/{model_name}/<versão>')"
+                              " e use .predict.")
                 else:
-                    print(msg)
+                    self._log(msg)
             except ImportError:
-                print("MLflow não está instalado neste ambiente. Instale com: %pip install mlflow")
+                self._log("MLflow não está instalado neste ambiente. Instale com: %pip install mlflow")
             except Exception as e:
-                print(f"Erro ao salvar no MLflow: {type(e).__name__}: {e}")
+                self._log(f"Erro ao salvar no MLflow: {type(e).__name__}: {e}")
 
     def _on_clear_log(self, _):
+        self._log_lines = []              # zera o histórico do console
         self.out_log.clear_output()       # limpa a área de preview/log
 
     def _on_spark_apply(self, _):
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            name = self.tx_spark_in.value.strip()
-            if not name:
-                print("Informe o nome da tabela Spark de entrada."); return
-            try:
-                from pyspark.sql import SparkSession
-            except ImportError:
-                print("PySpark não está disponível neste ambiente. No Databricks já "
+        name = self.tx_spark_in.value.strip()
+        if not name:
+            self._log("Informe o nome da tabela Spark de entrada."); return
+        try:
+            from pyspark.sql import SparkSession
+        except ImportError:
+            self._log("PySpark não está disponível neste ambiente. No Databricks já "
                       "vem no cluster; fora dele: %pip install pyspark."); return
+        with self._busy(self.btn_spark_apply, msg="aplicando a régua via Spark…"):
             spark = SparkSession.getActiveSession()
             if spark is None:
                 try:
                     spark = SparkSession.builder.getOrCreate()
                 except Exception as e:
-                    print("Nenhuma SparkSession ativa:", type(e).__name__, e); return
+                    self._log(f"Nenhuma SparkSession ativa: {type(e).__name__}: {e}"); return
             try:
                 sdf = spark.table(name)
             except Exception as e:
-                print(f"Não foi possível ler a tabela '{name}':", type(e).__name__, e); return
+                self._log(f"Não foi possível ler a tabela '{name}': "
+                          f"{type(e).__name__}: {e}"); return
             try:
                 out = self.seg.apply_spark(sdf, col_nota="folha")
             except ValueError as e:                 # colunas faltando / árvore vazia
-                print("⚠", e); return
+                self._log(f"⚠ {e}"); return
             except Exception as e:
-                print("Erro ao aplicar a régua:", type(e).__name__, e); return
+                self._log(f"Erro ao aplicar a régua: {type(e).__name__}: {e}"); return
 
             self.spark_result = out
             out_name = self.tx_spark_out.value.strip()
@@ -3070,16 +3131,17 @@ class TreeSegmenterUI:
                     # valor_regua) ao sobrescrever a base se ela já existir.
                     (out.write.mode("overwrite").option("mergeSchema", "true")
                         .saveAsTable(out_name))
-                    print(f"✓ tabela '{out_name}' gravada (segmento, folha, valor_regua).")
+                    self._log(f"✓ tabela '{out_name}' gravada (segmento, folha, valor_regua).")
                 except Exception as e:
-                    print(f"Régua aplicada, mas falhou ao gravar '{out_name}':",
-                          type(e).__name__, e)
-            print(f"✓ régua aplicada em '{name}'. Spark DataFrame em  ui.spark_result.")
+                    self._log(f"Régua aplicada, mas falhou ao gravar '{out_name}': "
+                              f"{type(e).__name__}: {e}")
+            self._log(f"✓ régua aplicada em '{name}'. Spark DataFrame em  ui.spark_result.")
             try:
                 dist = out.groupBy("folha").count().orderBy("folha").toPandas()
-                display(dist)
+                with self.out_log:                  # tabela vai para o console
+                    display(dist)
             except Exception as e:
-                print("(não consegui resumir a distribuição:", type(e).__name__, e, ")")
+                self._log(f"(não consegui resumir a distribuição: {type(e).__name__}: {e})")
 
     def _parse_cuts(self, feature, sid):
         sub = self.df[self.seg.segments[sid]["mask"]]
@@ -3508,19 +3570,14 @@ class TreeSegmenterUI:
                   self.out_var_inv_t, self.out_var_optbin):
             o.value = ""                       # HTML widgets: limpa via .value
         self.out_var_cards.value = ""
-
-        def err(what, e):
-            return (f"<div style='font-size:11px;color:var(--bad-tx)'>({what} não gerada: "
-                    f"{type(e).__name__})</div>")
         bs, trend = None, None
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            if feat is None:
-                print("Selecione uma variável para analisar."); return
+        if feat is None:
+            self._log("Selecione uma variável para analisar."); return
+        with self._busy(self.btn_var_analyze, msg="analisando a variável…"):
             try:
                 summ = self.seg.variable_summary(feat, sid=sid)
             except Exception as e:
-                print("Erro no resumo da variável:", type(e).__name__, e); return
+                self._log(f"Erro no resumo da variável: {type(e).__name__}: {e}"); return
             kind = summ.get("tipo")
             if kind == "num" and tcol and tcol in self.df.columns:
                 try:
@@ -3533,11 +3590,21 @@ class TreeSegmenterUI:
                                  "ini": str(bs["safra"].iloc[0]),
                                  "fim": str(bs["safra"].iloc[-1])}
                 except Exception as e:
-                    print("(percentis por safra:", type(e).__name__, e, ")")
+                    self._log(f"(percentis por safra: {type(e).__name__}: {e})")
             lbl = self.seg.feature_labels.get(feat, feat)
-            print(f"Análise de '{lbl}' concluída"
-                  + (f" · folha {self._leaf_label(sid)}" if sid not in (None, 'root') else "")
-                  + ".")
+            self._log(f"Análise de '{lbl}' concluída"
+                      + (f" · folha {self._leaf_label(sid)}" if sid not in (None, 'root') else "")
+                      + ".")
+            self._render_var_analysis(feat, sid, tcol, summ, trend)
+
+    def _render_var_analysis(self, feat, sid, tcol, summ, trend):
+        """Renderiza os cards/gráficos da aba 'Análise de variável' a partir do
+        resumo já calculado (separado do handler p/ o corpo caber sob o _busy)."""
+        kind = summ.get("tipo")
+
+        def err(what, e):
+            return (f"<div style='font-size:11px;color:var(--bad-tx)'>({what} não gerada: "
+                    f"{type(e).__name__})</div>")
         # Resumo & estabilidade
         self.out_var_cards.value = self._var_cards_html(summ, trend)
         # Comportamento: distribuição & risco (logodds/WoE e tabela por faixa
@@ -3641,79 +3708,76 @@ class TreeSegmenterUI:
         'máx. bins' e preenche os 'Cortes' (Manual) com a sugestão."""
         sid = self._selected_leaf()
         feat = self.dd_feature.value
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            if sid is None or sid not in self.seg.segments:
-                print("Selecione uma folha."); return
+        if sid is None or sid not in self.seg.segments:
+            self._log("Selecione uma folha."); return
+        with self._busy(self.btn_sugcuts, msg="sugerindo os cortes…"):
             try:
                 r = self.seg.best_binning(sid, feat, max_n_bins=int(self.sl_bins.max))
             except Exception as e:
-                print(f"Não consegui sugerir cortes: {type(e).__name__}: {e}"); return
+                self._log(f"Não consegui sugerir cortes: {type(e).__name__}: {e}"); return
             lbl = self.seg.feature_labels.get(feat, feat)
             if r["n_bins"] < 2:
-                print(f"Sem corte ótimo para '{lbl}' nesta folha "
-                      "(variável pouco informativa aqui)."); return
+                self._log(f"Sem corte ótimo para '{lbl}' nesta folha "
+                          "(variável pouco informativa aqui)."); return
             self.sl_bins.value = max(self.sl_bins.min, min(self.sl_bins.max, r["n_bins"]))
             if r["kind"] == "num":
                 cuts = ", ".join(f"{c:.4g}" for c in r["cuts"])
                 self.tx_cuts.value = cuts
-                print(f"Sugestão p/ '{lbl}': {r['n_bins']} bins · cortes: {cuts}. "
-                      "Em 'Ótimo' o máx. bins já foi ajustado; em 'Manual' os cortes foram "
-                      "preenchidos. Clique em 👁 Preview.")
+                self._log(f"Sugestão p/ '{lbl}': {r['n_bins']} bins · cortes: {cuts}. "
+                          "Em 'Ótimo' o máx. bins já foi ajustado; em 'Manual' os cortes foram "
+                          "preenchidos. Clique em 👁 Preview.")
             else:
                 grupos = " | ".join("{" + ", ".join(g) + "}" for g in r["groups"])
-                print(f"Sugestão p/ '{lbl}' (categórica): {r['n_bins']} grupos: {grupos}. "
-                      "No modo Ótimo o máx. bins já foi ajustado; clique em 👁 Preview.")
+                self._log(f"Sugestão p/ '{lbl}' (categórica): {r['n_bins']} grupos: {grupos}. "
+                          "No modo Ótimo o máx. bins já foi ajustado; clique em 👁 Preview.")
 
     def _on_preview(self, _):
         self.out_preview_seg.value = ""
         self.out_preview_chart.value = ""
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
+        with self._busy(self.btn_preview, msg="gerando o preview…"):
             ok, msg = self._prepare_split()
             if not ok:
-                print(msg); return
+                self._log(msg); return
             feature = self._pending["feature"]
             kind = self._feature_kind()
             graf = ("segmentação (em Dividir) + distribuição/cortes (ao lado do histograma)"
                     if kind == "num" else "segmentação (em Dividir)")
-            print(f"Preview de '{self.seg.feature_labels.get(feature, feature)}' "
-                  f"({graf}) — revise os gráficos e clique em ✂ Criar segmento.")
-        p = self._pending
-        sid = p["only_segments"][0]
-        splits = p.get("splits")
-        mnb, mbs, xbs = p.get("max_n_bins", 4), p.get("min_bin_size", 0.05), p.get("max_bin_size")
-        mmd = p.get("min_mean_diff", 0.0)
-        # SEGMENTAÇÃO PROPOSTA (barras repr. × alvo por faixa) — dentro de "Dividir".
-        try:
-            self.out_preview_seg.value = self._fig_html(self.seg.plot_feature_value(
-                p["feature"], sid=sid, splits=splits, max_n_bins=mnb,
-                min_bin_size=mbs, max_bin_size=xbs, min_mean_diff=mmd))
-        except Exception as e:
-            self.out_preview_seg.value = (f"<div style='color:var(--bad-tx);font-size:11px'>"
-                                          f"(segmentação não gerada: {type(e).__name__})</div>")
-        # DISTRIBUIÇÃO DA VARIÁVEL + cortes sugeridos — ao lado do histograma.
-        if self._feature_kind() == "num":
+            self._log(f"Preview de '{self.seg.feature_labels.get(feature, feature)}' "
+                      f"({graf}) — revise os gráficos e clique em ✂ Criar segmento.")
+            p = self._pending
+            sid = p["only_segments"][0]
+            splits = p.get("splits")
+            mnb, mbs, xbs = p.get("max_n_bins", 4), p.get("min_bin_size", 0.05), p.get("max_bin_size")
+            mmd = p.get("min_mean_diff", 0.0)
+            # SEGMENTAÇÃO PROPOSTA (barras repr. × alvo por faixa) — dentro de "Dividir".
             try:
-                self.out_preview_chart.value = self._fig_html(self.seg.plot_feature_hist(
-                    p["feature"], sid=sid, splits=splits, max_n_bins=max(mnb, 6),
-                    min_bin_size=mbs, max_bin_size=xbs, min_mean_diff=mmd,
-                    figsize=self._PREVIEW_FIGSIZE))
+                self.out_preview_seg.value = self._fig_html(self.seg.plot_feature_value(
+                    p["feature"], sid=sid, splits=splits, max_n_bins=mnb,
+                    min_bin_size=mbs, max_bin_size=xbs, min_mean_diff=mmd))
             except Exception as e:
-                self.out_preview_chart.value = (f"<div style='color:var(--bad-tx);font-size:11px'>"
-                                                f"(distribuição não gerada: {type(e).__name__})</div>")
-        else:
-            self.out_preview_chart.value = (
-                "<div style='font-size:11px;color:var(--sub-ink)'>variável categórica — sem histograma "
-                "de distribuição; veja a segmentação no card <b>Dividir a folha</b>.</div>")
+                self.out_preview_seg.value = (f"<div style='color:var(--bad-tx);font-size:11px'>"
+                                              f"(segmentação não gerada: {type(e).__name__})</div>")
+            # DISTRIBUIÇÃO DA VARIÁVEL + cortes sugeridos — ao lado do histograma.
+            if self._feature_kind() == "num":
+                try:
+                    self.out_preview_chart.value = self._fig_html(self.seg.plot_feature_hist(
+                        p["feature"], sid=sid, splits=splits, max_n_bins=max(mnb, 6),
+                        min_bin_size=mbs, max_bin_size=xbs, min_mean_diff=mmd,
+                        figsize=self._PREVIEW_FIGSIZE))
+                except Exception as e:
+                    self.out_preview_chart.value = (f"<div style='color:var(--bad-tx);font-size:11px'>"
+                                                    f"(distribuição não gerada: {type(e).__name__})</div>")
+            else:
+                self.out_preview_chart.value = (
+                    "<div style='font-size:11px;color:var(--sub-ink)'>variável categórica — sem histograma "
+                    "de distribuição; veja a segmentação no card <b>Dividir a folha</b>.</div>")
 
     def _on_split(self, _):
-        with self.out_log:
+        with self._busy(self.btn_split, msg="criando o segmento…"):
             if self._pending is None:          # sem Preview: prepara a partir dos controles
                 ok, msg = self._prepare_split()
                 if not ok:
-                    self.out_log.clear_output(wait=True)
-                    print(msg); return
+                    self._log(msg); return
             redo_bak = list(self._redo)
             self._checkpoint()
             try:
@@ -3721,15 +3785,14 @@ class TreeSegmenterUI:
                 self._pending = None
             except Exception as e:
                 self._revert_checkpoint(redo_bak)
-                print("Erro ao criar segmento:", type(e).__name__, e); return
-        self._refresh()
+                self._log(f"Erro ao criar segmento: {type(e).__name__}: {e}"); return
+            self._refresh()
 
     def _on_lock(self, _):
         sid = self._selected_leaf()
         if sid is not None:
             self.locked.add(sid)
-            with self.out_log:
-                print("🔒 fechada:", self._leaf_label(sid))
+            self._log(f"🔒 fechada: {self._leaf_label(sid)}")
             # lock só muda o rótulo 🔒: atualiza árvore/dropdowns, NÃO o _refresh
             # completo (IV/PSI/metrics/tabela/PNG são idênticos após travar).
             self._refresh_lock_labels()
@@ -3738,13 +3801,11 @@ class TreeSegmenterUI:
         sid = self._selected_leaf()
         if sid in self.locked:
             self.locked.discard(sid)
-            with self.out_log:
-                print("🔓 reaberta:", self._leaf_label(sid))
+            self._log(f"🔓 reaberta: {self._leaf_label(sid)}")
             self._refresh_lock_labels()
 
     def _on_prune(self, _):
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
+        with self._busy(self.btn_prune, msg="podando a árvore…"):
             redo_bak = list(self._redo)
             self._checkpoint()
             try:
@@ -3752,31 +3813,30 @@ class TreeSegmenterUI:
                                protect=set(self.locked))
             except Exception as e:
                 self._revert_checkpoint(redo_bak)
-                print("Erro na poda:", type(e).__name__, e); return
-        self.locked &= set(self.seg.segments)
-        self._refresh()
+                self._log(f"Erro na poda: {type(e).__name__}: {e}"); return
+            self.locked &= set(self.seg.segments)
+            self._refresh()
 
     def _on_reset(self, _):
-        self._checkpoint()
-        self.seg = TreeSegmenter(self.df, **self._kwargs)
-        self.locked.clear()
-        self._pending = None
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            print("Árvore reiniciada.")
-        self._refresh()
+        with self._busy(self.btn_reset, self.btn_img_reset,
+                        msg="reiniciando a árvore…"):
+            self._checkpoint()
+            self.seg = TreeSegmenter(self.df, **self._kwargs)
+            self.locked.clear()
+            self._pending = None
+            self._log("Árvore reiniciada.")
+            self._refresh()
 
     def _on_export(self, _):
         # chamamos de "folha" na UI (não "nota"): renomeia as colunas de nota do assign
         self.result = self.seg.assign("segmento").rename(
             columns={"segmento_nota": "folha", "segmento_desc": "folha_desc"})
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            print("DataFrame rotulado em  ui.result  · shape", self.result.shape)
-            try:
+        self._log(f"DataFrame rotulado em  ui.result  · shape {self.result.shape}")
+        try:
+            with self.out_log:                  # a tabela vai para o console
                 display(self.result["folha"].value_counts().sort_index())
-            except Exception as e:
-                print(f"(distribuição de folhas indisponível: {e})")
+        except Exception as e:
+            self._log(f"(distribuição de folhas indisponível: {e})")
 
     def _boot_forest_html(self, bc):
         """Forest plot: barra de IC por folha + marcador do ponto (DES) e do alvo OOT."""
@@ -3842,6 +3902,11 @@ class TreeSegmenterUI:
         return "".join(rows)
 
     def _on_boot(self, _):
+        with self._busy(self.btn_boot, status=self.out_boot,
+                        msg="rodando o bootstrap…"):
+            self._do_boot()
+
+    def _do_boot(self):
         try:
             bc = self.seg.bootstrap_ci(n_boot=int(self.sl_boot.value))
         except Exception as e:
@@ -3889,16 +3954,15 @@ class TreeSegmenterUI:
     # Diagnóstico — placar de saúde do modelo (4 vereditos)
     # ==================================================================
     def _on_diag(self, _):
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
+        with self._busy(self.btn_diag, msg="avaliando o modelo…"):
             try:
                 html = self._diag_scorecard_html()
             except Exception as e:
                 self.out_diag.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro ao "
                                        f"avaliar o modelo: {type(e).__name__}: {e}</div>")
-                print("Erro no placar:", type(e).__name__, e); return
-            print("Placar de saúde do modelo calculado.")
-        self.out_diag.value = html
+                self._log(f"Erro no placar: {type(e).__name__}: {e}"); return
+            self._log("Placar de saúde do modelo calculado.")
+            self.out_diag.value = html
 
     def _on_diag_hide(self, _):
         self.out_diag.value = ""    # oculta/limpa a avaliação já renderizada
@@ -4089,6 +4153,11 @@ class TreeSegmenterUI:
     # Validação (monotonicidade · calibração · backtest) e relatório
     # ==================================================================
     def _on_validate(self, _):
+        with self._busy(self.btn_validate, status=self.out_validate,
+                        msg="gerando as análises de validação…"):
+            self._do_validate()
+
+    def _do_validate(self):
         # Validação SÓ em análises gráficas (sem tabelas), em grade de 2 colunas.
         cards = []                                   # [(título, html_do_gráfico)]
 
@@ -4146,20 +4215,19 @@ class TreeSegmenterUI:
         self.out_validate.value = status_html + grid
 
     def _on_report(self, _):
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            path = self.tx_report_path.value.strip()
-            if not path:
-                print("Informe o caminho do relatório (.md)."); return
-            tcol = self.tx_time_col.value.strip() or None
-            if tcol and tcol not in self.df.columns:
-                print(f"(coluna de tempo '{tcol}' inexistente — relatório sem backtest)")
-                tcol = None
+        path = self.tx_report_path.value.strip()
+        if not path:
+            self._log("Informe o caminho do relatório (.md)."); return
+        tcol = self.tx_time_col.value.strip() or None
+        if tcol and tcol not in self.df.columns:
+            self._log(f"(coluna de tempo '{tcol}' inexistente — relatório sem backtest)")
+            tcol = None
+        with self._busy(self.btn_report, msg="gerando o relatório…"):
             try:
                 out = self.seg.validation_report(path, time_col=tcol)
-                print(f"📄 relatório de validação gerado em '{out}' (imagens salvas ao lado).")
+                self._log(f"📄 relatório de validação gerado em '{out}' (imagens salvas ao lado).")
             except Exception as e:
-                print("Erro ao gerar relatório:", type(e).__name__, e)
+                self._log(f"Erro ao gerar relatório: {type(e).__name__}: {e}")
 
     # ==================================================================
     # Discriminação (ROC · KS) e qualidade dos segmentos
@@ -4302,15 +4370,17 @@ class TreeSegmenterUI:
             self.out_conc.value = ""
             self._estab_ready = False
             return
-        self._estab_tcol = (self.tx_sib_time.value or "").strip() or self.date_col
-        # concentração das folhas: NÃO muda com métricas/zoom — renderiza 1× e guarda
-        try:
-            self._estab_conc_html = self._fig_html(
-                self.seg.plot_leaf_concentration(figsize=(9.0, 4.0)), full_width=True)
-        except Exception as e:
-            self._estab_conc_html = self._estab_err("concentração", e)
-        self._estab_ready = True
-        self._render_estab_charts()
+        with self._busy(self.btn_estab, status=self.out_estab,
+                        msg="calculando a estabilidade…"):
+            self._estab_tcol = (self.tx_sib_time.value or "").strip() or self.date_col
+            # concentração das folhas: NÃO muda com métricas/zoom — renderiza 1× e guarda
+            try:
+                self._estab_conc_html = self._fig_html(
+                    self.seg.plot_leaf_concentration(figsize=(9.0, 4.0)), full_width=True)
+            except Exception as e:
+                self._estab_conc_html = self._estab_err("concentração", e)
+            self._estab_ready = True
+            self._render_estab_charts()
 
     def _read_psi_ylim(self):
         """(lo, hi) do zoom manual dos gráficos de PSI, em fração — os campos são
@@ -4405,16 +4475,18 @@ class TreeSegmenterUI:
         def _err(what, e):
             return (f"<div style='color:var(--bad-tx);font-size:12px'>({what} não gerado: "
                     f"{type(e).__name__})</div>")
-        try:
-            self.out_varprof_missing.value = self._fig_html(
-                self.seg.plot_variables_missing_by_safra(time_col=tcol), full_width=True)
-        except Exception as e:
-            self.out_varprof_missing.value = _err("% missing", e)
-        try:
-            self.out_varprof_stats.value = self._fig_html(
-                self.seg.plot_variables_stats_by_safra(time_col=tcol), full_width=True)
-        except Exception as e:
-            self.out_varprof_stats.value = _err("dispersão", e)
+        with self._busy(self.btn_varprofile, status=self.out_varprof_missing,
+                        msg="gerando o perfil das variáveis…"):
+            try:
+                self.out_varprof_missing.value = self._fig_html(
+                    self.seg.plot_variables_missing_by_safra(time_col=tcol), full_width=True)
+            except Exception as e:
+                self.out_varprof_missing.value = _err("% missing", e)
+            try:
+                self.out_varprof_stats.value = self._fig_html(
+                    self.seg.plot_variables_stats_by_safra(time_col=tcol), full_width=True)
+            except Exception as e:
+                self.out_varprof_stats.value = _err("dispersão", e)
 
     # ==================================================================
     # Folhas-irmãs: inversão do alvo entre amostras e safras
@@ -4482,15 +4554,17 @@ class TreeSegmenterUI:
             return (f"<div style='font-size:11px;color:var(--bad-tx)'>({what} não gerado: "
                     f"{type(e).__name__}: {e})</div>")
 
-        try:
-            summ = self.seg.sibling_inversion_summary(pid, time_col=tcol, sample=samp,
-                                                      leaves=leaves)
-            ind = self._sib_indicator_html(summ)
-        except Exception as e:
-            ind = err("indicador de inversão", e)
-        # guarda o contexto p/ os controles de zoom/% re-renderizarem sem reanalisar
-        self._sib_ctx = {"pid": pid, "leaves": leaves, "tcol": tcol, "samp": samp, "ind": ind}
-        self._render_sib_charts()
+        with self._busy(self.btn_sib, status=self.out_sib,
+                        msg="analisando as folhas-irmãs…"):
+            try:
+                summ = self.seg.sibling_inversion_summary(pid, time_col=tcol, sample=samp,
+                                                          leaves=leaves)
+                ind = self._sib_indicator_html(summ)
+            except Exception as e:
+                ind = err("indicador de inversão", e)
+            # guarda o contexto p/ os controles de zoom/% re-renderizarem sem reanalisar
+            self._sib_ctx = {"pid": pid, "leaves": leaves, "tcol": tcol, "samp": samp, "ind": ind}
+            self._render_sib_charts()
 
     def _read_sib_ylim(self):
         """(lo, hi) do zoom manual dos gráficos de estabilidade, na escala do alvo.
@@ -4601,9 +4675,7 @@ class TreeSegmenterUI:
         self._restore(prev)
         self._pending = None
         self._sync_undo_buttons()
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            print("↶ desfeito.")
+        self._log("↶ desfeito.")
         self._refresh(select=prev.get("selected"))
 
     def _on_redo(self, _):
@@ -4614,9 +4686,7 @@ class TreeSegmenterUI:
         self._restore(nxt)
         self._pending = None
         self._sync_undo_buttons()
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            print("↷ refeito.")
+        self._log("↷ refeito.")
         self._refresh(select=nxt.get("selected"))
 
     # ==================================================================
@@ -4625,8 +4695,7 @@ class TreeSegmenterUI:
     def _on_automerge(self, _):
         import contextlib
         import io
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
+        with self._busy(self.btn_automerge, msg="rodando o auto-merge…"):
             n0 = sum(s["is_leaf"] for s in self.seg.segments.values())
             self._checkpoint()
             try:
@@ -4638,35 +4707,34 @@ class TreeSegmenterUI:
                                         protect=set(self.locked),
                                         include_missing=self.cb_automerge_na.value)
             except Exception as e:
-                print("Erro no auto-merge:", type(e).__name__, e)
+                self._log(f"Erro no auto-merge: {type(e).__name__}: {e}")
                 return
             n1 = sum(s["is_leaf"] for s in self.seg.segments.values())
-            print(buf.getvalue().strip() or "Auto-merge concluído.")
+            self._log(buf.getvalue().strip() or "Auto-merge concluído.")
             if n1 == n0:
-                print("Nenhuma folha-irmã indistinguível (p > alpha) — nada a fundir. "
-                      f"Aumente o alpha ou o 'Δ{self._risk_label} mínimo' para fundir mais.")
-        self.locked &= set(self.seg.segments)
-        self._pending = None
-        self._refresh()
+                self._log("Nenhuma folha-irmã indistinguível (p > alpha) — nada a fundir. "
+                          f"Aumente o alpha ou o 'Δ{self._risk_label} mínimo' para fundir mais.")
+            self.locked &= set(self.seg.segments)
+            self._pending = None
+            self._refresh()
 
     def _on_pdf(self, _):
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            path = (self.tx_pdf_path.value or "").strip()
-            if not path:
-                self.out_pdf.value = "<i>Informe o caminho do .pdf.</i>"; return
-            if not path.lower().endswith(".pdf"):
-                path += ".pdf"
+        path = (self.tx_pdf_path.value or "").strip()
+        if not path:
+            self.out_pdf.value = "<i>Informe o caminho do .pdf.</i>"; return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        with self._busy(self.btn_pdf, status=self.out_pdf, msg="gerando o PDF…"):
             try:
                 tcol = self.date_col if (self.date_col and self.date_col in self.df.columns) else None
                 self.seg.report_pdf(path, time_col=tcol)
             except Exception as e:
                 self.out_pdf.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro ao gerar "
                                       f"PDF: {type(e).__name__}: {e}</div>")
-                print(f"[pdf] erro: {e}"); return
+                self._log(f"[pdf] erro: {e}"); return
             self.out_pdf.value = (f"<div class='treeui-legend'>✅ Relatório salvo em "
                                   f"<code>{path}</code>.</div>")
-            print(f"[pdf] relatório salvo em {path}")
+            self._log(f"[pdf] relatório salvo em {path}")
 
     # ==================================================================
     # Persistência: salvar / carregar a árvore em JSON
@@ -4703,58 +4771,50 @@ class TreeSegmenterUI:
         self.box_confirm.layout.display = "none"
         self.html_confirm.value = ""
         if pend is not None:
-            with self.out_log:
-                self.out_log.clear_output(wait=True)
-                print(f"Operação cancelada — '{pend['path']}' não foi sobrescrito.")
+            self._log(f"Operação cancelada — '{pend['path']}' não foi sobrescrito.")
 
     def _on_save_json(self, _):
         path = self.tx_json_path.value.strip()
         if not path:
-            with self.out_log:
-                self.out_log.clear_output(wait=True)
-                print("Informe o caminho do arquivo .json.")
+            self._log("Informe o caminho do arquivo .json.")
             return
         self._confirm_overwrite(path, lambda: self._do_save_json(path))
 
     def _do_save_json(self, path):
         import json
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            try:
-                data = self.seg.to_dict()
-                data["_ui"] = {"locked": sorted(self.locked)}
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                n = sum(s["is_leaf"] for s in self.seg.segments.values())
-                print(f"💾 árvore salva em '{path}' ({n} folhas).")
-            except Exception as e:
-                print("Erro ao salvar:", type(e).__name__, e)
+        try:
+            data = self.seg.to_dict()
+            data["_ui"] = {"locked": sorted(self.locked)}
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            n = sum(s["is_leaf"] for s in self.seg.segments.values())
+            self._log(f"💾 árvore salva em '{path}' ({n} folhas).")
+        except Exception as e:
+            self._log(f"Erro ao salvar: {type(e).__name__}: {e}")
 
     def _on_load_json(self, _):
         import json
         import os
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            path = self.tx_json_path.value.strip()
-            if not path:
-                print("Informe o caminho do arquivo .json."); return
-            if not os.path.exists(path):
-                print(f"Arquivo não encontrado: '{path}'."); return
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                meta = data.get("meta", {})
-                if meta.get("target") and meta.get("target") != self.target:
-                    print(f"⚠ aviso: árvore salva com target='{meta.get('target')}', "
+        path = self.tx_json_path.value.strip()
+        if not path:
+            self._log("Informe o caminho do arquivo .json."); return
+        if not os.path.exists(path):
+            self._log(f"Arquivo não encontrado: '{path}'."); return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            meta = data.get("meta", {})
+            if meta.get("target") and meta.get("target") != self.target:
+                self._log(f"⚠ aviso: árvore salva com target='{meta.get('target')}', "
                           f"mas esta UI usa '{self.target}'. Carregando mesmo assim.")
-                self._checkpoint()
-                self.seg._load_segments(data["segments"])
-                self.locked = set(data.get("_ui", {}).get("locked", [])) & set(self.seg.segments)
-                self._pending = None
-                n = sum(s["is_leaf"] for s in self.seg.segments.values())
-                print(f"📂 árvore carregada de '{path}' ({n} folhas).")
-            except Exception as e:
-                print("Erro ao carregar:", type(e).__name__, e); return
+            self._checkpoint()
+            self.seg._load_segments(data["segments"])
+            self.locked = set(data.get("_ui", {}).get("locked", [])) & set(self.seg.segments)
+            self._pending = None
+            n = sum(s["is_leaf"] for s in self.seg.segments.values())
+            self._log(f"📂 árvore carregada de '{path}' ({n} folhas).")
+        except Exception as e:
+            self._log(f"Erro ao carregar: {type(e).__name__}: {e}"); return
         self._refresh()
 
     # ==================================================================
@@ -4779,9 +4839,7 @@ class TreeSegmenterUI:
                                    f"desenhar a árvore: {type(e).__name__}: {e}</div>")
             return
         if path:
-            with self.out_log:
-                self.out_log.clear_output(wait=True)
-                print(f"🖼️ imagem da árvore salva em '{path}' (tamanho real).")
+            self._log(f"🖼️ imagem da árvore salva em '{path}' (tamanho real).")
 
     def _on_plot_hide(self, _):
         self.out_plot.value = ""          # recolhe (esvazia) a imagem
@@ -5028,13 +5086,11 @@ class TreeSegmenterUI:
         if self.seg.segments[sid]["is_leaf"]:
             self._on_collapse(None)            # opera na folha ativa (dd_leaf)
             return
-        with self.out_log:
-            self.out_log.clear_output(wait=True)
-            if self.seg.segments[sid]["parent"] is None:
-                print("A raiz não pode ser recolhida — use Resetar para zerar a árvore.")
-                return
-            self._checkpoint()
-            self.seg.collapse(sid)
+        if self.seg.segments[sid]["parent"] is None:
+            self._log("A raiz não pode ser recolhida — use Resetar para zerar a árvore.")
+            return
+        self._checkpoint()
+        self.seg.collapse(sid)
         self.locked &= set(self.seg.segments)
         self._pending = None
         self._refresh()

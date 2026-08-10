@@ -560,3 +560,92 @@ def test_ui_confirm_overwrite_gate(task, tmp_path):
     chamadas.clear()
     ui._confirm_overwrite(p, lambda: chamadas.append(1))   # existe -> não executa
     assert chamadas == []
+
+
+def test_ui_busy_reabilita_botoes_apos_excecao(task):
+    """_busy desabilita os botões durante a ação e SEMPRE re-habilita ao sair,
+    mesmo quando o handler estoura exceção (finally)."""
+    ui = _build(task)
+    b1, b2 = ui.btn_autofit, ui.btn_boot
+    assert not b1.disabled and not b2.disabled
+    with pytest.raises(RuntimeError):
+        with ui._busy(b1, b2, msg="testando…"):
+            assert b1.disabled and b2.disabled     # ocupado: botões travados
+            raise RuntimeError("boom")
+    assert not b1.disabled and not b2.disabled     # finally re-habilitou
+
+
+def test_ui_busy_status_mostra_e_limpa(task):
+    """Com ``status``, o _busy mostra o aviso ⏳ durante a ação; ao sair limpa o
+    aviso se o handler não escreveu resultado próprio, e preserva o resultado
+    quando ele escreveu."""
+    ui = _build(task)
+    with ui._busy(ui.btn_boot, status=ui.out_boot, msg="rodando…"):
+        assert "⏳" in ui.out_boot.value
+    assert ui.out_boot.value == ""                 # nada escrito -> limpa o aviso
+    with ui._busy(ui.btn_boot, status=ui.out_boot, msg="rodando…"):
+        ui.out_boot.value = "<b>resultado</b>"
+    assert ui.out_boot.value == "<b>resultado</b>"  # resultado do handler preservado
+
+
+def test_ui_confirm_twice_nao_dispara_no_primeiro_clique(task):
+    """Ações destrutivas: o 1º clique só ARMA o botão ('Confirmar?' em vermelho);
+    a ação roda apenas no 2º clique dentro da janela, restaurando rótulo/estilo."""
+    ui = _build(task)
+    btn = ui.btn_reset
+    rotulo, estilo = btn.description, btn.button_style
+    chamadas = []
+    ui._confirm_twice(btn, lambda: chamadas.append(1), timeout=5.0)   # 1º clique
+    assert chamadas == []                          # NÃO disparou
+    assert btn.description == "Confirmar?" and btn.button_style == "danger"
+    ui._confirm_twice(btn, lambda: chamadas.append(1), timeout=5.0)   # 2º clique
+    assert chamadas == [1]                         # agora sim
+    assert btn.description == rotulo and btn.button_style == estilo
+
+
+def test_ui_confirm_twice_desarma_apos_timeout(task):
+    """Sem o 2º clique dentro da janela, o clique seguinte apenas REARMA (não
+    executa) — o timeout expirado não conta como confirmação."""
+    import time
+    ui = _build(task)
+    btn = ui.btn_prune
+    chamadas = []
+    ui._confirm_twice(btn, lambda: chamadas.append(1), timeout=0.05)  # arma
+    time.sleep(0.3)                                # janela expira (e o Timer desarma)
+    ui._confirm_twice(btn, lambda: chamadas.append(1), timeout=0.05)  # rearma, não executa
+    assert chamadas == []
+    assert btn.description == "Confirmar?"
+
+
+def test_ui_log_mantem_historico_e_apara_em_40(task):
+    """O console usa buffer: mensagens de ações anteriores permanecem (nada de
+    clear_output destrutivo) e só as últimas 40 linhas são mantidas; o botão
+    'limpar' zera o histórico."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        for i in range(45):
+            ui._log(f"linha {i}")
+    assert len(ui._log_lines) == 40
+    assert ui._log_lines[0] == "linha 5" and ui._log_lines[-1] == "linha 44"
+    ui._on_clear_log(None)
+    assert ui._log_lines == []
+
+
+def test_ui_reset_e_prune_pedem_confirmacao_no_botao(task):
+    """Clicar 1× em Resetar/Podar (inclusive o clone do preview) NÃO muta a
+    árvore: o botão só arma o 'Confirmar?'; o 2º clique executa de fato."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+    n0 = _nleaf(ui)
+    assert n0 >= 2
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.btn_reset.click()                       # 1º clique: só arma
+        assert _nleaf(ui) == n0
+        assert ui.btn_reset.description == "Confirmar?"
+        ui.btn_reset.click()                       # 2º clique: reseta
+    assert _nleaf(ui) == 1
+    for btn in (ui.btn_prune, ui.btn_img_reset):   # demais destrutivos também armam
+        with contextlib.redirect_stdout(io.StringIO()):
+            btn.click()
+        assert btn.description == "Confirmar?"
