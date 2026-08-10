@@ -565,11 +565,17 @@ class TreeSegmenterUI:
         self._last_html: dict = {}
         # cache do PNG (base64) do histograma da folha, por (sid, versão da árvore)
         self._leaf_hist_cache: dict = {}
+        # cache do IV por variável usado pelo "ordenar por IV" dos seletores,
+        # por (sid, versão da árvore) — lazy: só calcula com o toggle ligado
+        self._iv_sort_cache: dict = {}
 
         self._build()
         self._on_mode_change(None)   # estado inicial de visibilidade dos controles
         self._sync_autoconc_visibility()   # sliders de concentração do auto-fit
         self._refresh()              # _refresh_iv já mescla o PSI/CSI por variável
+        # contexto inicial (variável, folha) do guard do _on_feature_change: sem
+        # ele, a 1ª re-rotulagem (ordenar por IV) invalidaria o preview à toa
+        self._feat_ctx = (self._sel_feature(warn=False), self.dd_leaf.value)
 
     # ==================================================================
     # Construção dos widgets
@@ -582,11 +588,28 @@ class TreeSegmenterUI:
         # para mostrar o máximo possível do texto da opção selecionada
         self.dd_leaf = W.Dropdown(description="Folha", layout=W.Layout(width="100%"),
                                   style={"description_width": "52px"})
-        # opções com o NOME DE EXIBIÇÃO (feature_labels) — valor = nome da coluna
-        feat_opts = [(self.seg.feature_labels.get(f, f), f) for f in self.features]
-        self.dd_feature = W.Dropdown(description="Variável", options=feat_opts,
-                                     layout=W.Layout(width="100%"),
+        # seletor de variável com BUSCA (Combobox: digite para filtrar). As opções
+        # são os NOMES DE EXIBIÇÃO (feature_labels); o mapa rótulo→coluna fica em
+        # _feat_by_label e a resolução (texto livre → coluna) em _sel_feature.
+        labels, self._feat_by_label = self._feature_option_labels(by_iv=False)
+        self.dd_feature = W.Combobox(description="Variável", options=labels,
+                                     value=(labels[0] if labels else ""),
+                                     placeholder="digite p/ filtrar…",
+                                     continuous_update=False, ensure_option=False,
+                                     layout=W.Layout(width="100%", flex="1 1 auto"),
                                      style={"description_width": "62px"})
+        # toggle "ordenar por IV": reordena as opções pelo IV da variável na folha
+        # selecionada (memoizado por versão da árvore; cálculo lazy, só ao ligar)
+        # e anexa o IV entre parênteses ao rótulo.
+        self.tg_feat_iv = W.ToggleButton(
+            value=False, description="ordenar por IV", icon="sort-amount-desc",
+            tooltip="Reordena as opções pelo IV da variável na FOLHA selecionada "
+                    "(calculado ao ligar e ao trocar de folha; memoizado por versão "
+                    "da árvore) e mostra o IV entre parênteses no rótulo",
+            layout=W.Layout(width="auto", margin="0 0 0 6px"))
+        # mesma instância nas 2 views (card da aba + painel do preview da árvore)
+        self.box_feature = W.HBox([self.dd_feature, self.tg_feat_iv],
+                                  layout=W.Layout(width="100%", align_items="center"))
         self.tg_mode = W.ToggleButtons(options=["Ótimo", "Manual"], value="Ótimo",
                                        style={"button_width": "auto"},
                                        layout=W.Layout(width="100%"))
@@ -885,6 +908,14 @@ class TreeSegmenterUI:
         self.btn_pdf = mk("Gerar relatório PDF", "primary",
                           "Salva um relatório PDF do modelo no caminho informado", "file-pdf-o")
         self.out_pdf = W.HTML()
+        # --- exportação Excel multi-abas (.xlsx) — requer openpyxl (opcional) ---
+        self.tx_xlsx_path = W.Text(description="arquivo", value=f"arvore_{_suf}.xlsx",
+                                   layout=full, style=dstyle,
+                                   placeholder="caminho .xlsx onde salvar o Excel")
+        self.btn_xlsx = mk("Exportar Excel (.xlsx)", "primary",
+                           "Gera um .xlsx multi-abas: Folhas, Métricas por amostra, PSI, "
+                           "IV por variável, Calibração e Régua SQL — requer o pacote "
+                           "opcional openpyxl", "file-excel-o")
         # --- aplicar a régua numa tabela Spark ("reconstruir as folhas") ---
         # inputs com mais respiro vertical (tabela/saída mais espaçadas)
         spark_lay = W.Layout(width="98%", margin="9px 0")
@@ -896,10 +927,19 @@ class TreeSegmenterUI:
                                   f"Aplica a régua à tabela Spark (segmento, folha e {self._risk_label} por linha), "
                                   "desde que as colunas tenham o mesmo nome", "table")
         # --- controles da aba "Análise de variáveis" ---
-        # opções com o NOME DE EXIBIÇÃO (feature_labels) — valor = nome da coluna
-        var_opts = [(self.seg.feature_labels.get(f, f), f) for f in self.features]
-        self.dd_var = W.Dropdown(description="Variável", options=var_opts,
+        # seletor com BUSCA (Combobox) — rótulos de exibição; mapa em _var_by_label
+        var_labels, self._var_by_label = self._feature_option_labels(by_iv=False)
+        self.dd_var = W.Combobox(description="Variável", options=var_labels,
+                                 value=(var_labels[0] if var_labels else ""),
+                                 placeholder="digite p/ filtrar…",
+                                 continuous_update=False, ensure_option=False,
                                  layout=full, style=dstyle)
+        self.tg_var_iv = W.ToggleButton(
+            value=False, description="ordenar por IV", icon="sort-amount-desc",
+            tooltip="Reordena as opções pelo IV da variável na folha escolhida ao "
+                    "lado (raiz = carteira inteira; memoizado por versão da árvore) "
+                    "e mostra o IV entre parênteses no rótulo",
+            layout=W.Layout(width="auto", margin="0 0 0 6px"))
         self.dd_var_leaf = W.Dropdown(description="Folha", layout=full, style=dstyle)
         self.tx_var_time = W.Text(description="coluna safra", value=(self.date_col or "dt_ref"),
                                   layout=full, style=dstyle,
@@ -1029,6 +1069,7 @@ class TreeSegmenterUI:
         self.btn_confirm_yes.on_click(self._on_confirm_yes)
         self.btn_confirm_no.on_click(self._on_confirm_no)
         self.btn_pdf.on_click(self._on_pdf)
+        self.btn_xlsx.on_click(self._on_xlsx)
         self.btn_plot.on_click(self._on_plot)
         self.btn_plot_hide.on_click(self._on_plot_hide)
         self.btn_spark_apply.on_click(self._on_spark_apply)
@@ -1049,6 +1090,11 @@ class TreeSegmenterUI:
             lambda b: self._confirm_twice(b, lambda: self._on_reset(None)))
         self.tg_mode.observe(self._on_mode_change, names="value")
         self.dd_feature.observe(self._on_feature_change, names="value")
+        # ordenar por IV: recalcula as opções ao ligar/desligar; com o toggle
+        # ligado, trocar a folha de análise também reordena (lazy + memoizado)
+        self.tg_feat_iv.observe(lambda _: self._refresh_feature_options(), names="value")
+        self.tg_var_iv.observe(lambda _: self._refresh_var_options(), names="value")
+        self.dd_var_leaf.observe(self._on_var_leaf_iv, names="value")
         self.cb_minbin.observe(lambda _: self._sync_optbin_visibility(), names="value")
         self.cb_maxbin.observe(lambda _: self._sync_optbin_visibility(), names="value")
         self.cb_mindiff.observe(lambda _: self._sync_optbin_visibility(), names="value")
@@ -1225,7 +1271,7 @@ class TreeSegmenterUI:
         self.btn_suggest.layout.width = "99%"
         card_split = W.VBox([
             W.HTML("<div class='treeui-h'>Dividir a folha selecionada</div>"),
-            self.dd_leaf, self.dd_feature, self.btn_suggest, self.btn_sugcuts, self.tg_mode,
+            self.dd_leaf, self.box_feature, self.btn_suggest, self.btn_sugcuts, self.tg_mode,
             self.sl_bins, self.dd_split_criterion,
             self.cb_minbin, self.sl_minbin, self.cb_maxbin, self.sl_maxbin,
             self.cb_mindiff, self.sl_mindiff,
@@ -1312,7 +1358,7 @@ class TreeSegmenterUI:
             W.HTML("<div class='treeui-legend'>Os mesmos controles do card "
                    "'Dividir a folha' da aba — tudo sincronizado. Clique noutra folha "
                    "da imagem para trocar o alvo.</div>"),
-            self.dd_leaf, self.dd_feature, self.btn_sugcuts, self.tg_mode,
+            self.dd_leaf, self.box_feature, self.btn_sugcuts, self.tg_mode,
             self.sl_bins, self.dd_split_criterion,
             self.cb_minbin, self.sl_minbin, self.cb_maxbin, self.sl_maxbin,
             self.cb_mindiff, self.sl_mindiff,
@@ -1541,9 +1587,25 @@ class TreeSegmenterUI:
             W.HTML("<div class='treeui-h'>Exportar DataFrame rotulado</div>"),
             W.HTML("<div class='treeui-legend'>Gera <b>ui.result</b> (pandas) com a coluna de "
                    "segmento e a folha por linha.</div>"),
+            W.Box([], layout=W.Layout(flex="1 1 auto")),   # alinha o botão à base do card
             W.HBox([self.btn_export]),
-        ], layout=W.Layout(width="100%"))
+        ], layout=W.Layout(width="49%"))
         card_export_df.add_class("treeui-card")
+        card_xlsx = W.VBox([
+            W.HTML("<div class='treeui-h'>Exportar Excel (.xlsx)</div>"),
+            W.HTML("<div class='treeui-legend'>Arquivo multi-abas: <b>Folhas</b> (tabela "
+                   "completa numérica), <b>Métricas por amostra</b>, <b>PSI</b> (resumo + "
+                   "detalhe), <b>IV por variável</b>, <b>Calibração</b> e <b>Régua SQL</b>. "
+                   "Cabeçalhos congelados e percentuais formatados. Requer o pacote opcional "
+                   "<code>openpyxl</code>.</div>"),
+            self.tx_xlsx_path,
+            W.Box([], layout=W.Layout(flex="1 1 auto")),
+            W.HBox([self.btn_xlsx]),
+        ], layout=W.Layout(width="49%"))
+        card_xlsx.add_class("treeui-card")
+        export_top = W.HBox([card_export_df, card_xlsx],
+                            layout=W.Layout(width="100%", align_items="stretch",
+                                            justify_content="space-between"))
         card_mlflow = W.VBox([
             W.HTML("<div class='treeui-h'>Registrar no MLflow / Unity Catalog</div>"),
             W.HTML("<div class='treeui-legend'>Loga régua, métricas e o modelo pyfunc e registra a "
@@ -1604,17 +1666,19 @@ class TreeSegmenterUI:
         ])
         card_pdf.add_class("treeui-card")
         # a antiga aba "Histórico" virou uma SEÇÃO no fim da aba Exportar
-        tab_valid = W.VBox([sep_exp, card_export_df, export_row,
+        tab_valid = W.VBox([sep_exp, export_top, export_row,
                             sep_hist, hist_row, self.box_confirm, card_pdf])
 
         # ================================================================
         # ABA ② ANÁLISE DE VARIÁVEL — perfil, distribuição e estabilidade
         # ================================================================
-        self.dd_var.layout = W.Layout(width="30%")
+        self.dd_var.layout = W.Layout(width="100%", flex="1 1 auto")
         self.dd_var.style.description_width = "62px"
-        self.dd_var_leaf.layout = W.Layout(width="42%")
+        box_var = W.HBox([self.dd_var, self.tg_var_iv],
+                         layout=W.Layout(width="34%", align_items="center"))
+        self.dd_var_leaf.layout = W.Layout(width="40%")
         self.dd_var_leaf.style.description_width = "46px"
-        self.tx_var_time.layout = W.Layout(width="22%")
+        self.tx_var_time.layout = W.Layout(width="20%")
         self.btn_var_analyze.layout = W.Layout(width="auto")
         var_controls = W.VBox([
             W.HTML("<div class='treeui-h'>Análise de variáveis</div>"),
@@ -1622,7 +1686,7 @@ class TreeSegmenterUI:
                    "distribuição, %missing, média/mediana/desvio, faixa de percentis, PSI atual "
                    "e o comportamento por safra (percentis e PSI). Informe a <b>coluna de "
                    "safra</b> (ex.: dt_ref) para as análises temporais.</div>"),
-            W.HBox([self.dd_var, self.dd_var_leaf, self.tx_var_time, self.btn_var_analyze],
+            W.HBox([box_var, self.dd_var_leaf, self.tx_var_time, self.btn_var_analyze],
                    layout=W.Layout(align_items="flex-end", justify_content="space-between",
                                    width="100%")),
         ])
@@ -2759,11 +2823,126 @@ class TreeSegmenterUI:
     def _selected_leaf(self):
         return self.dd_leaf.value
 
+    # ------------------------------------------------------------------
+    # Seletores de variável (Combobox com busca + ordenação por IV)
+    # ------------------------------------------------------------------
+    def _iv_map(self, sid):
+        """IV por variável p/ ordenar os seletores — memoizado por (folha,
+        versão da árvore). O cálculo (variable_iv sem PSI) só roda sob demanda
+        (toggle ligado); mutações na árvore invalidam via _tree_version."""
+        sid = sid if sid in self.seg.segments else "root"
+        key = (sid, self.seg._tree_version)
+        if key not in self._iv_sort_cache:
+            try:
+                iv = self.seg.variable_iv(sid, features=list(self.features),
+                                          with_psi=False)
+                self._iv_sort_cache[key] = dict(zip(iv["variavel"], iv["iv"]))
+            except Exception as e:
+                self._log(f"(IV p/ ordenação indisponível: {type(e).__name__}: {e})")
+                self._iv_sort_cache[key] = {}
+        return self._iv_sort_cache[key]
+
+    def _feature_option_labels(self, by_iv=False, sid=None):
+        """(rótulos, mapa rótulo→coluna) das opções dos seletores de variável.
+        ``by_iv=True`` reordena por IV (desc) na folha ``sid`` e anexa o IV
+        entre parênteses ao rótulo; IV indisponível (NaN) vai para o fim."""
+        feats = list(self.features)
+        ivm = self._iv_map(sid) if by_iv else {}
+        if by_iv:
+            def chave(f):
+                v = ivm.get(f)
+                sem_iv = v is None or pd.isna(v)
+                return (sem_iv, -(0.0 if sem_iv else float(v)))
+            feats = sorted(feats, key=chave)
+        labels, mapa = [], {}
+        for f in feats:
+            lbl = str(self.seg.feature_labels.get(f, f))
+            v = ivm.get(f)
+            if by_iv and v is not None and not pd.isna(v):
+                lbl = f"{lbl} (IV {v:.4f})"
+            if lbl in mapa:                # rótulo repetido → desambigua com a coluna
+                lbl = f"{lbl} [{f}]"
+            mapa[lbl] = f
+            labels.append(lbl)
+        return labels, mapa
+
+    def _combo_feature(self, combo, mapa, warn=True):
+        """Resolve o texto do Combobox (texto LIVRE) para o nome da coluna.
+        Aceita o rótulo exibido, o próprio nome da coluna ou o rótulo sem o
+        sufixo "(IV …)"; entrada que não bate com nenhuma opção → None (com
+        aviso no console quando ``warn``)."""
+        txt = (combo.value or "").strip()
+        if not txt:
+            return None
+        if txt in mapa:
+            return mapa[txt]
+        if txt in self.features:           # digitou o nome da coluna direto
+            return txt
+        for lbl, f in mapa.items():        # rótulo sem o sufixo de IV
+            if lbl.split(" (IV ")[0] == txt:
+                return f
+        if warn:
+            self._log(f"⚠ Variável '{txt}' não reconhecida — escolha uma opção da "
+                      "lista (digite para filtrar).")
+        return None
+
+    def _sel_feature(self, warn=True):
+        """Coluna selecionada no seletor da aba Construir (None se inválida)."""
+        return self._combo_feature(self.dd_feature, self._feat_by_label, warn=warn)
+
+    def _sel_var(self, warn=True):
+        """Coluna selecionada no seletor da aba Análise (None se inválida)."""
+        return self._combo_feature(self.dd_var, self._var_by_label, warn=warn)
+
+    def _refresh_feature_options(self):
+        """Reconstrói as opções do seletor da aba Construir (toggle de IV ou
+        troca de folha com o toggle ligado), preservando a seleção atual."""
+        cur = self._sel_feature(warn=False)
+        by_iv = self.tg_feat_iv.value
+        labels, mapa = self._feature_option_labels(
+            by_iv=by_iv, sid=self.dd_leaf.value if by_iv else None)
+        self._feat_by_label = mapa
+        self.dd_feature.options = tuple(labels)
+        if cur is not None:
+            inv = {f: l for l, f in mapa.items()}
+            if inv.get(cur, self.dd_feature.value) != self.dd_feature.value:
+                self.dd_feature.value = inv[cur]
+
+    def _refresh_var_options(self):
+        """Idem p/ o seletor da aba Análise (folha de referência = dd_var_leaf)."""
+        cur = self._sel_var(warn=False)
+        by_iv = self.tg_var_iv.value
+        labels, mapa = self._feature_option_labels(
+            by_iv=by_iv, sid=self.dd_var_leaf.value if by_iv else None)
+        self._var_by_label = mapa
+        self.dd_var.options = tuple(labels)
+        if cur is not None:
+            inv = {f: l for l, f in mapa.items()}
+            if inv.get(cur, self.dd_var.value) != self.dd_var.value:
+                self.dd_var.value = inv[cur]
+
+    def _on_var_leaf_iv(self, _):
+        """Trocar a folha da Análise reordena o seletor se o toggle estiver
+        ligado (ignora as reatribuições programáticas do _refresh)."""
+        if self._suspend_leaf_obs or not getattr(self, "tg_var_iv", None):
+            return
+        if self.tg_var_iv.value:
+            self._refresh_var_options()
+
+    def _set_feature_selection(self, feat):
+        """Seleciona ``feat`` no Combobox da aba Construir (via rótulo atual)."""
+        inv = {f: l for l, f in self._feat_by_label.items()}
+        if feat in inv:
+            self.dd_feature.value = inv[feat]
+
     def _feature_kind(self):
         sid = self.dd_leaf.value
+        feat = self._sel_feature(warn=False)
+        if feat is None:
+            return "num"                   # entrada inválida: controles neutros
         sub = (self.df if sid is None or sid not in self.seg.segments
                else self.df[self.seg.segments[sid]["mask"]])
-        return self.seg._detect_kind(sub, self.dd_feature.value, None)
+        return self.seg._detect_kind(sub, feat, None)
 
     def _on_mode_change(self, _):
         """Mostra o controle certo conforme modo e tipo da variável.
@@ -2785,7 +2964,13 @@ class TreeSegmenterUI:
 
     def _on_feature_change(self, _):
         """Trocar a VARIÁVEL/FOLHA limpa o preview (o gráfico era de outra
-        seleção) e reconfigura os controles do modo atual."""
+        seleção) e reconfigura os controles do modo atual. Reordenar as opções
+        (toggle de IV) muda só o RÓTULO da mesma coluna — nesse caso não há o
+        que invalidar (o contexto variável+folha é o mesmo)."""
+        ctx = (self._sel_feature(warn=False), self.dd_leaf.value)
+        if ctx[0] is not None and ctx == getattr(self, "_feat_ctx", None):
+            return
+        self._feat_ctx = ctx
         if hasattr(self, "out_preview_seg"):      # widgets podem não existir na 1ª chamada
             self.out_preview_seg.value = ""
             self.out_preview_chart.value = ""
@@ -2822,7 +3007,9 @@ class TreeSegmenterUI:
     def _rebuild_cat_box(self):
         """Monta um seletor de grupo por categoria presente na folha (ordenadas por alvo)."""
         sid = self.dd_leaf.value
-        feat = self.dd_feature.value
+        feat = self._sel_feature(warn=False)
+        if feat is None:
+            self.cat_box.children = (); return
         # guarda: recriar N Dropdowns (novos modelos no comm + nós no DOM) é caro;
         # se o contexto (variável, folha) não mudou e os widgets já existem, mantém.
         # _on_feature_change/_on_mode_change disparam a cada troca de folha, mas
@@ -2863,7 +3050,8 @@ class TreeSegmenterUI:
         self.cat_box.children = tuple(rows)
 
     def _cat_groups(self):
-        if (getattr(self, "_cat_ctx", None) != (self.dd_feature.value, self.dd_leaf.value)
+        if (getattr(self, "_cat_ctx", None) != (self._sel_feature(warn=False),
+                                                self.dd_leaf.value)
                 or not getattr(self, "_cat_widgets", None)):
             self._rebuild_cat_box()
         grupos = {}
@@ -2957,8 +3145,7 @@ class TreeSegmenterUI:
             if sug["feature"] is None:
                 self._log("Nenhuma variável informativa para esta folha — IV muito baixo.")
                 return
-            if sug["feature"] in list(self.dd_feature.options):
-                self.dd_feature.value = sug["feature"]
+            self._set_feature_selection(sug["feature"])
             self.tg_mode.value = "Ótimo"
             lbl = self.seg.feature_labels.get(sug["feature"], sug["feature"])
             self._log(f"Sugestão para esta folha: dividir por '{lbl}' "
@@ -3234,6 +3421,8 @@ class TreeSegmenterUI:
         self._refresh_iv()
         self._refresh_leaf_hist()
         self._sync_img_selection()      # espelha a folha no preview interativo (contorno+barra)
+        if self.tg_feat_iv.value:       # ordenação por IV é POR FOLHA → reordena
+            self._refresh_feature_options()
         self._on_feature_change(None)   # nova folha: limpa o preview e recompõe os grupos
 
     def _on_tab_change(self, change):
@@ -3260,6 +3449,9 @@ class TreeSegmenterUI:
         self._iv_dirty = False
         sid = self.dd_leaf.value
         iv = self.seg.variable_iv(sid)
+        # aproveita o cálculo p/ o "ordenar por IV" dos seletores (mesma folha)
+        self._iv_sort_cache[(sid if sid in self.seg.segments else "root",
+                             self.seg._tree_version)] = dict(zip(iv["variavel"], iv["iv"]))
         pd_med = iv.attrs.get("valor_medio")
         has_psi = "pior_psi" in iv.columns
         disp = (iv[["variavel", "n_bins", "iv", "forca"]].copy()
@@ -3629,7 +3821,7 @@ class TreeSegmenterUI:
         return sty
 
     def _on_var_analyze(self, _):
-        feat = self.dd_var.value
+        feat = self._sel_var(warn=False)
         sid = self.dd_var_leaf.value
         tcol = self.tx_var_time.value.strip()
         for o in (self.out_var_dist, self.out_var_time,
@@ -3639,7 +3831,11 @@ class TreeSegmenterUI:
         self.out_var_cards.value = ""
         bs, trend = None, None
         if feat is None:
-            self._log("Selecione uma variável para analisar."); return
+            txt = (self.dd_var.value or "").strip()
+            self._log(f"⚠ Variável '{txt}' não reconhecida — escolha uma opção da "
+                      "lista (digite para filtrar)." if txt
+                      else "Selecione uma variável para analisar.")
+            return
         with self._busy(self.btn_var_analyze, msg="analisando a variável…"):
             try:
                 summ = self.seg.variable_summary(feat, sid=sid)
@@ -3752,7 +3948,10 @@ class TreeSegmenterUI:
             return False, "Nenhuma folha selecionada."
         if sid in self.locked:
             return False, "⚠ Folha fechada — reabra (🔓) para dividir."
-        feature = self.dd_feature.value
+        feature = self._sel_feature(warn=False)
+        if feature is None:
+            return False, (f"⚠ Variável '{(self.dd_feature.value or '').strip()}' não "
+                           "reconhecida — escolha uma opção da lista (digite p/ filtrar).")
         try:
             if self.tg_mode.value == "Ótimo":
                 splits = None
@@ -3774,7 +3973,9 @@ class TreeSegmenterUI:
         """Sugere o binning ótimo da variável selecionada NESTA folha: ajusta o
         'máx. bins' e preenche os 'Cortes' (Manual) com a sugestão."""
         sid = self._selected_leaf()
-        feat = self.dd_feature.value
+        feat = self._sel_feature()          # inválida → aviso no console
+        if feat is None:
+            return
         if sid is None or sid not in self.seg.segments:
             self._log("Selecione uma folha."); return
         with self._busy(self.btn_sugcuts, msg="sugerindo os cortes…"):
@@ -4812,6 +5013,30 @@ class TreeSegmenterUI:
             self.out_pdf.value = (f"<div class='treeui-legend'>✅ Relatório salvo em "
                                   f"<code>{path}</code>.</div>")
             self._log(f"[pdf] relatório salvo em {path}")
+
+    def _on_xlsx(self, _):
+        path = (self.tx_xlsx_path.value or "").strip()
+        if not path:
+            self._log("Informe o caminho do arquivo .xlsx."); return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+        self._confirm_overwrite(path, lambda: self._do_xlsx(path))
+
+    def _do_xlsx(self, path):
+        """Gera o Excel multi-abas via :meth:`TreeSegmenter.to_excel` (openpyxl é
+        OPCIONAL — sem ele, o ImportError amigável vai para o console)."""
+        with self._busy(self.btn_xlsx, msg="gerando o Excel…"):
+            tabela = (self.tx_sql_table.value or "").strip() or "minha_tabela"
+            try:
+                self.seg.to_excel(path, table=tabela)
+            except ImportError as e:
+                self._log(f"⚠ {e}")
+                return
+            except Exception as e:
+                self._log(f"Erro ao exportar Excel: {type(e).__name__}: {e}")
+                return
+            self._log(f"📊 Excel salvo em '{path}' (Folhas · Métricas por amostra · "
+                      "PSI · IV por variável · Calibração · Régua SQL).")
 
     # ==================================================================
     # Persistência: salvar / carregar a árvore em JSON

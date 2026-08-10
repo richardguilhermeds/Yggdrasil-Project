@@ -5427,6 +5427,113 @@ class TreeSegmenter:
         return "\n".join(L)
 
     # ------------------------------------------------------------------
+    # TO_EXCEL: relatório multi-abas (.xlsx) — requer openpyxl (opcional).
+    # ------------------------------------------------------------------
+    def to_excel(self, path: str, table: str = "minha_tabela") -> str:
+        """Exporta o modelo para um Excel multi-abas (``.xlsx``) em ``path``.
+
+        Requer o pacote OPCIONAL **openpyxl** — o import é lazy (só aqui) e,
+        sem ele instalado, sobe um :class:`ImportError` com instrução amigável.
+
+        Abas geradas (uma aba indisponível é pulada — ex.: PSI sem ``sample_col``):
+
+        - **Folhas** — tabela completa numérica das folhas (com PSI e teste de
+          hipótese entre folhas adjacentes, quando aplicável);
+        - **Métricas por amostra** — :meth:`metrics`;
+        - **PSI** — resumo por amostra (:meth:`psi`) e, logo abaixo, o detalhe
+          da contribuição por folha (:meth:`psi_detalhe`);
+        - **IV por variável** — :meth:`variable_iv` na raiz (carteira inteira);
+        - **Calibração** — :meth:`calibration_table`;
+        - **Régua SQL** — o ``CASE WHEN`` de :meth:`to_sql` como texto
+          (``table`` é o nome da tabela de origem no SQL).
+
+        Formatação mínima: cabeçalho CONGELADO em todas as abas e colunas de
+        percentual como % de verdade no Excel — representatividade vira fração
+        0–1 com formato ``0.00%`` (e, na classificação, as colunas de alvo/taxa
+        também ganham o formato, já que são frações).
+
+        Retorna o próprio ``path``.
+        """
+        try:
+            import openpyxl  # noqa: F401  — dependência OPCIONAL (import lazy)
+        except ImportError as e:
+            raise ImportError(
+                "A exportação para Excel requer o pacote opcional 'openpyxl' "
+                "(instale com: pip install openpyxl).") from e
+        from openpyxl.utils import get_column_letter
+
+        # colunas exibidas como % no Excel: {coluna: divisor} — representativi-
+        # dade vem 0–100 (÷100); na classificação, alvo/taxa já são frações (÷1)
+        def _pct_cols(df: pd.DataFrame) -> dict:
+            cols = {}
+            for c in df.columns:
+                cs = str(c)
+                if cs == "repr_%" or (cs.startswith("repr_") and cs.endswith("_%")):
+                    cols[c] = 100.0
+                elif self._is_clf and (cs.startswith("valor_") or cs == "valor_medio"
+                                       or cs == "taxa_default"):
+                    cols[c] = 1.0
+            return cols
+
+        # cada aba é montada de forma independente: uma falha pontual (ex.:
+        # métrica sem alvo na amostra) pula a aba em vez de derrubar o arquivo
+        def _tenta(build):
+            try:
+                return build()
+            except Exception:
+                return None
+
+        lv = self.leaves(with_psi=self.sample_col is not None, with_test=True)
+        met = _tenta(self.metrics)
+        psi_df = psi_det = None
+        if self.sample_col is not None:
+            psi_df = _tenta(self.psi)
+            if psi_df is not None:
+                psi_det = _tenta(self.psi_detalhe)
+        ivt = _tenta(self.variable_iv)
+        ct = _tenta(self.calibration_table)
+        sql = _tenta(lambda: self.to_sql(table=table))
+
+        with pd.ExcelWriter(path, engine="openpyxl") as writer:
+
+            def _write(nome, df, startrow=0, freeze=True):
+                df = df.copy()
+                pct = _pct_cols(df)
+                for c, den in pct.items():
+                    df[c] = pd.to_numeric(df[c], errors="coerce") / den
+                df.to_excel(writer, sheet_name=nome, index=False, startrow=startrow)
+                ws = writer.sheets[nome]
+                if freeze:
+                    ws.freeze_panes = "A2"          # congela o cabeçalho
+                idx = {str(c): i + 1 for i, c in enumerate(df.columns)}
+                for c in pct:                        # formato de % nas células
+                    letra = get_column_letter(idx[str(c)])
+                    ini = startrow + 2               # 1-based, abaixo do cabeçalho
+                    for row in range(ini, ini + len(df)):
+                        ws[f"{letra}{row}"].number_format = "0.00%"
+                return ws
+
+            _write("Folhas", lv)
+            if met is not None:
+                _write("Métricas por amostra", met)
+            if psi_df is not None:
+                ws = _write("PSI", psi_df)
+                if psi_det is not None and len(psi_det):
+                    start = len(psi_df) + 3          # 2 linhas em branco após o resumo
+                    ws.cell(row=start, column=1,
+                            value="Detalhe — contribuição de cada folha p/ o PSI")
+                    _write("PSI", psi_det, startrow=start, freeze=False)
+            if ivt is not None:
+                _write("IV por variável", ivt)
+            if ct is not None:
+                _write("Calibração", ct)
+            if sql:
+                ws = writer.book.create_sheet("Régua SQL")
+                for i, ln in enumerate(str(sql).split("\n"), start=1):
+                    ws.cell(row=i, column=1, value=ln)
+        return path
+
+    # ------------------------------------------------------------------
     # REGUA_FEATURES: colunas usadas pela árvore (necessárias na tabela).
     # ------------------------------------------------------------------
     def regua_features(self) -> list:

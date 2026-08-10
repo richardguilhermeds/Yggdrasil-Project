@@ -689,6 +689,107 @@ def test_ui_refresh_invalida_diag_sql_validacao(task):
     assert ui2.out_sql.value == ""
 
 
+def test_ui_combobox_variavel_busca_e_valida(task):
+    """Os seletores de variável são Combobox (digite p/ filtrar): rótulo→coluna
+    via mapa; texto que não bate com opção nenhuma não resolve, avisa no console
+    e não deixa o split preparar."""
+    import ipywidgets as W
+    ui = _build(task)
+    assert isinstance(ui.dd_feature, W.Combobox) and isinstance(ui.dd_var, W.Combobox)
+    assert ui._sel_feature() == "score"            # sem feature_labels: rótulo = coluna
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.dd_feature.value = "variavel_que_nao_existe"
+    assert ui._sel_feature() is None
+    assert any("não reconhecida" in l for l in ui._log_lines)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ok, msg = ui._prepare_split()              # entrada inválida não explode
+    assert ok is False and "não reconhecida" in msg
+
+
+def test_ui_combobox_ordena_por_iv(task):
+    """O toggle 'ordenar por IV' reordena as opções por IV desc e anexa o IV ao
+    rótulo; a seleção sobrevive à reordenação e segue resolvendo p/ a coluna."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.tg_feat_iv.value = True
+    opts = list(ui.dd_feature.options)
+    assert any("(IV " in o for o in opts)
+    ivm = ui._iv_map(ui.dd_leaf.value)
+    vals = [ivm[ui._feat_by_label[o]] for o in opts
+            if not pd.isna(ivm.get(ui._feat_by_label[o], float("nan")))]
+    assert vals == sorted(vals, reverse=True)      # ordem decrescente de IV
+    assert ui._sel_feature() == "score"            # seleção preservada
+    assert "(IV " in ui.dd_feature.value           # rótulo atual ganhou o IV
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.tg_feat_iv.value = False                # desligar volta ao rótulo simples
+    assert all("(IV " not in o for o in ui.dd_feature.options)
+    assert ui._sel_feature() == "score"
+
+
+def test_ui_combobox_iv_nao_invalida_preview(task):
+    """Reordenar por IV só re-rotula a MESMA coluna: o preview pendente não é
+    invalidado (contexto variável+folha inalterado)."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.dd_leaf.value = "root"
+        ui.dd_feature.value = "score"
+        ui.tg_mode.value = "Manual"
+        ui.tx_cuts.value = "0.8"
+        ui._on_preview(None)
+        assert ui._pending is not None
+        ui.tg_feat_iv.value = True                 # rótulo vira "score (IV …)"
+    assert ui._sel_feature() == "score"
+    assert ui._pending is not None                 # preview segue válido
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_split(None)
+    assert _nleaf(ui) >= 2                         # split funciona com o rótulo de IV
+
+
+def test_ui_combobox_var_analise_ordena_e_valida(task):
+    """Aba Análise: toggle de IV reordena o seletor; entrada inválida no
+    'Analisar variável' avisa e não renderiza nada."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.tg_var_iv.value = True
+    assert any("(IV " in o for o in ui.dd_var.options)
+    assert ui._sel_var() in ui.features
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.dd_var.value = "typo_qualquer"
+        ui._on_var_analyze(None)
+    assert any("não reconhecida" in l for l in ui._log_lines)
+    assert ui.out_var_cards.value == ""
+
+
+def test_ui_exportar_excel(task, tmp_path):
+    pytest.importorskip("openpyxl")
+    import os
+    ui = _build(task)
+    p = str(tmp_path / "arvore.xlsx")
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        ui.tx_xlsx_path.value = p
+        ui._on_xlsx(None)                          # não existe → salva direto
+    assert os.path.exists(p)
+    assert any("Excel salvo" in l for l in ui._log_lines)
+
+
+def test_ui_exportar_excel_sem_openpyxl_avisa(task, tmp_path, monkeypatch):
+    """Sem openpyxl, o handler mostra a instrução amigável no console (não
+    estoura exceção na UI)."""
+    from yggdrasil.credit_risk.tree import TreeSegmenter
+    ui = _build(task)
+
+    def boom(self, path, table="minha_tabela"):
+        raise ImportError("A exportação para Excel requer o pacote opcional "
+                          "'openpyxl' (instale com: pip install openpyxl).")
+
+    monkeypatch.setattr(TreeSegmenter, "to_excel", boom)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.tx_xlsx_path.value = str(tmp_path / "x.xlsx")
+        ui._on_xlsx(None)
+    assert any("openpyxl" in l for l in ui._log_lines)
+
+
 def test_ui_reset_e_prune_pedem_confirmacao_no_botao(task):
     """Clicar 1× em Resetar/Podar (inclusive o clone do preview) NÃO muta a
     árvore: o botão só arma o 'Confirmar?'; o 2º clique executa de fato."""

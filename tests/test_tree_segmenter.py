@@ -484,6 +484,65 @@ def test_diff_trees_task_incompativel():
         a.diff_trees(b)
 
 
+# ----------------------------------------------------------------------
+# Excel multi-abas (gated por openpyxl — dependência OPCIONAL)
+# ----------------------------------------------------------------------
+def test_to_excel_multiabas_roundtrip(task, tmp_path):
+    openpyxl = pytest.importorskip("openpyxl")
+    from openpyxl.utils import get_column_letter
+    seg = _mk(task, com_oot=True, n=4000, seed=3)
+    seg.fit_auto(max_depth=2, verbose=False)
+    p = str(tmp_path / "arvore.xlsx")
+    assert seg.to_excel(p, table="carteira") == p
+    wb = openpyxl.load_workbook(p)
+    for aba in ["Folhas", "Métricas por amostra", "PSI", "IV por variável",
+                "Calibração", "Régua SQL"]:
+        assert aba in wb.sheetnames, f"aba ausente: {aba}"
+    assert wb["Folhas"].freeze_panes == "A2"          # cabeçalho congelado
+    lv = pd.read_excel(p, sheet_name="Folhas")
+    assert len(lv) == len(seg.leaves())
+    # representatividade exportada como FRAÇÃO (0–1) com formato de % no Excel
+    rep = [c for c in lv.columns if str(c).startswith("repr_")]
+    assert rep and lv[rep].fillna(0).le(1.0).all().all()
+    j = [c.value for c in wb["Folhas"][1]].index(rep[0]) + 1
+    assert wb["Folhas"][f"{get_column_letter(j)}2"].number_format == "0.00%"
+    # aba PSI traz o resumo E o detalhe por folha logo abaixo
+    textos = [str(c.value) for row in wb["PSI"].iter_rows() for c in row
+              if c.value is not None]
+    assert any("Detalhe" in t for t in textos)
+    # régua SQL como texto (uma linha por célula da coluna A)
+    sql = "\n".join(str(c.value) for c in wb["Régua SQL"]["A"] if c.value is not None)
+    assert "CASE" in sql and "carteira" in sql
+
+
+def test_to_excel_sem_sample_col_pula_psi(tmp_path):
+    openpyxl = pytest.importorskip("openpyxl")
+    df = make_df("classification", n=800).drop(columns=["amostra"])
+    seg = TreeSegmenter(df, target="target", task_type="classification", verbose=False)
+    seg.grow("score", splits=[0.8])
+    p = str(tmp_path / "sem_amostra.xlsx")
+    seg.to_excel(p)
+    wb = openpyxl.load_workbook(p)
+    assert "PSI" not in wb.sheetnames and "Folhas" in wb.sheetnames
+
+
+def test_to_excel_sem_openpyxl_erro_amigavel(tmp_path, monkeypatch):
+    """Sem o openpyxl (opcional), o to_excel sobe ImportError com a instrução
+    de instalação — nunca um traceback críptico de dentro do pandas."""
+    import builtins
+    real_import = builtins.__import__
+
+    def sem_openpyxl(name, *a, **kw):
+        if name == "openpyxl" or name.startswith("openpyxl."):
+            raise ImportError("No module named 'openpyxl'")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", sem_openpyxl)
+    seg = _mk("classification", n=400)
+    with pytest.raises(ImportError, match="pip install openpyxl"):
+        seg.to_excel(str(tmp_path / "x.xlsx"))
+
+
 def test_apply_spark_roundtrip(task):
     pytest.importorskip("pyspark")
     from pyspark.sql import SparkSession
