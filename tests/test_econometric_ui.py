@@ -1,12 +1,17 @@
 """
 Testes da interface de modelos satélite (:class:`SatelliteUI`).
 
-Cobrem o esqueleto e as duas primeiras abas: construção a partir de
+Cobrem o esqueleto e as abas já preenchidas: construção a partir de
 ``RiskSeries`` / ``pandas.Series`` + macro / sem dados, validação do alinhamento
 temporal, nomes definitivos das abas, relatório de estacionariedade, ajuste único
-com tabela de coeficientes e o ida-e-volta com :class:`StudyConfig`.
+com tabela de coeficientes, o ida-e-volta com :class:`StudyConfig`, a **busca
+champion-challenger** (dimensionamento da grade, ranking, motivo do descarte,
+escolha manual e Diebold-Mariano) e a **bateria de diagnóstico** (placar por
+família, tabela completa, leitura em texto e invalidação).
 
-Tudo roda em séries sintéticas **curtas** e grades pequenas — nenhuma busca.
+Tudo roda em séries sintéticas **curtas** e grades minúsculas (2 candidatas, 2
+defasagens, 1 variável por especificação) — a busca completa é do usuário, não
+da suíte.
 """
 from __future__ import annotations
 
@@ -309,6 +314,212 @@ def test_config_de_benchmark_exporta_modelo_candidato():
 
 
 # ======================================================================
+# Aba Seleção — busca champion-challenger
+# ======================================================================
+def _ui_para_busca(n=54, sinal_desemprego=1):
+    """Interface com uma grade **minúscula**: 2 candidatas, 2 defasagens, 1 variável."""
+    ui = _ui_pronta_para_ajuste(n=n)
+    ui._sign_tgs["desemprego"].value = sinal_desemprego
+    ui.tx_lag_set.value = "0,1"
+    ui.sl_max_vars.value = 1                 # 2 candidatas × 2 defasagens = 4 specs
+    ui.sl_horizon.value = 2
+    ui.sl_min_train.value = 40
+    return ui
+
+
+def test_tamanho_da_grade_avisa_antes_de_rodar():
+    ui = _ui_para_busca()
+    info = ui._render_grid_info()
+    assert info == {"candidatas": 2, "total": 4, "efetivo": 4, "janelas": 13,
+                    "min_train": 40, "ajustes": 4 * 14}
+    html = ui.out_grid_info.value
+    assert "a avaliar" in html and "janelas walk-forward" in html
+
+    # grade maior que o teto de especificações: o corte precisa ser explícito
+    ui.tx_lag_set.value = "0,1,3,6"
+    ui.sl_max_vars.value = 2
+    ui.sl_max_specs.value = 5
+    info2 = ui._grid_size()
+    assert info2["total"] == 2 * 4 + 1 * 16      # C(2,1)·4 + C(2,2)·4²
+    assert info2["efetivo"] == 5
+    ui._render_grid_info()
+    assert "não serão avaliadas" in ui.out_grid_info.value
+
+
+def test_grade_sem_janela_de_validacao_nao_roda():
+    ui = _ui_para_busca(n=54)
+    ui.sl_min_train.value = 60                   # maior que a própria série
+    ui.btn_search.click()
+    assert ui.search_ is None
+    assert "janela de validação" in ui.out_search_status.value
+
+
+def test_busca_produz_ranking_e_adota_a_campea():
+    ui = _ui_para_busca()
+    ui.btn_search.click()
+    res = ui.search_
+    assert res is not None, ui.out_search_status.value
+    assert len(res.ranking) == 4 + len(res.benchmarks)      # grade + benchmarks
+    # a campeã entra como modelo vigente (o seletor permite discordar)
+    assert res.best_spec is not None
+    assert ui.selected_spec_ is res.best_spec
+    assert ui.fit_ is not None and ui.model_ is res.best
+    assert ui._dirty_since_fit is False
+
+    rank = ui.out_search_rank.value
+    for col in ("especificação", "variáveis", "defasagens", "RMSE fora", "VIF máx.",
+                "sinais", "situação", "AIC"):
+        assert col in rank, col
+    assert "★" in rank                                       # a campeã marcada
+    assert "random_walk" in rank                             # benchmarks na mesma régua
+    assert "qualificadas" in ui.out_search_resumo.value
+    # progresso por etapa com o tempo decorrido (a busca não dá sinal de vida sozinha)
+    prog = ui.out_search_progress.value
+    assert "Progresso da busca" in prog and "concluída" in prog
+    assert ui._search_secs is not None and ui._search_secs > 0
+    # o seletor traz a campeã pré-escolhida
+    assert ui.dd_pick_spec.value == res.best_spec.describe()
+    assert any("campeã" in rot for rot, _ in ui.dd_pick_spec.options)
+
+
+def test_busca_explicita_o_motivo_do_descarte():
+    """Sinal declarado ao contrário: as especificações caem no filtro duro e a
+    interface diz exatamente por quê."""
+    ui = _ui_para_busca(sinal_desemprego=-1)
+    ui.btn_search.click()
+    assert ui.search_ is not None, ui.out_search_status.value
+    desq = ui.out_search_desq.value
+    assert "sinal econômico invertido em desemprego" in desq
+    assert "motivo" in desq
+    assert "sinal invertido" in ui.out_search_resumo.value
+    # as descartadas continuam disponíveis para escolha manual, marcadas como tal
+    assert any(rot.startswith("⚠ descartada") for rot, _ in ui.dd_pick_spec.options)
+
+
+def test_escolha_manual_sobrepoe_a_campea():
+    """Champion-challenger de verdade: dá para adotar até uma descartada."""
+    ui = _ui_para_busca(sinal_desemprego=-1)
+    ui.btn_search.click()
+    campea = ui.selected_spec_
+    alvo = next(v for rot, v in ui.dd_pick_spec.options if rot.startswith("⚠ descartada"))
+    ui.dd_pick_spec.value = alvo
+    ui.btn_pick_fit.click()
+    assert ui.selected_spec_ is not campea
+    assert ui.selected_spec_.describe() == alvo
+    assert ui.fit_ is not None and ui.fit_.spec.describe() == alvo
+    assert "adotada" in ui.out_pick_status.value
+    assert "p-valor" in ui.out_pick_info.value       # tabela de coeficientes da adotada
+    assert ui._dirty_since_fit is False
+
+
+def test_comparacao_com_benchmarks_e_diebold_mariano():
+    ui = _ui_para_busca()
+    ui.btn_search.click()
+    ui.btn_dm.click()
+    tab = ui.compare_
+    assert isinstance(tab, pd.DataFrame) and not tab.empty
+    for col in ("referência", "RMSE da referência", "RMSE da adotada", "DM (estat.)",
+                "p-valor", "veredito"):
+        assert col in tab.columns, col
+    assert {"random_walk", "media_historica"} <= set(tab["referência"])
+    assert tab["DM (estat.)"].notna().any(), "o teste deveria produzir estatística"
+    assert "veredito" in ui.out_dm.value
+    assert ui.out_dm_status.value.strip()
+
+
+def test_busca_sem_dados_e_sem_candidatas_avisa():
+    ui = _ui()
+    ui.btn_search.click()
+    assert ui.search_ is None
+    assert "Sem série carregada" in ui.out_search_status.value
+
+    ui2 = _ui_para_busca()
+    ui2._set_all_candidates(False)
+    ui2.btn_search.click()
+    assert ui2.search_ is None
+    assert "candidata" in ui2.out_search_status.value
+
+
+# ======================================================================
+# Aba Diagnóstico
+# ======================================================================
+def test_diagnostico_placar_tabela_e_graficos():
+    ui = _ui_pronta_para_ajuste(n=72)
+    ui.btn_fit_now.click()
+    assert ui.dd_chow_break.options, "as datas candidatas do Chow saem do design do ajuste"
+    ui.btn_diag.click()
+    tab = ui.diagnostics_
+    assert isinstance(tab, pd.DataFrame) and not tab.empty
+    testes = set(tab["teste"])
+    # a bateria completa: resíduo, heterocedasticidade, normalidade, estabilidade, VIF
+    for t in ("Ljung-Box", "Breusch-Godfrey", "Durbin-Watson", "Breusch-Pagan", "White",
+              "ARCH-LM", "Jarque-Bera", "CUSUM", "Chow", "Quandt-Andrews sup-F", "VIF"):
+        assert t in testes, t
+    blocos = ui.diag_blocks_
+    assert [b["bloco"] for b in blocos] == ["Resíduo", "Heterocedasticidade", "Normalidade",
+                                            "Estabilidade", "Colinearidade"]
+    assert all(b["nivel"] in ("ok", "warn", "bad", "na") for b in blocos)
+    placar = ui.out_diag_placar.value
+    assert "Resíduo" in placar and "p = " in placar        # veredito + evidência
+    assert "Ljung-Box" in ui.out_diag_tabela.value
+    assert "H0" in ui.out_diag_tabela.value                # a nula de cada teste
+    assert "VIF" in ui.out_diag_vif.value
+    assert "<img" in ui.out_diag_plot_fit.value
+    assert "<img" in ui.out_diag_plot_resid.value
+    assert ui.vif_ is not None and len(ui.vif_) == 2
+
+
+def test_diagnostico_reprovado_traz_o_que_fazer():
+    """Média histórica deixa toda a dinâmica no resíduo: os blocos reprovam e a
+    leitura em texto diz o que fazer."""
+    ui = _ui_pronta_para_ajuste(n=72)
+    ui.dd_model.value = "media_historica"
+    ui.btn_fit_now.click()
+    ui.btn_diag.click()
+    ruins = [b for b in ui.diag_blocks_ if b["nivel"] == "bad"]
+    assert ruins, "o placar deveria reprovar ao menos um bloco"
+    leitura = ui.out_diag_leitura.value
+    assert "Autocorrelação residual" in leitura
+    assert "ordem AR" in leitura                    # conselho acionável, não tratado
+    assert "reprovado" in ui.out_diag_status.value.lower()
+    # modelo sem regressores: nada de VIF/Chow, e isso é dito em vez de omitido
+    assert "não há colinearidade a medir" in ui.out_diag_vif.value
+    assert any(b["bloco"] == "Colinearidade" and b["nivel"] == "na"
+               for b in ui.diag_blocks_)
+
+
+def test_diagnostico_invalidado_quando_o_modelo_muda():
+    ui = _ui_pronta_para_ajuste(n=72)
+    ui.btn_fit_now.click()
+    ui.btn_diag.click()
+    assert ui.diagnostics_ is not None
+    ui.tx_ar_orders.value = "2"                     # mexe na especificação
+    assert ui.diagnostics_ is None and ui.diag_blocks_ is None
+    assert "desatualizado" in ui.out_diag_notice.value
+    assert ui.out_diag_placar.value == ""
+    assert ui.out_diag_plot_fit.value == ""
+
+
+def test_diagnostico_sem_ajuste_avisa():
+    ui = _ui()
+    ui.btn_diag.click()
+    assert ui.diagnostics_ is None
+    assert "Nenhum modelo ajustado" in ui.out_diag_status.value
+
+
+def test_troca_de_dados_zera_selecao_e_diagnostico():
+    ui = _ui_para_busca()
+    ui.btn_search.click()
+    ui.btn_diag.click()
+    outra = _sintetico(n=48, seed=11)
+    ui.set_data(outra.series, outra.macro)
+    assert ui.search_ is None and ui.compare_ is None and ui.selected_spec_ is None
+    assert ui.diagnostics_ is None and ui.diag_blocks_ is None
+    assert ui.out_search_rank.value == "" and ui.out_diag_placar.value == ""
+    assert not ui.dd_pick_spec.options
+
+
+# ======================================================================
 # Tema
 # ======================================================================
 def _htmls(widget, acc=None):
@@ -337,6 +548,20 @@ def test_html_gerado_usa_tokens_de_tema_e_nao_hex():
 
     for html in _htmls(ui.panel):
         if "<style>" in html:                   # a folha de estilo define os tokens
+            continue
+        achados = _HEX.findall(html)
+        assert not achados, f"hex fixo no HTML gerado: {achados[:3]} em {html[:120]!r}"
+
+
+def test_html_da_selecao_e_do_diagnostico_usa_tokens_de_tema():
+    """Mesma regra nas abas de seleção e diagnóstico (placar, progresso, ranking)."""
+    ui = _ui_para_busca()
+    ui.btn_search.click()
+    ui.btn_dm.click()
+    ui.btn_diag.click()
+    ui.cb_dark.value = True
+    for html in _htmls(ui.panel):
+        if "<style>" in html:
             continue
         achados = _HEX.findall(html)
         assert not achados, f"hex fixo no HTML gerado: {achados[:3]} em {html[:120]!r}"

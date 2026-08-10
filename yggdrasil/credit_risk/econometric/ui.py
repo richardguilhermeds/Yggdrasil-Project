@@ -15,8 +15,17 @@ tema claro/escuro) mas para um fluxo de **série temporal + macro**:
   defasagens/ordens AR/sazonalidade e os parâmetros de seleção; o botão
   **Ajustar agora** ajusta UM modelo com a especificação corrente e mostra os
   coeficientes com p-valor e AIC/BIC — feedback rápido antes de gastar uma busca;
-* **Seleção**, **Diagnóstico**, **Cenários & Projeção**, **Backtest** e
-  **Exportar** — as demais etapas do estudo.
+* **Seleção** — a busca *champion-challenger* sobre a grade: o **tamanho da grade**
+  antes de rodar (a busca é cara), o progresso por etapa com o tempo decorrido, o
+  **ranking** das especificações qualificadas, a lista das **descartadas com o
+  motivo** (sinal invertido, VIF alto), a escolha **manual** de uma especificação
+  do ranking — champion-challenger de verdade exige poder discordar do critério —
+  e a comparação contra os benchmarks ingênuos com o teste de Diebold-Mariano;
+* **Diagnóstico** — a bateria de :mod:`.diagnostics` sobre o modelo vigente num
+  **placar por família** (resíduo, heterocedasticidade, normalidade, estabilidade,
+  colinearidade), a tabela completa com p-valores, os gráficos de ajuste e de
+  resíduos e a leitura em texto do **que fazer** quando um teste falha;
+* **Cenários & Projeção**, **Backtest** e **Exportar** — as demais etapas do estudo.
 
 A configuração corrente é materializável como
 :class:`~yggdrasil.credit_risk.econometric.config.StudyConfig` (:meth:`to_config`)
@@ -39,6 +48,7 @@ quando faltarem).
 """
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from contextlib import contextmanager, suppress
@@ -170,6 +180,23 @@ _CSS = """
   color:var(--sub-ink); }
 .satui-metric .v { font-size:16px; font-weight:600; color:var(--ink); margin-top:2px;
   font-variant-numeric: tabular-nums; }
+/* placar de vereditos (aba Diagnóstico): um bloco por família de teste */
+.satui-placar { display:grid; grid-template-columns:repeat(auto-fit,minmax(196px,1fr)); gap:8px; }
+.satui-bloco { background:var(--tile-bg); border:1px solid var(--hair); border-radius:10px;
+  padding:8px 11px; border-left-width:3px; border-left-style:solid;
+  border-left-color:var(--faint-ink); }
+.satui-bloco.ok   { border-left-color:var(--ok-ink); }
+.satui-bloco.warn { border-left-color:var(--warn-ink); }
+.satui-bloco.bad  { border-left-color:var(--bad-ink); }
+.satui-bloco .k { font-size:10px; text-transform:uppercase; letter-spacing:.04em;
+  color:var(--sub-ink); }
+.satui-bloco .v { font-size:13px; font-weight:600; margin:3px 0 2px; }
+.satui-bloco .d { font-size:11px; color:var(--muted); line-height:1.5;
+  font-variant-numeric: tabular-nums; }
+.satui-prog { border-collapse:collapse; font-size:12px; width:100%; margin:2px 0 8px; }
+.satui-prog th { padding:4px 10px; text-align:left; background:var(--tbl-head-bg);
+  color:var(--tbl-head-ink); font-weight:600; }
+.satui-prog td { padding:4px 10px; border-top:1px solid var(--tbl-line); }
 .satui-signrow { font-size:12px; color:var(--body-ink); }
 .satui-signhead { font-size:11px; color:var(--sub-ink); letter-spacing:.03em;
   margin:2px 0 6px; line-height:1.6; }
@@ -335,6 +362,39 @@ def _sem_acento(txt: str) -> str:
     return "".join(c for c in n if not unicodedata.combining(c)).lower()
 
 
+#: O que fazer quando um bloco da bateria de diagnóstico falha — ``(rótulo,
+#: testes da família, conselho)``. Curto e acionável: a aba **Diagnóstico** só
+#: mostra as famílias que efetivamente reprovaram.
+_CONSELHO_DIAG = (
+    ("Autocorrelação residual", ("Ljung-Box", "Breusch-Godfrey", "Durbin-Watson"),
+     "sobrou dinâmica que o modelo não capturou. <b>Aumente a ordem AR</b> (1 → 2) ou "
+     "<b>inclua outra defasagem da macro</b>; se persistir, estime com covariância "
+     "<b>HAC (Newey-West)</b> — os p-valores atuais estão otimistas e os intervalos, "
+     "estreitos demais."),
+    ("Heterocedasticidade", ("Breusch-Pagan", "White"),
+     "a variância do erro muda com o nível (típico: o erro cresce na recessão). O "
+     "coeficiente segue não-viesado, o <b>erro-padrão</b> é que fica errado — troque a "
+     "covariância para <b>HAC</b> ou modele na escala do <i>link</i>, que estabiliza a "
+     "variância perto das bordas."),
+    ("Volatilidade condicional (ARCH)", ("ARCH-LM",),
+     "a volatilidade vem em <i>clusters</i>. Os pontos projetados continuam válidos, mas "
+     "a <b>banda</b> subestima a incerteza justamente no estresse — leia o cenário "
+     "adverso como a cauda, não a banda do cenário base."),
+    ("Normalidade", ("Jarque-Bera",),
+     "resíduo não normal pesa sobre o <b>intervalo</b>, não sobre a média. Prefira bandas "
+     "por <b>reamostragem dos próprios resíduos</b> (é o que o motor de projeção faz) e "
+     "investigue outliers: um evento isolado pede uma <i>dummy</i>, não um modelo novo."),
+    ("Estabilidade", ("Chow", "Quandt-Andrews sup-F", "CUSUM"),
+     "o alerta mais sério: os coeficientes <b>mudaram no meio da amostra</b> e a projeção "
+     "extrapola uma relação que já não vale. Inclua uma <i>dummy</i> de quebra/evento, "
+     "encurte a amostra para o regime atual ou reestime por regime — nunca ignore."),
+    ("Colinearidade", ("VIF",),
+     "duas macro disputam o mesmo papel: os coeficientes ficam instáveis e podem sair com "
+     "o <b>sinal trocado</b> sem que a relação econômica tenha mudado. <b>Remova uma</b> "
+     "das redundantes (ou combine-as num índice) e reajuste."),
+)
+
+
 class SatelliteUI:
     """Interface de treinamento de modelos satélite (fatores prospectivos).
 
@@ -374,6 +434,16 @@ class SatelliteUI:
         O último :class:`FitResult` e o modelo que o produziu (aba Especificação).
     search_:
         O último :class:`SearchResult` (aba Seleção).
+    selected_spec_:
+        A :class:`Specification` **adotada** — a campeã da busca ou a que o usuário
+        escolheu manualmente no ranking (aba Seleção).
+    compare_:
+        A tabela de comparação da campeã contra os benchmarks ingênuos/ARIMA, com o
+        teste de Diebold-Mariano (aba Seleção).
+    diagnostics_, diag_blocks_, vif_:
+        A tabela da última bateria de diagnóstico, o placar por família de teste
+        (lista de dicionários com veredito e evidência) e a tabela de VIF por
+        variável (aba Diagnóstico).
     scenarios_, projection_:
         O último :class:`ScenarioSet` e a :class:`Projection` (aba Cenários).
     backtest_:
@@ -424,6 +494,11 @@ class SatelliteUI:
         self.fit_ = None            # último FitResult (Especificação)
         self.model_ = None          # o modelo que o produziu
         self.search_ = None         # SearchResult (Seleção)
+        self.selected_spec_ = None  # Specification adotada (campeã ou escolha manual)
+        self.compare_ = None        # comparação vs benchmarks + Diebold-Mariano
+        self.diagnostics_ = None    # tabela da última bateria de diagnóstico
+        self.diag_blocks_ = None    # placar por família de teste (lista de dicts)
+        self.vif_ = None            # VIF por variável do modelo vigente
         self.scenarios_ = None      # ScenarioSet (Cenários & Projeção)
         self.projection_ = None     # Projection (Cenários & Projeção)
         self.backtest_ = None       # backtest de cobertura (Backtest)
@@ -431,6 +506,9 @@ class SatelliteUI:
         self.stationarity_ = None   # tabela do último relatório de estacionariedade
 
         self._log_lines: list = []
+        self._search_steps: list = []     # linhas da tabela de progresso da busca
+        self._spec_por_desc: dict = {}    # describe() -> Specification da última grade
+        self._search_secs = None          # duração da última busca (segundos)
         self._dirty_since_fit = False
         self._init_candidates = list(candidates) if candidates else None
         self._init_signs = dict(expected_signs or {})
@@ -547,8 +625,13 @@ class SatelliteUI:
         if rs is not None:
             self.kind = rs.kind
         self.fit_ = self.model_ = self.search_ = None
+        self.selected_spec_ = self.compare_ = None
+        self.diagnostics_ = self.diag_blocks_ = self.vif_ = None
         self.scenarios_ = self.projection_ = self.backtest_ = self.study_ = None
         self.stationarity_ = None
+        self._spec_por_desc = {}
+        self._search_steps = []
+        self._search_secs = None
         self._clear_dirty()
         self._init_candidates = None
         self._init_signs = {}
@@ -565,6 +648,7 @@ class SatelliteUI:
         self.out_estac.value = ""
         self.out_estac_resumo.value = ""
         self._clear_fit_outputs()
+        self._clear_selecao_outputs()
         self._refresh_bar()
         self._refresh_serie()
         self._sync_model_fields()
@@ -654,12 +738,14 @@ class SatelliteUI:
         return "color:var(--muted)"
 
     def _df_html(self, df, max_height=None, center=False, color_map=None,
-                 pct_cols=None, precision=4):
+                 pct_cols=None, precision=4, fmt_cols=None):
         """Tabela HTML no estilo da casa.
 
         ``color_map`` é ``{coluna: função(valor) -> css}`` — use os helpers
         ``_css_veredito``/``_css_ordem``/``_css_ok``/``_css_pvalor``/``_css_coerencia``
-        (todos em tokens de tema, nunca hex).
+        (todos em tokens de tema, nunca hex). ``fmt_cols`` é
+        ``{coluna: "{:.1f}"}`` para colunas que pedem casas decimais próprias
+        (AIC ao lado de um RMSE de taxa, por exemplo).
         """
         sty = (df.style.hide(axis="index").set_table_styles(self._TABLE_STYLES)
                .set_properties(**{"font-size": "12px"}))
@@ -678,6 +764,10 @@ class SatelliteUI:
             if present:
                 sty = sty.format(lambda v: "" if pd.isna(v) else f"{v * 100:.1f}%",
                                  subset=present)
+        for col, fmt in (fmt_cols or {}).items():
+            if col in df.columns:
+                sty = sty.format(
+                    lambda v, _f=fmt: "—" if pd.isna(v) else _f.format(v), subset=[col])
         for col, fn in (color_map or {}).items():
             if col in df.columns:
                 sty = sty.map(fn, subset=[col])
@@ -774,12 +864,15 @@ class SatelliteUI:
             "<div class='satui-notice'>⚠️ <b>Ajuste desatualizado</b> — a especificação "
             "mudou depois do último ajuste; os coeficientes abaixo são do modelo "
             "ANTERIOR. Clique em <i>Ajustar agora</i> para atualizar.</div>")
+        self._invalidate_diag("a especificação mudou depois do último ajuste")
         self._refresh_bar()
 
     def _clear_dirty(self):
         self._dirty_since_fit = False
         if getattr(self, "out_fit_warn", None) is not None:
             self.out_fit_warn.value = ""
+        # o diagnóstico pertencia ao ajuste anterior: some com ele
+        self._invalidate_diag("o modelo vigente mudou")
 
     # ==================================================================
     # Construção da interface
@@ -795,17 +888,12 @@ class SatelliteUI:
 
         tab_serie = self._build_tab_serie()
         tab_spec = self._build_tab_spec()
-        # As abas seguintes nascem VAZIAS (placeholder) com os nomes definitivos —
-        # os blocos seguintes só substituem ``.children`` do respectivo VBox.
-        self.box_selecao = self._placeholder_box(
-            "Seleção",
-            "busca champion-challenger sobre a grade de especificações, com os filtros "
-            "duros de sinal econômico e VIF, validação walk-forward e ranking contra os "
-            "benchmarks.")
-        self.box_diagnostico = self._placeholder_box(
-            "Diagnóstico",
-            "bateria de resíduos (autocorrelação, heterocedasticidade, normalidade, "
-            "estabilidade) e os gráficos de ajuste do modelo escolhido.")
+        # Seleção e Diagnóstico já preenchidas; as demais nascem VAZIAS (placeholder)
+        # com os nomes definitivos — os blocos seguintes só substituem ``.children``.
+        self.box_selecao = W.VBox(layout=W.Layout(padding="2px"))
+        self.box_diagnostico = W.VBox(layout=W.Layout(padding="2px"))
+        self.box_selecao.children = self._build_tab_selecao()
+        self.box_diagnostico.children = self._build_tab_diagnostico()
         self.box_cenarios = self._placeholder_box(
             "Cenários & Projeção",
             "cenários base/adverso/otimista (ou choques), projeção condicional em leque "
@@ -825,6 +913,9 @@ class SatelliteUI:
         for i, t in enumerate(self.ABAS):
             self.tabs.set_title(i, t)
         self.tabs.add_class("satui-tabs")
+        # abrir a aba Seleção recalcula o tamanho da grade (ele depende dos controles
+        # da aba Especificação, que o usuário acabou de mexer)
+        self.tabs.observe(self._on_tab_change, names="selected_index")
 
         console = W.VBox([
             W.HBox([W.HTML("<div class='satui-h'>Console</div>"), self.btn_clear_log],
@@ -1689,6 +1780,1150 @@ class SatelliteUI:
             color_map={"p-valor": self._css_pvalor, "coerência": self._css_coerencia})
 
     # ==================================================================
+    # Progresso e cronômetro (ações longas)
+    # ==================================================================
+    @staticmethod
+    def _fmt_dur(segundos) -> str:
+        """Duração legível: ``"12.4s"`` ou ``"3min 07s"``."""
+        s = float(segundos)
+        if s < 60:
+            return f"{s:.1f}s"
+        m, r = divmod(int(round(s)), 60)
+        return f"{m}min {r:02d}s"
+
+    def _render_progress(self, steps, widget, titulo="Progresso"):
+        """Tabela de progresso por etapa (mesmo desenho das demais UIs da casa)."""
+        if not steps:
+            widget.value = ""
+            return
+        icone = {"run": "⏳", "ok": "✅", "err": "❌", "skip": "➖"}
+        cor = {"run": "var(--warn-ink)", "ok": "var(--ok-ink)", "err": "var(--bad-ink)",
+               "skip": "var(--muted)"}
+        rot = {"run": "em andamento…", "ok": "concluída", "err": "erro", "skip": "pulada"}
+        trs = ""
+        for r in steps:
+            st = r.get("status", "run")
+            trs += (f"<tr><td>{icone.get(st, '')}</td><td>{r['label']}</td>"
+                    f"<td style='color:{cor.get(st, 'var(--ink)')};font-weight:600'>"
+                    f"{rot.get(st, st)}</td>"
+                    f"<td style='color:var(--muted)'>{r.get('detail', '')}</td></tr>")
+        widget.value = (
+            f"<div class='satui-legend' style='margin-top:6px'>{titulo}</div>"
+            "<table class='satui-prog'><thead><tr><th></th><th>Etapa</th><th>Status</th>"
+            f"<th>Detalhe</th></tr></thead><tbody>{trs}</tbody></table>")
+
+    def _search_prog(self, key, label, status, detail=""):
+        """Cria/atualiza a linha ``key`` da tabela de progresso da busca."""
+        for row in self._search_steps:
+            if row["key"] == key:
+                row["status"] = status
+                if detail:
+                    row["detail"] = detail
+                break
+        else:
+            self._search_steps.append({"key": key, "label": label, "status": status,
+                                       "detail": detail})
+        self._render_progress(self._search_steps, self.out_search_progress,
+                              "Progresso da busca")
+
+    def _search_prog_erro(self, exc):
+        """Marca como **erro** a etapa que estava em andamento."""
+        for row in reversed(self._search_steps):
+            if row.get("status") == "run":
+                row["status"] = "err"
+                row["detail"] = type(exc).__name__
+                break
+        self._render_progress(self._search_steps, self.out_search_progress,
+                              "Progresso da busca")
+
+    @contextmanager
+    def _cronometro(self, alvo, rotulo="processando"):
+        """Mostra o **tempo decorrido** em ``alvo`` enquanto o bloco roda.
+
+        A busca é síncrona (bloqueia a célula) e :func:`~..selection.search` não
+        expõe callback de progresso — um cronômetro em *thread* daemon é o sinal de
+        vida possível: sem ele a interface parece travada por minutos. Devolve uma
+        função que dá os segundos decorridos.
+        """
+        import threading
+        import time
+
+        ini = time.monotonic()
+        parar = threading.Event()
+
+        def _pinta(txt):
+            with suppress(Exception):
+                alvo.value = txt
+
+        def _loop():
+            while not parar.wait(1.0):
+                _pinta(f"<div class='satui-legend'><i>⏳ {rotulo} — "
+                       f"{self._fmt_dur(time.monotonic() - ini)} decorridos…</i></div>")
+
+        _pinta(f"<div class='satui-legend'><i>⏳ {rotulo} — iniciando…</i></div>")
+        th = threading.Thread(target=_loop, daemon=True)
+        th.start()
+        try:
+            yield lambda: time.monotonic() - ini
+        finally:
+            parar.set()
+            with suppress(Exception):
+                th.join(timeout=2.0)
+            _pinta("")
+
+    def _on_tab_change(self, change):
+        """Abrir a aba **Seleção** recalcula o tamanho da grade (ele depende dos
+        controles da aba Especificação, que o usuário acabou de mexer)."""
+        with suppress(Exception):
+            if change.get("new") == 2:
+                self._render_grid_info()
+
+    # ==================================================================
+    # Aba Seleção — busca champion-challenger
+    # ==================================================================
+    def _build_tab_selecao(self):
+        """Cartões da aba **Seleção** (devolve a tupla de filhos do VBox)."""
+        # --- card: tamanho da grade -----------------------------------------
+        self.btn_grid_size = W.Button(
+            description="Conferir a grade", icon="calculator",
+            layout=W.Layout(width="auto", min_width="180px"),
+            tooltip="Conta quantas especificações a busca vai avaliar com os parâmetros "
+                    "da aba Especificação — e quantos ajustes isso custa.")
+        self.btn_grid_size.on_click(lambda b: self._render_grid_info())
+        self.out_grid_info = W.HTML()
+        card_grade = W.VBox([
+            W.HTML("<div class='satui-h'>Tamanho da grade (confira antes de rodar)</div>"),
+            W.HTML("<div class='satui-legend'>A busca é <b>cara</b>: cada especificação é "
+                   "ajustada na amostra cheia e, se passar nos filtros duros, revalidada "
+                   "<b>janela a janela</b> (walk-forward). O total cresce com o conjunto de "
+                   "defasagens <b>elevado</b> ao número de variáveis — quando o aviso "
+                   "aparecer, reduza <b>defasagens</b> ou <b>máx. variáveis</b> na aba "
+                   "<b>Especificação</b> em vez de esperar.</div>"),
+            self.btn_grid_size, self.out_grid_info,
+        ])
+        card_grade.add_class("satui-card")
+
+        # --- card: rodar a busca --------------------------------------------
+        self.cb_require_signs = W.Checkbox(
+            value=True, indent=False,
+            description="aplicar o filtro duro de sinal econômico")
+        self.cb_include_bench = W.Checkbox(
+            value=True, indent=False,
+            description="incluir os benchmarks (ARIMA e ingênuos)")
+        self.cb_cobertura = W.Checkbox(
+            value=False, indent=False,
+            description="medir a cobertura dos intervalos (bem mais lento)")
+        self.sl_rank_n = W.BoundedIntText(
+            value=20, min=1, max=200, description="linhas na tabela:",
+            style={"description_width": "initial"}, layout=W.Layout(width="210px"))
+        self.btn_search = W.Button(
+            description="Rodar busca", icon="search", button_style="success",
+            layout=W.Layout(width="auto", min_width="170px"),
+            tooltip="Ajusta e valida toda a grade, aplica os filtros duros e ranqueia.")
+        self.btn_search.on_click(self._on_search)
+        self.out_search_status = W.HTML()
+        self.out_search_progress = W.HTML()
+        self.out_search_timer = W.HTML()
+        self.out_search_resumo = W.HTML()
+        card_busca = W.VBox([
+            W.HTML("<div class='satui-h'>Busca champion-challenger</div>"),
+            W.HTML("<div class='satui-legend'>Para cada especificação: ajuste na amostra "
+                   "cheia (AIC/BIC, VIF, sinais), <b>filtros duros</b> (sinal econômico "
+                   "coerente e VIF sob o teto) e, para as que passam, <b>validação "
+                   "walk-forward</b>. O ranking usa o critério escolhido na aba "
+                   "<b>Especificação</b>. Desligar o filtro de sinal serve para "
+                   "diagnóstico — não para escolher o modelo.</div>"),
+            W.HBox([self.cb_require_signs, self.cb_include_bench],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            W.HBox([self.cb_cobertura, self.sl_rank_n, self.btn_search],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            self.out_search_status, self.out_search_progress, self.out_search_timer,
+            self.out_search_resumo,
+        ])
+        card_busca.add_class("satui-card")
+
+        # --- card: ranking ---------------------------------------------------
+        self.out_search_rank = W.HTML()
+        card_rank = W.VBox([
+            W.HTML("<div class='satui-h'>Ranking das qualificadas (e dos benchmarks)</div>"),
+            W.HTML("<div class='satui-legend'>★ marca a <b>campeã</b> pelo critério. As "
+                   "linhas de <b>benchmark</b> entram na mesma tabela de propósito: um "
+                   "modelo macro que não bate o ARIMA e os ingênuos <b>fora da amostra</b> "
+                   "ainda não está pronto, por melhor que seja o R². <b>vs ARIMA</b> abaixo "
+                   "de 1 significa erro menor que o do ARIMA.</div>"),
+            self.out_search_rank,
+        ])
+        card_rank.add_class("satui-card")
+
+        # --- card: descartadas ------------------------------------------------
+        self.out_search_desq = W.HTML()
+        card_desq = W.VBox([
+            W.HTML("<div class='satui-h'>Descartadas — e por quê</div>"),
+            W.HTML("<div class='satui-help'><div class='ttl'>Os dois filtros duros</div>"
+                   "<b>Sinal econômico invertido</b>: o efeito líquido da variável saiu com "
+                   "o sinal contrário ao declarado. É <b>desqualificador</b> mesmo com "
+                   "ajuste excelente — sob estresse a projeção iria na direção errada.<br>"
+                   "<b>VIF acima do teto</b>: duas macro explicam a mesma coisa; os "
+                   "coeficientes ficam instáveis e o sinal vira por acaso amostral.<br>"
+                   "Ver o que <b>saiu</b> importa tanto quanto ver a campeã: se quase tudo "
+                   "caiu por sinal, o problema costuma estar no sinal declarado ou na "
+                   "transformação da variável, não nas especificações.</div>"),
+            self.out_search_desq,
+        ])
+        card_desq.add_class("satui-card")
+
+        # --- card: escolha manual ----------------------------------------------
+        self.dd_pick_spec = W.Dropdown(
+            options=[], description="Especificação:",
+            style={"description_width": "initial"}, layout=W.Layout(width="98%"))
+        self.btn_pick_fit = W.Button(
+            description="Adotar e ajustar", icon="check", button_style="primary",
+            layout=W.Layout(width="auto", min_width="185px"),
+            tooltip="Ajusta a especificação escolhida na amostra cheia e a torna o modelo "
+                    "vigente (Diagnóstico, Cenários e Exportar passam a usá-la).")
+        self.btn_pick_fit.on_click(self._on_pick_fit)
+        self.out_pick_status = W.HTML()
+        self.out_pick_info = W.HTML()
+        card_pick = W.VBox([
+            W.HTML("<div class='satui-h'>Adotar uma especificação (você pode discordar)</div>"),
+            W.HTML("<div class='satui-legend'>A campeã já vem adotada como <b>modelo "
+                   "vigente</b>, mas o critério é uma régua, não um veredito: diferenças "
+                   "mínimas de RMSE não decidem nada e a especificação mais defensável "
+                   "costuma ser a mais <b>parcimoniosa</b> entre as equivalentes. Escolha "
+                   "outra aqui — inclusive uma <b>descartada</b>, se você discorda do sinal "
+                   "declarado — e ela passa a valer nas abas seguintes.</div>"),
+            self.dd_pick_spec,
+            W.HBox([self.btn_pick_fit], layout=W.Layout(align_items="center")),
+            self.out_pick_status, self.out_pick_info,
+        ])
+        card_pick.add_class("satui-card")
+
+        # --- card: benchmarks + Diebold-Mariano --------------------------------
+        self.btn_dm = W.Button(
+            description="Comparar com os benchmarks", icon="balance-scale",
+            layout=W.Layout(width="auto", min_width="240px"),
+            tooltip="Revalida a especificação adotada e testa, com Diebold-Mariano, se a "
+                    "vantagem sobre cada benchmark é estatisticamente distinguível.")
+        self.btn_dm.on_click(self._on_dm)
+        self.out_dm_status = W.HTML()
+        self.out_dm_timer = W.HTML()
+        self.out_dm = W.HTML()
+        card_bench = W.VBox([
+            W.HTML("<div class='satui-h'>Vantagem sobre os benchmarks é real? "
+                   "(Diebold-Mariano)</div>"),
+            W.HTML("<div class='satui-help'><div class='ttl'>Como ler</div>"
+                   "O teste compara o <b>diferencial de perda</b> das duas séries de erro "
+                   "fora da amostra. <b>H0: mesma acurácia.</b> p pequeno ⇒ a diferença "
+                   "<b>não</b> é ruído amostral. RMSE menor <b>sem</b> p pequeno é o caso "
+                   "mais comum em série curta: a campeã parece melhor, mas você não "
+                   "consegue distingui-la do passeio aleatório — e aí a parcimônia decide."
+                   "</div>"),
+            W.HBox([self.btn_dm], layout=W.Layout(align_items="center")),
+            self.out_dm_status, self.out_dm_timer, self.out_dm,
+        ])
+        card_bench.add_class("satui-card")
+
+        return (card_grade, card_busca, card_rank, card_desq, card_pick, card_bench)
+
+    # ------------------------------------------------------------------ grade
+    def _grid_params(self) -> dict:
+        """Parâmetros da grade lidos da aba **Especificação** (erro legível)."""
+        return dict(
+            lag_set=tuple(self._parse_ints(self.tx_lag_set.value, "defasagens")),
+            ar_orders=tuple(self._parse_ints(self.tx_ar_orders.value, "ordens AR")),
+            max_vars=int(self.sl_max_vars.value),
+            seasonal=bool(self.cb_seasonal.value),
+            seasonal_period=int(self.sl_seasonal_period.value),
+            max_specs=int(self.sl_max_specs.value),
+        )
+
+    def _grid_size(self, params=None) -> dict:
+        """Conta a grade **sem construí-la** e estima o custo da busca."""
+        p = params or self._grid_params()
+        cands = self.candidates()
+        kmax = min(int(p["max_vars"]), len(cands))
+        total = sum(math.comb(len(cands), k) * (len(p["lag_set"]) ** k) * len(p["ar_orders"])
+                    for k in range(1, kmax + 1))
+        efetivo = min(int(total), int(p["max_specs"]))
+        n = len(self.series) if self.series is not None else 0
+        horizonte = int(self.sl_horizon.value)
+        min_train = int(self.sl_min_train.value) or max(24, n // 2)
+        janelas = max(0, n - horizonte + 1 - min_train)
+        return {"candidatas": len(cands), "total": int(total), "efetivo": efetivo,
+                "janelas": int(janelas), "min_train": int(min_train),
+                "ajustes": int(efetivo * (1 + janelas))}
+
+    def _render_grid_info(self):
+        """Desenha o cartão de dimensionamento da grade (e devolve as contas)."""
+        if self.series is None:
+            self.out_grid_info.value = (
+                "<div class='satui-legend'>Carregue uma série na aba <b>Série</b> antes de "
+                "dimensionar a grade.</div>")
+            return None
+        try:
+            params = self._grid_params()
+            info = self._grid_size(params)
+        except ValueError as exc:
+            self.out_grid_info.value = f"<div class='satui-notice'>{exc}</div>"
+            return None
+        if not info["candidatas"]:
+            self.out_grid_info.value = (
+                "<div class='satui-notice'>Nenhuma variável marcada como <b>candidata</b> na "
+                "aba <b>Especificação</b> — a grade ficaria vazia.</div>")
+            return info
+        html = self._metric_tiles({
+            "candidatas": info["candidatas"],
+            "defasagens": len(params["lag_set"]),
+            "máx. variáveis": int(params["max_vars"]),
+            "grade": info["total"],
+            "a avaliar": info["efetivo"],
+            "janelas walk-forward": info["janelas"],
+            "ajustes (teto)": info["ajustes"],
+        })
+        avisos = []
+        if info["janelas"] <= 0:
+            avisos.append(
+                "❌ <b>Não sobra janela de validação</b>: com mínimo de treino "
+                f"{info['min_train']} e horizonte {int(self.sl_horizon.value)} não há "
+                f"origem possível em {len(self.series)} observações. Reduza o horizonte ou "
+                "o mínimo de treino na aba <b>Especificação</b>.")
+        if info["total"] > info["efetivo"]:
+            avisos.append(
+                f"⚠️ A grade tem <b>{info['total']}</b> especificações e o teto é "
+                f"<b>{info['efetivo']}</b>: as demais <b>não serão avaliadas</b> (o corte é "
+                "por ordem de geração, não por qualidade). Aumente <i>máx. especificações</i> "
+                "ou reduza <i>defasagens</i>/<i>máx. variáveis</i>.")
+        if info["ajustes"] > 20000:
+            avisos.append(
+                f"⚠️ Cerca de <b>{info['ajustes']:,}</b> ajustes no pior caso — isso são "
+                "<b>muitos minutos</b>. Reduza o conjunto de defasagens (cada defasagem a "
+                "mais multiplica a grade) ou o número máximo de variáveis.".replace(",", "."))
+        elif info["ajustes"] > 5000:
+            avisos.append(
+                f"ℹ️ Cerca de <b>{info['ajustes']:,}</b> ajustes no pior caso — conte alguns "
+                "minutos. Ligue <i>Manter cluster ativo</i> se estiver no Databricks."
+                .replace(",", "."))
+        if self.cb_cobertura.value:
+            avisos.append("ℹ️ A <b>cobertura dos intervalos</b> está ligada: cada janela "
+                          "simula trajetórias além do ajuste — conte várias vezes o tempo "
+                          "acima.")
+        html += "".join(f"<div class='satui-notice' style='margin-top:8px'>{a}</div>"
+                        for a in avisos)
+        self.out_grid_info.value = html
+        return info
+
+    def _clear_selecao_outputs(self):
+        """Zera as saídas da aba Seleção (dados novos ⇒ busca antiga sem sentido)."""
+        for w in ("out_search_status", "out_search_progress", "out_search_timer",
+                  "out_search_resumo", "out_search_rank", "out_search_desq",
+                  "out_pick_status", "out_pick_info", "out_dm_status", "out_dm",
+                  "out_grid_info"):
+            widget = getattr(self, w, None)
+            if widget is not None:
+                widget.value = ""
+        dd = getattr(self, "dd_pick_spec", None)
+        if dd is not None:
+            dd.options = []
+
+    # ------------------------------------------------------------------ modelo da busca
+    def _search_model(self):
+        """``(classe, kwargs, aviso)`` do modelo candidato da busca.
+
+        Os modelos que não são candidatos (ARIMA e os ingênuos) entram no estudo
+        como **benchmark**: a grade é varrida com ARDL, a mesma convenção de
+        :meth:`to_config`.
+        """
+        key = self.dd_model.value
+        registry = MODELOS[key]["registry"]
+        aviso = ""
+        if registry is None:
+            aviso = (f"o modelo '{key}' não é candidato da busca (entra como benchmark) — "
+                     "a grade foi varrida com ARDL.")
+            registry = "ardl"
+        cls = _E.config.MODEL_REGISTRY[registry]
+        if registry == "vasicek":
+            kwargs = {"rho": float(self.fl_rho.value),
+                      "pd_ttc": (None if self.cb_ttc_auto.value else float(self.fl_pd_ttc.value)),
+                      "cov_type": self.dd_cov.value}
+        elif registry == "ardl":
+            kwargs = {"cov_type": self.dd_cov.value}
+        else:
+            kwargs = {}
+        return cls, kwargs, aviso
+
+    # ------------------------------------------------------------------ busca
+    def _on_search(self, b):
+        if self.series is None:
+            self.out_search_status.value = (
+                "<div class='satui-notice'>Sem série carregada — traga os dados na aba "
+                "<b>Série</b> (ou carregue o estudo de referência).</div>")
+            return
+        cands = self.candidates()
+        if not cands:
+            self.out_search_status.value = (
+                "<div class='satui-notice'>Marque ao menos uma variável <b>candidata</b> na "
+                "aba <b>Especificação</b>.</div>")
+            return
+        if self.macro is None:
+            self.out_search_status.value = (
+                "<div class='satui-notice'>Há candidatas marcadas mas nenhuma macro "
+                "carregada.</div>")
+            return
+        try:
+            params = self._grid_params()
+        except ValueError as exc:
+            self.out_search_status.value = f"<div class='satui-notice'>{exc}</div>"
+            return
+        info = self._grid_size(params)
+        self._render_grid_info()
+        if info["janelas"] <= 0:
+            self.out_search_status.value = (
+                "<div class='satui-notice'>Sem janela de validação fora da amostra: reduza o "
+                "<b>horizonte</b> ou o <b>mínimo de treino</b> na aba Especificação.</div>")
+            return
+
+        cls, kwargs, aviso = self._search_model()
+        if aviso:
+            self._log(f"[busca] {aviso}")
+        band_sims = 200 if self.cb_cobertura.value else 0
+        horizonte = int(self.sl_horizon.value)
+        min_train = int(self.sl_min_train.value) or None
+        self._search_steps = []
+        self.out_search_status.value = ""
+        for w in (self.out_search_resumo, self.out_search_rank, self.out_search_desq,
+                  self.out_dm, self.out_dm_status, self.out_pick_info, self.out_pick_status):
+            w.value = ""
+
+        with self._busy(self.btn_search, self.btn_pick_fit, self.btn_dm, self.btn_grid_size,
+                        self.btn_fit_now), \
+                self._cronometro(self.out_search_timer, "busca em andamento") as decorrido:
+            try:
+                self._search_prog("grade", "Montar a grade de especificações", "run")
+                import warnings
+
+                with warnings.catch_warnings(record=True) as capturados:
+                    warnings.simplefilter("always")
+                    grid = _E.selection.make_grid(
+                        cands, lag_set=params["lag_set"], min_vars=1,
+                        max_vars=params["max_vars"], ar_orders=params["ar_orders"],
+                        link=self.dd_link.value, expected_signs=self.expected_signs(),
+                        seasonal=params["seasonal"],
+                        seasonal_period=params["seasonal_period"],
+                        max_specs=params["max_specs"])
+                for a in capturados:
+                    self._log(f"[busca] {a.message}")
+                self._spec_por_desc = {s.describe(): s for s in grid}
+                self._search_prog("grade", "Montar a grade de especificações", "ok",
+                                  f"{len(grid)} especificações")
+                rot_aval = (f"Avaliar {len(grid)} especificações (ajuste + walk-forward "
+                            f"de {info['janelas']} janelas)")
+                self._search_prog("aval", rot_aval, "run")
+                if self.cb_include_bench.value:
+                    self._search_prog("bench", "Benchmarks: ARIMA e ingênuos", "run")
+                res = _E.selection.search(
+                    self.series, self.macro, grid, model_cls=cls, model_kwargs=kwargs,
+                    expected_signs=self.expected_signs(), link=self.dd_link.value,
+                    horizon=horizonte, min_train=min_train,
+                    criterion=self.dd_criterion.value, vif_max=float(self.fl_vif_max.value),
+                    require_signs=bool(self.cb_require_signs.value),
+                    include_benchmarks=bool(self.cb_include_bench.value),
+                    band_sims=band_sims)
+            except Exception as exc:  # noqa: BLE001
+                self._search_prog_erro(exc)
+                self.out_search_status.value = (
+                    "<div class='satui-notice'>✗ A busca falhou — veja o <b>Console</b> "
+                    f"(rodapé): {type(exc).__name__}.</div>")
+                self._log(f"[busca] ERRO: {type(exc).__name__}: {exc}")
+                return
+            secs = decorrido()
+
+        self.search_ = res
+        self._search_secs = secs
+        rk = res.ranking
+        n_qual = int((rk["status"] == "qualificado").sum()) if len(rk) else 0
+        self._search_prog("aval", rot_aval, "ok",
+                          f"{n_qual} qualificada(s) de {len(grid)} · {self._fmt_dur(secs)}")
+        if self.cb_include_bench.value:
+            self._search_prog("bench", "Benchmarks: ARIMA e ingênuos", "ok",
+                              f"{len(res.benchmarks)} referência(s)")
+        campea = res.best_spec.describe() if res.best_spec is not None else "—"
+        self._search_prog("rank", "Ranking e escolha da campeã", "ok", campea)
+
+        # a campeã já entra como modelo vigente (o seletor abaixo permite discordar)
+        if res.best is not None and res.best.result is not None:
+            self.model_, self.fit_ = res.best, res.best.result
+            self.selected_spec_ = res.best_spec
+            self._clear_dirty()
+            self._render_fit()
+        self._render_search()
+        self._refresh_bar()
+        self._log(f"[busca] {len(grid)} especificações avaliadas em {self._fmt_dur(secs)} · "
+                  f"{n_qual} qualificada(s) · campeã: {campea}")
+
+    # ------------------------------------------------------------------ ranking
+    @staticmethod
+    def _motivo_descarte(status) -> tuple:
+        """``(situação, motivo)`` legíveis a partir do ``status`` do ranking."""
+        s = str(status)
+        if s == "qualificado":
+            return "qualificada", "passou nos filtros duros"
+        if s == "benchmark":
+            return "benchmark", "referência (não é candidata)"
+        if s.startswith("reprovado: sinal"):
+            variaveis = re.findall(r"'([^']+)'", s)
+            alvo = ", ".join(variaveis) if variaveis else "—"
+            return "descartada", f"sinal econômico invertido em {alvo}"
+        if s.startswith("reprovado: VIF"):
+            m = re.search(r"VIF=([\d.]+)>([\d.]+)", s)
+            if m:
+                return "descartada", (f"colinearidade: VIF {m.group(1)} acima do teto "
+                                      f"{m.group(2)}")
+            return "descartada", "colinearidade (VIF acima do teto)"
+        if s.startswith("erro"):
+            return "erro", s.split(":", 1)[1].strip() if ":" in s else s
+        return "—", s
+
+    @staticmethod
+    def _rotulo_sinais(v) -> str:
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            return "—"
+        return "✓ coerentes" if bool(v) else "✗ invertido"
+
+    @staticmethod
+    def _css_situacao(v):
+        """Situação da especificação no ranking (qualificada/descartada/erro)."""
+        s = _sem_acento(v)
+        if s.startswith("qualificada"):
+            return "color:var(--ok-tx);background-color:var(--ok-bg);font-weight:600"
+        if s.startswith("descartada"):
+            return "color:var(--bad-tx);background-color:var(--bad-bg);font-weight:600"
+        if s.startswith("erro"):
+            return "color:var(--warn-tx);background-color:var(--warn-bg);font-weight:600"
+        return "color:var(--muted)"
+
+    @staticmethod
+    def _css_motivo(v):
+        """Motivo do descarte: sinal invertido (vermelho) × VIF (âmbar)."""
+        s = _sem_acento(v)
+        if "sinal" in s:
+            return "color:var(--bad-tx);background-color:var(--bad-bg);font-weight:600"
+        if "colinearidade" in s or "vif" in s:
+            return "color:var(--warn-tx);background-color:var(--warn-bg);font-weight:600"
+        if "passou" in s:
+            return "color:var(--ok-tx)"
+        return "color:var(--muted)"
+
+    def _css_vif_factory(self, teto):
+        """Colore o VIF contra o teto vigente (fecha sobre ``teto``)."""
+        meio = max(2.0, float(teto) / 2.0)
+
+        def _css(v):
+            try:
+                x = float(v)
+            except (TypeError, ValueError):
+                return ""
+            if x != x:
+                return "color:var(--muted)"
+            if x > float(teto):
+                return "color:var(--bad-tx);background-color:var(--bad-bg);font-weight:600"
+            if x > meio:
+                return "color:var(--warn-tx);font-weight:600"
+            return "color:var(--ok-tx)"
+
+        return _css
+
+    def _linhas_ranking(self, df, champ_desc, n):
+        """Converte ``n`` linhas do ranking cru em linhas legíveis da tela."""
+        linhas = []
+        for i, (_, r) in enumerate(df.head(int(n)).iterrows(), start=1):
+            desc = str(r["modelo"])
+            spec = self._spec_por_desc.get(desc)
+            campea = champ_desc is not None and desc == champ_desc
+            linhas.append({
+                "#": ("★ " if campea else "") + str(i),
+                "especificação": desc,
+                "variáveis": ", ".join(spec.exog) if spec else "—",
+                "defasagens": (", ".join(str(list(l)[0]) for l in spec.exog.values())
+                               if spec and spec.exog else "—"),
+                "AR": (int(spec.ar) if spec else np.nan),
+                "AIC": r.get("AIC", np.nan), "BIC": r.get("BIC", np.nan),
+                "RMSE fora": r.get("oos_rmse", np.nan),
+                "vs ARIMA": r.get("vs_arima", np.nan),
+                "VIF máx.": r.get("max_vif", np.nan),
+                "cobertura": r.get("cobertura", np.nan),
+                "sinais": self._rotulo_sinais(r.get("sinais_ok")),
+                "situação": r["situação"],
+                "motivo": r["motivo"],
+            })
+        return pd.DataFrame(linhas)
+
+    def _render_search(self):
+        """Resumo, ranking, descartadas e seletor da última busca."""
+        res = self.search_
+        if res is None:
+            return
+        rk = res.ranking.copy()
+        if rk.empty:
+            self.out_search_status.value = (
+                "<div class='satui-notice'>A busca não avaliou nenhuma especificação.</div>")
+            return
+        situ, motivo = zip(*[self._motivo_descarte(s) for s in rk["status"]])
+        rk["situação"], rk["motivo"] = list(situ), list(motivo)
+        champ = res.best_spec.describe() if res.best_spec is not None else None
+        n_top = int(self.sl_rank_n.value)
+        teto = float(self.fl_vif_max.value)
+        qual = rk[rk["situação"].isin(("qualificada", "benchmark"))]
+        desq = rk[~rk["situação"].isin(("qualificada", "benchmark"))]
+
+        # --- resumo -------------------------------------------------------
+        n_sinal = int(desq["motivo"].str.startswith("sinal").sum()) if len(desq) else 0
+        n_vif = int(desq["motivo"].str.startswith("colinearidade").sum()) if len(desq) else 0
+        n_erro = int((rk["situação"] == "erro").sum())
+        tiles = {
+            "avaliadas": int((rk["situação"] != "benchmark").sum()),
+            "qualificadas": int((rk["situação"] == "qualificada").sum()),
+            "sinal invertido": n_sinal,
+            "VIF alto": n_vif,
+            "erro no ajuste": n_erro,
+            "benchmarks": int((rk["situação"] == "benchmark").sum()),
+        }
+        if self._search_secs is not None:
+            tiles["tempo"] = self._fmt_dur(self._search_secs)
+        self.out_search_resumo.value = self._metric_tiles(tiles)
+
+        if champ is None:
+            self.out_search_status.value = (
+                "<div class='satui-notice'>⚠️ <b>Nenhuma especificação qualificada</b> — "
+                "todas caíram nos filtros duros. Revise os <b>sinais esperados</b> (é comum "
+                "declarar o sinal de uma variável já invertida, como um índice de "
+                "confiança), afrouxe o <b>teto de VIF</b> ou reduza o número de variáveis "
+                "por especificação. A tabela de descartadas abaixo diz exatamente o que "
+                "aconteceu.</div>")
+        else:
+            self.out_search_status.value = (
+                "<div class='satui-legend' style='color:var(--ok-ink)'>✓ Campeã pelo critério "
+                f"<b>{self.dd_criterion.value}</b>: <code>{champ}</code> — já adotada como "
+                "modelo vigente.</div>")
+
+        # --- ranking ------------------------------------------------------
+        tab = self._linhas_ranking(qual, champ, n_top)
+        cols = ["#", "especificação", "variáveis", "defasagens", "AR", "AIC", "BIC",
+                "RMSE fora", "vs ARIMA", "VIF máx.", "sinais", "situação"]
+        if len(tab) and tab["cobertura"].notna().any():
+            cols.insert(-2, "cobertura")
+        if len(tab):
+            self.out_search_rank.value = self._df_html(
+                tab[cols], max_height="420px",
+                color_map={"situação": self._css_situacao, "sinais": self._css_coerencia,
+                           "VIF máx.": self._css_vif_factory(teto)},
+                fmt_cols={"AIC": "{:.1f}", "BIC": "{:.1f}", "RMSE fora": "{:.5f}",
+                          "vs ARIMA": "{:.2f}", "VIF máx.": "{:.2f}"},
+                pct_cols=["cobertura"], precision=4)
+            if len(qual) > len(tab):
+                self.out_search_rank.value += (
+                    f"<div class='satui-legend'>Mostrando {len(tab)} de {len(qual)} linhas "
+                    "— aumente <i>linhas na tabela</i> para ver mais.</div>")
+        else:
+            self.out_search_rank.value = (
+                "<div class='satui-legend'>Nenhuma especificação qualificada.</div>")
+
+        # --- descartadas ---------------------------------------------------
+        if len(desq):
+            tab_d = self._linhas_ranking(desq, None, n_top)
+            cols_d = ["#", "especificação", "variáveis", "defasagens", "AIC", "VIF máx.",
+                      "sinais", "motivo"]
+            self.out_search_desq.value = self._df_html(
+                tab_d[cols_d], max_height="360px",
+                color_map={"motivo": self._css_motivo, "sinais": self._css_coerencia,
+                           "VIF máx.": self._css_vif_factory(teto)},
+                fmt_cols={"AIC": "{:.1f}", "VIF máx.": "{:.2f}"}, precision=4)
+            if len(desq) > len(tab_d):
+                self.out_search_desq.value += (
+                    f"<div class='satui-legend'>Mostrando {len(tab_d)} de {len(desq)} "
+                    "descartadas.</div>")
+        else:
+            self.out_search_desq.value = (
+                "<div class='satui-legend' style='color:var(--ok-ink)'>Nenhuma especificação "
+                "foi descartada pelos filtros duros.</div>")
+
+        # --- seletor -------------------------------------------------------
+        opcoes = []
+        for _, r in qual.head(n_top).iterrows():
+            desc = str(r["modelo"])
+            if desc not in self._spec_por_desc:      # linha de benchmark
+                continue
+            marca = "★ campeã · " if desc == champ else ""
+            rmse = r.get("oos_rmse", np.nan)
+            rot = f"{marca}{desc}"
+            if pd.notna(rmse):
+                rot += f" · RMSE {float(rmse):.5f}"
+            opcoes.append((rot, desc))
+        for _, r in desq.head(max(5, n_top // 2)).iterrows():
+            desc = str(r["modelo"])
+            if desc not in self._spec_por_desc:
+                continue
+            opcoes.append((f"⚠ descartada · {desc} · {r['motivo']}", desc))
+        self.dd_pick_spec.options = opcoes
+        if champ is not None and any(v == champ for _, v in opcoes):
+            self.dd_pick_spec.value = champ
+
+    # ------------------------------------------------------------------ escolha manual
+    def _on_pick_fit(self, b):
+        desc = self.dd_pick_spec.value
+        spec = self._spec_por_desc.get(desc) if desc else None
+        if spec is None:
+            self.out_pick_status.value = (
+                "<div class='satui-notice'>Rode a busca e escolha uma especificação do "
+                "ranking antes.</div>")
+            return
+        cls, kwargs, _aviso = self._search_model()
+        with self._busy(self.btn_pick_fit, self.btn_search, self.btn_dm,
+                        status=self.out_pick_status, msg="ajustando a especificação escolhida…"):
+            try:
+                modelo = cls(self.series, self.macro, spec, **kwargs)
+                fit = modelo.fit()
+            except Exception as exc:  # noqa: BLE001
+                self.out_pick_status.value = (
+                    f"<div class='satui-notice'>Não foi possível ajustar: {exc}</div>")
+                self._log(f"[seleção] erro ao ajustar a especificação escolhida: {exc}")
+                return
+        self.model_, self.fit_ = modelo, fit
+        self.selected_spec_ = spec
+        self._clear_dirty()
+        self._render_fit()
+        self._refresh_bar()
+        self.out_pick_status.value = (
+            "<div class='satui-legend' style='color:var(--ok-ink)'>✓ Especificação adotada "
+            f"como <b>modelo vigente</b>: <code>{spec.describe()}</code>.</div>")
+        self.out_pick_info.value = (
+            self._metric_tiles({k: v for k, v in fit.metrics().items()
+                                if k in ("nobs", "n_params", "AIC", "BIC", "R2", "sigma")})
+            + self._coef_html(fit)
+            + "<div class='satui-legend'>A aba <b>Especificação</b> continua descrevendo a "
+              "<i>sua</i> especificação (candidatas e defasagens da matriz de sinais): "
+              "<i>Ajustar agora</i> lá refaz aquela, não esta. As abas <b>Diagnóstico</b>, "
+              "<b>Cenários</b> e <b>Exportar</b> usam a adotada aqui.</div>")
+        aic = f" · AIC {fit.aic:.1f}" if fit.aic is not None else ""
+        self._log(f"[seleção] especificação adotada: {spec.describe()}{aic}")
+
+    # ------------------------------------------------------------------ benchmarks / DM
+    def _on_dm(self, b):
+        res = self.search_
+        if res is None or not res.benchmarks:
+            self.out_dm_status.value = (
+                "<div class='satui-notice'>Rode a busca com <b>incluir os benchmarks</b> "
+                "ligado antes de comparar.</div>")
+            return
+        spec = self.selected_spec_
+        if spec is None:
+            self.out_dm_status.value = (
+                "<div class='satui-notice'>Adote uma especificação no seletor acima "
+                "antes.</div>")
+            return
+        cls, kwargs, _aviso = self._search_model()
+        horizonte = int(self.sl_horizon.value)
+        min_train = int(self.sl_min_train.value) or None
+        with self._busy(self.btn_dm, self.btn_search, self.btn_pick_fit), \
+                self._cronometro(self.out_dm_timer,
+                                 "revalidando a especificação adotada janela a janela"):
+            try:
+                wf = _E.selection.walk_forward(
+                    lambda s, m: cls(s, m, spec, **kwargs), self.series, self.macro,
+                    min_train=min_train, horizon=horizonte)
+            except Exception as exc:  # noqa: BLE001
+                self.out_dm_status.value = (
+                    f"<div class='satui-notice'>Não foi possível revalidar: {exc}</div>")
+                self._log(f"[seleção] erro no walk-forward da adotada: {exc}")
+                return
+        rmse_ad = float(wf.get("rmse", np.nan))
+        linhas = []
+        for nome, bwf in res.benchmarks.items():
+            dm = _E.selection.diebold_mariano(wf["errors"], bwf["errors"], h=horizonte)
+            rmse_b = float(bwf.get("rmse", np.nan))
+            razao = rmse_ad / rmse_b if np.isfinite(rmse_b) and rmse_b > 0 else np.nan
+            p = dm["pvalue"]
+            if not np.isfinite(p if p is not None else np.nan):
+                veredito = "— amostra curta para o teste"
+            elif np.isfinite(razao) and razao < 1.0:
+                veredito = ("✓ adotada melhor e distinguível" if p <= 0.05
+                            else "adotada melhor, mas indistinguível")
+            elif np.isfinite(razao) and razao > 1.0:
+                veredito = ("✗ a referência é melhor" if p <= 0.05
+                            else "referência melhor, mas indistinguível")
+            else:
+                veredito = "empate"
+            linhas.append({"referência": nome, "RMSE da referência": rmse_b,
+                           "RMSE da adotada": rmse_ad, "razão adotada/ref.": razao,
+                           "DM (estat.)": dm["stat"], "p-valor": dm["pvalue"],
+                           "janelas": int(bwf.get("n_windows", 0)), "veredito": veredito})
+        tab = pd.DataFrame(linhas).sort_values("RMSE da referência").reset_index(drop=True)
+        self.compare_ = tab
+        self.out_dm.value = self._df_html(
+            tab, color_map={"veredito": self._css_coerencia, "p-valor": self._css_pvalor},
+            fmt_cols={"RMSE da referência": "{:.5f}", "RMSE da adotada": "{:.5f}",
+                      "razão adotada/ref.": "{:.3f}", "DM (estat.)": "{:.3f}"},
+            precision=4)
+        piores = [r for r in linhas
+                  if pd.notna(r["razão adotada/ref."]) and r["razão adotada/ref."] >= 1.0]
+        if piores:
+            nomes = ", ".join(r["referência"] for r in piores)
+            self.out_dm_status.value = (
+                f"<div class='satui-notice'>⚠️ A especificação adotada <b>não supera</b> "
+                f"{nomes} fora da amostra. Antes de seguir para a projeção, revise a "
+                "especificação (defasagens, ordem AR, transformação) — um satélite que "
+                "perde para o passeio aleatório não está capturando sinal macro.</div>")
+        else:
+            self.out_dm_status.value = (
+                "<div class='satui-legend' style='color:var(--ok-ink)'>✓ A adotada tem erro "
+                "menor que o de todas as referências fora da amostra.</div>")
+        self._log(f"[seleção] comparação com {len(tab)} referência(s) · RMSE da adotada "
+                  f"{rmse_ad:.5f}")
+
+    # ==================================================================
+    # Aba Diagnóstico — a bateria sobre o modelo vigente
+    # ==================================================================
+    #: blocos do placar: ``(rótulo, testes da bateria, o que a família mede)``
+    _BLOCOS_DIAG = (
+        ("Resíduo", ("Ljung-Box", "Breusch-Godfrey", "Durbin-Watson"),
+         "autocorrelação sobrando"),
+        ("Heterocedasticidade", ("Breusch-Pagan", "White", "ARCH-LM"),
+         "variância do erro instável"),
+        ("Normalidade", ("Jarque-Bera",), "forma da distribuição do erro"),
+        ("Estabilidade", ("Chow", "Quandt-Andrews sup-F", "CUSUM"),
+         "coeficientes mudando na amostra"),
+        ("Colinearidade", ("VIF",), "macro redundante"),
+    )
+
+    def _build_tab_diagnostico(self):
+        """Cartões da aba **Diagnóstico** (devolve a tupla de filhos do VBox)."""
+        self.fl_alpha_diag = W.BoundedFloatText(
+            value=0.05, min=0.001, max=0.20, step=0.01, description="nível α:",
+            style={"description_width": "initial"}, layout=W.Layout(width="140px"))
+        self.dd_chow_break = W.Dropdown(
+            options=[], description="quebra do Chow:",
+            style={"description_width": "initial"}, layout=W.Layout(width="250px"))
+        self.cb_diag_plots = W.Checkbox(value=True, indent=False,
+                                        description="desenhar os gráficos")
+        self.btn_diag = W.Button(
+            description="Rodar diagnóstico", icon="stethoscope", button_style="primary",
+            layout=W.Layout(width="auto", min_width="200px"),
+            tooltip="Roda a bateria completa sobre os resíduos do modelo vigente.")
+        self.btn_diag.on_click(self._on_diag)
+        self.out_diag_notice = W.HTML()
+        self.out_diag_status = W.HTML()
+        card_acao = W.VBox([
+            W.HTML("<div class='satui-h'>Bateria de diagnóstico do modelo vigente</div>"),
+            W.HTML("<div class='satui-legend'>O modelo vigente é o último ajustado — pela "
+                   "aba <b>Especificação</b> ou adotado na aba <b>Seleção</b>. A bateria "
+                   "olha o que o ajuste <b>deixou</b> no resíduo: se sobrou dinâmica, se a "
+                   "variância é instável, se os coeficientes mudaram no meio da amostra. "
+                   "Nenhum teste sozinho reprova um modelo — a leitura é conjunta, e a "
+                   "<b>estabilidade</b> é a que mais pesa para projetar.</div>"),
+            W.HBox([self.fl_alpha_diag, self.dd_chow_break, self.cb_diag_plots,
+                    self.btn_diag],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            self.out_diag_notice, self.out_diag_status,
+        ])
+        card_acao.add_class("satui-card")
+
+        self.out_diag_placar = W.HTML()
+        card_placar = W.VBox([
+            W.HTML("<div class='satui-h'>Placar por família de teste</div>"),
+            W.HTML("<div class='satui-legend'>Cada bloco mostra o <b>pior</b> veredito da "
+                   "família e a evidência (estatística e p-valor). ⚠️ significa "
+                   "<b>inconclusivo</b> — o teste não rodou ou não tem graus de liberdade —, "
+                   "não aprovação.</div>"),
+            self.out_diag_placar,
+        ])
+        card_placar.add_class("satui-card")
+
+        self.out_diag_tabela = W.HTML()
+        card_tab = W.VBox([
+            W.HTML("<div class='satui-h'>Todos os testes</div>"),
+            W.HTML("<div class='satui-legend'>A coluna <b>H0</b> é a hipótese nula: "
+                   "<b>p pequeno rejeita a nula</b>. Como a nula muda de teste para teste, "
+                   "a coluna <b>ok</b> já traduz tudo para a mesma direção — ✓ é o "
+                   "resultado <b>desejável</b> para um bom modelo.</div>"),
+            self.out_diag_tabela,
+        ])
+        card_tab.add_class("satui-card")
+
+        self.out_diag_vif = W.HTML()
+        card_vif = W.VBox([
+            W.HTML("<div class='satui-h'>Colinearidade das macro (VIF)</div>"),
+            self.out_diag_vif,
+        ])
+        card_vif.add_class("satui-card")
+
+        self.out_diag_leitura = W.HTML()
+        card_leitura = W.VBox([
+            W.HTML("<div class='satui-h'>O que fazer</div>"),
+            self.out_diag_leitura,
+        ])
+        card_leitura.add_class("satui-card")
+
+        self.out_diag_plot_fit = W.HTML()
+        self.out_diag_plot_resid = W.HTML()
+        card_plots = W.VBox([
+            W.HTML("<div class='satui-h'>Ajuste e resíduos</div>"),
+            W.HTML("<div class='satui-legend'>O gráfico de ajuste mostra se o modelo "
+                   "acompanha o <b>nível</b> e as <b>viradas</b> do ciclo; o painel de "
+                   "resíduos é a leitura visual da bateria (ACF para autocorrelação, "
+                   "histograma e QQ para normalidade).</div>"),
+            self.out_diag_plot_fit, self.out_diag_plot_resid,
+        ])
+        card_plots.add_class("satui-card")
+
+        return (card_acao, card_placar, card_tab, card_vif, card_leitura, card_plots)
+
+    def _sync_diag_widgets(self):
+        """Repõe as datas candidatas do Chow a partir do design do ajuste."""
+        dd = getattr(self, "dd_chow_break", None)
+        if dd is None:
+            return
+        fit = self.fit_
+        X = getattr(fit, "exog", None) if fit is not None else None
+        if X is None or getattr(X, "shape", (0, 0))[0] < 8:
+            dd.options = []
+            return
+        k = int(X.shape[1])
+        n = int(X.shape[0])
+        opcoes = [(str(p)[:10], i) for i, p in enumerate(X.index)
+                  if k < i < n - k]
+        dd.options = opcoes
+        if opcoes:
+            dd.value = opcoes[len(opcoes) // 2][1]
+
+    def _invalidate_diag(self, motivo="o modelo vigente mudou"):
+        """Invalida as saídas do diagnóstico (padrão ``_mark_dirty`` do projeto)."""
+        self.diagnostics_ = self.diag_blocks_ = self.vif_ = None
+        if getattr(self, "out_diag_plot_resid", None) is None:   # ainda em construção
+            return
+        for w in ("out_diag_placar", "out_diag_tabela", "out_diag_vif", "out_diag_leitura",
+                  "out_diag_plot_fit", "out_diag_plot_resid", "out_diag_status"):
+            getattr(self, w).value = ""
+        self.out_diag_notice.value = (
+            f"<div class='satui-notice'>⚠️ <b>Diagnóstico desatualizado</b> — {motivo}. "
+            "Clique em <i>Rodar diagnóstico</i>.</div>") if self.fit_ is not None else ""
+        self._sync_diag_widgets()
+
+    @staticmethod
+    def _ok3(v):
+        """Normaliza a coluna ``ok`` da bateria em ``True``/``False``/``None``."""
+        if v is None:
+            return None
+        if isinstance(v, (bool, np.bool_)):
+            return bool(v)
+        if isinstance(v, float) and np.isnan(v):
+            return None
+        s = str(v).strip().lower()
+        if s in ("true", "1", "1.0"):
+            return True
+        if s in ("false", "0", "0.0"):
+            return False
+        return None
+
+    def _diag_table(self, alpha, break_index=None) -> pd.DataFrame:
+        """Bateria de resíduos + estabilidade em data conhecida/desconhecida + VIF."""
+        diag = _E.diagnostics
+        fit = self.fit_
+        rep = fit.diagnostics(alpha=alpha)
+        extras = []
+        self.vif_ = None
+        X = fit.exog
+        if X is not None and getattr(X, "shape", (0, 0))[1] > 0:
+            y = (fit.fitted_link + fit.resid).to_numpy(dtype=float)
+            if break_index is not None:
+                try:
+                    extras.append(diag.chow_test(y, X, int(break_index), alpha=alpha))
+                except Exception as exc:  # noqa: BLE001
+                    extras.append(diag.DiagnosticResult(
+                        "Chow", np.nan, None, None, "sem quebra estrutural",
+                        f"indisponível: {str(exc)[:60]}"))
+            try:
+                extras.append(diag.quandt_andrews(y, X))
+            except Exception as exc:  # noqa: BLE001
+                extras.append(diag.DiagnosticResult(
+                    "Quandt-Andrews sup-F", np.nan, None, None,
+                    "sem quebra (coeficientes estáveis)", f"indisponível: {str(exc)[:60]}"))
+            # VIF: só as colunas macro da especificação (o filtro duro da seleção)
+            cols = _E.selection._macro_columns(fit)
+            if len(cols) >= 2:
+                self.vif_ = diag.vif(X[cols])
+                mx = float(self.vif_["VIF"].max())
+                teto = float(self.fl_vif_max.value)
+                extras.append(diag.DiagnosticResult(
+                    test="VIF", statistic=mx, pvalue=None, passed=bool(mx <= teto),
+                    h0="sem colinearidade excessiva entre as macro",
+                    conclusion=("colinearidade sob controle" if mx <= teto
+                                else f"VIF máximo {mx:.1f} acima do teto {teto:.1f}")))
+            elif len(cols) == 1:
+                self.vif_ = pd.DataFrame({"variavel": cols, "VIF": [1.0]})
+        if extras:
+            rep = pd.concat([rep, pd.DataFrame([r.to_row() for r in extras])],
+                            ignore_index=True)
+        return rep
+
+    def _bloco_veredito(self, tab, rotulo, testes, resumo) -> dict:
+        """Veredito de um bloco do placar: o **pior** teste da família e a evidência."""
+        sub = tab[tab["teste"].isin(testes)] if "teste" in tab.columns else tab.iloc[0:0]
+        if sub.empty:
+            return {"bloco": rotulo, "nivel": "na", "veredito": "não avaliado",
+                    "detalhe": f"{resumo} — os testes desta família não se aplicam a este "
+                               "modelo", "falhas": 0, "n": 0, "teste": None}
+        ordem = {"bad": 0, "warn": 1, "ok": 2}
+        pior = None
+        falhas = 0
+        for _, r in sub.iterrows():
+            ok = self._ok3(r.get("ok"))
+            nivel = "ok" if ok is True else ("bad" if ok is False else "warn")
+            if ok is False:
+                falhas += 1
+            if pior is None or ordem[nivel] < ordem[pior[0]]:
+                pior = (nivel, r)
+        nivel, r = pior
+        est, p = r.get("estatistica"), r.get("p_valor")
+        det = str(r["teste"])
+        if pd.notna(est):
+            det += f": {float(est):.3f}"
+        if pd.notna(p):
+            det += f" · p = {float(p):.4f}"
+        conclusao = str(r.get("conclusao") or "").strip()
+        if conclusao:
+            det += f" — {conclusao}"
+        veredito = {"ok": "passou", "bad": "reprovado", "warn": "inconclusivo"}[nivel]
+        return {"bloco": rotulo, "nivel": nivel, "veredito": veredito, "detalhe": det,
+                "falhas": falhas, "n": int(len(sub)), "teste": str(r["teste"])}
+
+    def _placar_html(self, blocos) -> str:
+        """Mosaico de blocos coloridos por token semântico."""
+        cor = {"ok": "var(--ok-tx)", "warn": "var(--warn-tx)", "bad": "var(--bad-tx)",
+               "na": "var(--muted)"}
+        icone = {"ok": "✅", "warn": "⚠️", "bad": "❌", "na": "—"}
+        cards = []
+        for b in blocos:
+            n = b["nivel"]
+            cls = n if n in ("ok", "warn", "bad") else ""
+            extra = (f" ({b['falhas']} de {b['n']} teste{'s' if b['n'] > 1 else ''})"
+                     if b["falhas"] else "")
+            cards.append(
+                f"<div class='satui-bloco {cls}'><div class='k'>{b['bloco']}</div>"
+                f"<div class='v' style='color:{cor[n]}'>{icone[n]} {b['veredito']}{extra}"
+                f"</div><div class='d'>{b['detalhe']}</div></div>")
+        return "<div class='satui-placar'>" + "".join(cards) + "</div>"
+
+    def _diag_leitura_html(self, tab) -> str:
+        """Leitura curta e acionável — só das famílias que reprovaram."""
+        falhou = {str(r["teste"]) for _, r in tab.iterrows()
+                  if self._ok3(r.get("ok")) is False}
+        if not falhou:
+            return ("<div class='satui-help'><div class='ttl'>Nada a corrigir por aqui</div>"
+                    "Nenhum teste da bateria reprovou ao nível escolhido. Isso valida a "
+                    "<b>forma</b> do modelo, não a sua <b>capacidade preditiva</b>: quem "
+                    "decide se o modelo presta é o erro fora da amostra da aba "
+                    "<b>Seleção</b> e a cobertura dos intervalos no <b>Backtest</b>.</div>")
+        itens = []
+        for rotulo, testes, conselho in _CONSELHO_DIAG:
+            caidos = [t for t in testes if t in falhou]
+            if not caidos:
+                continue
+            itens.append(f"<li><b>{rotulo}</b> ({', '.join(caidos)}) — {conselho}</li>")
+        inconclusivos = sorted({str(r["teste"]) for _, r in tab.iterrows()
+                                if self._ok3(r.get("ok")) is None})
+        extra = ""
+        if inconclusivos:
+            extra = ("<div style='margin-top:6px'>Inconclusivos (sem graus de liberdade ou "
+                     f"dependência ausente): {', '.join(inconclusivos)} — trate como "
+                     "<b>não testado</b>, não como aprovado.</div>")
+        return ("<div class='satui-help'><div class='ttl'>Leitura e próximo passo</div>"
+                f"<ul>{''.join(itens)}</ul>{extra}"
+                "<div style='margin-top:6px'>Corrija <b>uma</b> coisa por vez e reajuste: "
+                "boa parte das falhas de heterocedasticidade e normalidade some quando a "
+                "autocorrelação é resolvida.</div></div>")
+
+    def _on_diag(self, b):
+        if self.fit_ is None:
+            self.out_diag_status.value = (
+                "<div class='satui-notice'>Nenhum modelo ajustado — use <i>Ajustar agora</i> "
+                "na aba <b>Especificação</b> ou adote uma especificação na aba "
+                "<b>Seleção</b>.</div>")
+            return
+        alpha = float(self.fl_alpha_diag.value)
+        quebra = self.dd_chow_break.value if self.dd_chow_break.options else None
+        with self._busy(self.btn_diag, status=self.out_diag_status,
+                        msg="rodando a bateria de diagnóstico…"):
+            try:
+                tab = self._diag_table(alpha, quebra)
+            except ImportError as exc:
+                self.out_diag_status.value = (
+                    f"<div class='satui-notice'>Bateria indisponível: {exc}</div>")
+                self._log(f"[diagnóstico] dependência ausente: {exc}")
+                return
+            except Exception as exc:  # noqa: BLE001
+                self.out_diag_status.value = (
+                    f"<div class='satui-notice'>Não foi possível rodar: {exc}</div>")
+                self._log(f"[diagnóstico] erro: {exc}")
+                return
+        self.diagnostics_ = tab
+        blocos = [self._bloco_veredito(tab, rot, testes, resumo)
+                  for rot, testes, resumo in self._BLOCOS_DIAG]
+        self.diag_blocks_ = blocos
+        self.out_diag_notice.value = ""
+        self.out_diag_placar.value = self._placar_html(blocos)
+
+        vis = tab.rename(columns={"teste": "teste", "estatistica": "estatística",
+                                  "p_valor": "p-valor", "conclusao": "conclusão"})
+        vis["ok"] = [{True: "✓", False: "✗"}.get(self._ok3(v), "—") for v in tab["ok"]]
+        cols = [c for c in ("teste", "estatística", "p-valor", "ok", "H0", "conclusão")
+                if c in vis.columns]
+        self.out_diag_tabela.value = self._df_html(
+            vis[cols], max_height="420px",
+            color_map={"ok": self._css_ok, "p-valor": self._css_pvalor},
+            fmt_cols={"estatística": "{:.4f}"}, precision=4)
+
+        if self.vif_ is not None and len(self.vif_):
+            teto = float(self.fl_vif_max.value)
+            vtab = self.vif_.rename(columns={"variavel": "variável"})
+            self.out_diag_vif.value = (
+                self._df_html(vtab, color_map={"VIF": self._css_vif_factory(teto)},
+                              fmt_cols={"VIF": "{:.2f}"})
+                + "<div class='satui-legend'>Regra prática: VIF acima de 5 (alguns usam 10) "
+                  "indica que a variável é largamente explicada pelas outras — o teto "
+                  f"vigente da seleção é <b>{teto:.1f}</b>.</div>")
+        else:
+            self.out_diag_vif.value = (
+                "<div class='satui-legend'>Menos de duas variáveis macro no modelo vigente: "
+                "não há colinearidade a medir.</div>")
+
+        self.out_diag_leitura.value = self._diag_leitura_html(tab)
+
+        if self.cb_diag_plots.value:
+            try:
+                self.out_diag_plot_fit.value = self._fig_html(
+                    _E.report.plot_fit(self.fit_, self.series), stretch=True)
+            except Exception as exc:  # noqa: BLE001
+                self.out_diag_plot_fit.value = (
+                    f"<div class='satui-legend'>Gráfico de ajuste indisponível: {exc}</div>")
+            try:
+                self.out_diag_plot_resid.value = self._fig_html(
+                    _E.report.plot_residual_diagnostics(self.fit_), stretch=True)
+            except Exception as exc:  # noqa: BLE001
+                self.out_diag_plot_resid.value = (
+                    f"<div class='satui-legend'>Painel de resíduos indisponível: {exc}</div>")
+        else:
+            self.out_diag_plot_fit.value = self.out_diag_plot_resid.value = ""
+
+        reprovados = [b["bloco"] for b in blocos if b["nivel"] == "bad"]
+        self.out_diag_status.value = (
+            "<div class='satui-legend' style='color:var(--ok-ink)'>✓ Bateria concluída sem "
+            "reprovações.</div>" if not reprovados else
+            "<div class='satui-legend' style='color:var(--bad-ink)'>Bloco(s) reprovado(s): "
+            f"<b>{', '.join(reprovados)}</b> — veja <i>O que fazer</i> abaixo.</div>")
+        self._refresh_bar()
+        self._log(f"[diagnóstico] {len(tab)} teste(s) a α={alpha:.3f}"
+                  + (f" · reprovados: {', '.join(reprovados)}" if reprovados else " · tudo ok"))
+
+    # ==================================================================
     # Configuração declarativa (StudyConfig)
     # ==================================================================
     def _stress_var(self) -> str:
@@ -1892,7 +3127,15 @@ class SatelliteUI:
         else:
             pills.append(self._pill(f"ajuste: {self.fit_.model_name}", "green"))
         if self.search_ is not None:
-            pills.append(self._pill("busca: concluída", "green"))
+            rk = self.search_.ranking
+            n_qual = int((rk["status"] == "qualificado").sum()) if len(rk) else 0
+            pills.append(self._pill(f"busca: {n_qual} qualificada(s)",
+                                    "green" if n_qual else "yellow"))
+        if self.diag_blocks_:
+            ruins = [b for b in self.diag_blocks_ if b["nivel"] == "bad"]
+            pills.append(self._pill(
+                f"diagnóstico: {len(ruins)} bloco(s) reprovado(s)" if ruins
+                else "diagnóstico: sem reprovações", "red" if ruins else "green"))
         self.bar.value = "<div class='satui-bar'>" + "".join(pills) + "</div>"
 
     # ------------------------------------------------------------------ display
