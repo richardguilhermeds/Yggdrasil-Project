@@ -36,6 +36,16 @@ a trilha de auditoria (tabela por variável, funil por etapa e política em JSON
                                     "correlacao"], apply=True)
     res.tabela; res.funil; res.politica
 
+O :mod:`~yggdrasil.credit_risk.model.selection_report` transforma esse resultado
+em material de **apresentação**: gráficos (funil, causas de exclusão, ranking de
+IV e IV × PSI), tabelas formatadas em pt-BR, uma página HTML autocontida e um
+Excel multi-abas::
+
+    from yggdrasil.credit_risk.model import plot_funil, save_selection_report
+
+    plot_funil(res)                                   # o gráfico-síntese
+    save_selection_report(res, "selecao.html", seg=seg)
+
 A interface interativa (ipywidgets, dentro do Jupyter/Databricks) é opcional e
 carregada sob demanda — instale com ``pip install yggdrasil[ui]``::
 
@@ -56,10 +66,28 @@ from .selection import (
     rotulo_etapa,
     run_selection,
 )
+from .selection_report import (
+    build_selection_report_html,
+    causas_exclusao,
+    export_selection_xlsx,
+    plot_funil,
+    plot_iv_psi,
+    plot_iv_ranking,
+    plot_motivos,
+    save_selection_report,
+    tabela_decisoes,
+    tabela_funil,
+    tabela_politica,
+)
 
 __all__ = ["ModelSegmenter", "ModelSegmenterUI", "run_selection", "SelectionResult",
            "SELECTION_STEPS", "STEPS_DEFAULT", "PARAMS_DEFAULT", "register_step",
-           "rotulo_etapa"]
+           "rotulo_etapa",
+           # relatório da seleção (gráficos, tabelas, HTML e Excel)
+           "plot_funil", "plot_motivos", "plot_iv_ranking", "plot_iv_psi",
+           "tabela_decisoes", "tabela_funil", "tabela_politica", "causas_exclusao",
+           "build_selection_report_html", "save_selection_report",
+           "export_selection_xlsx"]
 
 
 def __getattr__(name):
