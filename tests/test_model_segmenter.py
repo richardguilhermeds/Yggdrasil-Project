@@ -10,6 +10,8 @@ novos, save/load round-trip, SHAP best-effort e a UI (gated por ipywidgets).
 """
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -2392,3 +2394,56 @@ def test_diff_models_sem_ratings_e_task_diferente(seg, tmp_path):
                            sample_col="amostra", ref_sample="DES", verbose=False)
     with pytest.raises(ValueError, match="task_type"):
         seg.diff_models(outro)
+
+
+# ----------------------------------------------------------------------
+# to_sql — régua de ratings como CASE WHEN sobre o score materializado
+# ----------------------------------------------------------------------
+@pytest.mark.parametrize("metodo", ["quantil", "decis", "arvore", "optbin"])
+def test_to_sql_reproduz_ratings_do_python(seg, metodo):
+    """O SQL gerado tem todas as faixas na ORDEM da régua e as fronteiras batem
+    rating a rating com a atribuição feita em Python (executa o CASE WHEN no
+    SQLite sobre a coluna de score já materializada)."""
+    import sqlite3
+
+    seg.fit(_default_algo(seg.task_type))
+    seg.build_ratings(method=metodo, n_ratings=5)
+    sql = seg.to_sql(table="base", col_value="valor_previsto")
+
+    # ① todas as faixas, na ordem dos rótulos da régua
+    labels = list(seg.rating_labels_)
+    pos = [sql.index(f"THEN '{lab}'") for lab in labels]
+    assert len(pos) == len(labels) and pos == sorted(pos)
+    assert "ELSE NULL" in sql and "convenção de borda" in sql
+
+    # ② fronteiras: rating do SQL == rating do Python, linha a linha
+    novo = _synthetic(seg.task_type, n=500, seed=7, com_cat=True)
+    pred = seg.predict(novo, col_value="valor_previsto")
+    con = sqlite3.connect(":memory:")
+    try:
+        pred[["score"]].to_sql("base", con, index=False)
+        got = pd.read_sql_query(sql, con)
+    finally:
+        con.close()
+    assert got["rating"].tolist() == pred["rating"].tolist()
+    assert np.allclose(got["valor_previsto"], pred["valor_previsto"])
+
+
+def test_to_sql_opcoes_e_guarda(seg):
+    """Nomes de tabela/colunas, escala do score e a guarda sem régua de ratings."""
+    seg.fit(_default_algo(seg.task_type))
+    with pytest.raises(RuntimeError, match="build_ratings"):
+        seg.to_sql()
+    seg.build_ratings(method="quantil", n_ratings=4)
+    sql = seg.to_sql(table="cat.esq.carteira", score_col="pontuacao",
+                     col_rating="faixa_risco")
+    assert "FROM cat.esq.carteira;" in sql
+    assert "pontuacao >=" in sql and "END AS faixa_risco" in sql
+    assert "AS valor_previsto" not in sql          # col_value=None ⇒ só o rating
+    # score_scale=1 escreve as fronteiras na escala CRUA (0–1)
+    cru = seg.to_sql(score_scale=1)
+    cortes_cru = [float(t) for t in re.findall(r"score >= ([\d.eE+-]+)", cru)]
+    cortes_neg = [float(t) for t in re.findall(r"score >= ([\d.eE+-]+)",
+                                               seg.to_sql())]
+    assert cortes_cru and np.allclose(np.array(cortes_neg),
+                                      np.array(cortes_cru) * seg.score_scale)

@@ -684,6 +684,9 @@ class ModelSegmenterUI:
         algoritmo/hiperparâmetros mudaram depois do treino): pill âmbar na barra +
         tarja sobre o card de métricas. No-op sem modelo treinado; a flag limpa no
         próximo fit bem-sucedido."""
+        # o placar de saúde e o SQL da régua já renderizados viram "desatualizado"
+        # (antes da guarda: valem para toda mudança, não só a primeira)
+        self._invalidate_diag_sql(stale=True)
         if self.seg.score_ is None or self._dirty_since_fit:
             return
         self._dirty_since_fit = True
@@ -1529,6 +1532,34 @@ class ModelSegmenterUI:
             row_compare_dist, row_calib_resid,
         ]); metrics_card.add_class("mseg-card")
 
+        # --- PLACAR DE SAÚDE DO MODELO (4 vereditos + evidência) -------------
+        self.btn_diag = W.Button(description="Avaliar modelo (placar)",
+                                 button_style="primary", icon="stethoscope",
+                                 layout=W.Layout(width="auto", min_width="210px"),
+                                 tooltip="Veredito de relance em 4 dimensões "
+                                         "(discriminação · estabilidade · calibração · "
+                                         "estrutura) reunindo os testes das outras abas.")
+        self.btn_diag_hide = W.Button(description="Ocultar", icon="eye-slash",
+                                      layout=W.Layout(width="auto", min_width="110px"),
+                                      tooltip="Limpa o placar já renderizado.")
+        self.out_diag = W.HTML()
+        self.btn_diag.on_click(self._on_diag)
+        self.btn_diag_hide.on_click(self._on_diag_hide)
+        _diag_metrics = ("AUC · KS" if self.task_type == "classification"
+                         else "R² · RMSE")
+        diag_card = W.VBox([
+            W.HTML("<div class='mseg-h'>Placar de saúde do modelo · discriminação · "
+                   "estabilidade · calibração · estrutura</div>"),
+            W.HTML(f"<div class='mseg-legend'>Veredito de relance em 4 dimensões "
+                   f"(verde/amarelo/vermelho), cada uma com a <b>evidência numérica</b> "
+                   f"logo abaixo: {_diag_metrics} por amostra e o shift DES→OOT, PSI da "
+                   f"régua e das variáveis, teste de calibração (Jeffreys/t por safra e "
+                   f"por rating) e a estrutura (nº de variáveis, inversões de monotonia e "
+                   f"ratings sem separação estatística). Clique para (re)calcular.</div>"),
+            W.HBox([self.btn_diag, self.btn_diag_hide]),
+            self.out_diag,
+        ]); diag_card.add_class("mseg-card")
+
         # --- Champion × challenger: baseline congelado em memória ------------
         # congela o modelo vigente (config + métricas + score) e, após re-treinos/
         # tuning, compara o desafiante com ele. A foto vive só nesta sessão e
@@ -1651,6 +1682,7 @@ class ModelSegmenterUI:
         tab_model = W.VBox([
             train_card,
             metrics_card,
+            diag_card,
             calib_card,
             champion_card,
             self.formula_card,
@@ -1971,6 +2003,41 @@ class ModelSegmenterUI:
                                          "hiperparâmetros.")
         self.out_diff = W.HTML()
         self.btn_diff.on_click(self._on_diff)
+        # --- régua de ratings como SQL (CASE WHEN sobre o score materializado) ---
+        _sql_sty = {"description_width": "initial"}
+        self.tx_sql_table = W.Text(value="minha_tabela", description="tabela:",
+                                   style=_sql_sty, layout=W.Layout(width="30%"))
+        self.tx_sql_score = W.Text(value="score", description="coluna do score:",
+                                   style=_sql_sty, layout=W.Layout(width="26%"))
+        self.tx_sql_rating = W.Text(value="rating", description="coluna do rating:",
+                                    style=_sql_sty, layout=W.Layout(width="26%"))
+        self.cb_sql_value = W.Checkbox(value=True, indent=False,
+                                       description="anexar o valor previsto por rating",
+                                       layout=W.Layout(width="auto"))
+        self.btn_sql = W.Button(description="Gerar SQL (CASE WHEN)",
+                                button_style="primary", icon="database",
+                                layout=W.Layout(width="auto", min_width="210px"),
+                                tooltip="Gera a régua de ratings como SQL copiável, sobre "
+                                        "a coluna de score já materializada na tabela.")
+        self.out_sql = W.Textarea(layout=W.Layout(width="99%", height="240px"))
+        self.btn_sql.on_click(self._on_sql)
+        card_sql = W.VBox([
+            W.HTML("<div class='mseg-h'>Exportar a régua de ratings como SQL "
+                   "(CASE WHEN)</div>"),
+            W.HTML("<div class='mseg-legend'>Régua pronta para copiar e colar: um "
+                   "<code>CASE WHEN</code> sobre a coluna de <b>score já materializada</b> "
+                   "na tabela (escala de negócio <b>0–1000</b>, a mesma de "
+                   "<i>Escorar base</i>). As fronteiras são os <b>cortes exatos</b> da "
+                   "estratégia de ratings e a <b>convenção de borda</b> sai comentada no "
+                   "cabeçalho — o rating em SQL bate com o atribuído em Python. O score "
+                   "em si não é reproduzido em SQL (é o modelo): gere-o antes com "
+                   "<i>Escorar base</i> ou <code>predict</code>.</div>"),
+            W.HBox([self.tx_sql_table, self.tx_sql_score, self.tx_sql_rating],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            W.HBox([self.cb_sql_value, self.btn_sql],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            self.out_sql,
+        ]); card_sql.add_class("mseg-card")
         card_diff = W.VBox([
             W.HTML("<div class='mseg-h'>Comparar com modelo salvo (JSON)</div>"),
             W.HTML("<div class='mseg-legend'>Carrega outro modelo salvo por <b>Salvar</b> "
@@ -1985,6 +2052,7 @@ class ModelSegmenterUI:
         ]); card_diff.add_class("mseg-card")
         tab_export = W.VBox([
             card_score,
+            card_sql,
             W.HBox([card_persist, card_mlflow],
                    layout=W.Layout(justify_content="space-between", align_items="stretch")),
             card_diff,
@@ -4091,6 +4159,275 @@ class ModelSegmenterUI:
         except Exception as e:
             self.out_calib_plot.value = f"<i>{e}</i>"
 
+    # ==================================================================
+    # Placar de saúde do modelo (4 vereditos) — reúne os testes das abas
+    # ==================================================================
+    #: token de tema por cor do veredito: (texto, fundo, palavra)
+    _DIAG_TOKENS = {"green": ("var(--ok-tx)", "var(--ok-bg)", "OK"),
+                    "yellow": ("var(--warn-tx)", "var(--warn-bg)", "ATENÇÃO"),
+                    "red": ("var(--bad-tx)", "var(--bad-bg)", "CRÍTICO")}
+    #: nível de :meth:`_metric_level` → cor do veredito
+    _DIAG_NIVEL = {"bom": "green", "atencao": "yellow", "ruim": "red"}
+
+    @staticmethod
+    def _diag_pior(*cores):
+        """Pior cor entre as informadas (vermelho > amarelo > verde); ignora None."""
+        ordem = {"green": 0, "yellow": 1, "red": 2}
+        vs = [c for c in cores if c in ordem]
+        return max(vs, key=lambda c: ordem[c]) if vs else "yellow"
+
+    @staticmethod
+    def _diag_psi_cor(psi):
+        """Cor do PSI pelos limiares do repositório: <0,10 estável · <0,25 atenção."""
+        if psi is None or not np.isfinite(psi):
+            return None
+        return "green" if psi < 0.10 else "yellow" if psi < 0.25 else "red"
+
+    def _on_diag(self, _):
+        if self.seg.score_ is None:
+            self.out_diag.value = ("<div class='mseg-legend'>Treine (ou carregue) o "
+                                   "modelo antes de avaliar o placar.</div>")
+            return
+        with self._busy(self.btn_diag, status=self.out_diag,
+                        msg="avaliando o modelo…"):
+            try:
+                html = self._diag_scorecard_html()
+            except Exception as e:
+                self.out_diag.value = (f"<div class='mseg-legend' style='color:var(--bad-tx)'>"
+                                       f"Erro ao avaliar o modelo: {type(e).__name__}: "
+                                       f"{e}</div>")
+                self._log(f"[placar] erro: {type(e).__name__}: {e}")
+                return
+            self.out_diag.value = html
+            self._log("[placar] placar de saúde do modelo calculado.")
+
+    def _on_diag_hide(self, _):
+        self.out_diag.value = ""      # oculta/limpa a avaliação já renderizada
+
+    def _diag_scorecard_html(self):
+        """Placar de 4 vereditos (Discriminação · Estabilidade · Calibração ·
+        Estrutura) + a evidência estatística — reúne os testes das outras abas.
+
+        Discriminação usa AUC/KS (classificação) ou R² (regressão) na referência,
+        mais o shift DES→OOT; estabilidade combina o PSI da régua de ratings com o
+        pior PSI entre as variáveis do modelo; calibração reaproveita o teste de
+        Jeffreys/t do backtest por safra e por rating (mais Hosmer-Lemeshow na
+        classificação), caindo para o gap previsto×observado quando os testes não
+        se aplicam; estrutura junta nº de variáveis, inversões de monotonia e
+        pares de ratings vizinhos sem separação estatística."""
+        seg = self.seg
+        is_clf = self.task_type == "classification"
+        ref, oot = seg.ref_sample, seg._oot_sample()
+        met = seg.metrics()
+        linha = met[met["amostra"] == ref]
+        if not len(linha):
+            linha = met.head(1)
+
+        def _v(col):
+            if not len(linha) or col not in met.columns:
+                return None
+            try:
+                v = float(linha[col].iloc[0])
+            except (TypeError, ValueError):
+                return None
+            return v if np.isfinite(v) else None
+
+        # ---------- ① discriminação: métrica na referência + shift DES→OOT ----
+        shifts = {}
+        with suppress(Exception):
+            shifts = seg.metric_shifts() or {}
+        if is_clf:
+            auc, ks = _v("auc"), _v("ks")
+            cor_d = self._diag_pior(self._DIAG_NIVEL.get(self._metric_level("auc", auc)),
+                                    self._DIAG_NIVEL.get(self._metric_level("ks", ks)))
+            partes = ([f"AUC {auc:.1%}"] if auc is not None else ["AUC —"])
+            if ks is not None:
+                partes.append(f"KS {ks:.1%}")
+            principal, d_shift = "auc", shifts.get("auc")
+        else:
+            r2 = _v("r2")
+            cor_d = self._DIAG_NIVEL.get(self._metric_level("r2", r2), "yellow")
+            partes = [f"R² {r2:.1%}" if r2 is not None else "R² —"]
+            rmse = _v("rmse")
+            if rmse is not None:
+                partes.append(f"RMSE {rmse:.4f}")
+            principal, d_shift = "r2", shifts.get("r2")
+        val_d = f"{ref}: " + " · ".join(partes)
+        if d_shift is not None and np.isfinite(d_shift):
+            val_d += f" · Δ{oot} {d_shift:+.3f}"
+            if d_shift <= -0.10:      # queda forte fora da amostra rebaixa o veredito
+                cor_d = "red"
+            elif d_shift <= -0.05:
+                cor_d = self._diag_pior(cor_d, "yellow")
+
+        # ---------- ② estabilidade: PSI da régua + PSI das variáveis ----------
+        psi_regua = psi_var = None
+        var_psi = None
+        if seg.sample_col is not None and getattr(seg, "rating_", None) is not None:
+            with suppress(Exception):
+                p = seg.psi()
+                if len(p):
+                    psi_regua = float(p["psi"].max())
+        if seg.sample_col is not None:
+            with suppress(Exception):
+                feats = list(seg.model_features or seg.selected_features())
+                if feats:
+                    var_psi = seg.variable_iv(features=feats)
+                    if "pior_psi" in var_psi.columns and var_psi["pior_psi"].notna().any():
+                        psi_var = float(var_psi["pior_psi"].max())
+        cor_e = self._diag_pior(self._diag_psi_cor(psi_regua),
+                                self._diag_psi_cor(psi_var))
+        val_e = " · ".join(
+            [("PSI da régua —" if psi_regua is None else f"PSI da régua {psi_regua:.1%}"),
+             ("variáveis —" if psi_var is None else f"pior variável {psi_var:.1%}")])
+
+        # ---------- ③ calibração: Jeffreys/t (safra e rating) + HL ------------
+        bt = rt = None
+        hl = None
+        cores_c, evid_c = [], []
+        if seg.date_col:
+            with suppress(Exception):
+                bt = seg.backtest()
+        if bt is not None and len(bt):
+            frac = float((bt["status"] != "ok").mean())
+            cores_c.append("green" if frac <= 0.10 else "yellow" if frac <= 0.25 else "red")
+            evid_c.append(f"{int((bt['status'] != 'ok').sum())}/{len(bt)} safras fora do IC")
+        if getattr(seg, "rating_", None) is not None:
+            with suppress(Exception):
+                rt = seg.rating_table()
+        if rt is not None and "status_teste" in rt.columns:
+            fora = int((rt["status_teste"] != "ok").sum())
+            frac = fora / max(len(rt), 1)
+            cores_c.append("green" if frac <= 0.10 else "yellow" if frac <= 0.25 else "red")
+            evid_c.append(f"{fora}/{len(rt)} ratings fora do IC")
+        if is_clf:
+            with suppress(Exception):
+                hl = seg.hosmer_lemeshow()
+        if hl is not None:
+            p = float(hl["p_value"])
+            cores_c.append("green" if p >= 0.05 else "yellow" if p >= 0.01 else "red")
+            evid_c.append(f"HL p={p:.3f}")
+        if not evid_c and bt is not None and len(bt) and bt["gap"].notna().any():
+            gap = float(bt["gap"].abs().max())          # fallback: gap previsto×observado
+            cores_c.append("green" if gap <= 0.02 else "yellow" if gap <= 0.05 else "red")
+            evid_c.append(f"máx |gap| {gap:.3f}")
+        cor_c = self._diag_pior(*cores_c) if cores_c else "yellow"
+        val_c = " · ".join(evid_c) if evid_c else "sem teste disponível"
+
+        # ---------- ④ estrutura: variáveis · monotonia · separação ------------
+        n_var = len(seg.model_features or [])
+        mono = sep = None
+        n_inv, n_sep_falha, n_pares = 0, 0, 0
+        if getattr(seg, "rating_", None) is not None:
+            with suppress(Exception):
+                mono = seg.monotonicity_report()
+                n_inv = int(mono["n_inversoes"].sum())
+            with suppress(Exception):
+                sep = seg.adjacent_rating_tests()
+                n_pares = len(sep)
+                n_sep_falha = int((sep["veredito"] == "nao_separa").sum())
+        if mono is None:
+            cor_s, val_s = "yellow", f"{n_var} variáveis · sem régua de ratings"
+        else:
+            cor_s = ("red" if n_inv else "yellow" if n_sep_falha else "green")
+            val_s = (f"{n_var} var · {n_inv} inversão(ões) · "
+                     f"{n_sep_falha}/{n_pares} pares sem separação")
+
+        _alvo = "bom × mau" if is_clf else "a variação do alvo"
+        dims = [("Discriminação", f"o score separa {_alvo}?", cor_d, val_d),
+                ("Estabilidade", "população e régua estáveis (DES→amostras)?", cor_e, val_e),
+                ("Calibração", "o previsto se confirma no realizado?", cor_c, val_c),
+                ("Estrutura", "ratings monotônicos e distintos?", cor_s, val_s)]
+
+        def tile(dim, pergunta, cor, valor):
+            tx, bg, palavra = self._DIAG_TOKENS[cor]
+            return (f"<div class='mseg-metric' style='padding:11px 13px;"
+                    f"border-left:4px solid {tx};background:{bg}'>"
+                    f"<div class='k' style='color:{tx}'>{dim} · {palavra}</div>"
+                    f"<div class='v mono' style='color:{tx};font-size:13px'>{valor}</div>"
+                    f"<div style='font-size:10px;color:var(--muted);margin-top:3px'>"
+                    f"{pergunta}</div></div>")
+
+        placar = ("<div class='mseg-metrics' style='grid-template-columns:"
+                  "repeat(auto-fit,minmax(220px,1fr))'>"
+                  + "".join(tile(*d) for d in dims) + "</div>")
+
+        # ---------- evidência (mesmas tabelas das outras abas) ----------------
+        ev = [f"<div class='mseg-h' style='margin-top:12px'>Discriminação · métricas "
+              f"por amostra</div>{self._metrics_table_html(met)}"]
+        if psi_regua is not None or var_psi is not None:
+            ev.append("<div class='mseg-h' style='margin-top:12px'>Estabilidade · PSI da "
+                      "régua de ratings e das variáveis do modelo</div>")
+            if psi_regua is not None:
+                with suppress(Exception):
+                    ev.append(self._df_html(seg.psi(), center=True,
+                                            color_validation=True))
+            if var_psi is not None and "pior_psi" in var_psi.columns:
+                cols = [c for c in ("variavel", "iv", "pior_psi", "estabilidade")
+                        if c in var_psi.columns]
+                top = (var_psi[cols].sort_values("pior_psi", ascending=False).head(8))
+                ev.append("<div class='mseg-legend'>Variáveis do modelo com maior "
+                          "PSI (DES × demais amostras):</div>")
+                ev.append(self._df_html(top, center=True,
+                                        color_estabilidade=True))
+        if hl is not None:
+            ev.append(f"<div class='mseg-h' style='margin-top:12px'>Calibração · "
+                      f"Hosmer-Lemeshow (global)</div>"
+                      f"<div class='mseg-legend'>χ² = {hl['statistic']:.3f} · "
+                      f"gl = {hl['df']} · p = {hl['p_value']:.4f} — p alto = sem "
+                      f"evidência de má calibração global.</div>")
+        if bt is not None and len(bt):
+            ev.append("<div class='mseg-h' style='margin-top:12px'>Calibração · backtest "
+                      "por safra (teste de Jeffreys/t)</div>")
+            ev.append(self._df_html(bt, center=True, color_validation=True,
+                                    max_height="240px"))
+        if mono is not None:
+            ev.append("<div class='mseg-h' style='margin-top:12px'>Estrutura · "
+                      "monotonicidade do alvo por amostra</div>")
+            ev.append(self._df_html(mono, center=True))
+        if sep is not None and len(sep):
+            ev.append("<div class='mseg-h' style='margin-top:12px'>Estrutura · separação "
+                      "estatística entre ratings vizinhos</div>")
+            ev.append(self._rating_septest_html())
+        return placar + "".join(ev)
+
+    def _on_sql(self, _):
+        """Gera a régua de ratings como CASE WHEN sobre a coluna de score."""
+        if getattr(self.seg, "rating_", None) is None:
+            self.out_sql.value = ("-- Gere os ratings antes (aba Ratings & Score → "
+                                  "'Gerar ratings').")
+            return
+        tbl = (self.tx_sql_table.value or "minha_tabela").strip()
+        sc = (self.tx_sql_score.value or "score").strip()
+        rt = (self.tx_sql_rating.value or "rating").strip()
+        val = (self.tx_value_col.value or "valor_previsto").strip()
+        with self._busy(self.btn_sql, msg="gerando o SQL…"):
+            try:
+                self.out_sql.value = self.seg.to_sql(
+                    table=tbl, score_col=sc, col_rating=rt,
+                    col_value=(val if self.cb_sql_value.value else None))
+                self._log("[SQL] régua gerada — selecione tudo na caixa e copie (Ctrl+C).")
+            except Exception as e:
+                self.out_sql.value = f"-- Erro ao gerar SQL: {type(e).__name__}: {e}"
+                self._log(f"[SQL] erro: {type(e).__name__}: {e}")
+
+    def _invalidate_diag_sql(self, stale=True):
+        """Placar de saúde e SQL da régua ficam obsoletos quando o modelo muda.
+
+        ``stale=True`` (mudança de configuração) marca a saída JÁ renderizada como
+        desatualizada; ``stale=False`` (re-treino) simplesmente a limpa. Saída
+        vazia continua vazia — as duas nascem ocultas."""
+        diag, sql = getattr(self, "out_diag", None), getattr(self, "out_sql", None)
+        if diag is not None and diag.value:
+            diag.value = (
+                "<div style='font-size:12px;color:var(--warn-tx);background:var(--warn-bg);"
+                "border-radius:6px;padding:4px 8px;display:inline-block'>⚠️ Modelo "
+                "alterado — placar desatualizado. Clique em <b>Avaliar modelo (placar)"
+                "</b> para recalcular.</div>") if stale else ""
+        if sql is not None and sql.value.strip():
+            sql.value = ("-- Modelo alterado — SQL desatualizado. Clique em "
+                         "'Gerar SQL (CASE WHEN)' para regenerar." if stale else "")
+
     # ------------------------------------------------------------------ Champion × challenger
     def _baseline_nome(self) -> str:
         """Nome do baseline no campo do card (default 'baseline')."""
@@ -4695,6 +5032,8 @@ class ModelSegmenterUI:
                                    monotonic_fusion=self.cb_fusion.value, **kw)
             self._log(f"[ratings] {len(self.seg.rating_labels_)} faixas ({method}).")
             self._render_ratings()
+            # a régua mudou ⇒ placar e SQL já renderizados ficaram obsoletos
+            self._invalidate_diag_sql(stale=True)
         except Exception as e:
             self._log(f"[ratings] erro: {e}")
 
@@ -5259,6 +5598,8 @@ class ModelSegmenterUI:
                   self.out_adv_missing, self.out_adv_stats,
                   self.out_adv_group_metrics, self.out_adv_group_rating):
             w.value = ""
+        # placar de saúde e SQL da régua vieram do modelo ANTIGO: sai da tela
+        self._invalidate_diag_sql(stale=False)
         # calibração pós-treino: o retreino descarta a camada (seg.calibration_ =
         # None no fit/set_model) — o card acompanha; após um LOAD, refresh_model
         # re-renderiza a camada carregada logo em seguida (_render_calibration).

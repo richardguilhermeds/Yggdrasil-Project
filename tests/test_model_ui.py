@@ -609,3 +609,65 @@ def test_undo_cobre_derivada_e_transformacao():
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_redo(None)
     assert ui.cb_woe.value is True
+
+
+@pytest.mark.parametrize("task", ["classification", "regression"])
+def test_placar_saude_quatro_vereditos(task):
+    """Placar de saúde na aba Modelo: 4 vereditos com a evidência numérica,
+    renderizando em classificação E em regressão (paridade clf×reg), pintado só
+    com tokens semânticos de tema e invalidado quando o modelo muda."""
+    ui = _build() if task == "classification" else _build_reg()
+    ui._on_diag(None)                      # sem modelo treinado → aviso amigável
+    assert "Treine" in ui.out_diag.value
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.seg.fit()
+        ui.seg.build_ratings(method="quantil", n_ratings=4)
+        ui._on_diag(None)
+    html = ui.out_diag.value
+    for dim in ("Discriminação", "Estabilidade", "Calibração", "Estrutura"):
+        assert dim in html, f"veredito ausente: {dim}"
+    # evidência numérica de cada dimensão (métrica da tarefa, PSI e estrutura)
+    assert ("AUC" in html) if task == "classification" else ("R²" in html)
+    assert "PSI da régua" in html and "inversão(ões)" in html
+    assert "pares sem separação" in html
+    # vereditos coloridos só com tokens de tema (nunca hex fixo)
+    assert "border-left:4px solid var(--" in html
+    assert any(t in html for t in ("var(--ok-bg)", "var(--warn-bg)", "var(--bad-bg)"))
+
+    # mudança de configuração ⇒ placar renderizado vira "desatualizado"
+    ui._mark_dirty()
+    assert "desatualizado" in ui.out_diag.value
+    # re-treino limpa a saída (placar do modelo antigo sai da tela)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_fit(None)
+    assert ui.out_diag.value == ""
+    # botão "Ocultar" limpa o placar já renderizado
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_diag(None)
+    assert ui.out_diag.value.strip()
+    ui._on_diag_hide(None)
+    assert ui.out_diag.value == ""
+
+
+def test_card_sql_da_regua_de_ratings():
+    """Aba Validar & Exportar: card do CASE WHEN da régua de ratings — guarda sem
+    régua, nomes de tabela/colunas do formulário e invalidação da saída."""
+    ui = _build()
+    ui._on_sql(None)                       # sem régua de ratings → aviso na caixa
+    assert "Gere os ratings" in ui.out_sql.value
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.seg.fit()
+        ui.seg.build_ratings(method="quantil", n_ratings=4)
+    ui.tx_sql_table.value = "cat.esq.carteira"
+    ui.tx_sql_score.value = "pontuacao"
+    ui.tx_sql_rating.value = "faixa_risco"
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_sql(None)
+    sql = ui.out_sql.value
+    assert "FROM cat.esq.carteira;" in sql and "END AS faixa_risco" in sql
+    assert "pontuacao" in sql and "AS valor_previsto" in sql
+    for lab in ui.seg.rating_labels_:
+        assert f"THEN '{lab}'" in sql
+    ui._mark_dirty()                       # modelo alterado ⇒ SQL desatualizado
+    assert "desatualizado" in ui.out_sql.value

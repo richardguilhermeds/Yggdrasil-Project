@@ -6901,6 +6901,168 @@ class ModelSegmenter:
                          col_value: round(self._risco(self.df.loc[m, self.target]), 6)})
         return pd.DataFrame(rows)
 
+    # ------------------------------------------------------------------
+    # TO_SQL: a régua de ratings como CASE WHEN sobre o score materializado
+    # ------------------------------------------------------------------
+    def _rating_score_cuts(self) -> tuple:
+        """Cortes de score da régua vigente + a **convenção de borda** usada.
+
+        Devolve ``(cuts, borda)``: ``cuts`` são os limites FINITOS que separam as
+        faixas de score (crescentes, na escala CRUA do score) e ``borda`` diz de
+        que lado o valor exatamente no limite cai, conforme a estratégia ajustada:
+
+        * cortes por quantil/decis/percentil/manuais e binning ótimo usam
+          ``searchsorted(..., side='right')`` ⇒ o valor no limite entra na faixa de
+          CIMA ⇒ ``'esquerda'`` (faixa fechada à esquerda: ``lo <= score < hi``);
+        * a estratégia de árvore compara ``x <= limiar`` ⇒ o valor no limite fica
+          na faixa de BAIXO ⇒ ``'direita'`` (``lo < score <= hi``).
+        """
+        st = self.rating_strategy
+        if st is None or not self.rating_labels_:
+            raise RuntimeError("Gere os ratings antes (build_ratings).")
+        thr = getattr(st, "thresholds_", None)          # estratégia de árvore
+        if thr is not None:
+            cuts = np.asarray(thr, dtype="float64")
+            return np.unique(cuts[np.isfinite(cuts)]), "direita"
+        cortes = getattr(st, "splits_", None)           # binning ótimo
+        if cortes is None:
+            cortes = getattr(st, "edges_", None)        # quantil/decis/manuais
+        if cortes is None:
+            raise RuntimeError(
+                f"A estratégia de rating {type(st).__name__!r} não expõe cortes de "
+                f"score — não dá para reproduzi-la como CASE WHEN.")
+        cuts = np.asarray(cortes, dtype="float64")
+        return np.unique(cuts[np.isfinite(cuts)]), "esquerda"
+
+    def _rating_score_ranges(self) -> list:
+        """Faixas de score de cada rating, na ordem de ``rating_labels_``:
+        ``[{'rating': 'A', 'faixas': [(lo, hi), …]}, …]`` — ``None`` nas pontas
+        abertas. Um rating pode ter MAIS de uma faixa (estratégia de árvore, onde
+        intervalos de score não contíguos podem receber o mesmo rótulo).
+
+        O rótulo de cada intervalo vem da própria estratégia (um ponto interno é
+        reclassificado por ela), então a régua em SQL nunca diverge da aplicada em
+        Python — só as fronteiras são lidas dos cortes."""
+        st = self.rating_strategy
+        cuts, _borda = self._rating_score_cuts()
+        k = len(cuts)
+        por_rating = {lab: [] for lab in self.rating_labels_}
+        for i in range(k + 1):
+            lo = float(cuts[i - 1]) if i > 0 else None
+            hi = float(cuts[i]) if i < k else None
+            # ponto REPRESENTATIVO no MEIO do intervalo (longe das bordas: a
+            # estratégia de árvore compara em float32 e um valor exatamente no
+            # limiar poderia ser reclassificado do outro lado)
+            if lo is None and hi is None:
+                rep = 0.0
+            elif lo is None:
+                rep = hi - max(1.0, abs(hi))
+            elif hi is None:
+                rep = lo + max(1.0, abs(lo))
+            else:
+                rep = 0.5 * (lo + hi)
+            raw = int(np.asarray(st._raw_groups(np.array([rep], dtype="float64")))[0])
+            lab = st.raw_to_label_.get(raw)
+            if lab in por_rating:
+                por_rating[lab].append((lo, hi))
+        out = []
+        for lab in self.rating_labels_:
+            faixas = []
+            for lo, hi in por_rating[lab]:
+                if faixas and lo is not None and faixas[-1][1] == lo:
+                    faixas[-1] = (faixas[-1][0], hi)     # intervalos colados: une
+                else:
+                    faixas.append((lo, hi))
+            out.append({"rating": lab, "faixas": faixas})
+        return out
+
+    def to_sql(self, table: str = "minha_tabela", score_col: str = "score",
+               col_rating: str = "rating", col_value=None, ruler_sample=None,
+               score_scale=None) -> str:
+        """Gera SQL ANSI com ``CASE WHEN`` que reproduz a **régua de ratings** sobre
+        uma coluna de score JÁ materializada. Pronto p/ copiar.
+
+        ``table`` é a tabela/CTE de origem e ``score_col`` a coluna de score dela —
+        esperada na **escala de negócio** (0–``score_scale``, i.e. 0–1000 por
+        padrão), a mesma devolvida por :meth:`predict`/:meth:`score_table`/
+        :meth:`apply_spark`. Passe ``score_scale=1`` se a coluna guardar o score
+        CRU (0–1). Cada rating de :meth:`rating_ruler` vira um ramo do CASE, na
+        ordem da régua, com o volume e o valor previsto do alvo no comentário.
+
+        **Fronteiras e convenção de borda** (ver :meth:`_rating_score_cuts`): são
+        os cortes EXATOS aprendidos pela estratégia de rating, escritos com toda a
+        precisão. O valor exatamente no limite segue o mesmo lado que em Python —
+        ``score >= lo AND score < hi`` para cortes por quantil/decis/percentil/
+        manuais e binning ótimo; ``score > lo AND score <= hi`` na estratégia de
+        árvore. A convenção usada sai como comentário no cabeçalho do SQL.
+
+        ``col_value`` (ex.: ``'valor_previsto'``) anexa uma segunda coluna com o
+        valor previsto do alvo daquele rating — a régua de :meth:`rating_ruler`
+        calibrada em ``ruler_sample`` (referência/DES por padrão).
+
+        Linhas com ``score`` NULL caem no ``ELSE NULL`` (rating nulo); qualquer
+        score não-nulo cai em alguma faixa (as pontas são abertas)."""
+        ranges = self._rating_score_ranges()
+        esc = float(self.score_scale if score_scale is None else score_scale)
+        _cuts, borda = self._rating_score_cuts()
+        ge, lt = (">=", "<") if borda == "esquerda" else (">", "<=")
+        ruler = self.rating_ruler(sample=ruler_sample)
+        info = {r["rating"]: (int(r["n"]), float(r["valor_previsto"]))
+                for _, r in ruler.iterrows()}
+
+        def _n(v):                       # literal numérico com precisão de ida-e-volta
+            return repr(float(v))
+
+        def cond(faixas):
+            partes = []
+            for lo, hi in faixas:
+                sub = []
+                if lo is not None:
+                    sub.append(f"{score_col} {ge} {_n(lo * esc)}")
+                if hi is not None:
+                    sub.append(f"{score_col} {lt} {_n(hi * esc)}")
+                partes.append(" AND ".join(sub) if sub
+                              else f"{score_col} IS NOT NULL")
+            if len(partes) == 1:
+                return partes[0]
+            return " OR ".join(f"({p})" for p in partes)
+
+        borda_txt = (f"[lo, hi) — {score_col} >= lo AND {score_col} < hi (valor no "
+                     f"limite entra na faixa de CIMA)" if borda == "esquerda"
+                     else f"(lo, hi] — {score_col} > lo AND {score_col} <= hi (valor no "
+                          f"limite fica na faixa de BAIXO)")
+        _amostra = ruler_sample or self.ref_sample
+        cab = [f"-- Régua de ratings ({self.task_type}) gerada por ModelSegmenter "
+               f"· {len(ranges)} faixas",
+               f"-- método: {self.rating_config.get('method', '—')} · coluna de score "
+               f"'{score_col}' na escala 0–{_fmt(esc)} (score cru × {_fmt(esc)})",
+               f"-- convenção de borda: {borda_txt}",
+               f"-- score NULL ⇒ {col_rating} NULL (ELSE)"]
+        if col_value is not None:
+            cab.append(f"-- {col_value}: alvo médio do rating na amostra '{_amostra}' "
+                       f"(régua de rating_ruler)")
+
+        def case(valfn, alias, comentar=True):
+            linhas = ["  CASE"]
+            for r in ranges:
+                n_r, v_r = info.get(r["rating"], (0, float("nan")))
+                com = f"  -- n={n_r} · valor previsto {v_r:.6f}" if comentar else ""
+                linhas.append(f"    WHEN {cond(r['faixas'])} THEN "
+                              f"{valfn(r['rating'])}{com}")
+            linhas.append("    ELSE NULL")
+            linhas.append(f"  END AS {alias}")
+            return "\n".join(linhas)
+
+        def _q(v):                       # literal de texto com escape de aspas
+            return "'" + str(v).replace("'", "''") + "'"
+
+        corpo = [case(_q, col_rating)]
+        if col_value is not None:
+            corpo[-1] += ","
+            corpo.append(case(lambda lab: _n(info.get(lab, (0, float("nan")))[1]),
+                              col_value, comentar=False))
+        return "\n".join(cab + ["SELECT", "  *,"] + corpo + [f"FROM {table};"])
+
     def predict(self, X: pd.DataFrame, col_score="score", col_rating="rating",
                 col_value=None, ruler_sample=None, col_reasons=None,
                 reasons_top_n=3) -> pd.DataFrame:
