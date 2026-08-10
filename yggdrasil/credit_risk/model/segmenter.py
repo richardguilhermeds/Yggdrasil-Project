@@ -17,7 +17,9 @@ e :class:`~yggdrasil.credit_risk.pd.SequentialPDSegmenter` — que constroem uma
    LightGBM, XGBoost, CatBoost), treinado na própria interface (``fit``) ou
    recebido pronto (``set_model``). Registry extensível em :data:`ALGORITHMS`.
 3. **Métricas** do modelo por amostra (KS/AUC/Gini/Acc/F1 na classificação;
-   RMSE/MAE/R² na regressão) e **SHAP** do modelo criado.
+   RMSE/MAE/R² na regressão) e **SHAP** do modelo criado. Opcionalmente, uma
+   **calibração pós-treino** do score cru (``calibrate``: intercepto/Platt/
+   isotônica) sem re-treinar o modelo.
 4. **Score → ratings**: a resposta do modelo é segmentada em faixas homogêneas
    ordenadas, reaproveitando :mod:`yggdrasil.ratings` (decis/quantil/árvore/optbin),
    com o número de ratings escolhido pelo usuário.
@@ -598,6 +600,24 @@ class _TwoStageModel:
         return p * self.reg_predict(X) + (1.0 - p) * self.anchor0
 
 
+def _logit_np(p, eps=1e-12) -> np.ndarray:
+    """Logito seguro: clipa ``p`` a ``[eps, 1−eps]`` antes de ``log(p/(1−p))`` —
+    evita ±inf com probabilidades 0/1 na camada de calibração."""
+    p = np.clip(np.asarray(p, dtype="float64"), eps, 1.0 - eps)
+    return np.log(p / (1.0 - p))
+
+
+def _sigmoid_np(z) -> np.ndarray:
+    """Sigmoide numericamente estável (sem overflow do ``exp`` em |z| grande)."""
+    z = np.asarray(z, dtype="float64")
+    out = np.empty_like(z)
+    pos = z >= 0
+    out[pos] = 1.0 / (1.0 + np.exp(-z[pos]))
+    ez = np.exp(z[~pos])
+    out[~pos] = ez / (1.0 + ez)
+    return out
+
+
 # ======================================================================
 # Classe principal
 # ======================================================================
@@ -748,6 +768,11 @@ class ModelSegmenter:
         # SHAP; persistida em to_dict/from_dict. None também vira 42.
         self.random_state: int = 42 if random_state is None else int(random_state)
         self.score_: pd.Series | None = None
+        # camada de CALIBRAÇÃO pós-treino do score CRU (ver :meth:`calibrate`):
+        # dict serializável {method, sample, params, …} aplicado no fluxo único
+        # de score (_predict_score_array) — None = sem camada. Um novo
+        # fit/set_model a descarta; persiste em to_dict/save e volta no load.
+        self.calibration_: dict | None = None
         self.rating_strategy = None
         self.rating_col_: str | None = None
         self.rating_: pd.Series | None = None
@@ -2433,6 +2458,7 @@ class ModelSegmenter:
             self._set_monotone_on_pipe(
                 self.model, *self._monotone_est_params(algorithm, mono_dirs, X, feats))
         self.model.fit(X, y, **fit_kwargs)
+        self.calibration_ = None           # modelo novo ⇒ a camada antiga não vale
         self.score_ = self._compute_score(self.df)
         self._shap_cache = {}
         return self
@@ -2503,6 +2529,7 @@ class ModelSegmenter:
         self.class_balance = False             # hurdle não usa o balanceamento do fit
         self.monotone = None                   # hurdle não aplica monotonicidade
         self.monotone_dirs_ = {}
+        self.calibration_ = None               # modelo novo ⇒ a camada antiga não vale
         self.score_ = self._compute_score(self.df)
         self._shap_cache = {}
         self._metrics_cache = None
@@ -3175,6 +3202,7 @@ class ModelSegmenter:
         self.class_balance = False
         self.monotone = None
         self.monotone_dirs_ = {}
+        self.calibration_ = None           # modelo novo ⇒ a camada antiga não vale
         self.score_ = self._compute_score(self.df)
         self._shap_cache = {}
         return self
@@ -3311,10 +3339,20 @@ class ModelSegmenter:
         if self.task_type == "classification":
             if hasattr(model, "predict_proba"):
                 p = np.asarray(model.predict_proba(X))
-                return p[:, 1] if p.ndim == 2 and p.shape[1] >= 2 else np.ravel(p)
-            if hasattr(model, "decision_function"):
-                return np.ravel(model.decision_function(X))
-        return np.ravel(model.predict(X))
+                sc = p[:, 1] if p.ndim == 2 and p.shape[1] >= 2 else np.ravel(p)
+            elif hasattr(model, "decision_function"):
+                sc = np.ravel(model.decision_function(X))
+            else:
+                sc = np.ravel(model.predict(X))
+        else:
+            sc = np.ravel(model.predict(X))
+        # camada de calibração pós-treino (calibrate): entra AQUI, no fluxo único
+        # de score — score_, métricas, ratings, predict e a escoragem Spark saem
+        # calibrados. Só sobre o modelo VIGENTE: pipes candidatos (CV do fit /
+        # backward elimination) seguem crus.
+        if getattr(self, "calibration_", None) is not None and model is self.model:
+            sc = self._apply_calibration(sc)
+        return sc
 
     def _compute_score(self, df) -> pd.Series:
         faltando = [f for f in self.model_features if f not in df.columns]
@@ -3325,6 +3363,285 @@ class ModelSegmenter:
         X = df[self.model_features]
         return pd.Series(self._predict_score_array(self.model, X), index=df.index,
                          name="score", dtype="float64")
+
+    # ------------------------------------------------------------------
+    # CALIBRAÇÃO pós-treino: camada sobre o score CRU (antes de score_scale)
+    # ------------------------------------------------------------------
+    def _apply_calibration(self, sc) -> np.ndarray:
+        """Aplica a camada vigente (:attr:`calibration_`) a um array de score
+        CRU. Só numpy + parâmetros serializáveis (sem objeto sklearn ajustado):
+        a mesma camada roda idêntica no driver e nos executores Spark."""
+        cal = self.calibration_
+        sc = np.asarray(sc, dtype="float64")
+        if not cal:
+            return sc
+        method = cal.get("method")
+        p = cal.get("params") or {}
+        if self.task_type == "classification":
+            if method == "intercept":
+                return _sigmoid_np(_logit_np(sc) + float(p["delta"]))
+            if method == "platt":
+                return _sigmoid_np(float(p["a"]) * _logit_np(sc) + float(p["b"]))
+            if method == "isotonic":
+                # interpolação linear entre os degraus da isotônica (mesma regra
+                # do sklearn com out_of_bounds='clip'); np.interp já clipa nas pontas
+                return np.interp(sc, np.asarray(p["x"], dtype="float64"),
+                                 np.asarray(p["y"], dtype="float64"))
+        else:
+            if method == "intercept":
+                if p.get("mode") == "multiplicativo":
+                    return sc * float(p["factor"])
+                return sc + float(p["shift"])
+            if method == "platt":                  # recalibração LINEAR a·ŷ + b
+                return float(p["a"]) * sc + float(p["b"])
+            if method == "isotonic":
+                return np.interp(sc, np.asarray(p["x"], dtype="float64"),
+                                 np.asarray(p["y"], dtype="float64"))
+        raise ValueError(f"Camada de calibração desconhecida: {method!r}.")
+
+    def _base_score_series(self, df=None) -> pd.Series:
+        """Score CRU do modelo — SEM a camada de calibração — na base ``df``
+        (default: o df de treino). É sobre ele que :meth:`calibrate` ajusta:
+        re-calibrar SUBSTITUI a camada (nunca empilha uma sobre a outra)."""
+        cal, self.calibration_ = self.calibration_, None
+        try:
+            return self._compute_score(self.df if df is None else df)
+        finally:
+            self.calibration_ = cal
+
+    def _calibration_xy(self, sample=None):
+        """``(y, score cru, score calibrado)`` da amostra, alinhados e sem NaN —
+        base do antes×depois (:meth:`calibration_compare` /
+        :meth:`plot_calibration_compare`)."""
+        raw = self._base_score_series()
+        mask = (np.ones(len(self.df), dtype=bool) if self.sample_col is None
+                else self._frame_mask(sample))
+        y = self.df.loc[mask, self.target].to_numpy(dtype="float64")
+        r = raw[mask].to_numpy(dtype="float64")
+        ok = ~np.isnan(y) & ~np.isnan(r)
+        y, r = y[ok], r[ok]
+        c = self._apply_calibration(r) if self.calibration_ is not None else r
+        return y, r, np.asarray(c, dtype="float64")
+
+    def calibrate(self, method="intercept", sample=None, target_rate=None,
+                  mode="aditivo"):
+        """Ajusta uma camada de **calibração pós-treino** sobre o score CRU
+        (0–1, ANTES da escala de negócio ``score_scale``), sem re-treinar.
+
+        Classificação (camada sobre a probabilidade prevista):
+
+        * ``'intercept'`` — desloca o intercepto no LOGITO (``p' = σ(logit(p)+δ)``)
+          para a média calibrada casar a tendência central: ``target_rate`` se
+          informado, senão a taxa observada da amostra do ajuste. Preserva o
+          ranking (AUC/KS/Gini inalterados).
+        * ``'platt'`` — regressão logística sobre o logito
+          (``p' = σ(a·logit(p)+b)``): corrige nível E inclinação
+          (sobre/subconfiança). Preserva o ranking quando ``a > 0``.
+        * ``'isotonic'`` — regressão isotônica (monotônica, não-paramétrica) do
+          observado sobre o previsto. Preserva a ORDENAÇÃO (com possíveis empates).
+
+        Regressão: ``'intercept'`` vira ajuste da média do previsto —
+        ``mode='aditivo'`` (``ŷ + shift``) ou ``'multiplicativo'`` (``ŷ ×
+        fator``); ``'platt'`` vira a recalibração LINEAR ``a·ŷ + b`` (mínimos
+        quadrados); ``'isotonic'`` aplica a isotônica ao previsto.
+
+        A camada entra no **fluxo único de score** (:meth:`_predict_score_array`):
+        ``score_``, métricas, ratings, :meth:`predict`/:meth:`score_table` e a
+        escoragem Spark (:meth:`apply_spark`) passam a usar o score calibrado.
+        Persiste em :meth:`to_dict`/:meth:`save` e volta no :meth:`load`;
+        um novo ``fit``/``set_model`` a descarta; :meth:`decalibrate` remove.
+        Ratings existentes são reprojetados sobre o novo score (mesmos cortes).
+
+        ``sample``: amostra do ajuste (default: a referência). ``target_rate``:
+        tendência central alvo — só com ``method='intercept'``. Devolve ``self``."""
+        if self.model is None:
+            raise RuntimeError("Ajuste/defina o modelo antes (fit / set_model / load).")
+        if method not in ("intercept", "platt", "isotonic"):
+            raise ValueError("method deve ser 'intercept', 'platt' ou 'isotonic'.")
+        if target_rate is not None and method != "intercept":
+            raise ValueError("target_rate só se aplica a method='intercept' "
+                             "(platt/isotonic ajustam contra o alvo observado).")
+        if mode not in ("aditivo", "multiplicativo"):
+            raise ValueError("mode deve ser 'aditivo' ou 'multiplicativo'.")
+        sample = sample or self.ref_sample
+        if self.sample_col is not None and sample not in self._samples():
+            raise ValueError(f"Amostra '{sample}' não encontrada. "
+                             f"Disponíveis: {self._samples()}")
+        raw = self._base_score_series()
+        mask = (np.ones(len(self.df), dtype=bool) if self.sample_col is None
+                else self._frame_mask(sample))
+        y = self.df.loc[mask, self.target].to_numpy(dtype="float64")
+        sc = raw[mask].to_numpy(dtype="float64")
+        ok = ~np.isnan(y) & ~np.isnan(sc)
+        y, sc = y[ok], sc[ok]
+        if y.size == 0:
+            raise ValueError(f"Sem observações válidas (alvo e score) na amostra "
+                             f"'{sample}' para ajustar a calibração.")
+        is_clf = self.task_type == "classification"
+        params: dict
+        if method == "intercept":
+            alvo = float(target_rate) if target_rate is not None else float(np.mean(y))
+            if is_clf:
+                if not (0.0 < alvo < 1.0):
+                    raise ValueError("Na classificação a tendência central alvo deve "
+                                     "estar em (0, 1).")
+                # δ por bisseção: média(σ(z+δ)) é crescente em δ ⇒ raiz única
+                z = _logit_np(sc)
+                lo, hi = -30.0, 30.0
+                for _ in range(100):
+                    mid = 0.5 * (lo + hi)
+                    if float(np.mean(_sigmoid_np(z + mid))) < alvo:
+                        lo = mid
+                    else:
+                        hi = mid
+                params = {"delta": 0.5 * (lo + hi), "target": alvo}
+            elif mode == "multiplicativo":
+                media = float(np.mean(sc))
+                if abs(media) < 1e-12:
+                    raise ValueError("Previsto com média ~0: o ajuste multiplicativo "
+                                     "é indefinido — use mode='aditivo'.")
+                params = {"mode": "multiplicativo", "factor": alvo / media,
+                          "target": alvo}
+            else:
+                params = {"mode": "aditivo", "shift": alvo - float(np.mean(sc)),
+                          "target": alvo}
+        elif method == "platt":
+            if is_clf:
+                if np.unique(y).size < 2:
+                    raise ValueError(f"A amostra '{sample}' tem uma única classe — "
+                                     "Platt requer as duas.")
+                from sklearn.linear_model import LogisticRegression
+                lr = LogisticRegression(C=1e6, solver="lbfgs", max_iter=1000)
+                lr.fit(_logit_np(sc).reshape(-1, 1), y.astype(int))
+                params = {"a": float(np.ravel(lr.coef_)[0]),
+                          "b": float(np.ravel(lr.intercept_)[0])}
+            else:
+                if float(np.std(sc)) < 1e-12:
+                    raise ValueError("Previsto (quase) constante — a recalibração "
+                                     "linear é indefinida; use method='intercept'.")
+                a, b = np.polyfit(sc, y, 1)
+                params = {"a": float(a), "b": float(b)}
+        else:                                       # isotonic
+            from sklearn.isotonic import IsotonicRegression
+            kw = {"y_min": 0.0, "y_max": 1.0} if is_clf else {}
+            iso = IsotonicRegression(increasing=True, out_of_bounds="clip", **kw)
+            iso.fit(sc, y)
+            # guarda só os degraus (listas JSON): a aplicação é np.interp — idem
+            # sklearn — e a camada fica serializável sem o objeto ajustado
+            params = {"x": [float(v) for v in np.ravel(iso.X_thresholds_)],
+                      "y": [float(v) for v in np.ravel(iso.y_thresholds_)]}
+        self.calibration_ = {
+            "method": method, "sample": sample,
+            "target_rate": float(target_rate) if target_rate is not None else None,
+            "params": params,
+            "ajustada_em": pd.Timestamp.now().isoformat(timespec="seconds"),
+        }
+        self._refresh_after_calibration()
+        return self
+
+    def decalibrate(self):
+        """Remove a camada de calibração (:meth:`calibrate`) e volta ao score CRU
+        do modelo — recalcula ``score_``, invalida caches dependentes e reprojeta
+        a régua de ratings (mesmos cortes). No-op sem camada. Devolve ``self``."""
+        if self.calibration_ is None:
+            return self
+        self.calibration_ = None
+        self._refresh_after_calibration()
+        return self
+
+    def _refresh_after_calibration(self):
+        """Após aplicar/remover a camada: recalcula ``score_`` e invalida o que
+        depende dele — caches de métricas/IC e os ratings, cuja régua existente é
+        **reprojetada** sobre o novo score (mesmos cortes; padrão do load e do
+        retreino na UI). Se a reprojeção falhar, os ratings são limpos para não
+        refletirem o score antigo."""
+        self.score_ = self._compute_score(self.df)
+        self._metrics_cache = None
+        self._metrics_ci_cache = None
+        if self.rating_strategy is not None:
+            try:
+                self.rating_ = self.rating_strategy.transform(
+                    self._rating_frame(), self._make_cfg("_amostra"))
+            except Exception:
+                self.rating_ = None
+                self.rating_strategy = None
+                self.rating_labels_ = []
+                self.rating_config = {}
+
+    def calibration_compare(self, sample=None) -> pd.DataFrame:
+        """Efeito da camada vigente na amostra (default: a do ajuste): linhas
+        ``sem calibração`` (score cru) × ``com calibração``, com a média prevista,
+        a média observada do alvo e as métricas de calibração recomputadas —
+        ``brier``/``logloss`` na classificação; ``mean_bias``/``rmse``/``mae`` na
+        regressão. Requer :meth:`calibrate` aplicado."""
+        if self.calibration_ is None:
+            raise RuntimeError("Nenhuma camada de calibração vigente (use calibrate).")
+        sample = sample or self.calibration_.get("sample") or self.ref_sample
+        y, raw, cal = self._calibration_xy(sample)
+        rows = []
+        for nome, sc in (("sem calibração", raw), ("com calibração", cal)):
+            if self.task_type == "classification":
+                m = classification_metrics(y, sc)
+                rows.append({"camada": nome, "media_score": float(np.mean(sc)),
+                             "taxa_observada": float(np.mean(y)),
+                             "brier": m.get("brier"), "logloss": m.get("logloss")})
+            else:
+                m = regression_metrics(y, sc)
+                rows.append({"camada": nome, "media_prevista": float(np.mean(sc)),
+                             "media_observada": float(np.mean(y)),
+                             "mean_bias": m.get("mean_bias"), "rmse": m.get("rmse"),
+                             "mae": m.get("mae")})
+        out = pd.DataFrame(rows)
+        out.attrs["sample"] = sample
+        out.attrs["method"] = self.calibration_["method"]
+        return out
+
+    def plot_calibration_compare(self, sample=None, n_bins=10, figsize=(6.6, 4.8),
+                                 dpi=150, save_path=None, ax=None):
+        """Calibração **antes × depois** da camada (:meth:`calibrate`): curvas
+        previsto×observado por faixa de previsto (quantis) do score CRU e do
+        CALIBRADO na mesma figura, com a diagonal ideal. Eixos na unidade do
+        alvo (não na escala de negócio 0–1000). Requer camada vigente."""
+        if self.calibration_ is None:
+            raise RuntimeError("Nenhuma camada de calibração vigente (use calibrate).")
+        sample = sample or self.calibration_.get("sample") or self.ref_sample
+        y, raw, cal = self._calibration_xy(sample)
+        fig, ax = _new_ax(figsize, dpi, ax)
+        if y.size == 0:
+            ax.axis("off"); fig.tight_layout(); return fig
+
+        def _curva(sc):
+            q = np.unique(np.quantile(sc, np.linspace(0, 1, n_bins + 1)))
+            if len(q) < 2:                          # previsto (quase) constante
+                return np.asarray([float(np.mean(sc))]), np.asarray([float(np.mean(y))])
+            idx = np.clip(np.searchsorted(q, sc, side="right") - 1, 0, len(q) - 2)
+            px, py = [], []
+            for g in range(len(q) - 1):
+                m = idx == g
+                if m.sum():
+                    px.append(float(sc[m].mean())); py.append(float(y[m].mean()))
+            return np.asarray(px), np.asarray(py)
+
+        for nome, sc, cor, ls in (("sem calibração", raw, "#8aa4bf", "--"),
+                                  ("com calibração", cal, "#15324a", "-")):
+            px, py = _curva(sc)
+            ax.plot(px, py, marker="o", ms=5, lw=1.8, ls=ls, color=cor, label=nome)
+        lim = [min(ax.get_xlim()[0], ax.get_ylim()[0]),
+               max(ax.get_xlim()[1], ax.get_ylim()[1])]
+        ax.plot(lim, lim, color="#bbb", ls=":", lw=1, zorder=0)
+        ax.set_xlabel("previsto"); ax.set_ylabel("observado")
+        _pct_axis(ax, "both")                       # unidade do alvo, em %
+        met = {"intercept": "intercepto", "platt": "Platt",
+               "isotonic": "isotônica"}.get(self.calibration_["method"],
+                                            self.calibration_["method"])
+        ax.set_title(f"Calibração antes × depois ({met}) · {sample}", fontsize=11,
+                     fontweight="bold", color="#15324a")
+        ax.grid(alpha=0.15)
+        ax.legend(fontsize=8, loc="best", framealpha=0.9)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        return fig
 
     def metrics(self) -> pd.DataFrame:
         """Métricas do modelo por amostra: classificação (auc, gini, ks, ks_cutoff,
@@ -6537,6 +6854,8 @@ class ModelSegmenter:
             ruler_df = self.rating_ruler(sample=ruler_sample, col_rating=col_rating,
                                          col_value=col_value)
         s = copy.copy(self)                       # rasa: compartilha model/var_meta/bins
+        # a cópia rasa também leva ``calibration_`` (dict de parâmetros puros —
+        # picklável): a UDF distribuída escora com a MESMA camada de calibração.
         s.df = self.df.iloc[0:0].copy()           # só o schema (sem as linhas de treino)
         s._mask_cache = {}
         s._samples_cache = None
@@ -7134,6 +7453,9 @@ class ModelSegmenter:
             "rating_config": self.rating_config,
             "two_stage": self.two_stage,
             "two_stage_threshold": self.two_stage_threshold,
+            # camada de calibração pós-treino (calibrate): parâmetros 100% JSON —
+            # o load a reaplica no fluxo de score sem depender do joblib
+            "calibration": self.calibration_,
         }
 
     def save(self, path: str):
@@ -7172,6 +7494,9 @@ class ModelSegmenter:
         seg.rating_config = data.get("rating_config", {})
         seg.two_stage = bool(data.get("two_stage", False))
         seg.two_stage_threshold = data.get("two_stage_threshold")
+        # camada de calibração: setada ANTES do load recomputar o score_, para o
+        # score carregado já sair calibrado (JSONs antigos: sem a chave ⇒ None)
+        seg.calibration_ = data.get("calibration")
         seg._rebuild_derived()      # recria colunas categóricas derivadas no df
         return seg
 

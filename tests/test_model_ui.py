@@ -452,6 +452,50 @@ def test_card_comparar_modelo_salvo(tmp_path):
     assert "Erro ao comparar" in ui.out_diff.value
 
 
+def test_card_calibracao_aplica_remove_e_retreino_limpa():
+    """Aba Modelo · card 'Calibração do score': aplicar ajusta a camada no seg
+    (média casa a taxa da amostra), renderiza status + antes×depois; 'Remover'
+    volta ao score cru e limpa as saídas; um re-treino descarta a camada e o
+    card acompanha."""
+    ui = _build()
+    # sem modelo: aplicar avisa e não cria camada
+    ui._on_calibrate(None)
+    assert getattr(ui.seg, "calibration_", None) is None
+    assert "Treine" in ui.out_calib_status.value
+    with contextlib.redirect_stdout(io.StringIO()):
+        # classes balanceadas descalibram a média de propósito
+        ui.seg.fit("logistica", class_balance=True)
+    # tendência-alvo inválida → erro amigável, sem camada
+    ui.tx_calib_target.value = "abc"
+    ui._on_calibrate(None)
+    assert "inválida" in ui.out_calib_status.value
+    assert ui.seg.calibration_ is None
+    # aplica o intercepto sem alvo ⇒ casa a taxa observada na amostra do ajuste
+    ui.tx_calib_target.value = ""
+    ui.dd_calib.value = "intercept"
+    ui._on_calibrate(None)
+    assert ui.seg.calibration_ is not None
+    assert "Calibração vigente" in ui.out_calib_status.value
+    assert "<table" in ui.out_calib_table.value      # brier/logloss antes×depois
+    assert "<img" in ui.out_calib_plot.value         # plot de calibração
+    mask = ui.seg._frame_mask("DES")
+    taxa = float(ui.seg.df.loc[mask, "target"].mean())
+    assert abs(float(ui.seg.score_[mask].mean()) - taxa) < 1e-6
+    # remover volta ao cru e limpa as saídas do card
+    ui._on_decalibrate(None)
+    assert ui.seg.calibration_ is None
+    assert "removida" in ui.out_calib_status.value
+    assert ui.out_calib_table.value == "" and ui.out_calib_plot.value == ""
+    # re-aplica e re-treina pela UI: a camada morre e o card é limpo
+    ui._on_calibrate(None)
+    assert ui.seg.calibration_ is not None
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_fit(None)
+    assert ui.seg.calibration_ is None
+    assert ui.out_calib_status.value == ""
+    assert ui.out_calib_table.value == "" and ui.out_calib_plot.value == ""
+
+
 def test_toggle_monotonicidade_ignorado_sem_suporte():
     """Toggle marcado + algoritmo sem suporte: o fit via UI NÃO repassa a opção
     (nem aviso, nem restrição) — a linha fica oculta, mas o valor persiste."""

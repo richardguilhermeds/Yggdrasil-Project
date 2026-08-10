@@ -13,7 +13,8 @@ a modelo:
 * **Modelo** — escolhe o algoritmo (Logística/Linear, RandomForest, ExtraTrees,
   GradientBoosting, HistGradientBoosting e — via extras — LightGBM/XGBoost/CatBoost)
   e treina (ou usa um modelo pré-ajustado); métricas por amostra, gráficos do
-  modelo, fórmula (modelos lineares) e **SHAP**;
+  modelo, **calibração pós-treino do score** (intercepto/Platt/isotônica, com
+  antes×depois), fórmula (modelos lineares) e **SHAP**;
 * **Ratings & Score** — segmenta o score em ratings (decis/quantil/árvore/optbin),
   com o número escolhido pelo usuário; tabela, badrate, distribuição, inversão
   entre ratings e indicador de separação estatística entre ratings vizinhos;
@@ -1384,9 +1385,86 @@ class ModelSegmenterUI:
             self.out_compare_base,
         ]); champion_card.add_class("mseg-card")
 
+        # --- Calibração pós-treino do score (camada sobre o score CRU 0–1) ---
+        if self.task_type == "classification":
+            _cal_opts = [("Intercepto — casa a tendência central (desloca o logito)",
+                          "intercept"),
+                         ("Platt — logística sobre o logito (nível + inclinação)",
+                          "platt"),
+                         ("Isotônica — monotônica não-paramétrica", "isotonic")]
+            _alvo_ph = "taxa-alvo, ex.: 0.045 (vazio = taxa da amostra)"
+        else:
+            _cal_opts = [("Intercepto — ajusta a média do previsto", "intercept"),
+                         ("Linear (Platt) — a·previsto + b", "platt"),
+                         ("Isotônica — monotônica não-paramétrica", "isotonic")]
+            _alvo_ph = "média-alvo, ex.: 0.35 (vazio = média da amostra)"
+        self.dd_calib = W.Dropdown(options=_cal_opts, value="intercept",
+                                   description="Método:",
+                                   style={"description_width": "initial"},
+                                   layout=W.Layout(width="46%"))
+        self.dd_calib_sample = W.Dropdown(options=self.seg._samples(),
+                                          value=self.seg.ref_sample,
+                                          description="Amostra do ajuste:",
+                                          style={"description_width": "initial"},
+                                          layout=W.Layout(width="30%"))
+        self.tx_calib_target = W.Text(value="", placeholder=_alvo_ph,
+                                      description="tendência-alvo:",
+                                      style={"description_width": "initial"},
+                                      layout=W.Layout(width="46%"))
+        self.tx_calib_target.tooltip = ("Tendência central que o score calibrado deve "
+                                        "casar — só no método Intercepto; vazio usa a "
+                                        "observada na amostra do ajuste.")
+        self.dd_calib_mode = W.Dropdown(
+            options=[("aditivo (previsto + shift)", "aditivo"),
+                     ("multiplicativo (previsto × fator)", "multiplicativo")],
+            value="aditivo", description="Ajuste da média:",
+            style={"description_width": "initial"}, layout=W.Layout(width="30%"))
+        self.dd_calib_mode.tooltip = ("Como o Intercepto move a média do previsto na "
+                                      "regressão: somando um deslocamento fixo ou "
+                                      "multiplicando por um fator.")
+        if self.task_type != "regression":       # modo só faz sentido em regressão
+            self.dd_calib_mode.layout.display = "none"
+        self.btn_calibrate = W.Button(description="Aplicar calibração",
+                                      button_style="primary", icon="sliders")
+        self.btn_calibrate.tooltip = ("Ajusta a camada sobre o score CRU na amostra "
+                                      "escolhida e recalcula score, métricas e ratings "
+                                      "(régua reprojetada). Re-aplicar substitui a "
+                                      "camada anterior; um novo treino a descarta.")
+        self.btn_decalibrate = W.Button(description="Remover", icon="undo")
+        self.btn_decalibrate.tooltip = ("Remove a camada de calibração e volta ao "
+                                        "score cru do modelo.")
+        self.out_calib_status = W.HTML()
+        self.out_calib_table = W.HTML()
+        self.out_calib_plot = W.HTML()
+        self.btn_calibrate.on_click(self._on_calibrate)
+        self.btn_decalibrate.on_click(self._on_decalibrate)
+        calib_card = W.VBox([
+            W.HTML("<div class='mseg-h'>Calibração do score (pós-treino)</div>"),
+            W.HTML("<div class='mseg-legend'>Ajusta uma <b>camada de calibração</b> "
+                   "sobre o score CRU (0–1, antes da escala 0–1000), sem re-treinar: "
+                   "<b>intercepto</b> casa a tendência central (alvo informado ou o "
+                   "observado na amostra), <b>Platt</b> corrige nível e inclinação e "
+                   "<b>isotônica</b> ajusta uma curva monotônica não-paramétrica. A "
+                   "camada entra no fluxo único de score — métricas, ratings e "
+                   "escoragem (predict/Spark) — e persiste no Salvar/Carregar; "
+                   "<i>Remover</i> ou um novo treino a descartam.</div>"),
+            W.HBox([self.dd_calib, self.dd_calib_sample],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            W.HBox([self.tx_calib_target, self.dd_calib_mode],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            W.HBox([self.btn_calibrate, self.btn_decalibrate]),
+            self.out_calib_status,
+            W.HBox([W.VBox([self.out_calib_table],
+                           layout=W.Layout(width="49.5%")),
+                    W.VBox([self.out_calib_plot],
+                           layout=W.Layout(width="49.5%"))],
+                   layout=W.Layout(justify_content="space-between")),
+        ]); calib_card.add_class("mseg-card")
+
         tab_model = W.VBox([
             train_card,
             metrics_card,
+            calib_card,
             champion_card,
             self.formula_card,
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>SHAP — beeswarm</div>"), self.out_shap],
@@ -3588,6 +3666,109 @@ class ModelSegmenterUI:
             except Exception as e:
                 out.value = f"<i>{e}</i>"
 
+    # ------------------------------------------------------------------ Calibração pós-treino
+    def _on_calibrate(self, b):
+        """Aplica a camada de calibração (seg.calibrate) com o método/amostra do
+        card e re-renderiza tudo o que depende do score (métricas, gráficos,
+        ratings reprojetados)."""
+        seg = self.seg
+        if seg.score_ is None:
+            self.out_calib_status.value = ("<i>Treine (ou carregue) o modelo antes "
+                                           "de calibrar.</i>")
+            return
+        alvo_txt = (self.tx_calib_target.value or "").strip().replace(",", ".")
+        target = None
+        if alvo_txt:
+            try:
+                target = float(alvo_txt)
+            except ValueError:
+                self.out_calib_status.value = (
+                    f"<div style='color:var(--bad-ink);font-size:12px'><b>Tendência-alvo "
+                    f"inválida:</b> '{alvo_txt}' não é um número.</div>")
+                return
+        mode = (self.dd_calib_mode.value if self.task_type == "regression"
+                else "aditivo")
+        with self._busy(self.btn_calibrate, self.btn_decalibrate,
+                        status=self.out_calib_status, msg="ajustando a calibração…"):
+            try:
+                seg.calibrate(method=self.dd_calib.value,
+                              sample=self.dd_calib_sample.value,
+                              target_rate=target, mode=mode)
+                self._render_calibration()
+                self._render_metrics()
+                self._render_model_plots()
+                if getattr(seg, "rating_", None) is not None:
+                    self._render_ratings()      # régua reprojetada pelo calibrate
+                self._refresh_bar()
+                self._log(f"[calibração] camada '{self.dd_calib.value}' ajustada na "
+                          f"amostra {self.dd_calib_sample.value} — métricas e ratings "
+                          "recomputados.")
+            except Exception as e:
+                self.out_calib_status.value = (
+                    f"<div style='color:var(--bad-ink);font-size:12px'><b>Erro na "
+                    f"calibração:</b> {type(e).__name__}: {e}</div>")
+                self._log(f"[calibração] erro: {e}")
+
+    def _on_decalibrate(self, b):
+        """Remove a camada de calibração (seg.decalibrate) e volta ao score cru."""
+        seg = self.seg
+        if getattr(seg, "calibration_", None) is None:
+            self.out_calib_status.value = ("<div class='mseg-legend'>Não há camada de "
+                                           "calibração vigente.</div>")
+            return
+        with self._busy(self.btn_calibrate, self.btn_decalibrate,
+                        status=self.out_calib_status, msg="removendo a calibração…"):
+            try:
+                seg.decalibrate()
+                self.out_calib_table.value = ""
+                self.out_calib_plot.value = ""
+                self.out_calib_status.value = (
+                    "<div class='mseg-legend'><span style='color:var(--ok-ink);"
+                    "font-weight:600'>✓ Camada removida</span> — score de volta ao "
+                    "cru do modelo; métricas e ratings recomputados.</div>")
+                self._render_metrics()
+                self._render_model_plots()
+                if getattr(seg, "rating_", None) is not None:
+                    self._render_ratings()
+                self._refresh_bar()
+                self._log("[calibração] camada removida — score cru restaurado.")
+            except Exception as e:
+                self.out_calib_status.value = (
+                    f"<div style='color:var(--bad-ink);font-size:12px'><b>Erro ao "
+                    f"remover:</b> {type(e).__name__}: {e}</div>")
+                self._log(f"[calibração] erro ao remover: {e}")
+
+    def _render_calibration(self):
+        """Card da calibração: status da camada vigente + antes×depois — tabela
+        (brier/logloss ou bias/RMSE/MAE recomputados) e plot de calibração."""
+        seg = self.seg
+        cal = getattr(seg, "calibration_", None)
+        if cal is None:
+            self.out_calib_status.value = ""
+            self.out_calib_table.value = ""
+            self.out_calib_plot.value = ""
+            return
+        met = {"intercept": "intercepto", "platt": "Platt",
+               "isotonic": "isotônica"}.get(cal.get("method"), cal.get("method"))
+        alvo = cal.get("target_rate")
+        alvo_txt = f" · tendência-alvo = {alvo:.4f}" if alvo is not None else ""
+        self.out_calib_status.value = (
+            f"<div class='mseg-legend'><span style='color:var(--ok-ink);font-weight:600'>"
+            f"✓ Calibração vigente: {met} · amostra {cal.get('sample')}{alvo_txt}.</span> "
+            "Score, métricas, ratings e escoragem já usam o score calibrado.</div>")
+        try:
+            self.out_calib_table.value = (
+                "<div class='mseg-h'>Antes × depois — métricas de calibração</div>"
+                + self._df_html(seg.calibration_compare().round(5), center=True))
+        except Exception as e:
+            self.out_calib_table.value = f"<i>{e}</i>"
+        try:
+            self.out_calib_plot.value = self._fig_html(
+                seg.plot_calibration_compare(figsize=(6.6, 4.8)),
+                tight=False, stretch=True)
+        except Exception as e:
+            self.out_calib_plot.value = f"<i>{e}</i>"
+
     # ------------------------------------------------------------------ Champion × challenger
     def _baseline_nome(self) -> str:
         """Nome do baseline no campo do card (default 'baseline')."""
@@ -4639,6 +4820,10 @@ class ModelSegmenterUI:
                 self._render_metrics(); self._render_model_plots(); self._render_formula()
             except Exception as e:
                 self._log(f"[load] falha ao renderizar métricas/gráficos: {e}")
+            try:
+                self._render_calibration()     # camada de calibração carregada (se houver)
+            except Exception as e:
+                self._log(f"[load] falha ao renderizar a calibração: {e}")
         if getattr(s, "rating_", None) is not None:
             try:
                 self._render_ratings()
@@ -4744,6 +4929,10 @@ class ModelSegmenterUI:
                   self.out_adv_missing, self.out_adv_stats,
                   self.out_adv_group_metrics, self.out_adv_group_rating):
             w.value = ""
+        # calibração pós-treino: o retreino descarta a camada (seg.calibration_ =
+        # None no fit/set_model) — o card acompanha; após um LOAD, refresh_model
+        # re-renderiza a camada carregada logo em seguida (_render_calibration).
+        self._render_calibration()
         # o modelo mudou ⇒ o resultado do backward elimination ficou defasado (a ordem
         # de remoção/métricas vieram do modelo anterior) — descarta o cache p/ não
         # reaplicar seleção de um modelo que não existe mais.

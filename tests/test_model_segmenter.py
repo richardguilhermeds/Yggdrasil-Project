@@ -992,6 +992,113 @@ def test_save_load_roundtrip(seg, tmp_path):
 
 
 # ----------------------------------------------------------------------
+# Calibração pós-treino do score (calibrate / decalibrate)
+# ----------------------------------------------------------------------
+def test_calibrate_intercept_casa_tendencia_central(seg):
+    """Modelo descalibrado de propósito (classes balanceadas inflam a
+    probabilidade média) → calibrate('intercept') casa a tendência central da
+    amostra (ou o target_rate) sem mudar o ranking; decalibrate volta ao cru."""
+    algo = _default_algo(seg.task_type)
+    if seg.task_type == "classification":
+        seg.fit(algo, class_balance=True)       # descalibra a média de propósito
+    else:
+        seg.fit(algo)
+    mask = seg._frame_mask("DES")
+    taxa = float(seg.df.loc[mask, "target"].mean())
+    raw = seg.score_.copy()
+    if seg.task_type == "classification":       # está mesmo fora da taxa observada
+        assert abs(float(raw[mask].mean()) - taxa) > 0.01
+    seg.calibrate("intercept")                  # sem alvo ⇒ taxa da amostra
+    assert seg.calibration_ is not None
+    assert abs(float(seg.score_[mask].mean()) - taxa) < 1e-6
+    if seg.task_type == "classification":       # deslocar o logito preserva o AUC
+        from sklearn.metrics import roc_auc_score
+        y = seg.df.loc[mask, "target"].to_numpy(dtype="float64")
+        assert roc_auc_score(y, seg.score_[mask]) == pytest.approx(
+            roc_auc_score(y, raw[mask]), abs=1e-12)
+    alvo = taxa / 2 if seg.task_type == "classification" else 0.6
+    seg.calibrate("intercept", target_rate=alvo)  # re-calibrar SUBSTITUI a camada
+    assert abs(float(seg.score_[mask].mean()) - alvo) < 1e-6
+    seg.decalibrate()                           # remove ⇒ score cru do modelo
+    assert seg.calibration_ is None
+    assert np.allclose(seg.score_.to_numpy(), raw.to_numpy(), equal_nan=True)
+
+
+def test_calibrate_isotonic_preserva_ordenacao(seg):
+    """A isotônica é monotônica não-decrescente no score cru (ordem preservada;
+    empates possíveis) — na classificação o AUC fica essencialmente o mesmo."""
+    seg.fit(_default_algo(seg.task_type))
+    raw = seg.score_.copy()
+    seg.calibrate("isotonic")
+    r, c = raw.to_numpy(), seg.score_.to_numpy()
+    ok = ~np.isnan(r) & ~np.isnan(c)
+    ordem = np.argsort(r[ok], kind="stable")
+    assert (np.diff(c[ok][ordem]) >= -1e-12).all()
+    if seg.task_type == "classification":
+        from sklearn.metrics import roc_auc_score
+        mask = seg._frame_mask("DES")
+        y = seg.df.loc[mask, "target"].to_numpy(dtype="float64")
+        assert roc_auc_score(y, c[mask]) == pytest.approx(
+            roc_auc_score(y, r[mask]), abs=0.05)   # só empates dos degraus
+
+
+def test_calibrate_roundtrip_save_load(seg, tmp_path):
+    """A camada persiste em save/load: score, camada e predict idênticos."""
+    seg.fit(_default_algo(seg.task_type))
+    seg.build_ratings(method="quantil", n_ratings=6)
+    seg.calibrate("platt")
+    p = tmp_path / "cal.json"
+    seg.save(str(p))
+    seg2 = ModelSegmenter(seg.df, target="target", task_type=seg.task_type,
+                          sample_col="amostra", ref_sample="DES",
+                          date_col="dt_ref", verbose=False).load(str(p), seg.df)
+    assert seg2.calibration_ == seg.calibration_
+    assert np.allclose(seg.score_.to_numpy(), seg2.score_.to_numpy(), equal_nan=True)
+    a = seg.predict(seg.df.head(100))["score"].to_numpy()
+    b = seg2.predict(seg.df.head(100))["score"].to_numpy()
+    assert np.allclose(a, b, equal_nan=True)
+
+
+def test_calibrate_compare_plot_e_ratings_reprojetados(seg):
+    """calibration_compare traz antes×depois com as métricas de calibração da
+    tarefa; o plot sai; a régua de ratings é reprojetada (mesmos rótulos)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    seg.fit(_default_algo(seg.task_type))
+    seg.build_ratings(method="quantil", n_ratings=6)
+    labels = list(seg.rating_labels_)
+    with pytest.raises(RuntimeError):
+        seg.calibration_compare()               # sem camada vigente
+    seg.calibrate("isotonic")
+    cmp_df = seg.calibration_compare()
+    assert list(cmp_df["camada"]) == ["sem calibração", "com calibração"]
+    esperadas = ({"brier", "logloss"} if seg.task_type == "classification"
+                 else {"mean_bias", "rmse", "mae"})
+    assert esperadas.issubset(cmp_df.columns)
+    fig = seg.plot_calibration_compare()
+    assert fig is not None
+    plt.close(fig)
+    assert seg.rating_ is not None and list(seg.rating_labels_) == labels
+
+
+def test_calibrate_validacoes_e_refit_descarta(seg):
+    with pytest.raises(RuntimeError):           # sem modelo ajustado
+        seg.calibrate("intercept")
+    seg.fit(_default_algo(seg.task_type))
+    with pytest.raises(ValueError):
+        seg.calibrate("foo")
+    with pytest.raises(ValueError):             # alvo só no intercepto
+        seg.calibrate("platt", target_rate=0.2)
+    with pytest.raises(ValueError):
+        seg.calibrate("intercept", sample="ZZZ")
+    seg.calibrate("intercept")
+    assert seg.calibration_ is not None
+    seg.fit(_default_algo(seg.task_type))       # retreino descarta a camada
+    assert seg.calibration_ is None
+
+
+# ----------------------------------------------------------------------
 # SHAP (best-effort) e sem sample_col
 # ----------------------------------------------------------------------
 def test_shap_importance(seg):
