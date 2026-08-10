@@ -2,20 +2,36 @@
 
 O *shift* mede a degradação (ou ganho) de uma métrica entre a amostra de
 desenvolvimento e a *out-of-time*, atendendo ao requisito de acompanhar
-deslocamentos de KS, AUC, RMSE, MAE etc. no experimento.
+deslocamentos de KS, AUC, RMSE, MAE etc. no experimento. Cada shift ganha
+também uma *flag* de degradação (``{m}_shift_flag``) que interpreta a variação
+na direção ruim da métrica via :data:`HIGHER_IS_BETTER`.
 """
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 import numpy as np
 import pandas as pd
 
 from ..config import ColumnConfig
 from ..data import analysis_samples_present
+from .classification import HIGHER_IS_BETTER as _HIB_CLASSIFICATION
 from .classification import classification_metrics, ks_optimal_cutoff
+from .regression import HIGHER_IS_BETTER as _HIB_REGRESSION
 from .regression import regression_metrics
+
+# Direção "boa" de cada métrica (classificação + regressão): ``True`` = maior é
+# melhor (AUC, KS, R²...), ``False`` = menor é melhor (RMSE, Brier...) e
+# ``None`` = viés, avaliado pela magnitude ``|valor|`` (ideal perto de zero).
+HIGHER_IS_BETTER: Dict[str, Optional[bool]] = {
+    **_HIB_CLASSIFICATION,
+    **_HIB_REGRESSION,
+}
+
+# Limiares default das flags: degradação relativa na direção ruim da métrica.
+FLAG_ATENCAO = 0.10    # > 10% de queda relativa => 'atencao'
+FLAG_DEGRADADO = 0.20  # > 20% de queda relativa => 'degradado'
 
 
 def compute_metrics(
@@ -60,15 +76,58 @@ def metric_by_sample(
     return resultado
 
 
+def shift_flag(
+    metric: str,
+    ref: float,
+    cmp: float,
+    atencao: float = FLAG_ATENCAO,
+    degradado: float = FLAG_DEGRADADO,
+) -> Optional[str]:
+    """Classifica o shift de uma métrica em ``'ok'``/``'atencao'``/``'degradado'``.
+
+    A degradação é a variação relativa na direção *ruim* da métrica, segundo
+    :data:`HIGHER_IS_BETTER`:
+
+    * maior-é-melhor (AUC, KS, R²...): queda ``(ref - cmp) / |ref|``;
+    * menor-é-melhor (RMSE, Brier...): aumento ``(cmp - ref) / |ref|``;
+    * viés (``mean_bias``): crescimento da magnitude ``(|cmp| - |ref|) / |ref|``.
+
+    Devolve ``None`` quando a direção da métrica é desconhecida ou a degradação
+    relativa não é computável (referência zero ou valores não finitos).
+    """
+    if metric not in HIGHER_IS_BETTER:
+        return None
+    ref, cmp = float(ref), float(cmp)
+    if not (np.isfinite(ref) and np.isfinite(cmp)) or ref == 0:
+        return None
+    sentido = HIGHER_IS_BETTER[metric]
+    if sentido is True:
+        degradacao = (ref - cmp) / abs(ref)
+    elif sentido is False:
+        degradacao = (cmp - ref) / abs(ref)
+    else:  # viés: importa o afastamento de zero, não o sinal
+        degradacao = (abs(cmp) - abs(ref)) / abs(ref)
+    if degradacao > degradado:
+        return "degradado"
+    if degradacao > atencao:
+        return "atencao"
+    return "ok"
+
+
 def metric_shifts(
     metrics_ref: Dict[str, float],
     metrics_cmp: Dict[str, float],
-) -> Dict[str, float]:
-    """Shifts absoluto e relativo de ``ref`` (DES) para ``cmp`` (OOT).
+    *,
+    flag_atencao: float = FLAG_ATENCAO,
+    flag_degradado: float = FLAG_DEGRADADO,
+) -> Dict[str, Union[float, str]]:
+    """Shifts absoluto/relativo e flag de degradação de ``ref`` (DES) para ``cmp`` (OOT).
 
     ``{m}_shift_abs = cmp - ref`` e ``{m}_shift_rel = (cmp - ref) / |ref|``.
+    ``{m}_shift_flag`` classifica a degradação (:func:`shift_flag`) conforme os
+    limiares ``flag_atencao``/``flag_degradado``.
     """
-    shifts: Dict[str, float] = {}
+    shifts: Dict[str, Union[float, str]] = {}
     for m, ref in metrics_ref.items():
         if m == "ks_cutoff":  # corte não é métrica de performance
             continue
@@ -79,16 +138,24 @@ def metric_shifts(
         shifts[f"{m}_shift_rel"] = (
             round(float((cmp - ref) / abs(ref)), 6) if ref != 0 else float("nan")
         )
+        flag = shift_flag(m, ref, cmp, atencao=flag_atencao, degradado=flag_degradado)
+        if flag is not None:
+            shifts[f"{m}_shift_flag"] = flag
     return shifts
 
 
 def sample_shifts(
     metrics_by_sample: Dict[str, Dict[str, float]],
     cfg: ColumnConfig,
-) -> Dict[str, float]:
+    *,
+    flag_atencao: float = FLAG_ATENCAO,
+    flag_degradado: float = FLAG_DEGRADADO,
+) -> Dict[str, Union[float, str]]:
     """Atalho: shifts entre as amostras dev e OOT de um dict por amostra."""
     ref = metrics_by_sample.get(cfg.dev_sample)
     cmp = metrics_by_sample.get(cfg.oot_sample)
     if ref is None or cmp is None:
         return {}
-    return metric_shifts(ref, cmp)
+    return metric_shifts(
+        ref, cmp, flag_atencao=flag_atencao, flag_degradado=flag_degradado
+    )

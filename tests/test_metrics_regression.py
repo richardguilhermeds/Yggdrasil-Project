@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from yggdrasil.metrics import regression_metrics
+from yggdrasil.metrics import metric_shifts, regression_metrics
 from yggdrasil.metrics.regression import robust_mape
 
 
@@ -36,3 +36,18 @@ def test_chaves_presentes():
     m = regression_metrics(y, yhat)
     for chave in ["rmse", "mae", "mape", "smape", "medae", "r2", "mean_bias"]:
         assert chave in m
+
+
+def test_shift_flags_erro_e_vies():
+    ref = {"rmse": 0.10, "mean_bias": -0.10, "r2": 0.50}
+    cmp = {"rmse": 0.113, "mean_bias": 0.13, "r2": 0.55}
+    s = metric_shifts(ref, cmp)
+    assert s["rmse_shift_flag"] == "atencao"         # erro subiu 13%
+    assert s["mean_bias_shift_flag"] == "degradado"  # |viés| cresceu 30%
+    assert s["r2_shift_flag"] == "ok"                # melhorou
+
+
+def test_shift_flag_vies_por_magnitude_ignora_sinal():
+    # Viés que troca de sinal mas mantém a magnitude não é degradação.
+    s = metric_shifts({"mean_bias": 0.05}, {"mean_bias": -0.05})
+    assert s["mean_bias_shift_flag"] == "ok"

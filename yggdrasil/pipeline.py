@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from .config import ColumnConfig
-from .data import validate_input
+from .data import validate_input, validate_input_report
 from .metrics import metric_by_sample, sample_shifts
 from .monitoring import psi_summary
 from .ratings import RatingStrategy, build_ratings
@@ -33,7 +33,7 @@ class PipelineResult:
     df_scored: pd.DataFrame
     rating_cols: List[str]
     metrics_by_sample: Dict[str, Dict[str, float]]
-    shifts: Dict[str, float]
+    shifts: Dict[str, Union[float, str]]  # inclui flags '{m}_shift_flag'
     psi_metrics: Dict[str, float]
     reports: Dict[str, pd.DataFrame]
     model: Any = None
@@ -93,6 +93,12 @@ class MLPipeline:
     ) -> PipelineResult:
         cfg = self.cfg
         validate_input(df, cfg)
+        # Relatório não bloqueante de qualidade da entrada (aditivo ao validate).
+        findings = validate_input_report(df, cfg, problem_type=self.problem_type)
+        if findings:
+            print(f"[yggdrasil] Relatório de entrada: {len(findings)} finding(s)")
+            for sev, col, msg in findings:
+                print(f"  - [{sev}] {col}: {msg}")
         df = df.copy()
         feature_cols = cfg.feature_columns(df)
 

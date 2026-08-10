@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -25,7 +25,8 @@ DEFAULT_EXPERIMENT = "/Shared/Yggdrasil/esteira_ml"
 
 def _log_metric_dict(mlflow, metrics: Dict[str, float], suffix: str = "") -> None:
     for nome, valor in metrics.items():
-        if valor is None or not np.isfinite(valor):
+        # Ignora valores não numéricos (ex.: flags de shift, que viram tags).
+        if valor is None or isinstance(valor, str) or not np.isfinite(valor):
             continue
         chave = f"{nome}{suffix}"
         mlflow.log_metric(chave, float(valor))
@@ -68,7 +69,7 @@ def log_pipeline_run(
     problem_type: str,
     rating_cols: Sequence[str],
     metrics_by_sample: Dict[str, Dict[str, float]],
-    shifts: Dict[str, float],
+    shifts: Dict[str, Union[float, str]],
     psi_metrics: Dict[str, float],
     reports: Dict[str, pd.DataFrame],
     params: Optional[dict] = None,
@@ -103,7 +104,7 @@ def log_pipeline_run(
             _log_metric_dict(mlflow, met, suffix=f"_{amostra.lower()}")
 
         # ── shifts e PSI agregado ───────────────────────────────────────
-        _log_metric_dict(mlflow, shifts)
+        _log_metric_dict(mlflow, shifts)     # só os valores numéricos
         _log_metric_dict(mlflow, psi_metrics)
 
         # ── tags ────────────────────────────────────────────────────────
@@ -112,6 +113,8 @@ def log_pipeline_run(
             "problem_type": problem_type,
             "trained_by": "richard-guilherme",
         }
+        # Flags de degradação dos shifts ('{m}_shift_flag') viram tags do run.
+        base_tags.update({k: v for k, v in shifts.items() if isinstance(v, str)})
         base_tags.update(tags or {})
         mlflow.set_tags(base_tags)
 
