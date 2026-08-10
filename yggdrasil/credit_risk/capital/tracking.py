@@ -91,6 +91,74 @@ def _log_capital_figures(mlflow, result, allocation, tmp: str) -> None:
                 mlflow.log_artifact(fig_alloc, artifact_path="figures")
 
 
+#: colunas da aba Resumo do relatório (comparação dos runs do experimento)
+_REPORT_METRICS_SPEC = [
+    ("params.method", "método"),
+    ("metrics.EL", "EL"),
+    ("metrics.VaR", "VaR"),
+    ("metrics.ES", "ES"),
+    ("metrics.CE_var", "CE (VaR)"),
+    ("metrics.CE_es", "CE (ES)"),
+]
+
+
+def _log_capital_report(mlflow, run, portfolio, result, allocation, asrf,
+                        benchmark, div, tmp: str) -> None:
+    """Monta e loga o relatório HTML em abas (``report.html``) do *run*.
+
+    Import tardio de :mod:`.._mlflow_report` (padrão do pacote). A aba Resumo
+    compara EL/VaR/ES/CE entre os runs do experimento; as abas de Alocação de
+    Euler e de Validação/benchmark só entram quando os dados existem no run.
+    """
+    from .._mlflow_report import build_tabbed_report_html, runs_comparison_df
+
+    resumo = runs_comparison_df(mlflow, run.info.experiment_id, run.info.run_id,
+                                metrics_spec=_REPORT_METRICS_SPEC)
+    blocos_resumo = [
+        ("Comparação dos runs do experimento — EL · VaR · ES · CE", resumo),
+        ("Distribuição de perdas do run atual", result.summary()),
+        ("Carteira por segmento", portfolio.summary()),
+    ]
+    tabs = [("Resumo · runs", blocos_resumo)]
+
+    if allocation is not None and len(allocation):
+        tabs.append(("Alocação de Euler",
+                     [("Capital alocado por segmento (contribuição à cauda)",
+                       allocation)]))
+
+    blocos_val = []
+    if asrf is not None or benchmark is not None:
+        linhas = [{"medida": "Monte Carlo (run atual)",
+                   "CE": result.economic_capital(metric="var"),
+                   "VaR": result.var()}]
+        if asrf is not None:
+            linhas.append({"medida": "ASRF (benchmark analítico)",
+                           "CE": asrf.economic_capital,
+                           "VaR": asrf.value_at_risk})
+        if benchmark is not None:
+            linhas.append({"medida": "distribuição de referência",
+                           "CE": benchmark.economic_capital(result.q, metric=result.metric),
+                           "VaR": benchmark.var(result.q)})
+        blocos_val.append(("Benchmark de capital — modelo × referência",
+                           pd.DataFrame(linhas)))
+    if div is not None:
+        blocos_val.append(("Benefício de diversificação", pd.DataFrame([div])))
+    if blocos_val:
+        tabs.append(("Validação · benchmark", blocos_val))
+
+    nums = "①②③④⑤"                                   # numeração conforme as abas presentes
+    tabs = [(f"{nums[i]} {nome}", blocos) for i, (nome, blocos) in enumerate(tabs)]
+
+    titulo = f"Capital econômico — {portfolio.name}"
+    sub = (f"q={result.q} · {result.n_scenarios:,} cenários · seed={result.seed}"
+           f" · run {run.info.run_id[:8]}").replace(",", ".")
+    html_doc = build_tabbed_report_html(titulo, sub, tabs, highlight=("", "➤"))
+    path = os.path.join(tmp, "report.html")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html_doc)
+    mlflow.log_artifact(path)
+
+
 # ======================================================================
 # API pública
 # ======================================================================
@@ -111,7 +179,10 @@ def log_capital_run(
 
     Loga os insumos e resultados de uma simulação de Monte Carlo de capital
     econômico, opcionalmente enriquecidos com a alocação de Euler, o *benchmark*
-    ASRF e uma distribuição de referência.
+    ASRF e uma distribuição de referência. Além das tabelas e figuras, loga um
+    relatório HTML autocontido em abas (``report.html``): Resumo (EL/VaR/ES/CE
+    comparando os runs do experimento) · Alocação de Euler · Validação/benchmark
+    — as duas últimas apenas quando os dados existem no run.
 
     Parameters
     ----------
@@ -233,6 +304,13 @@ def log_capital_run(
             _log_capital_figures(mlflow, result, allocation, tmp)
         except Exception as exc:  # noqa: BLE001 - figuras são best-effort
             mlflow.set_tag("figures_error", str(exc)[:250])
+
+        # ── artefato: relatório HTML em abas (best-effort) ──────────────
+        try:
+            _log_capital_report(mlflow, run, portfolio, result, allocation,
+                                asrf, benchmark, div, tmp)
+        except Exception as exc:  # noqa: BLE001 - relatório é best-effort
+            mlflow.set_tag("report_error", str(exc)[:250])
 
         return run.info.run_id
 

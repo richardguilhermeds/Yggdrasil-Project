@@ -581,3 +581,77 @@ def test_rho_sanity_report_flags_out_of_range():
     assert rep2["tipo"] == "corporate"
     assert rep2["faixa_irb_max"] == IRB_CORPORATE_RHO[1]
     assert bool(rep2["fora_da_faixa"])                       # 0.5 > 0.24
+
+
+# ----------------------------------------------------------------------
+# Tracking MLflow: relatório em abas + comparação de runs generalizada
+# ----------------------------------------------------------------------
+def test_runs_comparison_df_default_and_custom_spec():
+    """Regressão: sem metrics_spec o resumo mantém as colunas dos segmentadores;
+    com metrics_spec, as colunas são as pedidas (métricas numéricas, params texto)."""
+    from yggdrasil.credit_risk import _mlflow_report as R
+
+    runs = pd.DataFrame({
+        "run_id": ["abc12345", "def67890"],
+        "start_time": pd.to_datetime(["2026-01-02 10:00", "2026-01-01 09:00"], utc=True),
+        "tags.mlflow.runName": ["run_a", None],
+        "params.algorithm": [None, "cart"],
+        "params.task_type": ["clf", None],
+        "metrics.val_ks": [0.51234, 0.4],
+        "metrics.val_psi": [0.02, 0.03],
+        "metrics.EL": [10.0, 20.0],
+    })
+
+    class _FakeMlflow:
+        def search_runs(self, experiment_ids, order_by):
+            return runs
+
+    fake = _FakeMlflow()
+    out = R.runs_comparison_df(fake, "0", "abc12345")
+    assert list(out.columns) == ["", "run", "quando", "algoritmo",
+                                 "KS (OOT)", "RMSE (OOT)", "PSI (OOT)"]
+    assert out.loc[0, ""] == "➤"                          # linha do run atual
+    assert out.loc[0, "algoritmo"] == "clf"               # fallback em task_type
+    assert out.loc[0, "KS (OOT)"] == pytest.approx(0.5123)
+    assert np.isnan(out.loc[0, "RMSE (OOT)"])             # métrica ausente -> NaN
+    assert out.loc[1, "run"] == "def67890"                # runName ausente -> run_id[:8]
+
+    custom = R.runs_comparison_df(fake, "0", "def67890",
+                                  metrics_spec=[("metrics.EL", "EL"),
+                                                ("params.task_type", "tarefa")])
+    assert list(custom.columns) == ["", "run", "quando", "EL", "tarefa"]
+    assert custom.loc[1, ""] == "➤"
+    assert custom.loc[1, "EL"] == pytest.approx(20.0)
+    assert custom.loc[0, "tarefa"] == "clf"
+
+
+def test_log_capital_run_generates_tabbed_report(tmp_path):
+    mlflow = pytest.importorskip("mlflow")
+    import matplotlib
+    matplotlib.use("Agg")
+    from yggdrasil.credit_risk.capital.asrf import asrf_capital
+    from yggdrasil.credit_risk.capital.tracking import log_capital_run
+
+    port = toy_multifactor()
+    sim = port.simulate(20_000, q=0.99, seed=2)
+    alloc = sim.allocate(metric="es")
+    a = asrf_capital(port, q=0.99)
+    prev_uri = mlflow.get_tracking_uri()
+    try:
+        mlflow.set_tracking_uri((tmp_path / "mlruns").as_uri())
+        run_id = log_capital_run(port, sim, allocation=alloc, asrf=a,
+                                 run_name="teste_report",
+                                 artifacts_dir=str(tmp_path / "arts"))
+        run = mlflow.get_run(run_id)
+        arts = [f.path for f in mlflow.MlflowClient().list_artifacts(run_id)]
+        html = open(mlflow.artifacts.download_artifacts(
+            run_id=run_id, artifact_path="report.html"), encoding="utf-8").read()
+    finally:
+        mlflow.set_tracking_uri(prev_uri)
+    assert "report.html" in arts                          # artefato na raiz do run
+    assert "report_error" not in run.data.tags            # relatório sem falha
+    assert {"EL", "VaR", "ES", "CE_var", "CE_es", "CE_asrf"} <= set(run.data.metrics)
+    # abas: Resumo sempre; Euler e Validação porque os dados existem no run
+    for aba in ("Resumo · runs", "Alocação de Euler", "Validação · benchmark"):
+        assert aba in html
+    assert "➤" in html                                    # run atual destacado

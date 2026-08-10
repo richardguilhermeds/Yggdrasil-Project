@@ -68,6 +68,56 @@ def _coverage_table(backtest):
     return None
 
 
+#: colunas da aba Resumo do relatório (comparação dos runs do experimento)
+_REPORT_METRICS_SPEC = [
+    ("params.model", "modelo"),
+    ("metrics.AIC", "AIC"),
+    ("metrics.oos_rmse_melhor", "RMSE (OOS)"),
+    ("metrics.diag_testes_ok", "diag. ok"),
+    ("metrics.diag_testes_total", "diag. total"),
+]
+
+
+def _log_satellite_report(mlflow, run, fit, projection, search, diag, tmp: str) -> None:
+    """Monta e loga o relatório HTML em abas (``report.html``) do *run*.
+
+    Import tardio de :mod:`.._mlflow_report` (padrão do pacote). Abas: Resumo
+    (AIC · RMSE fora da amostra · diagnóstico, comparando os runs do
+    experimento) · Coeficientes + diagnóstico · Projeção por cenário (esta só
+    quando há projeção no run).
+    """
+    from .._mlflow_report import build_tabbed_report_html, runs_comparison_df
+
+    resumo = runs_comparison_df(mlflow, run.info.experiment_id, run.info.run_id,
+                                metrics_spec=_REPORT_METRICS_SPEC)
+    blocos_resumo = [("Comparação dos runs do experimento — AIC · RMSE (OOS) · diagnóstico",
+                      resumo)]
+    ranking = getattr(search, "ranking", None)
+    if ranking is not None and len(ranking):
+        blocos_resumo.append(("Champion-challenger — ranking da busca (top 10)",
+                              ranking.head(10)))
+    tabs = [("① Resumo · runs", blocos_resumo)]
+
+    coefs = fit.coef_frame().reset_index().rename(columns={"index": "termo"})
+    blocos_coef = [("Coeficientes", coefs)]
+    if diag is not None and len(diag):
+        blocos_coef.append(("Bateria de diagnóstico de resíduos", diag))
+    tabs.append(("② Coeficientes · diagnóstico", blocos_coef))
+
+    if projection is not None:
+        tabs.append(("③ Projeção por cenário",
+                     [("Projeção condicional aos cenários — média e intervalo",
+                       projection.to_frame())]))
+
+    titulo = f"Modelo satélite — {fit.model_name} ({fit.kind})"
+    sub = f"link {fit.link} · nobs={fit.nobs} · run {run.info.run_id[:8]}"
+    html_doc = build_tabbed_report_html(titulo, sub, tabs, highlight=("", "➤"))
+    path = os.path.join(tmp, "report.html")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html_doc)
+    mlflow.log_artifact(path)
+
+
 def log_satellite_run(
     fit: "FitResult",
     *,
@@ -86,7 +136,10 @@ def log_satellite_run(
     Loga a especificação e o *link* como parâmetros; AIC/BIC/logL/R²/σ e o nº de
     testes de diagnóstico aprovados como métricas; e — *best-effort* — a tabela de
     coeficientes, a bateria de diagnóstico, a projeção e as figuras (ajuste,
-    resíduos, leque) como artefatos.
+    resíduos, leque) como artefatos, além de um relatório HTML autocontido em
+    abas (``report.html``): Resumo (AIC · RMSE fora da amostra · diagnóstico,
+    comparando os runs do experimento) · Coeficientes + diagnóstico · Projeção
+    por cenário.
 
     Parameters
     ----------
@@ -205,6 +258,12 @@ def log_satellite_run(
             _log_figures(mlflow, fit, series, projection, tmp)
         except Exception as exc:  # noqa: BLE001
             mlflow.set_tag("figures_error", str(exc)[:200])
+
+        # ── artefato: relatório HTML em abas (best-effort) ──────────
+        try:
+            _log_satellite_report(mlflow, run, fit, projection, search, diag, tmp)
+        except Exception as exc:  # noqa: BLE001
+            mlflow.set_tag("report_error", str(exc)[:200])
 
         return run.info.run_id
 

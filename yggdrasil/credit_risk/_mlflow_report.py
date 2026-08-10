@@ -2,8 +2,12 @@
 yggdrasil.credit_risk._mlflow_report
 ====================================
 Relatório MLflow em **abas** (① Resumo · ② Métricas · ③ Estabilidade),
-compartilhado pelos segmentadores de **árvore** e de **modelo**. Loga um artefato
-HTML autocontido (CSS + JS inline, sem dependência externa) no run ativo:
+compartilhado pelos segmentadores de **árvore** e de **modelo**. Os blocos
+genéricos (:func:`build_tabbed_report_html` e :func:`runs_comparison_df` com
+``metrics_spec``) também servem aos relatórios de **capital econômico**
+(:mod:`.capital.tracking`) e dos **modelos satélite** (:mod:`.econometric.tracking`).
+Loga um artefato HTML autocontido (CSS + JS inline, sem dependência externa)
+no run ativo:
 
 * **Resumo** — compara TODOS os runs do experimento (via ``mlflow.search_runs``)
   em **KS**, **RMSE** e **PSI no OOT**; a linha do run atual fica destacada.
@@ -97,8 +101,24 @@ def build_tabbed_report_html(title, subtitle, tabs, highlight=None):
             f"<script>{_JS}</script></body></html>")
 
 
-def runs_comparison_df(mlflow, experiment_id, current_run_id):
-    """DataFrame comparando os runs do experimento em KS/RMSE/PSI (OOT)."""
+#: colunas-padrão da aba Resumo dos segmentadores (KS/RMSE/PSI na validação)
+_DEFAULT_METRICS_SPEC = [
+    ("metrics.val_ks", "KS (OOT)"),
+    ("metrics.val_rmse", "RMSE (OOT)"),
+    ("metrics.val_psi", "PSI (OOT)"),
+]
+
+
+def runs_comparison_df(mlflow, experiment_id, current_run_id, metrics_spec=None):
+    """DataFrame comparando os runs do experimento.
+
+    ``metrics_spec`` = lista ``[(coluna_mlflow, rótulo)]`` com as colunas exibidas
+    após ``run``/``quando``: colunas ``metrics.*`` viram números arredondados
+    (4 casas) e as demais (``params.*``/``tags.*``) entram como texto. ``None``
+    mantém o comportamento dos segmentadores — coluna ``algoritmo``
+    (``params.algorithm`` com *fallback* em ``params.task_type``) + KS/RMSE/PSI
+    na amostra de validação (OOT).
+    """
     try:
         runs = mlflow.search_runs(experiment_ids=[experiment_id],
                                   order_by=["attributes.start_time DESC"])
@@ -116,16 +136,20 @@ def runs_comparison_df(mlflow, experiment_id, current_run_id):
         name = name.where(name.notna(), runs["run_id"].str[:8])
     quando = pd.to_datetime(col("start_time"), errors="coerce", utc=True)
     atual = (col("run_id") == current_run_id).map({True: "➤", False: ""})
-    out = pd.DataFrame({
+    data = {
         "": atual.values,
         "run": name.values,
         "quando": quando.dt.strftime("%d/%m/%y %H:%M").values,
-        "algoritmo": col("params.algorithm").fillna(col("params.task_type")).values,
-        "KS (OOT)": pd.to_numeric(col("metrics.val_ks"), errors="coerce").round(4).values,
-        "RMSE (OOT)": pd.to_numeric(col("metrics.val_rmse"), errors="coerce").round(4).values,
-        "PSI (OOT)": pd.to_numeric(col("metrics.val_psi"), errors="coerce").round(4).values,
-    })
-    return out
+    }
+    if metrics_spec is None:                            # default dos segmentadores
+        data["algoritmo"] = col("params.algorithm").fillna(col("params.task_type")).values
+        metrics_spec = _DEFAULT_METRICS_SPEC
+    for mcol, rotulo in metrics_spec:
+        if str(mcol).startswith("metrics."):
+            data[rotulo] = pd.to_numeric(col(mcol), errors="coerce").round(4).values
+        else:                                           # params.* / tags.* como texto
+            data[rotulo] = col(mcol).values
+    return pd.DataFrame(data)
 
 
 def _num(row, *names):

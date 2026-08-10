@@ -552,6 +552,38 @@ def test_log_satellite_run_logs_backtest_coverage(tmp_path):
     assert 0.0 <= mets["cobertura_intervalo"] <= 1.0
 
 
+def test_log_satellite_run_generates_tabbed_report(tmp_path):
+    mlflow = pytest.importorskip("mlflow")
+    import matplotlib
+    matplotlib.use("Agg")
+    from yggdrasil.credit_risk.econometric import tracking
+
+    syn = S.simulate_pd_series(seed=41)
+    spec = Specification(exog={"desemprego": [1]}, ar=1, link="logit")
+    m = ARDL(syn.series, syn.macro, spec)
+    fr = m.fit()
+    ss = standard_scenarios(syn.macro, horizon=6)
+    proj = m.project(ss, n_sims=200, seed=1)
+    prev_uri = mlflow.get_tracking_uri()
+    try:
+        mlflow.set_tracking_uri((tmp_path / "mlruns").as_uri())
+        run_id = tracking.log_satellite_run(fr, projection=proj, run_name="teste_report")
+        run = mlflow.get_run(run_id)
+        arts = [f.path for f in mlflow.MlflowClient().list_artifacts(run_id)]
+        html = open(mlflow.artifacts.download_artifacts(
+            run_id=run_id, artifact_path="report.html"), encoding="utf-8").read()
+    finally:
+        mlflow.set_tracking_uri(prev_uri)
+    assert "report.html" in arts                          # artefato na raiz do run
+    assert "report_error" not in run.data.tags            # relatório sem falha
+    assert "AIC" in run.data.metrics
+    # três abas: Resumo · Coeficientes+diagnóstico · Projeção por cenário
+    for aba in ("① Resumo · runs", "② Coeficientes · diagnóstico",
+                "③ Projeção por cenário"):
+        assert aba in html
+    assert "➤" in html                                    # run atual destacado
+
+
 def test_report_figures_render():
     import matplotlib
     matplotlib.use("Agg")
