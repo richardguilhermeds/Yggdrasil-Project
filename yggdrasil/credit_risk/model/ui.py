@@ -1067,14 +1067,9 @@ class ModelSegmenterUI:
 
         tab_vars = W.VBox([
             W.HTML("<div class='mseg-h'>Seleção & categorização de variáveis</div>"),
-            # auto-seleção à esquerda · card de multicolinearidade ao lado
-            W.HBox([W.VBox([W.HBox([self.sl_min_iv, self.sl_max_psi, self.cb_require_mono]),
-                            W.HBox([self.btn_auto, self.btn_auto_cat]),
-                            self.out_mono_hint],
-                           layout=W.Layout(width="54%")),
-                    W.VBox([redund_card], layout=W.Layout(width="45%"))],
-                   layout=W.Layout(justify_content="space-between", width="99%")),
-            sel_card,
+            W.HBox([self.sl_min_iv, self.sl_max_psi, self.cb_require_mono,
+                    self.btn_auto, self.btn_auto_cat]),
+            self.out_mono_hint,
             # incluir/excluir UMA variável por vez — a escolhida em 'Variável:'
             W.HBox([self.dd_var, self.btn_include, self.btn_exclude]),
             W.VBox([self.sel_included,
@@ -1091,6 +1086,10 @@ class ModelSegmenterUI:
                             self.out_vars], layout=W.Layout(width="58%")),
                     W.VBox([self.out_var_preview_h,
                             self.out_var_preview], layout=W.Layout(width="42%"))]),
+            # Cards novos desta versão, ao FIM da aba — o fluxo original de
+            # seleção/categorização fica intacto acima.
+            redund_card,
+            sel_card,
         ], layout=W.Layout(padding="2px"))
 
         # ---------- Aba 2: Análise de variáveis ----------
@@ -1700,9 +1699,6 @@ class ModelSegmenterUI:
         tab_model = W.VBox([
             train_card,
             metrics_card,
-            diag_card,
-            calib_card,
-            champion_card,
             self.formula_card,
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>SHAP — beeswarm</div>"), self.out_shap],
                            layout=W.Layout(width="55%")),
@@ -1730,6 +1726,11 @@ class ModelSegmenterUI:
                         self.out_shap_row],
                        layout=W.Layout(width="49.5%")),
             ], layout=W.Layout(justify_content="space-between")),
+            # Análises novas desta versão, ao FIM da aba: o fluxo original
+            # (treino → métricas → fórmula → SHAP) fica intacto acima.
+            diag_card,
+            calib_card,
+            champion_card,
         ], layout=W.Layout(padding="2px"))
         self._sync_algo_visibility()
 
@@ -2070,9 +2071,10 @@ class ModelSegmenterUI:
         ]); card_diff.add_class("mseg-card")
         tab_export = W.VBox([
             card_score,
-            card_sql,
             W.HBox([card_persist, card_mlflow],
                    layout=W.Layout(justify_content="space-between", align_items="stretch")),
+            # Cards novos desta versão, ao FIM da aba (SQL da régua e diff de modelo).
+            card_sql,
             card_diff,
         ], layout=W.Layout(padding="2px"))
 
@@ -2264,8 +2266,9 @@ class ModelSegmenterUI:
             self.out_adv_stats,
         ]); card_adv_varprofile.add_class("mseg-card")
 
-        tab_adv = W.VBox([card_adv_disc, card_adv_safra, card_adv_group,
-                          card_adv_varprofile, card_adv_bt],
+        tab_adv = W.VBox([card_adv_disc, card_adv_safra, card_adv_varprofile,
+                          # métricas por segmento é novidade — entra ao fim da aba
+                          card_adv_bt, card_adv_group],
                          layout=W.Layout(padding="2px"))
 
         # ---------- Aba: Importância (Backward Elimination) ----------

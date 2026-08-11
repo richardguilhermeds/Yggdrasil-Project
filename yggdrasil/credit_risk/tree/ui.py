@@ -1704,10 +1704,11 @@ class TreeSegmenterUI:
             W.HTML("<div class='treeui-h'>Exportar DataFrame rotulado</div>"),
             W.HTML("<div class='treeui-legend'>Gera <b>ui.result</b> (pandas) com a coluna de "
                    "segmento e a folha por linha.</div>"),
-            W.Box([], layout=W.Layout(flex="1 1 auto")),   # alinha o botão à base do card
             W.HBox([self.btn_export]),
-        ], layout=W.Layout(width="49%"))
+        ], layout=W.Layout(width="100%"))
         card_export_df.add_class("treeui-card")
+        # card novo (Excel multi-abas) empilhado ABAIXO do export original,
+        # em largura cheia — o card antigo mantém o formato que tinha.
         card_xlsx = W.VBox([
             W.HTML("<div class='treeui-h'>Exportar Excel (.xlsx)</div>"),
             W.HTML("<div class='treeui-legend'>Arquivo multi-abas: <b>Folhas</b> (tabela "
@@ -1716,13 +1717,9 @@ class TreeSegmenterUI:
                    "Cabeçalhos congelados e percentuais formatados. Requer o pacote opcional "
                    "<code>openpyxl</code>.</div>"),
             self.tx_xlsx_path,
-            W.Box([], layout=W.Layout(flex="1 1 auto")),
             W.HBox([self.btn_xlsx]),
-        ], layout=W.Layout(width="49%"))
+        ], layout=W.Layout(width="100%"))
         card_xlsx.add_class("treeui-card")
-        export_top = W.HBox([card_export_df, card_xlsx],
-                            layout=W.Layout(width="100%", align_items="stretch",
-                                            justify_content="space-between"))
         card_mlflow = W.VBox([
             W.HTML("<div class='treeui-h'>Registrar no MLflow / Unity Catalog</div>"),
             W.HTML("<div class='treeui-legend'>Loga régua, métricas e o modelo pyfunc e registra a "
@@ -1786,7 +1783,7 @@ class TreeSegmenterUI:
         ])
         card_pdf.add_class("treeui-card")
         # a antiga aba "Histórico" virou uma SEÇÃO no fim da aba Exportar
-        tab_valid = W.VBox([sep_exp, export_top, export_row,
+        tab_valid = W.VBox([sep_exp, card_export_df, card_xlsx, export_row,
                             sep_hist, hist_row, self.box_confirm, card_pdf])
 
         # ================================================================
