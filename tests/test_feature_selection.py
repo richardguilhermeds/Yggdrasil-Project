@@ -121,8 +121,17 @@ def spark():
     sess.stop()
 
 
-def _make_pdf(problem: str = "classification", n: int = 1200, seed: int = 0) -> pd.DataFrame:
-    """Tabela sintética com books bureau/bvs + colunas problemáticas para os filtros."""
+def _make_pdf(problem: str = "classification", n: int = 1200, seed: int = 0,
+              ruido: float = 2.0) -> pd.DataFrame:
+    """Tabela sintética com books bureau/bvs + colunas problemáticas para os filtros.
+
+    ``ruido`` calibra a força do sinal. No default (2.0) as features boas ficam em
+    IV ≈ 0.3 / AUC ≈ 0.64 — forte, mas abaixo de ``iv_leakage`` (0.50), que é a faixa
+    onde o pipeline de fato *seleciona*. Com ruído baixo (0.5) o IV vai a ~2.0 e o
+    consenso barra tudo por suspeita de leakage: use esse valor para exercitar essa
+    trava, nunca para testar o caminho feliz. Mesma convenção de
+    ``tests/test_feature_selection_pandas.py``.
+    """
     rng = np.random.default_rng(seed)
     s1 = rng.normal(size=n)
     s2 = rng.normal(size=n)
@@ -134,10 +143,8 @@ def _make_pdf(problem: str = "classification", n: int = 1200, seed: int = 0) -> 
         "feat_bvs_util": rng.normal(size=n),
         "feat_bvs_miss": rng.normal(size=n),                        # alto missing
     })
-    if problem == "classification":
-        df["target"] = (0.9 * s1 - 0.7 * s2 + rng.normal(0, 0.5, n) > 0).astype(int)
-    else:
-        df["target"] = 0.9 * s1 - 0.7 * s2 + rng.normal(0, 0.5, n)
+    linear = 0.9 * s1 - 0.7 * s2 + rng.normal(0, ruido, n)
+    df["target"] = (linear > 0).astype(int) if problem == "classification" else linear
     df.loc[df.sample(frac=0.8, random_state=1).index, "feat_bvs_miss"] = np.nan
     df["dt_ref"] = pd.Timestamp("2024-01-01")
     df["amostra"] = "DES"
@@ -186,6 +193,20 @@ def test_spark_end_to_end_classificacao(spark, fs_cfg_rapido):
     assert "overall_importance" in rep.panels and "book::bureau" in rep.panels
     html = rep.to_html(embed_panels=False)
     assert "Seleção de Features" in html
+
+
+def test_spark_barra_feature_com_leakage(spark, fs_cfg_rapido):
+    """Sinal quase perfeito (IV >> iv_leakage) não pode ser selecionado."""
+    from yggdrasil.feature_selection import run_feature_selection
+    sdf = spark.createDataFrame(_make_pdf("classification", ruido=0.5))  # IV ~2.0
+    rep = run_feature_selection(sdf, ColumnConfig(), fs_cfg_rapido,
+                                books=["bureau"], with_panels=False)
+    tab = rep.selection_table.set_index("feature")
+    # o representante do cluster bureau varia com o backend (os scores empatam);
+    # o que importa é que quem sobreviveu à redundância foi barrado por leakage.
+    vivos = tab[tab["motivo"] == "suspeita de leakage (revisar)"]
+    assert not vivos.empty and bool(vivos["leakage_flag"].all())
+    assert rep.selected_overall == []
 
 
 def test_spark_regressao(spark, fs_cfg_rapido):

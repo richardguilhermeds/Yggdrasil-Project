@@ -264,6 +264,10 @@ def test_paridade_com_spark(fs_cfg_rapido):
     pytest.importorskip("pyspark")
     from pyspark.sql import SparkSession
 
+    # getOrCreate devolve a sessão do fixture de tests/test_feature_selection.py quando
+    # os dois arquivos rodam juntos. Só paramos a sessão se fomos nós que a criamos —
+    # senão este teste derrubaria a sessão dos testes Spark que viessem depois.
+    ja_existia = SparkSession.getActiveSession() is not None
     spark = (SparkSession.builder.master("local[2]").appName("ygg-fsel-paridade")
              .config("spark.sql.shuffle.partitions", "4")
              .config("spark.ui.enabled", "false").getOrCreate())
@@ -275,7 +279,8 @@ def test_paridade_com_spark(fs_cfg_rapido):
         rep_sp = run_feature_selection(spark.createDataFrame(pdf), ColumnConfig(), fs_cfg_rapido,
                                        books=["bureau", "bvs"], with_panels=False)
     finally:
-        spark.stop()
+        if not ja_existia:
+            spark.stop()
 
     assert rep_pd.problem_type == rep_sp.problem_type
     # os filtros duros são determinísticos nos dois backends
