@@ -6,6 +6,11 @@ lógica de consenso. O import do ``pyspark`` é *gated* (mesmo padrão de
 :meth:`yggdrasil.credit_risk.tree.segmenter.TreeSegmenter.apply_spark`):
 o módulo importa sem pyspark instalado e só falha — com mensagem clara — ao
 executar uma função distribuída.
+
+As funções públicas também aceitam um ``pandas.DataFrame``: nesse caso delegam para
+o espelho local em :mod:`pandas_stats`, que devolve exatamente o mesmo formato. O
+import de ``pandas_stats`` é feito dentro da função para não criar ciclo com
+:mod:`importance` / :mod:`boruta`.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from .backend import is_pandas
 from .config import FeatureSelectionConfig
 
 # Tipos numéricos do Spark sobre os quais approxQuantile/Correlation operam.
@@ -34,6 +40,9 @@ def _require_functions():
 
 def numeric_columns(sdf, features: List[str]) -> List[str]:
     """Subconjunto de ``features`` cujo tipo Spark é numérico."""
+    if is_pandas(sdf):
+        from .pandas_stats import numeric_columns as _local
+        return _local(sdf, features)
     tipos = dict(sdf.dtypes)
     return [c for c in features if str(tipos.get(c, "")).lower().startswith(_NUMERIC_PREFIXES)]
 
@@ -41,6 +50,9 @@ def numeric_columns(sdf, features: List[str]) -> List[str]:
 # ── missing ─────────────────────────────────────────────────────────────
 def missing_rate(sdf, features: List[str]) -> pd.Series:
     """Fração de valores ausentes (NULL e, p/ floats, NaN) por feature — uma passada."""
+    if is_pandas(sdf):
+        from .pandas_stats import missing_rate as _local
+        return _local(sdf, features)
     F = _require_functions()
     n = sdf.count()
     if n == 0:
@@ -66,6 +78,9 @@ def variance_flags(sdf, features: List[str], cfg: Optional[FeatureSelectionConfi
     (numéricas) ou se tiver no máximo 1 valor distinto; é "quase-constante" se o
     valor modal cobre ``>= near_constant`` das linhas não-nulas.
     """
+    if is_pandas(sdf):
+        from .pandas_stats import variance_flags as _local
+        return _local(sdf, features, cfg)
     F = _require_functions()
     cfg = cfg or FeatureSelectionConfig()
     num = set(numeric_columns(sdf, features))
@@ -146,6 +161,9 @@ def correlation_matrices(
     sdf, features: List[str], cfg: Optional[FeatureSelectionConfig] = None,
 ) -> Dict[str, pd.DataFrame]:
     """Matrizes de correlação **Pearson e Spearman** entre as features numéricas."""
+    if is_pandas(sdf):
+        from .pandas_stats import correlation_matrices as _local
+        return _local(sdf, features, cfg)
     cfg = cfg or FeatureSelectionConfig()
     num = [c for c in numeric_columns(sdf, features)]
     if len(num) < 2:
@@ -162,6 +180,9 @@ def corr_with_target(
     method: str = "spearman",
 ) -> pd.Series:
     """Correlação (sinalizada) de cada feature numérica com o alvo."""
+    if is_pandas(sdf):
+        from .pandas_stats import corr_with_target as _local
+        return _local(sdf, features, target, cfg, method)
     cfg = cfg or FeatureSelectionConfig()
     num = numeric_columns(sdf, features)
     if not num:

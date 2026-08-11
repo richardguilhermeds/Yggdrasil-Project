@@ -1,4 +1,4 @@
-"""Indicadores de importância de features (Spark-native).
+"""Indicadores de importância de features (Spark-native, com espelho em pandas).
 
 Consolida, num único ranking por feature:
 
@@ -11,6 +11,9 @@ Consolida, num único ranking por feature:
 O ``score`` final é a média dos *ranks* das métricas disponíveis (mesmo método de
 :func:`yggdrasil.eda.importance.importance_ranking`), e há uma flag de suspeita de
 *leakage*. Tudo é devolvido como ``pandas.DataFrame`` (pequeno) já no driver.
+
+Com entrada pandas as primitivas delegam para :mod:`pandas_stats` (sklearn + percentis
+exatos); ``importance_indicators`` é orquestração pura e serve os dois backends.
 """
 
 from __future__ import annotations
@@ -20,12 +23,16 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from .backend import is_pandas
 from .config import FeatureSelectionConfig
 from .spark_stats import _require_functions, corr_with_target, numeric_columns
 
 
 def maybe_sample(sdf, cfg: FeatureSelectionConfig):
     """Amostra ``sample_size`` linhas para as etapas de modelo (se configurado)."""
+    if is_pandas(sdf):
+        from .pandas_stats import maybe_sample as _local
+        return _local(sdf, cfg)
     if cfg.sample_size and cfg.sample_size > 0:
         n = sdf.count()
         if n > cfg.sample_size:
@@ -44,6 +51,9 @@ def rf_importances(
     sdf, features: List[str], target: str, problem_type: str, cfg: FeatureSelectionConfig,
 ) -> pd.Series:
     """Importância por impureza de um RandomForest (pyspark.ml). Só features numéricas."""
+    if is_pandas(sdf):
+        from .pandas_stats import rf_importances as _local
+        return _local(sdf, features, target, problem_type, cfg)
     F = _require_functions()
     from pyspark.ml.feature import VectorAssembler
 
@@ -93,6 +103,9 @@ def univariate_metrics(
     sdf, features: List[str], target: str, cfg: FeatureSelectionConfig,
 ) -> pd.DataFrame:
     """IV/KS/AUC/Gini univariados por feature numérica (alvo binário)."""
+    if is_pandas(sdf):
+        from .pandas_stats import univariate_metrics as _local
+        return _local(sdf, features, target, cfg)
     F = _require_functions()
     from pyspark.ml.feature import Bucketizer
 

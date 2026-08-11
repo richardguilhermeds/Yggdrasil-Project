@@ -15,7 +15,7 @@ from dataclasses import dataclass
 class FeatureSelectionConfig:
     """Parâmetros da seleção de features sobre um Spark DataFrame.
 
-    A seleção é feita por *book* (grupo de features de mesma origem, ex.: serasa,
+    A seleção é feita por *book* (grupo de features de mesma origem, ex.: bureau,
     bvs). Cada feature passa por filtros duros (missing, variância, redundância) e
     depois por uma avaliação de importância + Boruta, consolidadas num **consenso**.
     """
@@ -51,6 +51,7 @@ class FeatureSelectionConfig:
     boruta_perc: float = 100.0         # percentil das shadows usado como limiar (100 = máximo)
 
     # ── backend / amostragem ────────────────────────────────────────────
+    # Só vale para entrada Spark; com pandas o Boruta já roda no driver (sklearn).
     backend: str = "spark"             # "spark" (pyspark.ml) | "driver" (sklearn)
     sample_size: int = 0               # >0 amostra N linhas p/ as etapas de modelo (0 = full)
     approx_rel_error: float = 0.01     # erro relativo do approxQuantile (0 = exato, caro)

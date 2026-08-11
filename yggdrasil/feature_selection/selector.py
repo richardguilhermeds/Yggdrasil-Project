@@ -1,4 +1,8 @@
-"""Orquestrador da seleção de features por *book* (PySpark).
+"""Orquestrador da seleção de features por *book* (pandas ou PySpark).
+
+O backend vem do tipo do DataFrame recebido (ver :mod:`backend`): pandas roda tudo
+no driver, Spark distribui. A lógica abaixo é a mesma nos dois casos — só a camada
+de estatística muda.
 
 `run_feature_selection` roda, **book a book**, o pipeline:
 
@@ -27,6 +31,7 @@ import pandas as pd
 from ..config import ColumnConfig
 from ..utils import get_logger
 from . import plots
+from .backend import backend_name, is_pandas
 from .books import BooksSpec, Book, resolve_books
 from .boruta import boruta_select
 from .config import FeatureSelectionConfig
@@ -54,6 +59,9 @@ _COLS = [
 
 def _infer_problem_type(sdf, cfg: ColumnConfig) -> str:
     """Heurística: alvo binário {0,1} => classification, senão regression."""
+    if is_pandas(sdf):
+        from .pandas_stats import infer_problem_type
+        return infer_problem_type(sdf, cfg)
     F = _require_functions()
     distintos = [r[0] for r in (sdf.select(cfg.target_col)
                                 .where(F.col(cfg.target_col).isNotNull())
@@ -233,22 +241,26 @@ def run_feature_selection(
     mlflow_experiment: Optional[str] = None,
     run_name: Optional[str] = None,
 ) -> FeatureSelectionReport:
-    """Roda a seleção de features ponta a ponta sobre um Spark DataFrame.
+    """Roda a seleção de features ponta a ponta sobre um DataFrame pandas ou Spark.
 
     Parameters
     ----------
     sdf:
-        Spark DataFrame com o contrato de colunas de ``cfg`` (features ``feat_*``,
-        alvo, e — opcionalmente — coluna de amostra).
+        DataFrame **pandas ou Spark** com o contrato de colunas de ``cfg`` (features
+        ``feat_*``, alvo, e — opcionalmente — coluna de amostra). O backend é escolhido
+        pelo tipo: pandas roda tudo no driver (sem exigir pyspark instalado), Spark
+        distribui. O relatório de saída é o mesmo nos dois casos.
     books:
         Definição dos books (ver :func:`yggdrasil.feature_selection.resolve_books`).
         Padrão (None): auto-deriva pelo 1º segmento após o prefixo.
     """
-    F = _require_functions()
+    local = is_pandas(sdf)
+    F = None if local else _require_functions()
     cfg = cfg or ColumnConfig()
     fs_cfg = fs_cfg or FeatureSelectionConfig()
     if cfg.target_col not in sdf.columns:
         raise ValueError(f"Coluna de alvo '{cfg.target_col}' ausente no DataFrame.")
+    _logger.info("Seleção de features no backend '%s'.", backend_name(sdf))
 
     books_res = resolve_books(sdf, cfg, books)
     if problem_type is None:
@@ -257,13 +269,16 @@ def run_feature_selection(
     # Usa só a amostra de desenvolvimento p/ a seleção, se a coluna existir.
     base = sdf
     if cfg.sample_col in sdf.columns:
-        dev = sdf.where(F.col(cfg.sample_col) == cfg.dev_sample)
-        if dev.head(1):
+        dev = (sdf[sdf[cfg.sample_col] == cfg.dev_sample] if local
+               else sdf.where(F.col(cfg.sample_col) == cfg.dev_sample))
+        if (not dev.empty) if local else bool(dev.head(1)):
             base = dev
             _logger.info("Seleção restrita à amostra de desenvolvimento '%s'.", cfg.dev_sample)
-    base = base.cache()
+    if not local:
+        base = base.cache()
     try:
-        base.count()
+        if not local:
+            base.count()
         book_tables: Dict[str, pd.DataFrame] = {}
         corr_by_book: Dict[str, pd.DataFrame] = {}
         for book in books_res:
@@ -293,7 +308,8 @@ def run_feature_selection(
         else:
             overall_corr = pd.DataFrame()
     finally:
-        base.unpersist()
+        if not local:
+            base.unpersist()
 
     panels: Dict[str, object] = {}
     if with_panels:

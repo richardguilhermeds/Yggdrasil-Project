@@ -22,6 +22,7 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 
+from .backend import is_pandas
 from .config import FeatureSelectionConfig
 from .importance import _impute_features, maybe_sample
 from .spark_stats import _require_functions, numeric_columns
@@ -145,9 +146,16 @@ def boruta_select(
     sdf, features: List[str], target: str, problem_type: str,
     cfg: Optional[FeatureSelectionConfig] = None,
 ) -> pd.DataFrame:
-    """Roda o Boruta no backend configurado e devolve as decisões por feature."""
+    """Roda o Boruta no backend configurado e devolve as decisões por feature.
+
+    Com entrada pandas o dado já está no driver: ``cfg.backend`` é ignorado e o
+    Boruta roda direto em :func:`boruta_driver`.
+    """
     cfg = cfg or FeatureSelectionConfig()
     num = numeric_columns(sdf, features)
+    if is_pandas(sdf):
+        amostra = maybe_sample(sdf, cfg)
+        return boruta_driver(amostra.loc[:, num], amostra[target], problem_type, cfg)
     if cfg.backend == "driver":
         amostra = maybe_sample(sdf, cfg).select(*num, target).toPandas()
         return boruta_driver(amostra[num], amostra[target], problem_type, cfg)

@@ -25,18 +25,18 @@ from yggdrasil.feature_selection.spark_stats import redundancy_clusters
 # ───────────────────────── bloco puro ─────────────────────────
 def test_resolve_books_keyword_dict_auto():
     cfg = ColumnConfig()
-    cols = ["feat_serasa_score", "feat_serasa_atraso", "feat_bvs_renda",
+    cols = ["feat_bureau_score", "feat_bureau_atraso", "feat_bvs_renda",
             "feat_bvs_score", "target", "dt_ref", "amostra"]
     sdf = SimpleNamespace(columns=cols)
 
-    kw = {b.name: b.features for b in resolve_books(sdf, cfg, ["serasa", "bvs"])}
-    assert kw["serasa"] == ["feat_serasa_score", "feat_serasa_atraso"]
+    kw = {b.name: b.features for b in resolve_books(sdf, cfg, ["bureau", "bvs"])}
+    assert kw["bureau"] == ["feat_bureau_score", "feat_bureau_atraso"]
     assert kw["bvs"] == ["feat_bvs_renda", "feat_bvs_score"]
 
     auto = {b.name: b.features for b in resolve_books(sdf, cfg, None)}
-    assert set(auto) == {"serasa", "bvs"}
+    assert set(auto) == {"bureau", "bvs"}
 
-    dic = resolve_books(sdf, cfg, {"bureau": ["feat_serasa_score", "feat_bvs_score"]})
+    dic = resolve_books(sdf, cfg, {"bureau": ["feat_bureau_score", "feat_bvs_score"]})
     assert dic[0].name == "bureau" and len(dic[0].features) == 2
 
 
@@ -122,14 +122,14 @@ def spark():
 
 
 def _make_pdf(problem: str = "classification", n: int = 1200, seed: int = 0) -> pd.DataFrame:
-    """Tabela sintética com books serasa/bvs + colunas problemáticas para os filtros."""
+    """Tabela sintética com books bureau/bvs + colunas problemáticas para os filtros."""
     rng = np.random.default_rng(seed)
     s1 = rng.normal(size=n)
     s2 = rng.normal(size=n)
     df = pd.DataFrame({
-        "feat_serasa_score": s1,
-        "feat_serasa_atraso": s1 * 0.97 + rng.normal(0, 0.05, n),  # redundante c/ score
-        "feat_serasa_const": 1.0,                                   # sem variância
+        "feat_bureau_score": s1,
+        "feat_bureau_atraso": s1 * 0.97 + rng.normal(0, 0.05, n),  # redundante c/ score
+        "feat_bureau_const": 1.0,                                   # sem variância
         "feat_bvs_renda": s2,
         "feat_bvs_util": rng.normal(size=n),
         "feat_bvs_miss": rng.normal(size=n),                        # alto missing
@@ -155,11 +155,11 @@ def test_spark_missing_e_variancia(spark, fs_cfg_rapido):
     from yggdrasil.feature_selection import run_feature_selection
     sdf = spark.createDataFrame(_make_pdf("classification"))
     rep = run_feature_selection(sdf, ColumnConfig(), fs_cfg_rapido,
-                                books=["serasa", "bvs"], with_panels=False)
+                                books=["bureau", "bvs"], with_panels=False)
     tab = rep.selection_table.set_index("feature")
-    assert tab.loc["feat_serasa_const", "motivo"] == "sem variância"
+    assert tab.loc["feat_bureau_const", "motivo"] == "sem variância"
     assert tab.loc["feat_bvs_miss", "motivo"] == "alto missing"
-    assert not bool(tab.loc["feat_serasa_const", "selecionada"])
+    assert not bool(tab.loc["feat_bureau_const", "selecionada"])
     assert not bool(tab.loc["feat_bvs_miss", "selecionada"])
 
 
@@ -167,23 +167,23 @@ def test_spark_redundancia(spark, fs_cfg_rapido):
     from yggdrasil.feature_selection import run_feature_selection
     sdf = spark.createDataFrame(_make_pdf("classification"))
     rep = run_feature_selection(sdf, ColumnConfig(), fs_cfg_rapido,
-                                books=["serasa"], with_panels=False)
+                                books=["bureau"], with_panels=False)
     tab = rep.selection_table.set_index("feature")
     # uma das duas features altamente correlacionadas deve sair como redundante
-    motivos = {tab.loc["feat_serasa_score", "motivo"], tab.loc["feat_serasa_atraso", "motivo"]}
+    motivos = {tab.loc["feat_bureau_score", "motivo"], tab.loc["feat_bureau_atraso", "motivo"]}
     assert any(isinstance(m, str) and m.startswith("redundante") for m in motivos)
 
 
 def test_spark_end_to_end_classificacao(spark, fs_cfg_rapido):
     from yggdrasil.feature_selection import run_feature_selection, FeatureSelectionReport
     sdf = spark.createDataFrame(_make_pdf("classification"))
-    rep = run_feature_selection(sdf, ColumnConfig(), fs_cfg_rapido, books=["serasa", "bvs"])
+    rep = run_feature_selection(sdf, ColumnConfig(), fs_cfg_rapido, books=["bureau", "bvs"])
     assert isinstance(rep, FeatureSelectionReport)
     assert rep.problem_type == "classification"
-    assert set(rep.selected_features) == {"serasa", "bvs"}
+    assert set(rep.selected_features) == {"bureau", "bvs"}
     assert len(rep.selected_overall) >= 1
     assert not rep.overall_importance.empty
-    assert "overall_importance" in rep.panels and "book::serasa" in rep.panels
+    assert "overall_importance" in rep.panels and "book::bureau" in rep.panels
     html = rep.to_html(embed_panels=False)
     assert "Seleção de Features" in html
 
@@ -192,7 +192,7 @@ def test_spark_regressao(spark, fs_cfg_rapido):
     from yggdrasil.feature_selection import run_feature_selection
     sdf = spark.createDataFrame(_make_pdf("regression"))
     rep = run_feature_selection(sdf, ColumnConfig(), fs_cfg_rapido,
-                                books=["serasa", "bvs"], with_panels=False)
+                                books=["bureau", "bvs"], with_panels=False)
     assert rep.problem_type == "regression"
     # em regressão não há IV/KS; corr_target/RF devem orientar a seleção
     assert rep.overall_importance is not None
