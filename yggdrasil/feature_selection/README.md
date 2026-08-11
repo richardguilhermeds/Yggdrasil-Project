@@ -1,6 +1,8 @@
 # 🌳 Yggdrasil — `feature_selection`
 
-Módulo Spark-first de **seleção de features** do Yggdrasil. Ele recebe um Spark DataFrame que segue o contrato de colunas do projeto (`feat_*`, alvo e, opcionalmente, coluna de amostra), organiza as candidatas em **books** (origens de dados, ex.: serasa, bvs) e roda, por book, um pipeline de filtros duros, indicadores de importância, **Boruta** e **consenso**. A esteira é **independente**: não faz parte da EDA nem do pipeline de treino do modelo — apenas seleciona variáveis e produz tabelas, painéis e um ranking global.
+Módulo de **triagem de features** do Yggdrasil. Ele recebe um DataFrame **pandas ou Spark** que segue o contrato de colunas do projeto (`feat_*`, alvo e, opcionalmente, coluna de amostra), organiza as candidatas em **books** (origens de dados, ex.: bureau, bvs) e roda, por book, um pipeline de filtros duros, indicadores de importância, **Boruta** e **consenso**. A esteira é **independente**: não faz parte da EDA nem do pipeline de treino do modelo — apenas seleciona variáveis e produz tabelas, painéis e um ranking global.
+
+> **Onde isto entra.** Esta é a peneira do **universo de features** — centenas de colunas, vários books, antes de escolher o modelo. A régua **final** sobre a lista já curta (PSI, monotonia, VIF, backward, política em JSON e relatório do comitê) é a `ModelSegmenter.select_features`, documentada no tutorial 10. Um corta o universo; o outro documenta a régua do modelo.
 
 ## Índice
 
@@ -29,10 +31,10 @@ O `yggdrasil.feature_selection` responde a uma pergunta objetiva: **dado um conj
 
 Características centrais:
 
-- **Esteira independente.** Não entra no pipeline do modelo nem na EDA. É um **entrypoint próprio** (`run_feature_selection`) que recebe um Spark DataFrame e devolve um relatório.
-- **Organização por book.** Features são agrupadas por **origem de dados** (book), ex.: `serasa`, `bvs`. Todo o pipeline roda **por book**, e ao final há um **ranking global** (`overall_importance`) das selecionadas.
+- **Esteira independente.** Não entra no pipeline do modelo nem na EDA. É um **entrypoint próprio** (`run_feature_selection`) que recebe o DataFrame e devolve um relatório.
+- **Organização por book.** Features são agrupadas por **origem de dados** (book), ex.: `bureau`, `bvs`. Todo o pipeline roda **por book**, e ao final há um **ranking global** (`overall_importance`) das selecionadas.
 - **Pipeline por book.** Filtros duros (missing, variância, redundância) → avaliação de importância (RandomForest + univariadas) e **Boruta** → consolidação num **consenso**.
-- **Spark-first.** As operações pesadas usam `pyspark.ml` (ou, opcionalmente, `sklearn` no driver). Os resultados pequenos são coletados no driver como `pandas`.
+- **pandas ou Spark, mesma chamada.** O backend vem do **tipo do DataFrame** (ver [§13](#13-backend-e-performance)): pandas roda tudo no driver com `sklearn` e percentis exatos; Spark distribui com `pyspark.ml`. Em ambos, os resultados pequenos voltam como `pandas` e a lógica de decisão é idêntica.
 
 Use o módulo quando precisar **reduzir e justificar** um conjunto de candidatas antes de modelar, mantendo rastreabilidade do **motivo** de cada descarte ou seleção.
 
@@ -40,13 +42,15 @@ Use o módulo quando precisar **reduzir e justificar** um conjunto de candidatas
 
 ## 2. Instalação
 
-O `pyspark` é um **extra opcional**. O pacote **importa sem pyspark** — o `import` é *gated*: só falha, com mensagem clara, ao **executar** uma função distribuída.
+Com entrada **pandas** não há nada a instalar além do próprio pacote — a esteira roda só com `pandas`, `numpy`, `scipy`, `scikit-learn` e `matplotlib`.
+
+O `pyspark` é um **extra opcional**, necessário apenas para a entrada Spark. O pacote **importa sem pyspark** — o `import` é *gated*: só falha, com mensagem clara, ao **executar** uma função distribuída.
 
 ```bash
 pip install 'yggdrasil[spark]'   # instala o yggdrasil com o extra de Spark
 ```
 
-> Sem o extra, ao executar a seleção você verá: `A seleção de features requer pyspark — instale com: pip install 'yggdrasil[spark]'`.
+> Sem o extra, ao passar um Spark DataFrame você verá: `A seleção de features requer pyspark — instale com: pip install 'yggdrasil[spark]'`.
 
 Imports usados ao longo deste tutorial:
 
@@ -84,9 +88,16 @@ cfg = ColumnConfig()                 # usa os defaults do contrato (feature_pref
 from yggdrasil import ColumnConfig
 from yggdrasil.feature_selection import run_feature_selection
 
-report = run_feature_selection(sdf)              # sdf é o seu Spark DataFrame; cfg/books inferidos
+report = run_feature_selection(df)               # df pandas OU Spark; cfg/books inferidos
 print(report.selected_overall)                   # lista achatada de todas as features selecionadas
 report.summary()                                 # tabela resumo: por book, n_features/selecionadas/descartadas
+```
+
+A mesma chamada serve os dois backends — quem decide é o tipo do objeto:
+
+```python
+run_feature_selection(pdf)                       # pandas  -> driver, sklearn, sem pyspark
+run_feature_selection(spark.createDataFrame(pdf))  # Spark -> cluster, pyspark.ml
 ```
 
 Inspecionando o resultado:
@@ -110,7 +121,7 @@ O parâmetro `books` (`BooksSpec = Union[Sequence[str], Dict[str, Sequence[str]]
 Uma `Sequence[str]` de palavras-chave. O match é **case-insensitive** e por **`contains`** (substring): `token = str(kw).lower()` e `feats = [c for c in cols if token in c.lower()]`. O **nome do book** preserva o caso original do `kw` (via `str(kw)`).
 
 ```python
-report = run_feature_selection(sdf, ColumnConfig(), books=["serasa", "bvs"])  # dois books por palavra-chave
+report = run_feature_selection(sdf, ColumnConfig(), books=["bureau", "bvs"])  # dois books por palavra-chave
 ```
 
 Se **nenhuma** feature contiver o token, emite-se um *warning* e o book vazio é **ignorado** (não levanta erro por book vazio individual).
@@ -121,7 +132,7 @@ Um `Dict[str, Sequence[str]]` mapeando nome do book → colunas explícitas:
 
 ```python
 books = {
-    "serasa": ["feat_serasa_score", "feat_serasa_pendencias"],   # colunas explícitas do book
+    "bureau": ["feat_bureau_score", "feat_bureau_pendencias"],   # colunas explícitas do book
     "bvs":    ["feat_bvs_consultas"],
 }
 report = run_feature_selection(sdf, ColumnConfig(), books=books)
@@ -137,7 +148,7 @@ Regras do modo dict:
 Sem `books` (ou `books=None`), as colunas de feature são agrupadas pelo **1º segmento** após o prefixo, derivado por `_auto_token` (separador `_`):
 
 ```python
-# feat_serasa_score  -> book "serasa"
+# feat_bureau_score  -> book "bureau"
 # feat_bvs_consultas -> book "bvs"
 report = run_feature_selection(sdf)   # books=None: auto pelo 1º segmento após o prefixo
 ```
@@ -323,8 +334,8 @@ report.panels["overview"]                      # render inline no Jupyter (sem d
 fig = report.panels["overall_importance"]
 fig.savefig("overall.png", dpi=110, bbox_inches="tight")   # salva o ranking global
 
-report.panels["book::serasa"]                  # painel de seleção do book serasa
-report.panels["corr::serasa"]                  # heatmap de correlação do book serasa (se existir)
+report.panels["book::bureau"]                  # painel de seleção do book bureau
+report.panels["corr::bureau"]                  # heatmap de correlação do book bureau (se existir)
 ```
 
 > Em dados vazios/insuficientes, as funções de plot ainda retornam uma `Figure` (com mensagem como `book vazio` ou `nenhuma feature selecionada`), nunca `None` nem exceção.
@@ -385,10 +396,23 @@ fs_cfg = FeatureSelectionConfig(            # exemplo de override
 
 ## 13. Backend e performance
 
-**`backend`** controla o motor de modelo:
+**O backend principal vem do tipo do DataFrame** — não há flag para escolhê-lo:
+
+| entrada | onde roda | motor | percentis / cardinalidade |
+|---|---|---|---|
+| `pandas.DataFrame` | driver | `sklearn` | exatos (`quantile`, `nunique`) |
+| Spark DataFrame | cluster | `pyspark.ml` | aproximados (`approxQuantile`, `approx_count_distinct`) |
+
+Qualquer objeto que **não** seja um `pandas.DataFrame` segue o caminho Spark — isso mantém o comportamento original para Spark clássico e Spark Connect (Databricks serverless / DBR 14+), onde heurísticas por atributo (`_jdf`) ou por nome de módulo falhariam.
+
+Como os percentis do Spark são aproximados, uma feature bem em cima de um limiar (`var_tol`, `missing_max`, `corr_high`) pode cair de um lado em cada backend. A lógica de decisão — consenso, redundância, Boruta, painéis — é a **mesma** nos dois.
+
+**`backend`** só tem efeito com entrada Spark, e controla o motor de modelo:
 
 - **`"spark"`** (default) — RandomForest e Boruta via `pyspark.ml`; tudo distribuído no cluster.
 - **`"driver"`** — usa `sklearn` no driver; o Boruta amostra para o driver via `toPandas()`.
+
+Com entrada pandas o dado já está no driver: `backend` é ignorado e o Boruta roda direto em `boruta_driver`.
 
 **Controles de custo:**
 
@@ -409,9 +433,9 @@ Se `mlflow_experiment` for *truthy*, `run_feature_selection` chama o logger inte
 report = run_feature_selection(
     sdf,
     ColumnConfig(),
-    books=["serasa", "bvs"],
+    books=["bureau", "bvs"],
     mlflow_experiment="/Shared/feature_selection",   # nome do experimento MLflow
-    run_name="fs_serasa_bvs_v1",                      # nome do run
+    run_name="fs_bureau_bvs_v1",                      # nome do run
 )
 ```
 
@@ -424,7 +448,7 @@ O que é registrado:
 
 ## 15. Exemplo ponta a ponta
 
-Cenário realista: classificação, dois books (`serasa` e `bvs`), amostra DEV no contrato, log no MLflow.
+Cenário realista: classificação, dois books (`bureau` e `bvs`), amostra DEV no contrato, log no MLflow.
 
 ```python
 from yggdrasil import ColumnConfig
@@ -444,22 +468,22 @@ report = run_feature_selection(
     sdf,                                          # Spark DataFrame com feat_*, alvo e coluna de amostra
     cfg,
     fs_cfg,
-    books=["serasa", "bvs"],                      # dois books por palavra-chave
+    books=["bureau", "bvs"],                      # dois books por palavra-chave
     problem_type="classification",                # explícito (poderia ser inferido)
     with_panels=True,                             # monta os painéis
     mlflow_experiment="/Shared/feature_selection",
-    run_name="fs_serasa_bvs_v1",
+    run_name="fs_bureau_bvs_v1",
 )
 
 # Inspeção
-print(report.selected_features)                   # {"serasa": [...], "bvs": [...]}
+print(report.selected_features)                   # {"bureau": [...], "bvs": [...]}
 report.summary()                                  # por book: n_features / selecionadas / descartadas
 report.overall_importance.head(25)                # ranking global das selecionadas
 
 # Painéis
 report.panels["overview"]                         # selecionadas x descartadas por book
 report.panels["overall_importance"]               # top global
-report.panels["book::serasa"]                     # seleção detalhada do book serasa
+report.panels["book::bureau"]                     # seleção detalhada do book bureau
 
 # Exportações
 report.to_csv("selecao_features.csv")             # CSV da selection_table
@@ -471,7 +495,10 @@ open("selecao_features.html", "w", encoding="utf-8").write(report.to_html())   #
 ## 16. Troubleshooting / FAQ
 
 **As métricas de modelo só aparecem para algumas features (numeric-only).**
-`rf_importance`, `corr_target`, `iv`, `ks`, `auc`, `gini` e o Boruta operam **só em colunas numéricas** (filtradas por `numeric_columns`, prefixos de dtype: `int`, `bigint`, `smallint`, `tinyint`, `double`, `float`, `decimal`, `long`). Features não-numéricas ficam `NaN` nessas colunas (merge `how='left'`) e entram no pipeline como `representante=True` na redundância.
+`rf_importance`, `corr_target`, `iv`, `ks`, `auc`, `gini` e o Boruta operam **só em colunas numéricas** (filtradas por `numeric_columns`, prefixos de dtype: `int`, `bigint`, `smallint`, `tinyint`, `double`, `float`, `decimal`, `long`; em pandas, `is_numeric_dtype` **exceto** `bool`, para casar com o Spark). Features não-numéricas ficam `NaN` nessas colunas (merge `how='left'`) e entram no pipeline como `representante=True` na redundância.
+
+**Os mesmos dados deram resultados um pouco diferentes em pandas e em Spark.**
+Esperado nas bordas: o Spark aproxima percentis (`approxQuantile`, controlado por `approx_rel_error`) e cardinalidade (`approx_count_distinct`, `rsd` 0.05 fixo), enquanto o pandas calcula exato. Uma feature muito em cima de `var_tol`, `missing_max` ou `corr_high` pode cair de um lado em cada backend. Some-se a isso o RandomForest ser `sklearn` num caso e `pyspark.ml` no outro (o `rf_subsampling` não tem equivalente no sklearn e é ignorado). Os **filtros duros** — missing e variância — são determinísticos e batem nos dois.
 
 **`Nenhum book com features foi resolvido. Verifique 'books'.`**
 Nenhum book resolveu features não-vazias. No modo palavra-chave, verifique se os tokens realmente aparecem (como substring, case-insensitive) nos nomes das colunas. Lembre que books vazios por palavra-chave são apenas **ignorados** com warning.

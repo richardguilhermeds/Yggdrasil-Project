@@ -37,8 +37,8 @@ Módulos: `metrics/`, `ratings/`, `monitoring/psi.py`, `interpretability/shap_ex
 ### 2. 🔎 Esteira de EDA de features (`yggdrasil.eda`)
 Análise exploratória inicial das features: missing (global e por safra), percentis e variação no tempo, histograma, relação com o alvo, binning com WoE/IV, importância (univariada mais surrogate multivariado), estabilidade/PSI por feature e extras (monotonicidade, outliers, correlação/VIF/redundância, detecção de leakage). Consolida tudo num `feature_profile` (1 linha por feature) com veredito (manter, revisar ou descartar).
 
-### 3. 🧮 Esteira de seleção de features em PySpark (`yggdrasil.feature_selection`)
-Seleção por book (grupo de features por palavra-chave ou prefixo, ex.: `serasa`, `bvs`) sobre um Spark DataFrame. O pipeline por book vai de missing a variância, importância (RF `pyspark.ml` com IV/KS/AUC/Gini/corr_target), redundância (Pearson e Spearman), Boruta (Spark-native com shadows, e fallback driver/sklearn) até o consenso (`selecionada` e `motivo`). Saída: tabela e painéis por book, mais um ranking global. Backend `"spark"` ou `"driver"`.
+### 3. 🧮 Esteira de triagem de features (`yggdrasil.feature_selection`)
+Seleção por book (grupo de features por palavra-chave ou prefixo, ex.: `bureau`, `bvs`) sobre um DataFrame **pandas ou Spark** — o backend vem do tipo do objeto, a chamada e o relatório são os mesmos. O pipeline por book vai de missing a variância, importância (RF com IV/KS/AUC/Gini/corr_target), redundância (Pearson e Spearman), Boruta (com shadows) até o consenso (`selecionada` e `motivo`). Saída: tabela e painéis por book, mais um ranking global. Com pandas roda tudo no driver via `sklearn` e dispensa o `pyspark`; com Spark distribui no cluster (`pyspark.ml`), e aí o backend `"spark"`/`"driver"` decide onde RF e Boruta rodam. É a peneira **anterior** ao modelo — a régua final da lista curta é a `ModelSegmenter.select_features`.
 
 ### 4. 🌳 Árvore de segmentação de risco de crédito (`yggdrasil.credit_risk.tree`)
 `TreeSegmenter` e `TreeSegmenterUI` são uma única classe/UI que atende classificação e regressão, escolhendo o comportamento por `task_type` (substituem as antigas classes separadas por tarefa). É uma régua sequencial com UI interativa (5 abas): binning ótimo/manual, faltantes em bin própria, notas por folha, IV, PSI/CSI, bootstrap, calibração, backtest, save/load JSON e `predict`/`to_pyspark`/`apply_spark`/`log_to_mlflow`.
@@ -183,20 +183,30 @@ report.feature_profile        # 1 linha por feature, com flags e veredito
 
 Todos centralizados em **[`notebooks/tutoriais/`](https://github.com/richardguilhermeds/Yggdrasil-Project/tree/main/notebooks/tutoriais)** (passo a passo, prontos para Jupyter/Databricks):
 
-| # | Tutorial |
-|---|---|
-| 00 | [Visão geral (classificação)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/00_tutorial_yggdrasil.ipynb) |
-| 01 | [Regressão (alvo [0,1] bimodal)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/01_tutorial_lgd.ipynb) |
-| 02 | [EDA de features](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/02_tutorial_eda_features.ipynb) |
-| 03 | [Seleção de features (PySpark)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/03_tutorial_feature_selection.ipynb) |
-| 04 | [Árvore de segmentação unificada (classificação & regressão por `task_type`)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/04_tutorial_tree_segmenter.ipynb) |
-| 05 | [Instalação e carregamento das interfaces (árvore + model segmenter)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/05_tutorial_instalacao_e_interfaces.ipynb) |
-| 06 | [Construtor de modelos (UI)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/06_tutorial_model_segmenter.ipynb) |
-| 07 | [Esteira ML + MLflow](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/07_tutorial_esteira_ml_mlflow.ipynb) |
-| 08 | [Capital econômico (ASRF, Monte Carlo, alocação de Euler)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/08_tutorial_capital_economico.ipynb) |
-| 09 | [Modelos econométricos satélite (ARDL, fator Z, projeção por cenários)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/09_tutorial_modelos_econometricos.ipynb) |
-| 10 | [Esteira de seleção de variáveis (etapas plugáveis, funil, relatório e política)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/10_tutorial_selecao_variaveis.ipynb) |
-| 11 | [Interface de modelos de série temporal (`SatelliteUI`: 7 abas, da estacionariedade ao backtest de cobertura)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/11_tutorial_interface_series_temporais.ipynb) |
+| # | Tutorial | O que resolve |
+|---|---|---|
+| 00 | [Visão geral (classificação)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/00_tutorial_yggdrasil.ipynb) | Passeio pela lib peça a peça — métricas, ratings, PSI, SHAP — até o `MLPipeline` fazer tudo de uma vez |
+| 01 | [Regressão (alvo [0,1] bimodal)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/01_tutorial_lgd.ipynb) | A mesma esteira quando o alvo é contínuo e preso em [0,1] |
+| 02 | [EDA de features](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/02_tutorial_eda_features.ipynb) | Conhecer a base antes de decidir qualquer coisa: perfil, estabilidade e veredito por feature |
+| 03 | [Triagem de features por book](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/03_tutorial_feature_selection.ipynb) | **Antes do modelo:** corta um universo amplo (pandas **ou** Spark) por book, com Boruta e consenso → shortlist |
+| 04 | [Árvore de segmentação unificada](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/04_tutorial_tree_segmenter.ipynb) | Achar os segmentos da carteira (classificação & regressão por `task_type`) |
+| 05 | [Instalação e carregamento das interfaces](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/05_tutorial_instalacao_e_interfaces.ipynb) | Colocar a árvore e o model segmenter para rodar no seu ambiente |
+| 06 | [Construtor de modelos (UI)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/06_tutorial_model_segmenter.ipynb) | Construir, diagnosticar e validar o modelo na interface |
+| 07 | [Esteira ML + MLflow](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/07_tutorial_esteira_ml_mlflow.ipynb) | Rastrear experimento, artefato e versão de ponta a ponta |
+| 08 | [Capital econômico](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/08_tutorial_capital_economico.ipynb) | ASRF, Monte Carlo multifatorial e alocação de Euler sobre a carteira |
+| 09 | [Modelos econométricos satélite](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/09_tutorial_modelos_econometricos.ipynb) | Ligar PD/LGD/CCF ao macro (ARDL, fator Z) e projetar por cenários |
+| 10 | [Esteira de seleção de variáveis](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/10_tutorial_selecao_variaveis.ipynb) | **Dentro do modelo:** a régua final sobre a lista já curta — PSI, monotonia, VIF, funil, relatório e política em JSON |
+| 11 | [Interface de séries temporais (`SatelliteUI`)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/11_tutorial_interface_series_temporais.ipynb) | 7 abas, da estacionariedade ao backtest de cobertura |
+
+> **03 e 10 não se repetem** — são estágios em sequência. O **03** (`yggdrasil.feature_selection`) é a
+> peneira do **universo de features**: centenas de colunas agrupadas por book, filtros duros + importância
+> + Boruta, e devolve uma shortlist. O **10** (`ModelSegmenter.select_features`) pega essa lista curta e
+> aplica a **régua do modelo** — categóricas, PSI, monotonia, VIF, backward — gerando a decisão por
+> variável, a política reproduzível em JSON e o relatório que vai anexo à documentação. Um corta o
+> universo; o outro documenta a régua final.
+>
+> **Trilha sugerida:** `00` → `02` (conhecer a base) → `03` (triar) → `10` (a régua) → `04`/`06` (modelar)
+> → `07` (rastrear). Os de risco de crédito (`08`, `09`, `11`) são independentes.
 
 > 📖 **Metodologia** (o *porquê* dos métodos, como KS, PSI/CSI, WoE/IV, ratings com fusão monotônica, SHAP e veredito de EDA): [`docs/metodologia.md`](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/docs/metodologia.md).
 > 🌳 **Árvore de segmentação unificada (classificação & regressão):** [`docs/credit-risk/tree-segmenter.md`](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/docs/credit-risk/tree-segmenter.md).
