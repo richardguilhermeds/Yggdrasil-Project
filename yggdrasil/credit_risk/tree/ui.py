@@ -192,9 +192,11 @@ _CSS = """
   border:1px solid var(--line) !important; }
 .treeui button.treeui-sug:hover {
   background:var(--ac-soft) !important; border-color:var(--ac-border) !important; }
-/* painel lateral da aba "Árvore interativa": ele tem altura máxima e rola, e as
-   caixas do ipywidgets são todas `flex:0 1 auto` — sem isto o conteúdo que
-   passa da altura é ESMAGADO (as caixas internas chegam a 0px) em vez de rolar */
+/* painel lateral da aba "Árvore interativa": as caixas do ipywidgets são todas
+   `flex:0 1 auto` — em qualquer contexto de altura restrita o conteúdo seria
+   ESMAGADO (caixas internas a 0px). O painel hoje cresce livre (sem barra de
+   rolagem própria), mas a proteção fica: custa nada e evita a regressão se
+   alguém devolver um max-height. */
 .treeui-cvpanel .widget-box, .treeui-cvpanel .jupyter-button,
 .treeui-cvpanel .widget-html, .treeui-cvpanel .widget-inline-hbox {
   flex-shrink:0 !important; }
@@ -2473,9 +2475,11 @@ class TreeSegmenterUI:
         self.box_cv_panel = W.VBox([self.out_cv_head, self.out_cv_stats, self.out_cv_note,
                                     self.box_cv_split, box_cv_regras],
                                    layout=W.Layout(width="100%"))
+        # SEM max_height/overflow: o painel cresce na altura natural do conteúdo
+        # e nunca ganha barra de rolagem própria — quem rola é a página, como
+        # nos demais cards da UI
         painel_cv = W.VBox([self.out_cv_empty, self.box_cv_panel],
-                           layout=W.Layout(width="410px", flex="0 0 410px", min_width="0",
-                                           max_height="640px", overflow="hidden auto",
+                           layout=W.Layout(width="470px", flex="0 0 470px", min_width="0",
                                            padding="0 2px 0 10px"))
         painel_cv.add_class("treeui-cvpanel")
         self.btn_cv_reset = W.Button(description="Resetar árvore", icon="refresh",
