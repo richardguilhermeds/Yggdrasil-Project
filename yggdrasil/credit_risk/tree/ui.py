@@ -90,6 +90,8 @@ _CSS = """
   --tbl-hover:#eef3f8; --tbl-sticky:#f4f6f9;
   --ci-bar:#9bb7c9; --ci-ref:#0f3d57;
   --notice-bg:#fff8e6; --notice-border:#f0c36d; --notice-ink:#664d03;
+  /* canvas da aba "Árvore interativa": pontinhos do fundo e face dos cartões */
+  --cv-dot:rgba(31,39,51,.10); --cv-node-bg:#fff;
   font-family:'IBM Plex Sans', -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
   color:var(--ink); }
 .treeui .mono { font-family:'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas,
@@ -179,6 +181,23 @@ _CSS = """
   white-space:nowrap; }
 /* botões: cantos mais suaves, alinhados ao mockup */
 .treeui .jupyter-button { border-radius:8px; font-family:inherit; }
+/* atalhos de sugestão de variável (painel da aba "Árvore interativa"): botões
+   largos, texto à esquerda — leem como uma lista, não como uma barra de ações.
+   O !important na altura é necessário: a folha do próprio ipywidgets é carregada
+   DEPOIS desta e, com a mesma especificidade, zeraria a altura do botão. */
+.treeui button.treeui-sug {
+  justify-content:flex-start !important; text-align:left; font-size:11.5px;
+  height:30px !important; line-height:1.2 !important; padding:0 11px !important;
+  margin-bottom:4px; background:var(--tile-bg) !important; color:var(--strong-ink);
+  border:1px solid var(--line) !important; }
+.treeui button.treeui-sug:hover {
+  background:var(--ac-soft) !important; border-color:var(--ac-border) !important; }
+/* painel lateral da aba "Árvore interativa": ele tem altura máxima e rola, e as
+   caixas do ipywidgets são todas `flex:0 1 auto` — sem isto o conteúdo que
+   passa da altura é ESMAGADO (as caixas internas chegam a 0px) em vez de rolar */
+.treeui-cvpanel .widget-box, .treeui-cvpanel .jupyter-button,
+.treeui-cvpanel .widget-html, .treeui-cvpanel .widget-inline-hbox {
+  flex-shrink:0 !important; }
 /* sliders/controles encolhem para caber na coluna (min-width:0 libera o flex)
    e os cards clipam qualquer sobra horizontal — elimina a barra de rolagem
    horizontal que aparecia embaixo dos cards na aba Construir */
@@ -204,6 +223,7 @@ _CSS = """
   --tbl-hover:rgba(189,205,219,.08); --tbl-sticky:#11171C;
   --ci-bar:#5F7281; --ci-ref:#8ACAFF;
   --notice-bg:rgba(190,80,30,.16); --notice-border:#DE7921; --notice-ink:#E8ECF0;
+  --cv-dot:rgba(232,236,240,.11); --cv-node-bg:#1F272D;
   background:#11171C; padding:8px; border-radius:12px; }
 .treeui.dark .treeui-banner, .treeui.dark .treeui-card, .treeui.dark .treeui-bar,
 .treeui.dark .treeui-chips .chip { background:#1F272D !important;
@@ -424,6 +444,273 @@ def _tree_image_widget_cls():
 
     _TREE_IMG_WIDGET_CLS = _TreeImageWidget
     return _TREE_IMG_WIDGET_CLS
+
+
+# ======================================================================
+# Árvore interativa em CANVAS (aba "Árvore interativa"): cada nó vira um
+# cartão num plano navegável (arrastar p/ mover, rolar p/ ampliar) e clicar
+# num nó abre, ao lado, o painel onde o corte e as regras de negócio da
+# folha são definidos.
+#
+# Mesma divisão de trabalho do preview clicável acima: TODO o cálculo mora
+# no Python — posição de cada cartão, cores, textos e o HTML de dentro do
+# nó chegam prontos pelos traits. O front só arrasta, amplia e devolve o
+# `selected`. Dois contadores (`fit_token`/`center_token`) deixam o Python
+# pedir "enquadre a árvore" e "centralize no nó selecionado" sem inventar
+# um protocolo de mensagens: basta incrementá-los.
+# ======================================================================
+_TREE_CANVAS_ESM = """
+function render({ model, el }) {
+  const NS = "http://www.w3.org/2000/svg";
+  const canvas = document.createElement("div");
+  canvas.className = "ygg-cv-canvas";
+  const world = document.createElement("div");      // plano que sofre o pan/zoom
+  world.className = "ygg-cv-world";
+  const svg = document.createElementNS(NS, "svg");  // arestas (curvas de Bézier)
+  svg.setAttribute("class", "ygg-cv-edges");
+  const layer = document.createElement("div");      // cartões dos nós
+  layer.className = "ygg-cv-nodes";
+  world.append(svg, layer);
+  canvas.appendChild(world);
+  const tools = document.createElement("div");      // +/−/enquadrar
+  tools.className = "ygg-cv-tools";
+  canvas.appendChild(tools);
+  el.replaceChildren(canvas);
+
+  let z = 1, px = 0, py = 0, anim = true;
+  let drag = null, moved = false;
+
+  const rect = () => {
+    const r = canvas.getBoundingClientRect();
+    return { w: r.width || 900, h: r.height || 560, left: r.left, top: r.top };
+  };
+  const apply = () => {
+    world.style.transform = "translate(" + px + "px," + py + "px) scale(" + z + ")";
+    world.style.transition = anim ? "transform .45s cubic-bezier(.22,1,.36,1)" : "none";
+  };
+  // zoom ancorado no ponto (cx, cy) do canvas: o que está sob o cursor não sai
+  // do lugar — é o gesto esperado de qualquer mapa
+  const setZoom = (nz, cx, cy) => {
+    nz = Math.min(2.2, Math.max(0.12, nz));
+    const k = nz / z;
+    px = cx - k * (cx - px); py = cy - k * (cy - py); z = nz;
+    apply();
+  };
+  function fit() {
+    const W = model.get("content_w") || 1, H = model.get("content_h") || 1;
+    const r = rect();
+    let nz = Math.min((r.w - 56) / W, (r.h - 56) / H, 1.1);
+    if (!isFinite(nz) || nz <= 0) nz = 1;
+    z = nz; px = (r.w - z * W) / 2; py = (r.h - z * H) / 2;
+    anim = true; apply();
+  }
+  function center() {
+    const sid = model.get("selected");
+    const n = (model.get("nodes") || []).find(n => n.sid === sid);
+    if (!n) return;
+    const r = rect();
+    z = Math.max(z, 0.5);
+    px = r.w / 2 - z * (n.x + n.w / 2);
+    py = r.h * 0.36 - z * (n.y + n.h / 2);
+    anim = true; apply();
+  }
+
+  const ic = (d) => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">' + d + '</svg>';
+  const mkBtn = (inner, title, fn) => {
+    const b = document.createElement("button");
+    b.className = "ygg-cv-btn"; b.title = title; b.innerHTML = inner;
+    b.addEventListener("mousedown", e => e.stopPropagation());
+    b.addEventListener("click", e => { e.stopPropagation(); fn(); });
+    tools.appendChild(b);
+  };
+  mkBtn(ic('<path d="M12 5v14"/><path d="M5 12h14"/>'), "Aproximar",
+        () => { const r = rect(); anim = true; setZoom(z * 1.25, r.w / 2, r.h / 2); });
+  mkBtn(ic('<path d="M5 12h14"/>'), "Afastar",
+        () => { const r = rect(); anim = true; setZoom(z / 1.25, r.w / 2, r.h / 2); });
+  mkBtn(ic('<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/>' +
+           '<path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>'),
+        "Enquadrar a árvore inteira", () => fit());
+
+  function syncSel() {
+    const sel = model.get("selected");
+    layer.querySelectorAll(".ygg-cv-node").forEach(
+      n => n.classList.toggle("sel", n.dataset.sid === sel));
+    svg.querySelectorAll("path").forEach(
+      p => p.classList.toggle("hi", p.dataset.child === sel));
+  }
+
+  function rebuild() {
+    const W = model.get("content_w") || 1, H = model.get("content_h") || 1;
+    svg.setAttribute("width", W); svg.setAttribute("height", H);
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    const ef = document.createDocumentFragment();
+    for (const e of (model.get("edges") || [])) {
+      const p = document.createElementNS(NS, "path");
+      p.setAttribute("d", e.d); p.dataset.child = e.child;
+      ef.appendChild(p);
+    }
+    svg.replaceChildren(ef);
+    const nf = document.createDocumentFragment();
+    for (const n of (model.get("nodes") || [])) {
+      const d = document.createElement("div");
+      d.className = "ygg-cv-node" + (n.leaf ? " leaf" : "");
+      d.dataset.sid = n.sid;
+      d.style.left = n.x + "px"; d.style.top = n.y + "px";
+      d.style.width = n.w + "px"; d.style.height = n.h + "px";
+      d.innerHTML = n.html;                        // montado (e escapado) no Python
+      d.addEventListener("mousedown", e => e.stopPropagation());
+      d.addEventListener("click", e => {
+        e.stopPropagation();
+        model.set("selected", n.sid); model.save_changes();
+      });
+      nf.appendChild(d);
+    }
+    layer.replaceChildren(nf);
+    syncSel();
+  }
+
+  canvas.addEventListener("mousedown", e => {
+    if (e.button !== 0) return;
+    moved = false; drag = { mx: e.clientX, my: e.clientY, px, py };
+    canvas.classList.add("grabbing");
+  });
+  const onMove = (e) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.mx, dy = e.clientY - drag.my;
+    if (Math.abs(dx) + Math.abs(dy) > 4) moved = true;
+    px = drag.px + dx; py = drag.py + dy; anim = false; apply();
+  };
+  const onUp = () => { drag = null; canvas.classList.remove("grabbing"); };
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+  // clique no vazio limpa a seleção; arrastar não conta como clique
+  canvas.addEventListener("click", () => {
+    if (moved) { moved = false; return; }
+    model.set("selected", ""); model.save_changes();
+  });
+  const onWheel = (e) => {
+    e.preventDefault();
+    const r = rect();
+    anim = false;
+    setZoom(z * Math.exp(-e.deltaY * 0.0012), e.clientX - r.left, e.clientY - r.top);
+  };
+  canvas.addEventListener("wheel", onWheel, { passive: false });
+
+  // um refresh do Python troca nodes+edges+tamanho de uma vez: o rAF agrupa os
+  // eventos num único rebuild
+  let raf = 0;
+  const schedule = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(rebuild); };
+  const onFit = () => fit(), onCenter = () => center();
+  const evs = ["change:nodes", "change:edges", "change:content_w", "change:content_h"];
+  evs.forEach(ev => model.on(ev, schedule));
+  model.on("change:selected", syncSel);
+  model.on("change:fit_token", onFit);
+  model.on("change:center_token", onCenter);
+  rebuild();
+  // 1ª medida do canvas só vale depois do layout. Com um nó já em foco a tela
+  // abre CENTRALIZADA nele (cartões legíveis); sem foco, enquadra a árvore.
+  setTimeout(() => { if (model.get("selected")) center(); else fit(); }, 60);
+  return () => {
+    cancelAnimationFrame(raf);
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+    canvas.removeEventListener("wheel", onWheel);
+    evs.forEach(ev => model.off(ev, schedule));
+    model.off("change:selected", syncSel);
+    model.off("change:fit_token", onFit);
+    model.off("change:center_token", onCenter);
+  };
+}
+export default { render };
+"""
+
+# As cores/medidas saem dos MESMOS tokens semânticos do resto da UI (ver _CSS):
+# o widget é injetado dentro do painel .treeui, então herda inclusive o tema
+# escuro. Os fallbacks depois da vírgula cobrem o caso de o CSS da UI não ter
+# sido injetado (widget renderizado solto).
+#
+# NUNCA usar var(--...) dentro do ATALHO `border`/`background` aqui: o Chromium
+# não re-resolve a variável dentro do atalho quando o tema muda em tempo de
+# execução (a classe .dark entra depois do 1º cálculo de estilo) e a borda fica
+# presa na cor clara. Com as longhands (border-color, background-color) o
+# recálculo acontece — por isso elas aparecem separadas abaixo.
+_TREE_CANVAS_CSS = """
+.ygg-cv-canvas { position:relative; width:100%; height:100%; overflow:hidden; cursor:grab;
+  border-width:1px; border-style:solid; border-color:var(--line,#e7e9ee);
+  border-radius:12px; background-color:var(--tile-bg,#f7f8fa);
+  background-image:radial-gradient(var(--cv-dot,rgba(31,39,51,.10)) 1.1px, transparent 1.1px);
+  background-size:24px 24px; }
+.ygg-cv-canvas.grabbing { cursor:grabbing; }
+.ygg-cv-world { position:absolute; left:0; top:0; transform-origin:0 0; }
+.ygg-cv-edges { position:absolute; left:0; top:0; overflow:visible; pointer-events:none; }
+.ygg-cv-edges path { fill:none; stroke:var(--ac-border,#cdd5e0); stroke-width:2; }
+.ygg-cv-edges path.hi { stroke:var(--sel-ac,#e8870b); stroke-width:2.6; }
+.ygg-cv-nodes { position:absolute; left:0; top:0; }
+.ygg-cv-node { position:absolute; box-sizing:border-box; cursor:pointer;
+  background-color:var(--cv-node-bg,#fff);
+  border-width:1.5px; border-style:solid; border-color:var(--line,#e7e9ee);
+  border-radius:12px; padding:9px 11px 8px; display:flex; flex-direction:column;
+  box-shadow:0 1px 3px rgba(16,24,40,.10);
+  font-family:'IBM Plex Sans',-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+  transition:border-color .15s, box-shadow .15s; }
+.ygg-cv-node:hover { border-color:var(--ac-border,#cdd5e0); box-shadow:0 4px 12px rgba(16,24,40,.16); }
+.ygg-cv-node.sel { border-color:var(--sel-ac,#e8870b); border-width:2px;
+  box-shadow:0 0 0 3px rgba(232,135,11,.22), 0 4px 14px rgba(16,24,40,.18); }
+.ygg-cv-node .t { display:flex; align-items:center; gap:5px; }
+.ygg-cv-node .lb { font-size:11.5px; font-weight:600; line-height:1.25; flex:1;
+  color:var(--strong-ink,#15324a); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ygg-cv-node .m { display:flex; align-items:baseline; gap:6px; margin-top:2px; }
+.ygg-cv-node .v { font-size:17px; font-weight:600; font-variant-numeric:tabular-nums; }
+.ygg-cv-node .g { font-size:9.5px; padding:1px 7px; border-radius:999px;
+  background-color:var(--ac-soft,#eef1f5); color:var(--ac-deep,#27324a); white-space:nowrap; }
+.ygg-cv-node .s { font-size:10px; color:var(--tree-meta,#7c8893); white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis; }
+.ygg-cv-node .bar { margin-top:auto; height:6px; border-radius:999px;
+  background-color:var(--gauge-track,#eceff3); overflow:hidden; }
+.ygg-cv-node .bar i { display:block; height:100%; border-radius:999px; }
+.ygg-cv-tools { position:absolute; left:12px; top:12px; display:flex; flex-direction:column;
+  gap:5px; z-index:5; }
+.ygg-cv-btn { width:30px; height:30px; display:flex; align-items:center; justify-content:center;
+  padding:0; cursor:pointer; border-width:1px; border-style:solid;
+  border-color:var(--line,#e7e9ee); border-radius:8px;
+  background-color:var(--cv-node-bg,#fff); color:var(--muted,#6b7480);
+  box-shadow:0 1px 3px rgba(16,24,40,.10); }
+.ygg-cv-btn:hover { background-color:var(--ac-soft,#eef1f5); color:var(--ac-deep,#27324a); }
+.ygg-cv-btn svg { width:15px; height:15px; display:block; }
+"""
+
+_TREE_CANVAS_WIDGET_CLS = None
+
+
+def _tree_canvas_widget_cls():
+    """Classe do canvas navegável da árvore — criada 1× e cacheada.
+
+    ``None`` quando o anywidget não está instalado: a aba então mostra um
+    aviso explicando como habilitá-la (não há como desenhar um plano com
+    pan/zoom só com os widgets core do ipywidgets)."""
+    global _TREE_CANVAS_WIDGET_CLS
+    if _TREE_CANVAS_WIDGET_CLS is not None:
+        return _TREE_CANVAS_WIDGET_CLS
+    try:
+        import anywidget
+        import traitlets
+    except Exception:
+        return None
+
+    class _TreeCanvasWidget(anywidget.AnyWidget):
+        _esm = _TREE_CANVAS_ESM
+        _css = _TREE_CANVAS_CSS
+        nodes = traitlets.List(traitlets.Dict()).tag(sync=True)   # cartões (x/y/html)
+        edges = traitlets.List(traitlets.Dict()).tag(sync=True)   # curvas pai→filho
+        content_w = traitlets.Int(1).tag(sync=True)               # tamanho do plano
+        content_h = traitlets.Int(1).tag(sync=True)
+        selected = traitlets.Unicode("").tag(sync=True)           # sid clicado ("" = nenhum)
+        fit_token = traitlets.Int(0).tag(sync=True)               # ++ → enquadra tudo
+        center_token = traitlets.Int(0).tag(sync=True)            # ++ → centraliza no sel.
+
+    _TREE_CANVAS_WIDGET_CLS = _TreeCanvasWidget
+    return _TREE_CANVAS_WIDGET_CLS
 
 
 class TreeSegmenterUI:
@@ -1282,6 +1569,12 @@ class TreeSegmenterUI:
         # de ações contextual. Sem anywidget, out_tree_img segue com o PNG estático.
         self._tree_img_widget = None       # instância do widget (criada no 1º preview)
         self._img_selected = None          # sid do nó clicado na imagem (folha OU ramo)
+        # aba "Árvore interativa": canvas navegável (anywidget, lazy — só é
+        # montado quando a aba é aberta) + painel de criação do nó clicado
+        self._cv_widget = None
+        self._cv_sel = None                # sid do nó em foco no painel
+        self._cv_syncing = False           # guarda dos observers durante a sincronia
+        self._cv_prev_tbl = None           # tabela das faixas do último preview
         # self.allow_interactive_tree foi resolvido no __init__ (Databricks → PNG
         # estático autocontido, sem CDN do anywidget) — ver comentário lá.
         # barra de ações em 2 linhas: 1. chip do nó + ações principais da folha;
@@ -1998,17 +2291,156 @@ class TreeSegmenterUI:
             # movida para cá: é uma etapa de fechamento, não da decisão de segmentação.
             sep_val, card_validacao])
 
-        # ---- montagem das abas (Análise de variável vem em 2º) ----------
-        tabs = W.Tab(children=[tab_build, tab_var, tab_diag, tab_valid, tab_avancado])
-        for i, titulo in enumerate(["Construir", "Análise de variáveis", "Diagnóstico",
-                                    "Exportar", "Avançado"]):
+        # ==============================================================
+        # Aba "Árvore interativa": o canvas à esquerda e, à direita, o
+        # painel que abre no nó clicado. Ao contrário da aba Construir
+        # (formulário → folha), aqui a árvore é o ponto de partida.
+        # ==============================================================
+        self.box_cv_canvas = W.Box(layout=W.Layout(width="100%", height="640px",
+                                                   min_width="0"))
+        self.out_cv_msg = W.HTML()            # aviso quando o canvas não é possível
+        self.btn_cv_fit = W.Button(description="Enquadrar", icon="compress",
+                                   tooltip="Voltar a ver a árvore inteira",
+                                   layout=W.Layout(width="auto"))
+        self.btn_cv_fit.on_click(self._on_cv_fit)
+
+        # -- painel: cabeçalho e métricas do nó
+        self.out_cv_head = W.HTML()
+        self.out_cv_stats = W.HTML()
+        self.out_cv_note = W.HTML()           # ramo já dividido / folha fechada
+        self.out_cv_empty = W.HTML(
+            "<div class='treeui-legend' style='padding:16px 4px'>Clique num nó do canvas "
+            "para abrir o painel. Numa <b>folha</b> você define o corte e as regras de "
+            "negócio dela; num <b>ramo já dividido</b>, só as ações de estrutura.</div>")
+
+        # -- painel: sugestões de variável (maior IV nesta folha)
+        self.out_cv_sug_h = W.HTML("<div class='treeui-h' style='margin:8px 0 5px'>"
+                                   "Sugestões · maior IV nesta folha</div>")
+        self.btns_cv_sug = [W.Button(layout=W.Layout(width="100%")) for _ in range(3)]
+        for i, b in enumerate(self.btns_cv_sug):
+            b.add_class("treeui-sug")
+            b.on_click(self._on_cv_sug(i))
+        self._cv_sug: list = []
+
+        # -- painel: configuração do corte
+        self.dd_cv_feature = W.Dropdown(description="Variável", options=[],
+                                        layout=W.Layout(width="100%"),
+                                        style={"description_width": "62px"})
+        self.dd_cv_feature.observe(self._on_cv_feature, names="value")
+        self._cv_feat_by_label: dict = {}
+        self.tg_cv_mode = W.ToggleButtons(
+            options=["Ótimo", "Manual"], value="Ótimo",
+            tooltips=["Deixa o binning ótimo achar os cortes",
+                      "Você digita os cortes"],
+            layout=W.Layout(width="auto"))
+        self.tg_cv_mode.observe(self._on_cv_mode, names="value")
+        self.sl_cv_bins = W.IntSlider(description="máx. faixas", value=4, min=2, max=6,
+                                      continuous_update=False,
+                                      layout=W.Layout(width="100%"),
+                                      style={"description_width": "72px"})
+        self.dd_cv_crit = W.Dropdown(
+            description="critério", value="optbin",
+            options=[("Binning ótimo (IV)", "optbin"), ("Gini (CART)", "gini"),
+                     ("Entropia / ganho de informação", "entropy"), ("KS", "ks"),
+                     ("Qui-quadrado (CHAID)", "chi2")],
+            layout=W.Layout(width="100%"), style={"description_width": "72px"})
+        self.tx_cv_cuts = W.Text(description="Cortes", placeholder="ex.: 420, 580, 720",
+                                 layout=W.Layout(width="100%"),
+                                 style={"description_width": "62px"})
+        self.btn_cv_sugcuts = W.Button(description="Sugerir", icon="magic",
+                                       tooltip="Preencher com o binning ótimo desta folha",
+                                       layout=W.Layout(width="auto"))
+        self.btn_cv_sugcuts.on_click(self._on_cv_sugcuts)
+        self.out_cv_cuts_hint = W.HTML()
+        self.box_cv_cuts = W.VBox([W.HBox([self.tx_cv_cuts, self.btn_cv_sugcuts],
+                                          layout=W.Layout(align_items="center", width="100%")),
+                                   self.out_cv_cuts_hint])
+        self.out_cv_preview = W.HTML()
+        self.btn_cv_preview = W.Button(description="Prever divisão", icon="eye",
+                                       layout=W.Layout(width="auto"))
+        self.btn_cv_preview.on_click(self._on_cv_preview)
+        self.btn_cv_apply = W.Button(description="Criar segmentos", icon="scissors",
+                                     button_style="primary",
+                                     layout=W.Layout(flex="1 1 auto"))
+        self.btn_cv_apply.on_click(self._on_cv_apply)
+        self.box_cv_split = W.VBox([
+            self.out_cv_sug_h, *self.btns_cv_sug,
+            W.HTML("<div class='treeui-h' style='margin:10px 0 5px'>Corte desta folha</div>"),
+            self.dd_cv_feature, self.tg_cv_mode, self.sl_cv_bins, self.dd_cv_crit,
+            self.box_cv_cuts,
+            W.HBox([self.btn_cv_preview, self.btn_cv_apply],
+                   layout=W.Layout(align_items="center", width="100%", flex_flow="row wrap")),
+            self.out_cv_preview,
+        ], layout=W.Layout(width="100%"))
+
+        # -- painel: regras de negócio (apelido + estrutura)
+        self.tx_cv_name = W.Text(description="Apelido", placeholder="nome de negócio do segmento",
+                                 continuous_update=False, layout=W.Layout(width="100%"),
+                                 style={"description_width": "62px"})
+        self.tx_cv_name.observe(self._on_cv_name, names="value")
+        self.btn_cv_lock = W.Button(description="🔒 Fechar folha", layout=W.Layout(width="auto"))
+        self.btn_cv_lock.on_click(self._on_cv_lock)
+        self.btn_cv_merge_l = W.Button(description="◀ Fundir", layout=W.Layout(width="auto"),
+                                       tooltip="Fundir com a folha vizinha da esquerda")
+        self.btn_cv_merge_l.on_click(self._on_cv_merge("left"))
+        self.btn_cv_merge_r = W.Button(description="Fundir ▶", layout=W.Layout(width="auto"),
+                                       tooltip="Fundir com a folha vizinha da direita")
+        self.btn_cv_merge_r.on_click(self._on_cv_merge("right"))
+        self.btn_cv_collapse = W.Button(description="Recolher para o pai",
+                                        layout=W.Layout(width="auto"),
+                                        tooltip="Desfaz o corte deste ramo: os filhos somem "
+                                                "e ele volta a ser folha")
+        self.btn_cv_collapse.on_click(self._on_cv_collapse)
+        box_cv_regras = W.VBox([
+            W.HTML("<div class='treeui-h' style='margin:12px 0 5px'>Regras de negócio</div>"),
+            W.HTML("<div class='treeui-legend' style='margin:0 0 6px'>O <b>apelido</b> é o nome "
+                   "que este segmento leva para a régua, o Excel e o SQL. <b>Fechar</b> protege "
+                   "a folha de novos cortes e da poda automática.</div>"),
+            self.tx_cv_name,
+            W.HBox([self.btn_cv_lock, self.btn_cv_merge_l, self.btn_cv_merge_r,
+                    self.btn_cv_collapse],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center", width="100%")),
+        ], layout=W.Layout(width="100%"))
+
+        self.box_cv_panel = W.VBox([self.out_cv_head, self.out_cv_stats, self.out_cv_note,
+                                    self.box_cv_split, box_cv_regras],
+                                   layout=W.Layout(width="100%"))
+        painel_cv = W.VBox([self.out_cv_empty, self.box_cv_panel],
+                           layout=W.Layout(width="390px", flex="0 0 390px", min_width="0",
+                                           max_height="640px", overflow="hidden auto",
+                                           padding="0 2px 0 12px"))
+        painel_cv.add_class("treeui-cvpanel")
+        card_cv = W.VBox([
+            W.HTML("<div class='treeui-h'>Árvore interativa · construa os cortes no mapa</div>"),
+            W.HTML("<div class='treeui-legend'>Arraste para navegar, role para ampliar e "
+                   "<b>clique num nó</b> para abrir o painel ao lado. Cada cartão traz a "
+                   "condição do nó, o " + _esc(self._risk_mean) + ", a volumetria e uma barra "
+                   "com a representatividade. A folha clicada aqui vira a folha ativa das "
+                   "outras abas.<br/>A tela abre centralizada na folha em foco; "
+                   "<b>Enquadrar</b> mostra a árvore inteira — em árvores largas os cartões "
+                   "ficam pequenos, então aproxime de volta para ler.</div>"),
+            W.HBox([self.btn_cv_fit], layout=W.Layout(width="100%")),
+            W.HBox([W.VBox([self.box_cv_canvas, self.out_cv_msg],
+                           layout=W.Layout(flex="1 1 auto", min_width="0")),
+                    painel_cv],
+                   layout=W.Layout(width="100%", align_items="stretch")),
+        ])
+        card_cv.add_class("treeui-card")
+        tab_canvas = W.VBox([card_cv])
+
+        # ---- montagem das abas (o canvas entra logo depois de Construir) ----
+        tabs = W.Tab(children=[tab_build, tab_canvas, tab_var, tab_diag, tab_valid,
+                               tab_avancado])
+        for i, titulo in enumerate(["Construir", "Árvore interativa", "Análise de variáveis",
+                                    "Diagnóstico", "Exportar", "Avançado"]):
             tabs.set_title(i, titulo)
         tabs.add_class("treeui-tabs")
         # a tabela de IV (optbinning de TODAS as variáveis na folha) é o item mais
-        # caro do open/refresh e fica na aba 1 (não-visível por padrão). Adiamos seu
+        # caro do open/refresh e fica numa aba não-visível por padrão. Adiamos seu
         # cálculo até a aba ser realmente aberta (render preguiçoso) — ver _refresh_iv.
         self.tabs = tabs
-        self._iv_tab_index = 1
+        self._iv_tab_index = 2
+        self._canvas_tab_index = 1
         tabs.observe(self._on_tab_change, names="selected_index")
 
         # ---- console persistente (log de todas as abas) -----------------
@@ -3127,6 +3559,13 @@ class TreeSegmenterUI:
         # fechado, nada a fazer — o próximo "Ver árvore" já desenha o estado novo
         if self._tree_img_visible():
             self._refresh_tree_widget()
+        # canvas da aba "Árvore interativa": redesenha só se estiver à vista; senão
+        # marca pendente e o _on_tab_change desenha ao abrir a aba
+        if (getattr(self, "tabs", None) is not None
+                and self.tabs.selected_index == self._canvas_tab_index):
+            self._refresh_canvas()
+        else:
+            self._cv_dirty = True
 
     # ==================================================================
     # Entrada / handlers
@@ -4189,16 +4628,32 @@ class TreeSegmenterUI:
         self._refresh_iv()
         self._refresh_leaf_hist()
         self._sync_img_selection()      # espelha a folha no preview interativo (contorno+barra)
+        self._sync_canvas_selection()   # e no canvas da aba "Árvore interativa"
         if self.tg_feat_iv.value:       # ordenação por IV é POR FOLHA → reordena
             self._refresh_feature_options()
         self._on_feature_change(None)   # nova folha: limpa o preview e recompõe os grupos
 
     def _on_tab_change(self, change):
-        """Ao abrir a aba 'Análise de variáveis', calcula a tabela de IV se estiver
-        pendente (render preguiçoso — não pagamos o optbinning de todas as variáveis
-        na abertura nem em cada mutação enquanto a aba não está à vista)."""
-        if change.get("new") == self._iv_tab_index and getattr(self, "_iv_dirty", False):
+        """Render preguiçoso das abas caras: a tabela de IV (optbinning de TODAS as
+        variáveis) e o canvas da árvore só são calculados quando a respectiva aba é
+        aberta — não na abertura da UI nem a cada mutação com a aba fora de vista."""
+        nova = change.get("new")
+        if nova == self._iv_tab_index and getattr(self, "_iv_dirty", False):
             self._compute_iv()
+        if nova == self._canvas_tab_index:
+            # 1ª abertura monta o widget e enquadra; nas seguintes só redesenha se
+            # a árvore mudou enquanto a aba estava escondida
+            primeira = not getattr(self, "_cv_rendered", False)
+            if primeira or getattr(self, "_cv_dirty", False):
+                self._cv_dirty = False
+                self._cv_rendered = True
+                if primeira and self._cv_sel is None:
+                    self._cv_sel = self.dd_leaf.value or "root"
+                # abre CENTRALIZADO no nó em foco, num zoom legível — e não
+                # enquadrando tudo: numa árvore larga o enquadramento inicial
+                # deixaria os cartões pequenos demais para ler (o botão
+                # "Enquadrar" continua ali para a visão geral)
+                self._refresh_canvas(center=primeira)
 
     def _refresh_iv(self):
         # só calcula se a aba de variáveis estiver à vista; senão marca pendente e
@@ -5940,6 +6395,650 @@ class TreeSegmenterUI:
 
     def _on_plot_hide(self, _):
         self.out_plot.value = ""          # recolhe (esvazia) a imagem
+
+    # ==================================================================
+    # Aba "Árvore interativa" — canvas navegável + painel de criação
+    #
+    # A aba Construir edita a árvore por formulário (escolher a folha num
+    # dropdown, configurar, aplicar). Aqui a ordem se inverte: a árvore é o
+    # mapa, clica-se no nó que interessa e o painel da direita abre já no
+    # contexto dele — corte e regras de negócio da folha no mesmo lugar.
+    # ==================================================================
+    _CV_NODE_W = 188          # cartão do nó, em px do PLANO (antes do zoom)
+    _CV_NODE_H = 104
+    _CV_GAP_X = 26            # respiro entre cartões vizinhos
+    _CV_GAP_Y = 68            # respiro entre níveis
+
+    def _canvas_children(self):
+        """(filhos de cada nó, mapa de notas). Os filhos saem na MESMA ordem da
+        árvore de texto da aba Construir (menor alvo à esquerda) — as duas
+        telas mostram a árvore na mesma ordem."""
+        filhos: dict = {}
+        for sid, s in self.seg.segments.items():
+            filhos.setdefault(s["parent"], []).append(sid)
+        nota_map, _ = self.seg._grade_map()
+        min_nota = self._min_nota_fn(filhos, nota_map)
+        return {k: sorted(v, key=min_nota) for k, v in filhos.items()}, nota_map
+
+    def _canvas_layout(self):
+        """Posiciona os cartões no plano: cada folha ocupa uma coluna, na ordem
+        da árvore, e o pai fica centralizado sobre os filhos. Devolve
+        ``(nós, arestas, largura, altura)`` já em px do plano."""
+        NW, NH = self._CV_NODE_W, self._CV_NODE_H
+        GX, GY = self._CV_GAP_X, self._CV_GAP_Y
+        filhos, nota_map = self._canvas_children()
+        pos: dict = {}
+        col = [0]        # próxima coluna livre (lista = célula mutável no closure)
+        prof = [0]
+
+        def walk(sid, d):
+            prof[0] = max(prof[0], d)
+            ch = filhos.get(sid, [])
+            if not ch:
+                x = col[0] * (NW + GX)
+                col[0] += 1
+            else:
+                xs = [walk(c, d + 1) for c in ch]
+                x = (min(xs) + max(xs)) / 2
+            pos[sid] = (x, d * (NH + GY))
+            return x
+
+        walk("root", 0)
+        lo, hi = self._leaf_values()
+        n_total = len(self.df)
+        nodes = [dict(sid=sid, x=round(x), y=round(y), w=NW, h=NH,
+                      leaf=bool(self.seg.segments[sid]["is_leaf"]),
+                      html=self._canvas_node_html(sid, filhos, nota_map, lo, hi, n_total))
+                 for sid, (x, y) in pos.items()]
+        edges = []
+        for sid, ch in filhos.items():
+            if sid is None or sid not in pos:
+                continue
+            x0, y0 = pos[sid][0] + NW / 2, pos[sid][1] + NH
+            for c in ch:
+                x1, y1 = pos[c][0] + NW / 2, pos[c][1]
+                edges.append(dict(child=c, d=(
+                    f"M {x0:.1f} {y0:.1f} C {x0:.1f} {y0 + GY * 0.55:.1f}, "
+                    f"{x1:.1f} {y1 - GY * 0.55:.1f}, {x1:.1f} {y1:.1f}")))
+        largura = max(1, col[0] * (NW + GX) - GX)
+        altura = (prof[0] + 1) * (NH + GY) - GY
+        return nodes, edges, int(largura), int(altura)
+
+    def _canvas_node_html(self, sid, filhos, nota_map, lo, hi, n_total):
+        """Conteúdo do cartão de um nó — montado (e escapado) aqui, como no
+        tooltip do preview clicável: o front só injeta a string pronta."""
+        s = self.seg.segments[sid]
+        n = int(s["mask"].sum())
+        rep = 100 * n / n_total if n_total else 0.0
+        ref = self.ref_sample if self.sample_col is not None else None
+        v = self._node_value(sid, ref)
+        cor = self._color(v, lo, hi)
+        rot = ("TODA A CARTEIRA" if s["parent"] is None
+               else self.seg._descrever([s["conditions"][-1]]))
+        v_txt = "—" if pd.isna(v) else f"{v * 100:.2f}%"
+        vol = f"{n:,}".replace(",", ".")
+        if s["is_leaf"]:
+            chip = f"folha {nota_map.get(sid, '?')}"
+            nome = self.seg.leaf_name(sid)
+            sub = f"{vol} obs · {rep:.1f}% da carteira"
+            if nome:
+                sub = f"{_esc(nome)} · {sub}"
+        else:
+            ch = filhos.get(sid, [])
+            feat = None
+            if ch:
+                conds = self.seg.segments[ch[0]]["conditions"]
+                feat = conds[-1]["feature"] if conds else None
+            lbl = self.seg.feature_labels.get(feat, feat) if feat else None
+            chip = f"{len(ch)} ramos"
+            sub = (f"dividida por {_esc(str(lbl))}" if lbl
+                   else f"{vol} obs · {rep:.1f}% da carteira")
+        lock = ("<span title='folha fechada' style='font-size:11px;flex:none'>🔒</span>"
+                if sid in self.locked else "")
+        return (f"<div class='t'><span class='lb' title=\"{_esc(rot)}\">{_esc(rot)}</span>{lock}</div>"
+                f"<div class='m'><span class='v' style='color:{cor}'>{v_txt}</span>"
+                f"<span class='g'>{_esc(chip)}</span></div>"
+                f"<div class='s'>{sub}</div>"
+                f"<div class='bar'><i style='width:{max(3, min(100, rep)):.1f}%;"
+                f"background:{cor}'></i></div>")
+
+    def _ensure_canvas_widget(self):
+        """Instancia o canvas 1× e o monta no card. ``False`` quando o anywidget
+        não está disponível/ligado — a aba então mostra só o aviso."""
+        if not self.allow_interactive_tree:
+            return False
+        if self._cv_widget is None:
+            cls = _tree_canvas_widget_cls()
+            if cls is None:
+                return False
+            self._cv_widget = cls(layout=W.Layout(width="100%", height="100%"))
+            self._cv_widget.observe(self._on_cv_select, names="selected")
+        if self._cv_widget not in self.box_cv_canvas.children:
+            self.box_cv_canvas.children = (self._cv_widget,)
+        return True
+
+    def _canvas_unavailable_html(self):
+        """Aviso quando o canvas não pode ser desenhado — mesma explicação (e
+        mesma saída) do preview clicável da aba Construir."""
+        if not self.allow_interactive_tree:
+            return ("<div class='treeui-legend' style='padding:22px 18px'>🔒 <b>Árvore "
+                    "interativa desligada.</b> Ela depende do <code>anywidget</code>, cujo "
+                    "frontend o gerenciador de widgets do Databricks busca de um CDN — num "
+                    "cluster sem egress a tela ficaria em branco. Por isso o padrão dentro do "
+                    "Databricks é desligada.<br/><br/>Para ligá-la num ambiente com egress (ou "
+                    "com o anywidget instalado como lib do cluster):<br/>"
+                    "<code>TreeSegmenterUI(..., allow_interactive_tree=True)</code>"
+                    "<br/><br/>Enquanto isso, a aba <b>Construir</b> faz as mesmas divisões "
+                    "pelo formulário, sem depender de rede.</div>")
+        return ("<div class='treeui-legend' style='padding:22px 18px'>💡 <b>Instale o "
+                "<code>anywidget</code></b> (<code>pip install anywidget</code>) para navegar "
+                "a árvore neste plano: arrastar, ampliar e clicar num nó para abrir o painel "
+                "de corte.<br/><br/>Sem ele, a aba <b>Construir</b> faz as mesmas divisões "
+                "pelo formulário.</div>")
+
+    def _refresh_canvas(self, fit=False, center=False):
+        """(Re)desenha o canvas a partir da árvore atual. ``fit`` enquadra tudo,
+        ``center`` centraliza no nó selecionado (contadores nos traits)."""
+        if not self._ensure_canvas_widget():
+            # sem o plano navegável, o painel ainda vale: ele é ipywidgets puro
+            # (zero rede) e opera sobre a folha ativa da UI — o que se perde é o
+            # mapa, não o corte nem as regras de negócio
+            self.out_cv_msg.value = self._canvas_unavailable_html()
+            self.box_cv_canvas.layout.display = "none"
+            self.btn_cv_fit.layout.display = "none"
+            self._refresh_cv_panel()
+            return
+        self.box_cv_canvas.layout.display = ""
+        self.btn_cv_fit.layout.display = ""
+        self.out_cv_msg.value = ""
+        w = self._cv_widget
+        try:
+            nodes, edges, cw, ch = self._canvas_layout()
+        except Exception as e:
+            self.out_cv_msg.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro ao "
+                                     f"desenhar a árvore: {type(e).__name__}: {e}</div>")
+            return
+        sel = self._cv_sel if self._cv_sel in self.seg.segments else ""
+        self._cv_sel = sel or None
+        with w.hold_sync():                    # 1 mensagem só pelo comm
+            w.nodes = nodes
+            w.edges = edges
+            w.content_w, w.content_h = cw, ch
+            w.selected = sel
+            if fit:
+                w.fit_token += 1
+            if center and sel:
+                w.center_token += 1
+        self._refresh_cv_panel()
+
+    # ---- seleção ----------------------------------------------------
+    def _on_cv_select(self, change):
+        """Clique num nó do canvas (trait ``selected``). Folha selecionada vira
+        também a folha ativa do resto da UI — as abas seguem juntas."""
+        sid = change.get("new") or None
+        self._cv_sel = sid if sid in self.seg.segments else None
+        if (self._cv_sel is not None and self.seg.segments[self._cv_sel]["is_leaf"]
+                and self.dd_leaf.value != self._cv_sel
+                and self._cv_sel in [s for _, s in self.dd_leaf.options]):
+            self.dd_leaf.value = self._cv_sel
+        self._refresh_cv_panel()
+
+    def _sync_canvas_selection(self):
+        """Espelha na aba do canvas a folha escolhida em OUTRA aba — as telas
+        mostram sempre o mesmo nó em foco. Vale mesmo sem o canvas montado: o
+        painel sozinho já opera sobre a folha ativa."""
+        sid = self.dd_leaf.value
+        if sid is None or sid not in self.seg.segments:
+            return
+        if self._cv_sel != sid:
+            self._cv_sel = sid
+            if getattr(self, "box_cv_panel", None) is not None:
+                self._refresh_cv_panel()
+        w = self._cv_widget
+        if w is not None and w.selected != sid:
+            w.selected = sid
+
+    def _cv_node(self):
+        """Nó em foco no painel: o clicado no canvas ou, na falta dele, a folha
+        ativa da UI (o painel serve mesmo sem o canvas ter sido tocado)."""
+        sid = self._cv_sel
+        if sid is None or sid not in self.seg.segments:
+            sid = self.dd_leaf.value
+        return sid if sid in self.seg.segments else None
+
+    # ---- painel de criação ------------------------------------------
+    def _refresh_cv_feature_options(self):
+        """Opções do seletor de variável do painel, ordenadas por IV NESTA folha
+        (o IV é por folha — a ordem muda a cada nó clicado)."""
+        sid = self._cv_node()
+        labels, mapa = self._feature_option_labels(by_iv=True, sid=sid)
+        self._cv_feat_by_label = mapa
+        atual = self.dd_cv_feature.value
+        col = mapa.get(atual) if atual else None
+        self._cv_syncing = True
+        try:
+            self.dd_cv_feature.options = labels
+            alvo = next((l for l, f in mapa.items() if f == col), None)
+            self.dd_cv_feature.value = alvo or (labels[0] if labels else None)
+        finally:
+            self._cv_syncing = False
+
+    def _cv_feature(self, warn=True):
+        return self._combo_feature(self.dd_cv_feature, self._cv_feat_by_label, warn=warn)
+
+    def _cv_kind(self, feature=None, sid=None):
+        """'num' ou 'cat' para a variável na folha em foco."""
+        sid = sid or self._cv_node()
+        feature = feature or self._cv_feature(warn=False)
+        if sid is None or feature is None:
+            return "num"
+        sub = self.df[self.seg.segments[sid]["mask"]]
+        try:
+            return self.seg._detect_kind(sub, feature, None)
+        except Exception:
+            return "num"
+
+    def _refresh_cv_panel(self):
+        """Reconstrói o painel para o nó em foco: cabeçalho, métricas, sugestões
+        de corte e quais controles/ações fazem sentido ali."""
+        sid = self._cv_node()
+        if sid is None:
+            self.box_cv_panel.layout.display = "none"
+            self.out_cv_empty.layout.display = ""
+            return
+        self.out_cv_empty.layout.display = "none"
+        self.box_cv_panel.layout.display = ""
+        s = self.seg.segments[sid]
+        is_leaf, is_root = bool(s["is_leaf"]), s["parent"] is None
+        travada = sid in self.locked
+        nota_map, _ = self.seg._grade_map()
+        n = int(s["mask"].sum())
+        n_total = len(self.df)
+        rep = 100 * n / n_total if n_total else 0.0
+        ref = self.ref_sample if self.sample_col is not None else None
+        v = self._node_value(sid, ref)
+        v_raiz = self._node_value("root", ref)
+
+        # ---- cabeçalho: o que é este nó e onde ele fica na árvore
+        if is_root:
+            kicker = "Raiz da árvore" if is_leaf else "Raiz · já dividida"
+        elif not is_leaf:
+            kicker = "Ramo já dividido"
+        else:
+            kicker = "Folha fechada" if travada else f"Folha {nota_map.get(sid, '?')}"
+        rot = ("TODA A CARTEIRA" if is_root
+               else self.seg._descrever([s["conditions"][-1]]))
+        caminho = ("caminho: " + self.seg._descrever(s["conditions"][:-1])
+                   if len(s["conditions"]) > 1 else "direto da raiz")
+        self.out_cv_head.value = (
+            f"<div style='font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;"
+            f"color:var(--ac);font-weight:700'>{_esc(kicker)}</div>"
+            f"<div style='font-size:15px;font-weight:600;line-height:1.25;margin-top:2px;"
+            f"color:var(--strong-ink)'>{_esc(rot)}</div>"
+            f"<div style='font-size:10.5px;color:var(--sub-ink);margin-top:3px'>"
+            f"{_esc(caminho if not is_root else 'toda a base')}</div>")
+
+        # ---- métricas do nó
+        v_txt = "—" if pd.isna(v) else f"{v * 100:.2f}%"
+        if pd.isna(v) or pd.isna(v_raiz) or v_raiz == 0:
+            delta = "—"
+        else:
+            d = (v - v_raiz) * 100
+            delta = f"{d:+.2f} p.p."
+        tiles = [("população", f"{n:,}".replace(",", ".")),
+                 ("% carteira", f"{rep:.1f}%"),
+                 (self._risk_label + (f" ({ref})" if ref else ""), v_txt),
+                 ("vs. carteira", delta)]
+        self.out_cv_stats.value = "<div class='treeui-metrics'>" + "".join(
+            f"<div class='treeui-metric'><div class='k'>{_esc(k)}</div>"
+            f"<div class='v'>{_esc(val)}</div></div>" for k, val in tiles) + "</div>"
+
+        # ---- o corte só existe para folha aberta
+        pode_dividir = is_leaf and not travada
+        self.box_cv_split.layout.display = "" if pode_dividir else "none"
+        if pode_dividir:
+            self._refresh_cv_feature_options()
+            self._refresh_cv_suggestions(sid)
+            self._sync_cv_mode()
+        if not is_leaf:
+            self.out_cv_note.value = (
+                "<div style='background:var(--ac-soft);color:var(--ac-deep);border-radius:9px;"
+                "padding:9px 12px;font-size:11.5px'>Este ramo já foi dividido. Para refazer o "
+                "corte, use <b>Recolher para o pai</b> abaixo — os filhos somem e ele volta a "
+                "ser folha.</div>")
+        elif travada:
+            self.out_cv_note.value = (
+                "<div style='background:var(--warn-bg);color:var(--warn-ink);border-radius:9px;"
+                "padding:9px 12px;font-size:11.5px'>🔒 Folha fechada como final. Reabra abaixo "
+                "para poder dividi-la.</div>")
+        else:
+            self.out_cv_note.value = ""
+
+        # ---- regras de negócio: apelido + ações válidas neste nó
+        self._cv_syncing = True
+        try:
+            self.tx_cv_name.value = (self.seg.leaf_name(sid) or "") if is_leaf else ""
+        finally:
+            self._cv_syncing = False
+        self.tx_cv_name.disabled = not is_leaf
+        self.btn_cv_lock.description = "🔓 Reabrir folha" if travada else "🔒 Fechar folha"
+        self.btn_cv_lock.disabled = not is_leaf
+        # a raiz é folha enquanto a árvore está vazia, mas não tem irmãs
+        esq, dir_ = ((None, None) if (not is_leaf or is_root)
+                     else self.seg._adjacent_sibling_neighbors(sid))
+        self.btn_cv_merge_l.disabled = esq is None
+        self.btn_cv_merge_r.disabled = dir_ is None
+        self.btn_cv_collapse.disabled = is_leaf
+        self.out_cv_preview.value = ""      # o preview era de outro nó
+
+    def _refresh_cv_suggestions(self, sid):
+        """Três variáveis de maior IV nesta folha, como atalhos: clicar já
+        seleciona a variável e mostra o preview do corte ótimo."""
+        ivm = self._iv_map(sid)
+        top = sorted(((f, iv) for f, iv in ivm.items() if not pd.isna(iv)),
+                     key=lambda kv: -kv[1])[:3]
+        self._cv_sug = [f for f, _ in top]
+        for i, b in enumerate(self.btns_cv_sug):
+            if i < len(top):
+                f, iv = top[i]
+                b.description = f"{self.seg.feature_labels.get(f, f)}  ·  IV {iv:.3f}"
+                b.tooltip = f"Usar '{f}' no corte desta folha (IV {iv:.4f})"
+                b.layout.display = ""
+            else:
+                b.layout.display = "none"
+        self.out_cv_sug_h.layout.display = "" if top else "none"
+
+    def _sync_cv_mode(self):
+        """Ótimo mostra máx. bins + critério; Manual mostra a caixa de cortes,
+        cujo formato depende do tipo da variável."""
+        manual = self.tg_cv_mode.value == "Manual"
+        cat = self._cv_kind() == "cat"
+        self.sl_cv_bins.layout.display = "none" if manual else ""
+        self.dd_cv_crit.layout.display = "none" if manual else ""
+        self.box_cv_cuts.layout.display = "" if manual else "none"
+        self.tx_cv_cuts.description = "Grupos" if cat else "Cortes"
+        self.tx_cv_cuts.placeholder = ("N,NE; CO; SE,S" if cat else "ex.: 420, 580, 720")
+        self.out_cv_cuts_hint.value = (
+            "<div style='font-size:10.5px;color:var(--sub-ink);margin:2px 0 0 4px'>"
+            + ("categórica — separe as CATEGORIAS por vírgula e os GRUPOS por ponto e vírgula."
+               if cat else
+               "numérica — um corte por vírgula; cada corte fecha à direita (≤).")
+            + "</div>")
+
+    def _on_cv_mode(self, _):
+        if self._cv_syncing:
+            return
+        self.out_cv_preview.value = ""
+        self._sync_cv_mode()
+
+    def _on_cv_feature(self, _):
+        if self._cv_syncing:
+            return
+        self.out_cv_preview.value = ""
+        self._sync_cv_mode()          # o tipo da variável muda o campo de cortes
+
+    def _on_cv_sug(self, i):
+        """Atalho de sugestão: seleciona a variável e já mostra o preview."""
+        def _handler(_):
+            if i >= len(self._cv_sug):
+                return
+            col = self._cv_sug[i]
+            alvo = next((l for l, f in self._cv_feat_by_label.items() if f == col), None)
+            if alvo is None:
+                return
+            self._cv_syncing = True
+            try:
+                self.dd_cv_feature.value = alvo
+            finally:
+                self._cv_syncing = False
+            self._sync_cv_mode()
+            self._on_cv_preview(None)
+        return _handler
+
+    def _cv_parse_cuts(self, feature, sid):
+        """Lê a caixa de cortes do painel. Numérica: '420, 580'. Categórica:
+        grupos separados por ';' e categorias por ',' — 'N,NE; CO; SE,S'."""
+        txt = (self.tx_cv_cuts.value or "").strip()
+        if not txt:
+            return None
+        if self._cv_kind(feature, sid) == "num":
+            vals = [x.strip() for x in txt.replace(";", ",").split(",") if x.strip()]
+            try:
+                return [float(x) for x in vals] or None
+            except ValueError as e:
+                raise ValueError(f"corte não numérico em '{txt}' ({e})") from None
+        grupos = [[c.strip() for c in g.split(",") if c.strip()]
+                  for g in txt.split(";") if g.strip()]
+        return [g for g in grupos if g] or None
+
+    def _cv_prepare(self):
+        """Monta ``self._pending`` a partir dos controles do painel (mesma
+        validação por ``show_grow`` do fluxo da aba Construir)."""
+        import contextlib
+        import io
+        sid = self._cv_node()
+        if sid is None or not self.seg.segments[sid]["is_leaf"]:
+            return False, "Selecione uma FOLHA no canvas para dividir."
+        if sid in self.locked:
+            return False, "⚠ Folha fechada — reabra para dividir."
+        feature = self._cv_feature(warn=False)
+        if feature is None:
+            return False, "⚠ Escolha uma variável da lista."
+        try:
+            if self.tg_cv_mode.value == "Ótimo":
+                splits = None
+                extra = dict(max_n_bins=self.sl_cv_bins.value,
+                             criterion=self.dd_cv_crit.value)
+            else:
+                splits, extra = self._cv_parse_cuts(feature, sid), {}
+                if not splits:
+                    return False, "⚠ Preencha os cortes para o modo Manual."
+            # show_grow devolve {sid: tabela das faixas} e imprime o preview no
+            # stdout — aqui só a tabela interessa (o painel a desenha)
+            with contextlib.redirect_stdout(io.StringIO()):
+                prev = self.seg.show_grow(feature, splits=splits,
+                                          only_segments=[sid], **extra)
+            self._cv_prev_tbl = prev.get(sid)
+            self._pending = dict(feature=feature, splits=splits,
+                                 only_segments=[sid], **extra)
+            return True, None
+        except Exception as e:
+            self._pending = None
+            self._cv_prev_tbl = None
+            return False, f"Erro ao preparar a divisão: {type(e).__name__}: {e}"
+
+    def _on_cv_sugcuts(self, _):
+        """Preenche a caixa de cortes com o binning ótimo desta folha."""
+        sid = self._cv_node()
+        feat = self._cv_feature()
+        if feat is None or sid is None:
+            return
+        with self._busy(self.btn_cv_sugcuts, msg="sugerindo os cortes…"):
+            try:
+                r = self.seg.best_binning(sid, feat, max_n_bins=int(self.sl_cv_bins.max))
+            except Exception as e:
+                self._log(f"Não consegui sugerir cortes: {type(e).__name__}: {e}"); return
+            lbl = self.seg.feature_labels.get(feat, feat)
+            if r["n_bins"] < 2:
+                self._log(f"Sem corte ótimo para '{lbl}' nesta folha."); return
+            self.sl_cv_bins.value = max(self.sl_cv_bins.min,
+                                        min(self.sl_cv_bins.max, r["n_bins"]))
+            if r["kind"] == "num":
+                self.tx_cv_cuts.value = ", ".join(f"{c:.4g}" for c in r["cuts"])
+            else:
+                self.tx_cv_cuts.value = "; ".join(", ".join(map(str, g)) for g in r["groups"])
+            self._log(f"Sugestão p/ '{lbl}': {r['n_bins']} faixas — cortes preenchidos.")
+
+    def _on_cv_preview(self, _):
+        """Mostra as faixas que o corte criaria — volume e alvo de cada uma —
+        antes de mexer na árvore."""
+        with self._busy(self.btn_cv_preview, msg="prevendo a divisão…"):
+            ok, msg = self._cv_prepare()
+            if not ok:
+                self.out_cv_preview.value = (f"<div style='font-size:11.5px;"
+                                             f"color:var(--bad-tx)'>{_esc(msg)}</div>")
+                return
+            tbl = self._cv_prev_tbl
+            if tbl is None or tbl.empty:
+                self.out_cv_preview.value = (
+                    "<div style='font-size:11.5px;color:var(--warn-tx)'>Sem corte válido para "
+                    "esta variável nesta folha — tente outra ou afrouxe o máx. de faixas.</div>")
+                return
+            self.out_cv_preview.value = self._cv_preview_html(
+                tbl, self._pending["only_segments"][0])
+
+    def _cv_preview_html(self, tbl, sid):
+        """Linhas do preview — uma por faixa proposta, com barra de volume.
+        A % é sobre a FOLHA (não sobre a carteira): o que importa aqui é como o
+        corte reparte esta folha."""
+        lo, hi = self._leaf_values()
+        n_pai = int(self.seg.segments[sid]["mask"].sum())
+        linhas = []
+        for r in tbl.itertuples(index=False):
+            rot = str(getattr(r, "faixa", ""))
+            n = int(getattr(r, "n", 0) or 0)
+            val = float(getattr(r, "valor_medio", float("nan")))
+            share = 100 * n / n_pai if n_pai else 0.0
+            cor = self._color(val, lo, hi)
+            v_txt = "—" if pd.isna(val) else f"{val * 100:.2f}%"
+            linhas.append(
+                f"<div style='display:flex;align-items:center;gap:9px;padding:5px 0;"
+                f"border-top:1px solid var(--hair)'>"
+                f"<div style='flex:1;min-width:0'>"
+                f"<div style='font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;"
+                f"text-overflow:ellipsis' title=\"{_esc(rot)}\">{_esc(rot)}</div>"
+                f"<div style='height:5px;border-radius:999px;background:var(--gauge-track);"
+                f"margin-top:4px;overflow:hidden'><i style='display:block;height:100%;"
+                f"width:{max(3, min(100, share)):.1f}%;background:{cor};border-radius:999px'></i>"
+                f"</div></div>"
+                f"<div style='flex:none;width:46px;text-align:right;font-size:10.5px;"
+                f"color:var(--sub-ink)'>{share:.1f}%</div>"
+                f"<div style='flex:none;width:56px;text-align:right;font-size:11.5px;"
+                f"font-weight:600;color:{cor}'>{v_txt}</div></div>")
+        if not linhas:
+            return ("<div style='font-size:11.5px;color:var(--warn-tx)'>O corte não separou "
+                    "a folha — tente outra variável ou afrouxe o mínimo por faixa.</div>")
+        # monotonicidade: faixas com alvo sempre subindo (ou sempre descendo) são o
+        # que se espera de uma variável de risco bem comportada; a quebra não impede
+        # o corte, mas merece ser vista antes de aplicá-lo
+        mono = bool(tbl.attrs.get("mono_ok", True))
+        selo = (f"<span style='font-size:10px;font-weight:700;padding:1px 8px;border-radius:999px;"
+                f"background:{'var(--ok-bg)' if mono else 'var(--warn-bg)'};"
+                f"color:{'var(--ok-ink)' if mono else 'var(--warn-ink)'}'>"
+                f"{'monotônica' if mono else 'não monotônica'}</span>")
+        return (f"<div style='display:flex;align-items:center;justify-content:space-between;"
+                f"margin-bottom:2px'><span style='font-size:9.5px;letter-spacing:.09em;"
+                f"text-transform:uppercase;color:var(--sub-ink);font-weight:700'>"
+                f"Preview · {len(linhas)} faixas</span>{selo}</div>" + "".join(linhas))
+
+    def _on_cv_apply(self, _):
+        """Aplica o corte à folha em foco — mesmo caminho (com desfazer) do
+        ✂ Criar segmento da aba Construir."""
+        with self._busy(self.btn_cv_apply, msg="criando os segmentos…"):
+            ok, msg = self._cv_prepare()
+            if not ok:
+                self._log(msg); return
+            sid = self._pending["only_segments"][0]
+            redo_bak = list(self._redo)
+            antes = self._delta_snapshot()
+            self._checkpoint()
+            try:
+                self.seg.grow(**self._pending)
+                self._pending = None
+            except Exception as e:
+                self._revert_checkpoint(redo_bak)
+                self._log(f"Erro ao criar segmento: {type(e).__name__}: {e}"); return
+            self._cv_sel = sid                 # segue no nó recém-dividido
+            self._refresh()                    # já redesenha o canvas (aba à vista)
+            self._cv_center()
+            self._log_delta("dividir (canvas)", antes)
+
+    # ---- regras de negócio do nó ------------------------------------
+    def _on_cv_name(self, _):
+        """Apelido de negócio da folha — o rótulo que vai para a régua, o Excel
+        e o SQL. Imediato e desfazível, como o campo da aba Construir."""
+        if self._cv_syncing:
+            return
+        sid = self._cv_node()
+        if sid is None or not self.seg.segments[sid]["is_leaf"]:
+            return
+        novo = " ".join((self.tx_cv_name.value or "").split())
+        if novo == (self.seg.leaf_name(sid) or ""):
+            return
+        redo_bak = list(self._redo)
+        self._checkpoint()
+        try:
+            self.seg.set_leaf_name(sid, novo or None)
+        except Exception as e:
+            self._revert_checkpoint(redo_bak)
+            self._log(f"Erro ao apelidar a folha: {type(e).__name__}: {e}"); return
+        self._log(f"🏷️ apelido {'aplicado' if novo else 'removido'}: {self._leaf_label(sid)}")
+        self._refresh_lock_labels()
+        self._refresh_table()
+        self._sync_leaf_name_field()
+        self._refresh_canvas()
+
+    def _on_cv_lock(self, _):
+        sid = self._cv_node()
+        if sid is None or not self.seg.segments[sid]["is_leaf"]:
+            return
+        if sid in self.locked:
+            self.locked.discard(sid)
+            self._log(f"🔓 reaberta: {self._leaf_label(sid)}")
+        else:
+            self.locked.add(sid)
+            self._log(f"🔒 fechada: {self._leaf_label(sid)}")
+        self._refresh_lock_labels()
+        self._refresh_canvas()
+
+    def _on_cv_merge(self, side):
+        """Funde a folha com a irmã adjacente do lado pedido."""
+        def _handler(_):
+            sid = self._cv_node()
+            if sid is None:
+                return
+            botao = self.btn_cv_merge_l if side == "left" else self.btn_cv_merge_r
+            with self._busy(botao, msg="fundindo as folhas…"):
+                redo_bak = list(self._redo)
+                antes = self._delta_snapshot()
+                self._checkpoint()
+                try:
+                    self.seg.merge_leaf(sid, side=side, verbose=False)
+                except Exception as e:
+                    self._revert_checkpoint(redo_bak)
+                    self._log(f"Erro ao fundir: {type(e).__name__}: {e}"); return
+                self._cv_sel = None            # o sid antigo morreu na fusão
+                self._refresh()                # já redesenha o canvas (aba à vista)
+                self._log_delta("fundir (canvas)", antes)
+        return _handler
+
+    def _on_cv_collapse(self, _):
+        """Recolhe o ramo: os filhos somem e o nó volta a ser folha divisível."""
+        sid = self._cv_node()
+        if sid is None or self.seg.segments[sid]["is_leaf"]:
+            return
+        with self._busy(self.btn_cv_collapse, msg="recolhendo o ramo…"):
+            redo_bak = list(self._redo)
+            antes = self._delta_snapshot()
+            self._checkpoint()
+            try:
+                self.seg.collapse(sid, verbose=False)
+            except Exception as e:
+                self._revert_checkpoint(redo_bak)
+                self._log(f"Erro ao recolher: {type(e).__name__}: {e}"); return
+            self._cv_sel = sid
+            self._refresh()                    # já redesenha o canvas (aba à vista)
+            self._cv_center()
+            self._log_delta("recolher (canvas)", antes)
+
+    def _on_cv_fit(self, _):
+        if self._cv_widget is not None:
+            self._cv_widget.fit_token += 1
+
+    def _cv_center(self):
+        """Traz o nó em foco para o centro do canvas, sem redesenhar a árvore."""
+        if self._cv_widget is not None and self._cv_sel:
+            self._cv_widget.center_token += 1
 
     # ==================================================================
     # Preview da árvore — interativo (anywidget) com fallback estático

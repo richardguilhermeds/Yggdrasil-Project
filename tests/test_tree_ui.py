@@ -1019,3 +1019,205 @@ def test_ui_sem_weight_col_tela_intocada(task):
     assert not [c for c in cols if c == "saldo_%" or "pond" in str(c)]
     assert "% saldo" not in ui._leaves_tsv() and "% saldo" not in ui.out_table.value
     assert "Repr. saldo" not in ui._leaf_header_html()
+
+
+# ======================================================================
+# Aba "Árvore interativa" — canvas navegável + painel de criação
+# ======================================================================
+def _abre_canvas(ui):
+    """Abre a aba do canvas como o clique do usuário faria (render preguiçoso)."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.tabs.selected_index = ui._canvas_tab_index
+    return ui._cv_widget
+
+
+def _foca(ui, w, sid):
+    """Põe o nó em foco pelo caminho de verdade: clique no canvas quando ele
+    existe, dropdown de folha quando não (modo offline)."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        if w is not None:
+            w.selected = sid
+        elif sid in [s for _, s in ui.dd_leaf.options]:
+            ui.dd_leaf.value = sid
+        else:
+            ui._cv_sel = sid
+            ui._refresh_cv_panel()
+
+
+def test_ui_aba_canvas_entre_construir_e_analise(task):
+    """A aba nova fica entre 'Construir' e 'Análise de variáveis', e o índice da
+    aba de IV acompanha o deslocamento (senão o render preguiçoso miraria a aba
+    errada)."""
+    ui = _build(task)
+    titulos = [ui.tabs.get_title(i) for i in range(len(ui.tabs.children))]
+    assert titulos[:3] == ["Construir", "Árvore interativa", "Análise de variáveis"]
+    assert ui._canvas_tab_index == 1
+    assert ui._iv_tab_index == titulos.index("Análise de variáveis")
+
+
+def test_ui_canvas_desenha_um_cartao_por_no(task):
+    """Cada nó vira um cartão posicionado no plano e cada aresta liga um pai a um
+    filho — o layout inteiro é calculado no Python."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+    w = _abre_canvas(ui)
+    if w is None:
+        pytest.skip("anywidget não instalado")
+    assert len(w.nodes) == len(ui.seg.segments)
+    assert len(w.edges) == len(ui.seg.segments) - 1        # todo nó menos a raiz
+    assert w.content_w > 0 and w.content_h > 0
+    folhas = {n["sid"] for n in w.nodes if n["leaf"]}
+    assert folhas == {s for s, v in ui.seg.segments.items() if v["is_leaf"]}
+    raiz = next(n for n in w.nodes if n["sid"] == "root")
+    assert "TODA A CARTEIRA" in raiz["html"] and "class='bar'" in raiz["html"]
+
+
+def test_ui_canvas_clique_abre_painel_da_folha(task):
+    """Clicar num nó abre o painel no contexto dele: cabeçalho, métricas,
+    sugestões por IV e os controles de corte."""
+    ui = _build(task)
+    w = _abre_canvas(ui)
+    if w is None:
+        pytest.skip("anywidget não instalado")
+    _foca(ui, w, "root")
+    assert ui._cv_sel == "root"
+    assert "Raiz da árvore" in ui.out_cv_head.value
+    assert "população" in ui.out_cv_stats.value
+    assert ui.box_cv_split.layout.display == ""            # raiz é folha: dá p/ dividir
+    assert [b for b in ui.btns_cv_sug if b.layout.display != "none"]
+
+
+def test_ui_canvas_preview_e_corte(task):
+    """Prever mostra as faixas propostas com o selo de monotonicidade; criar
+    segmentos divide a folha — desfazível, como na aba Construir."""
+    ui = _build(task)
+    w = _abre_canvas(ui)
+    antes = _nleaf(ui)
+    _foca(ui, w, "root")
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_preview(None)
+    assert "Preview ·" in ui.out_cv_preview.value
+    assert "monotônica" in ui.out_cv_preview.value
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_apply(None)
+    assert _nleaf(ui) > antes
+    assert ui._undo                                        # desfazível
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_undo(None)
+    assert _nleaf(ui) == antes
+
+
+def test_ui_canvas_corte_manual_num_e_cat(task):
+    """No modo Manual a caixa de cortes muda de formato conforme o tipo: lista de
+    números para numérica, grupos separados por ';' para categórica."""
+    ui = _build(task)
+    _abre_canvas(ui)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.tg_cv_mode.value = "Manual"
+    assert ui.box_cv_cuts.layout.display == ""
+    for col, rotulo, texto, esperado in (
+            ("score", "Cortes", "0.8, 1.1", [0.8, 1.1]),
+            ("garantia", "Grupos", "A, B; C; D", [["A", "B"], ["C"], ["D"]])):
+        alvo = next(l for l, f in ui._cv_feat_by_label.items() if f == col)
+        with contextlib.redirect_stdout(io.StringIO()):
+            ui.dd_cv_feature.value = alvo
+        assert ui.tx_cv_cuts.description == rotulo
+        ui.tx_cv_cuts.value = texto
+        assert ui._cv_parse_cuts(col, ui._cv_node()) == esperado
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_preview(None)
+        ui._on_cv_apply(None)
+    assert _nleaf(ui) == 3                                 # os 3 grupos pedidos
+
+
+def test_ui_canvas_regras_de_negocio_da_folha(task):
+    """O painel edita as regras de negócio da folha: apelido, fechar/reabrir e as
+    ações de estrutura, cada uma habilitada só onde faz sentido."""
+    ui = _build(task)
+    w = _abre_canvas(ui)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_apply(None)                              # divide a raiz
+    folhas = [s for s, v in ui.seg.segments.items() if v["is_leaf"]]
+    _foca(ui, w, folhas[0])
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.tx_cv_name.value = "clientes bons"
+    assert ui.seg.leaf_name(folhas[0]) == "clientes bons"
+    assert ui.btn_cv_merge_l.disabled                      # 1ª folha não tem vizinha à esq.
+    assert not ui.btn_cv_merge_r.disabled
+    assert ui.btn_cv_collapse.disabled                     # folha não recolhe
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_lock(None)
+    assert folhas[0] in ui.locked
+    assert "Reabrir" in ui.btn_cv_lock.description
+    assert ui.box_cv_split.layout.display == "none"        # fechada não divide
+    assert "🔒" in ui.out_cv_note.value
+
+
+def test_ui_canvas_recolher_e_fundir(task):
+    """Recolher devolve um ramo à condição de folha; fundir junta duas vizinhas.
+    As duas passam pelo mesmo checkpoint de desfazer das outras abas."""
+    ui = _build(task)
+    w = _abre_canvas(ui)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_apply(None)
+    n_apos_corte = _nleaf(ui)
+    folhas = [s for s, v in ui.seg.segments.items() if v["is_leaf"]]
+    _foca(ui, w, folhas[0])
+    with contextlib.redirect_stdout(io.StringIO()):         # funde as 2 primeiras
+        ui._on_cv_merge("right")(None)
+    assert _nleaf(ui) == n_apos_corte - 1
+    _foca(ui, w, "root")                                    # recolhe a raiz de volta
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_collapse(None)
+    assert _nleaf(ui) == 1 and ui.seg.segments["root"]["is_leaf"]
+
+
+def test_ui_canvas_selecao_espelhada_entre_abas(task):
+    """A folha em foco é uma só: escolhida no canvas, ela vira a folha ativa das
+    outras abas — e vice-versa."""
+    ui = _build(task)
+    w = _abre_canvas(ui)
+    if w is None:
+        pytest.skip("anywidget não instalado")
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_apply(None)
+    folhas = [s for s, v in ui.seg.segments.items() if v["is_leaf"]]
+    with contextlib.redirect_stdout(io.StringIO()):
+        w.selected = folhas[-1]                    # canvas → resto da UI
+    assert ui.dd_leaf.value == folhas[-1]
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.dd_leaf.value = folhas[0]               # resto da UI → canvas
+    assert w.selected == folhas[0] and ui._cv_node() == folhas[0]
+
+
+def test_ui_canvas_offline_cai_no_painel_sem_mapa(task):
+    """Com `allow_interactive_tree=False` (padrão no Databricks) o mapa some, mas
+    o painel continua: ele é ipywidgets puro, sem nenhuma rede."""
+    ui = _build(task, allow_interactive_tree=False)
+    assert _abre_canvas(ui) is None
+    assert ui.box_cv_canvas.layout.display == "none"
+    assert "allow_interactive_tree=True" in ui.out_cv_msg.value
+    assert ui.box_cv_panel.layout.display == ""
+    assert "Raiz da árvore" in ui.out_cv_head.value
+    antes = _nleaf(ui)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_preview(None)
+        ui._on_cv_apply(None)
+    assert _nleaf(ui) > antes                      # o corte funciona sem o mapa
+
+
+def test_ui_canvas_nao_carrega_nada_da_rede(task):
+    """O JS/CSS do canvas não referencia CDN, fonte externa nem @import — mesma
+    garantia offline exigida do preview clicável."""
+    import re
+    from yggdrasil.credit_risk.tree import ui as mod
+    blob = mod._TREE_CANVAS_ESM + mod._TREE_CANVAS_CSS
+    # o namespace do SVG (createElementNS) é um IDENTIFICADOR, não uma URL que o
+    # navegador busque — é a única ocorrência de http:// tolerada aqui
+    urls = [u for u in re.findall(r"https?://[^\s\"')]+", blob)
+            if u != "http://www.w3.org/2000/svg"]
+    assert not urls
+    assert "@import" not in blob
+    assert not [u for u in re.findall(r"url\(\s*['\"]?([^)'\"]+)", blob)
+                if not u.strip().lower().startswith("data:")]
