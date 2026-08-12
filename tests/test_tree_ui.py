@@ -88,7 +88,9 @@ def test_ui_problem_label_sobrescreve_rotulo(task):
 def test_ui_leaf_hist_por_task(task):
     ui = _build(task)
     with contextlib.redirect_stdout(io.StringIO()):
-        ui._on_autofit(None)                             # dispara _refresh -> _refresh_leaf_hist
+        ui._on_autofit(None)
+        # o histograma é preguiçoso e a UI abre no mapa: renderiza ao abrir Construir
+        ui.tabs.selected_index = ui._build_tab_index
     assert "não gerado" not in ui.out_leaf_hist.value    # reg usa plot_leaf_value_hist, clf badrate
 
 
@@ -435,7 +437,8 @@ def test_ui_diag_teste_des_oot(task):
     aderência da estimativa comparando DES × OOT por folha."""
     ui = _build(task, n=8000, seed=3)
     with contextlib.redirect_stdout(io.StringIO()):
-        ui._on_autofit(None)                 # cria folhas -> _refresh_table
+        ui._on_autofit(None)
+        ui.tabs.selected_index = ui._diag_tab_index   # a tabela renderiza ao abrir a aba
     html = ui.out_table.value
     assert "p (irmãs)" in html
     assert "p (DES×OOT)" in html        # nova coluna de aderência DES×OOT
@@ -1003,6 +1006,8 @@ def test_ui_weight_col_visao_dupla_contratos_saldo(task):
     _lv, cols, headers = ui._leaf_table_spec()
     assert headers.get("saldo_%") == "% saldo"
     assert any(c.startswith("valor_pond_") for c in cols)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.tabs.selected_index = ui._diag_tab_index   # a tabela renderiza ao abrir a aba
     assert "% saldo" in ui.out_table.value        # tabela renderizada
     assert "% saldo" in ui._leaves_tsv().splitlines()[0]
     card = ui._leaf_header_html()
@@ -1297,16 +1302,11 @@ def test_ui_canvas_reset_pede_confirmacao(task):
 
 
 def test_ui_canvas_barra_de_acoes_da_arvore(task):
-    """A barra traz desfazer/refazer e as três ações automáticas, que são os
-    MESMOS handlers da aba Construir e leem a configuração de lá."""
+    """A barra traz desfazer/refazer e as três ações automáticas — que abrem a
+    janelinha de confirmação em vez de executar direto (ver teste do modal)."""
     ui = _build(task)
     _abre_canvas(ui)
     assert ui.btn_cv_undo.disabled and ui.btn_cv_redo.disabled
-    with contextlib.redirect_stdout(io.StringIO()):
-        ui.sl_depth.value = 2
-        ui.tabs.selected_index = 0                          # mexe em Construir…
-        ui.tabs.selected_index = ui._canvas_tab_index       # …e volta
-    assert "profundidade <b>2</b>" in ui.out_cv_auto_cfg.value   # a linha acompanha
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_autofit(None)
     assert _nleaf(ui) > 1 and not ui.btn_cv_undo.disabled
@@ -1317,6 +1317,49 @@ def test_ui_canvas_barra_de_acoes_da_arvore(task):
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_undo(None)
     assert _nleaf(ui) == apos_fit and not ui.btn_cv_redo.disabled
+
+
+def test_ui_canvas_modal_confirma_acoes_automaticas(task):
+    """Auto-fit/auto-fundir/podar abrem a janelinha no meio do canvas com os
+    controles DA ABA CONSTRUIR (mesmas instâncias — nada para divergir); nada
+    roda até Aplicar, e Cancelar fecha sem tocar na árvore."""
+    ui = _build(task)
+    _abre_canvas(ui)
+    assert ui.box_cv_modal.layout.display == "none"        # fechada por padrão
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.btn_cv_autofit.click()
+    assert ui.box_cv_modal.layout.display == ""
+    assert ui._cv_modal_kind == "fit"
+    assert ui.sl_depth in ui.box_cv_modal_body.children    # instância da Construir
+    with contextlib.redirect_stdout(io.StringIO()):        # cancelar: nada muda
+        ui.btn_cv_modal_cancel.click()
+    assert ui.box_cv_modal.layout.display == "none" and _nleaf(ui) == 1
+    with contextlib.redirect_stdout(io.StringIO()):        # aplicar: roda de verdade
+        ui.btn_cv_autofit.click()
+        ui.sl_depth.value = 2
+        ui.btn_cv_modal_ok.click()
+    assert ui.box_cv_modal.layout.display == "none" and _nleaf(ui) > 1
+    assert ui._undo                                        # desfazível como sempre
+    with contextlib.redirect_stdout(io.StringIO()):        # cada ação leva seu corpo
+        ui.btn_cv_automerge.click()
+    assert ui.sl_alpha in ui.box_cv_modal_body.children
+    assert ui.sl_gap in ui.box_cv_modal_body.children
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.btn_cv_modal_cancel.click()
+        ui.btn_cv_prune.click()
+    assert ui.sl_repr in ui.box_cv_modal_body.children
+
+
+def test_ui_abre_na_arvore_interativa_com_iv_pronto(task):
+    """A UI abre direto na aba do mapa, com o painel da raiz preenchido e a
+    importância (IV) de cada variável já calculada — sugestões e seletor
+    ordenado sem nenhum clique."""
+    ui = _build(task)
+    assert ui.tabs.selected_index == ui._canvas_tab_index
+    assert "Raiz da árvore" in ui.out_cv_head.value
+    sugestoes = [b for b in ui.btns_cv_sug if b.layout.display != "none"]
+    assert sugestoes and all("IV" in b.description for b in sugestoes)
+    assert ui.dd_cv_feature.options and "(IV " in ui.dd_cv_feature.options[0]
 
 
 def test_ui_canvas_otimo_herda_limites_de_bin_da_construir(task):

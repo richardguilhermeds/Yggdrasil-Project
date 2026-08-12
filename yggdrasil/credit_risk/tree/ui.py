@@ -204,6 +204,18 @@ _CSS = """
    canvas começa mais à esquerda que os cards das outras abas. */
 .treeui-card-mapa { padding-left:5px !important; padding-right:5px !important;
   margin-left:-9px; margin-right:-9px; }
+/* palco do canvas: âncora do posicionamento absoluto da janelinha de
+   confirmação (o Layout do ipywidgets não expõe `position`, então as duas
+   classes fazem o par relative/absolute) */
+.treeui-cv-stage { position:relative; }
+.treeui-cv-modal { position:absolute; left:50%; top:44px; transform:translateX(-50%);
+  width:360px; max-width:92%; z-index:30; box-sizing:border-box;
+  background-color:var(--cv-node-bg,#fff);
+  border-width:1px; border-style:solid; border-color:var(--line,#e7e9ee);
+  border-radius:13px; box-shadow:0 16px 44px rgba(16,24,40,.28);
+  padding:13px 16px 14px; }
+.treeui-cv-modal .widget-box, .treeui-cv-modal .jupyter-button,
+.treeui-cv-modal .widget-html { flex-shrink:0 !important; }
 /* sliders/controles encolhem para caber na coluna (min-width:0 libera o flex)
    e os cards clipam qualquer sobra horizontal — elimina a barra de rolagem
    horizontal que aparecia embaixo dos cards na aba Construir */
@@ -2383,10 +2395,15 @@ class TreeSegmenterUI:
         self.box_cv_split = W.VBox([
             self.out_cv_sug_h, *self.btns_cv_sug,
             W.HTML("<div class='treeui-h' style='margin:10px 0 5px'>Corte desta folha</div>"),
-            self.dd_cv_feature, self.tg_cv_mode, self.sl_cv_bins, self.dd_cv_crit,
+            self.dd_cv_feature,
+            # o seletor de modo e os botões de ação ficam CENTRADOS na coluna
+            W.HBox([self.tg_cv_mode],
+                   layout=W.Layout(width="100%", justify_content="center")),
+            self.sl_cv_bins, self.dd_cv_crit,
             self.out_cv_optbin_hint, self.box_cv_cuts, self.cv_cat_box,
             W.HBox([self.btn_cv_preview, self.btn_cv_apply],
-                   layout=W.Layout(align_items="center", width="100%", flex_flow="row wrap")),
+                   layout=W.Layout(align_items="center", width="100%", flex_flow="row wrap",
+                                   justify_content="center")),
             self.out_cv_preview,
         ], layout=W.Layout(width="100%"))
 
@@ -2457,7 +2474,7 @@ class TreeSegmenterUI:
                                     self.box_cv_split, box_cv_regras],
                                    layout=W.Layout(width="100%"))
         painel_cv = W.VBox([self.out_cv_empty, self.box_cv_panel],
-                           layout=W.Layout(width="348px", flex="0 0 348px", min_width="0",
+                           layout=W.Layout(width="410px", flex="0 0 410px", min_width="0",
                                            max_height="640px", overflow="hidden auto",
                                            padding="0 2px 0 10px"))
         painel_cv.add_class("treeui-cvpanel")
@@ -2467,32 +2484,52 @@ class TreeSegmenterUI:
                                              "e é desfazível com ↶ Desfazer")
         self.btn_cv_reset.on_click(self._on_cv_reset)
         # barra de ações da árvore INTEIRA. Desfazer/refazer moram aqui porque
-        # manipulação direta sem desfazer à mão é desconfortável; as três ações
-        # automáticas são os MESMOS handlers da aba Construir e leem a
-        # configuração de lá (um só lugar de verdade — ver out_cv_auto_cfg).
+        # manipulação direta sem desfazer à mão é desconfortável.
         self.btn_cv_undo = W.Button(description="↶ Desfazer", layout=W.Layout(width="auto"),
                                     tooltip="Desfaz a última alteração na árvore")
         self.btn_cv_undo.on_click(self._on_undo)
         self.btn_cv_redo = W.Button(description="Refazer ↷", layout=W.Layout(width="auto"),
                                     tooltip="Refaz a alteração desfeita")
         self.btn_cv_redo.on_click(self._on_redo)
+        # As três ações automáticas NÃO executam direto: cada botão abre uma
+        # janelinha no meio do canvas com a configuração daquela ação, e nada
+        # muda até o Aplicar. Os controles dentro dela são as MESMAS instâncias
+        # da aba Construir (segunda view do mesmo modelo) — mexer num lado
+        # mexe no outro, um único lugar de verdade.
         self.btn_cv_autofit = W.Button(description="Auto-fit", icon="magic",
                                        layout=W.Layout(width="auto"),
                                        tooltip="Cresce a árvore gulosa por IV. Com uma FOLHA "
                                                "selecionada no mapa, cresce só aquele ramo; "
                                                "na raiz, reconstrói tudo")
-        self.btn_cv_autofit.on_click(self._on_autofit)
+        self.btn_cv_autofit.on_click(self._on_cv_modal_open("fit"))
         self.btn_cv_automerge = W.Button(description="Auto-fundir", icon="compress",
                                          layout=W.Layout(width="auto"),
                                          tooltip="Funde folhas-irmãs com risco estatisticamente "
                                                  "indistinguível (p > α) ou com Δ abaixo do mínimo")
-        self.btn_cv_automerge.on_click(self._on_automerge)
+        self.btn_cv_automerge.on_click(self._on_cv_modal_open("merge"))
         self.btn_cv_prune = W.Button(description="Podar", icon="scissors",
                                      layout=W.Layout(width="auto"),
                                      tooltip="Funde as folhas pouco representativas ou com Δ "
                                              "pequeno em relação à irmã")
-        self.btn_cv_prune.on_click(self._on_prune)
-        self.out_cv_auto_cfg = W.HTML()
+        self.btn_cv_prune.on_click(self._on_cv_modal_open("prune"))
+        # -- a janelinha em si: título + nota de alvo + corpo (controles) + ações
+        self.out_cv_modal_head = W.HTML()
+        self.box_cv_modal_body = W.VBox(layout=W.Layout(width="100%"))
+        self.btn_cv_modal_ok = W.Button(description="Aplicar", icon="check",
+                                        button_style="primary",
+                                        layout=W.Layout(width="auto"))
+        self.btn_cv_modal_ok.on_click(self._on_cv_modal_apply)
+        self.btn_cv_modal_cancel = W.Button(description="Cancelar",
+                                            layout=W.Layout(width="auto"))
+        self.btn_cv_modal_cancel.on_click(self._on_cv_modal_cancel)
+        self.box_cv_modal = W.VBox([
+            self.out_cv_modal_head, self.box_cv_modal_body,
+            W.HBox([self.btn_cv_modal_ok, self.btn_cv_modal_cancel],
+                   layout=W.Layout(justify_content="center", width="100%",
+                                   align_items="center")),
+        ], layout=W.Layout(width="360px", display="none"))
+        self.box_cv_modal.add_class("treeui-cv-modal")
+        self._cv_modal_kind = None
         # "ir para folha": numa árvore larga, achar uma folha arrastando é chato.
         # O dropdown é uma AÇÃO (voa até a folha e volta ao rótulo), não um estado.
         # o rótulo de ação usa "" como valor (NUNCA None: para o Selection do
@@ -2513,6 +2550,12 @@ class TreeSegmenterUI:
                                            "restaurar/comparar ficam na aba Avançado",
                                    layout=W.Layout(width="auto"))
         self.btn_cv_scn.on_click(self._on_cv_scn_save)
+        # palco: canvas + a janelinha de confirmação por cima (par relative/
+        # absolute via as classes treeui-cv-stage/-modal — o Layout do
+        # ipywidgets não expõe `position`)
+        _palco_cv = W.VBox([self.box_cv_canvas, self.out_cv_msg, self.box_cv_modal],
+                           layout=W.Layout(flex="1 1 auto", min_width="0"))
+        _palco_cv.add_class("treeui-cv-stage")
         card_cv = W.VBox([
             W.HTML("<div class='treeui-h'>Árvore interativa · construa os cortes no mapa</div>"),
             W.HTML("<div class='treeui-legend'>Arraste para navegar, role para ampliar e "
@@ -2533,10 +2576,7 @@ class TreeSegmenterUI:
                     self.btn_cv_reset],
                    layout=W.Layout(width="100%", align_items="center",
                                    flex_flow="row wrap")),
-            self.out_cv_auto_cfg,
-            W.HBox([W.VBox([self.box_cv_canvas, self.out_cv_msg],
-                           layout=W.Layout(flex="1 1 auto", min_width="0")),
-                    painel_cv],
+            W.HBox([_palco_cv, painel_cv],
                    layout=W.Layout(width="100%", align_items="stretch")),
         ])
         card_cv.add_class("treeui-card")
@@ -2557,8 +2597,10 @@ class TreeSegmenterUI:
         # caro do open/refresh e fica numa aba não-visível por padrão. Adiamos seu
         # cálculo até a aba ser realmente aberta (render preguiçoso) — ver _refresh_iv.
         self.tabs = tabs
-        self._iv_tab_index = 2
+        self._build_tab_index = 0
         self._canvas_tab_index = 1
+        self._iv_tab_index = 2
+        self._diag_tab_index = 3
         tabs.observe(self._on_tab_change, names="selected_index")
 
         # ---- console persistente (log de todas as abas) -----------------
@@ -2589,6 +2631,13 @@ class TreeSegmenterUI:
                         layout=W.Layout(justify_content="flex-end"))
         self.panel = W.VBox([topbar, banner, bar_box, tabs, console, self.tree_sel_style])
         self.panel.add_class("treeui")
+
+        # A interface ABRE na Árvore interativa, já com a importância (IV) de
+        # cada variável calculada: trocar o selected_index dispara o
+        # _on_tab_change, que desenha o canvas e o painel da raiz — sugestões
+        # por IV e o seletor de variável ordenado, sem nenhum clique. É custo
+        # pago 1× na abertura (o IV da raiz é memoizado para o resto da sessão).
+        tabs.selected_index = self._canvas_tab_index
 
     def _on_dark(self, change):
         if change["new"]:
@@ -3441,6 +3490,13 @@ class TreeSegmenterUI:
         return lv, cols, headers
 
     def _refresh_table(self):
+        # a tabela de folhas mora em Diagnóstico e custa ~0.5s (Styler grande):
+        # com a aba fora de vista, só marca pendente — o _on_tab_change renderiza
+        # ao abrir. Mesmo padrão preguiçoso do IV.
+        if getattr(self, "tabs", None) is not None and \
+                self.tabs.selected_index != self._diag_tab_index:
+            self._table_dirty = True
+            return
         lv, cols, headers = self._leaf_table_spec()
         sty = self._style_leaves(lv[cols]).relabel_index(
             [headers[c] for c in cols], axis="columns")
@@ -3533,7 +3589,17 @@ class TreeSegmenterUI:
     def _ordered_leaf_options(self):
         """Opções do dropdown na MESMA ordem da árvore (esquerda→direita por nota),
         com a DESCRIÇÃO COMPLETA da folha (todas as condições) — sem truncar, para
-        identificar a folha por inteiro."""
+        identificar a folha por inteiro.
+
+        Memoizado: são ~0.4s por chamada (grade_map + _descrever + alvo por
+        folha) e ela roda 2–3× por mutação (dd_leaf, dd_var_leaf, 'ir para
+        folha'). A chave cobre tudo de que os rótulos dependem: estrutura
+        (versão da árvore), cadeados e apelidos."""
+        key = (self.seg._tree_version, frozenset(self.locked),
+               tuple(sorted(self.seg._leaf_names_validos().items())))
+        cache = getattr(self, "_leaf_opts_cache", None)
+        if cache is not None and cache[0] == key:
+            return cache[1]
         seg = self.seg
         filhos: dict = {}
         for sid, s in seg.segments.items():
@@ -3568,6 +3634,7 @@ class TreeSegmenterUI:
                 rec(c)
 
         rec("root")
+        self._leaf_opts_cache = (key, opts)
         return opts
 
     def _set_html(self, widget, key, html):
@@ -4752,12 +4819,19 @@ class TreeSegmenterUI:
         self._on_feature_change(None)   # nova folha: limpa o preview e recompõe os grupos
 
     def _on_tab_change(self, change):
-        """Render preguiçoso das abas caras: a tabela de IV (optbinning de TODAS as
-        variáveis) e o canvas da árvore só são calculados quando a respectiva aba é
-        aberta — não na abertura da UI nem a cada mutação com a aba fora de vista."""
+        """Render preguiçoso das abas caras: tabela de IV (optbinning de TODAS as
+        variáveis), canvas da árvore, tabela de folhas (Diagnóstico) e histograma
+        da folha (Construir) só são calculados quando a respectiva aba é aberta —
+        não na abertura da UI nem a cada mutação com a aba fora de vista."""
         nova = change.get("new")
         if nova == self._iv_tab_index and getattr(self, "_iv_dirty", False):
             self._compute_iv()
+        if nova == self._build_tab_index and getattr(self, "_hist_dirty", False):
+            self._hist_dirty = False
+            self._refresh_leaf_hist()
+        if nova == self._diag_tab_index and getattr(self, "_table_dirty", False):
+            self._table_dirty = False
+            self._refresh_table()
         if nova == self._canvas_tab_index:
             # 1ª abertura monta o widget e enquadra; nas seguintes só redesenha se
             # a árvore mudou enquanto a aba estava escondida
@@ -4772,9 +4846,9 @@ class TreeSegmenterUI:
                 # deixaria os cartões pequenos demais para ler (o botão
                 # "Enquadrar" continua ali para a visão geral)
                 self._refresh_canvas(center=primeira)
-            elif getattr(self, "out_cv_auto_cfg", None) is not None:
-                # nada a redesenhar, mas os sliders da aba Construir podem ter
-                # mudado enquanto estávamos lá — a linha de parâmetros acompanha
+            else:
+                # nada a redesenhar, mas mutações feitas noutra aba mudam o que o
+                # desfazer/refazer da barra pode fazer
                 self._sync_cv_auto_cfg()
 
     def _refresh_iv(self):
@@ -4932,7 +5006,14 @@ class TreeSegmenterUI:
 
     def _refresh_leaf_hist(self):
         """Alvo da folha selecionada (DES): taxa de default + IC de Wilson
-        (classificação) ou histograma do alvo (regressão)."""
+        (classificação) ou histograma do alvo (regressão).
+
+        O card mora na aba Construir e desenha uma figura matplotlib (~0.2s);
+        com a aba fora de vista (ex.: trabalhando no mapa), só marca pendente."""
+        if getattr(self, "tabs", None) is not None and \
+                self.tabs.selected_index != self._build_tab_index:
+            self._hist_dirty = True
+            return
         sid = self.dd_leaf.value
         if sid is None or sid not in self.seg.segments:
             self._set_html(self.out_leaf_hist, "leaf_hist",
@@ -6710,6 +6791,10 @@ class TreeSegmenterUI:
             return
         sel = self._cv_sel if self._cv_sel in self.seg.segments else ""
         self._cv_sel = sel or None
+        # se a atribuição de `selected` muda o trait, o observer (_on_cv_select)
+        # já refaz o painel — refazer aqui de novo pagaria os testes de vizinhas
+        # e o mover-corte 2× por abertura
+        painel_ja_vai = w.selected != sel
         with w.hold_sync():                    # 1 mensagem só pelo comm
             w.nodes = nodes
             w.edges = edges
@@ -6719,7 +6804,8 @@ class TreeSegmenterUI:
                 w.fit_token += 1
             if center and sel:
                 w.center_token += 1
-        self._refresh_cv_panel()
+        if not painel_ja_vai:
+            self._refresh_cv_panel()
 
     # ---- seleção ----------------------------------------------------
     def _on_cv_select(self, change):
@@ -7459,22 +7545,69 @@ class TreeSegmenterUI:
                 self._log_delta("resetar (canvas)", antes)
         self._confirm_twice(b, _resetar)
 
-    def _sync_cv_auto_cfg(self):
-        """Uma linha com os parâmetros que as três ações automáticas vão usar.
+    # ---- janelinha de confirmação das ações automáticas ---------------
+    def _on_cv_modal_open(self, kind):
+        """Abre a janelinha da ação ``kind`` no meio do canvas. Os controles são
+        as MESMAS instâncias da aba Construir (segunda view do mesmo modelo do
+        ipywidgets) — não há cópia de configuração para divergir. Nada roda até
+        o Aplicar; Cancelar fecha sem tocar na árvore."""
+        def _abrir(_):
+            titulos = {"fit": "Auto-fit — crescer a árvore",
+                       "merge": "Auto-fundir — juntar folhas indistinguíveis",
+                       "prune": "Podar — remover folhas pouco representativas"}
+            if kind == "fit":
+                alvo = ("<b>apenas a folha selecionada</b>"
+                        if (self._cv_node() or "root") != "root"
+                        else "<b>a árvore toda</b> (raiz em foco)")
+                nota = (f"Cresce {alvo} de forma gulosa por IV, até a profundidade "
+                        "escolhida. As concentrações são % da carteira inteira.")
+                corpo = (self.sl_depth, self.dd_criterion,
+                         self.cb_autoconc_min, self.sl_autoconc_min,
+                         self.cb_autoconc_max, self.sl_autoconc_max)
+            elif kind == "merge":
+                nota = ("Funde folhas-irmãs com alvo estatisticamente "
+                        "indistinguível (p &gt; α no teste entre adjacentes) ou com "
+                        "diferença abaixo do Δ mínimo. Folhas fechadas não entram.")
+                corpo = (self.sl_alpha, self.sl_gap, self.cb_automerge_na)
+            else:
+                nota = ("Funde com a irmã as folhas com representatividade abaixo "
+                        "do mínimo ou com diferença de alvo menor que o Δ mínimo. "
+                        "Folhas fechadas não entram.")
+                corpo = (self.sl_repr, self.sl_gap)
+            self.out_cv_modal_head.value = (
+                f"<div style='font-size:13px;font-weight:600;color:var(--strong-ink);"
+                f"margin-bottom:3px'>{titulos[kind]}</div>"
+                f"<div class='treeui-legend' style='margin:0 0 8px'>{nota} A ação é "
+                f"desfazível com ↶ Desfazer.</div>")
+            self.box_cv_modal_body.children = corpo
+            self._cv_modal_kind = kind
+            self.box_cv_modal.layout.display = ""
+            if kind == "fit":                    # sliders condicionais do auto-fit
+                self._sync_autoconc_visibility()
+        return _abrir
 
-        Os sliders ficam na aba Construir e NÃO são duplicados aqui: duas cópias
-        do mesmo número divergem na primeira vez que alguém mexe numa delas. Aqui
-        mostramos o valor em vigor e onde mudá-lo."""
-        alvo = ("a folha selecionada" if (self._cv_node() or "root") != "root"
-                else "a árvore toda (raiz em foco)")
-        self.out_cv_auto_cfg.value = (
-            f"<div class='treeui-legend' style='margin:2px 0 0'>"
-            f"<b>Auto-fit</b> cresce {alvo} até profundidade "
-            f"<b>{int(self.sl_depth.value)}</b> pelo critério "
-            f"<b>{_esc(self.dd_criterion.value)}</b> · <b>Auto-fundir</b> usa α="
-            f"<b>{self.sl_alpha.value:.2f}</b> e Δ mínimo <b>{self.sl_gap.value:.3f}</b> · "
-            f"<b>Podar</b> usa repr. mínima <b>{self.sl_repr.value:.1f}%</b>. "
-            f"Os controles desses números ficam na aba <b>Construir</b>.</div>")
+    def _cv_modal_close(self):
+        self.box_cv_modal.layout.display = "none"
+        self.box_cv_modal_body.children = ()
+        self._cv_modal_kind = None
+
+    def _on_cv_modal_cancel(self, _):
+        self._cv_modal_close()
+
+    def _on_cv_modal_apply(self, _):
+        """Fecha a janelinha e roda o handler REAL da aba Construir — mesmo
+        checkpoint, mesmo desfazer, mesma linha de Δ no console."""
+        kind = self._cv_modal_kind
+        self._cv_modal_close()
+        if kind == "fit":
+            self._on_autofit(None)
+        elif kind == "merge":
+            self._on_automerge(None)
+        elif kind == "prune":
+            self._on_prune(None)
+
+    def _sync_cv_auto_cfg(self):
+        """Estado dos botões desfazer/refazer da barra do mapa."""
         self.btn_cv_undo.disabled = not self._undo
         self.btn_cv_redo.disabled = not self._redo
 
