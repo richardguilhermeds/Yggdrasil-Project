@@ -359,9 +359,14 @@ class ModelSegmenterUI:
         # trava de reentrância: _restore reatribui valores de widgets, cujos
         # observers também empilham checkpoint (ex.: a troca de transformação).
         self._restoring: bool = False
+        # guarda do seletor da aba Análise (ver _refresh_an_var_options)
+        self._an_opts_syncing: bool = False
         self._build()
         self._refresh_bar()
-        self._refresh_vars()
+        # ranking calculado JÁ na abertura: a aba Variáveis é a primeira coisa que
+        # se olha, e um placeholder pedindo um clique atrasava a leitura. O custo
+        # é o optbinning de cada candidata — some no tempo de montar a UI.
+        self._refresh_vars(force=True)
         self._sync_bin_controls()
 
     # ------------------------------------------------------------------ render utils
@@ -512,7 +517,7 @@ class ModelSegmenterUI:
     def _df_html(self, df, max_height=None, color_categoria=False, center=False,
                  color_forca=False, color_tendencia=False, color_estabilidade=False,
                  color_validation=False, pct_cols=None, highlight_included=False,
-                 color_veredicto=False, color_decisao=False):
+                 color_veredicto=False, color_decisao=False, color_vif=False):
         sty = (df.style.hide(axis="index").set_table_styles(self._TABLE_STYLES)
                .set_properties(**{"font-size": "12px"}))
         if highlight_included and "incluida" in df.columns:
@@ -540,6 +545,16 @@ class ModelSegmenterUI:
                 fg, bg = self._CAT_COLORS.get(v, ("", ""))
                 return (f"color:{fg};background-color:{bg};font-weight:600" if fg else "")
             sty = sty.map(_cat_css, subset=["categoria"])
+        if color_vif and "leitura" in df.columns:
+            _VIF = {"ok": ("var(--ok-ink)", "var(--ok-bg)"),
+                    "atenção": ("var(--warn-ink)", "var(--warn-bg)"),
+                    "alto": ("var(--bad-ink)", "var(--bad-bg)"),
+                    "colinear": ("var(--bad-ink)", "var(--bad-bg)")}
+
+            def _vif_css(v):
+                fg, bg = _VIF.get(v, ("", ""))
+                return (f"color:{fg};background-color:{bg};font-weight:600" if fg else "")
+            sty = sty.map(_vif_css, subset=["leitura"])
         if color_forca and "forca" in df.columns:
             def _forca_css(v):
                 fg, bg = self._FORCA_COLORS.get(v, ("", ""))
@@ -638,6 +653,48 @@ class ModelSegmenterUI:
     def _pill(text, cls="muted"):
         return f"<span class='pill pill-{cls}'>{text}</span>"
 
+    def _refresh_an_var_options(self):
+        """Reordena o seletor da aba Análise por IV (ou volta à ordem natural).
+
+        Trocar ``options`` num Dropdown reseta o ``value`` por um instante — e o
+        observer de ``dd_var2`` dispara a ANÁLISE inteira. A guarda evita esse
+        re-render no meio da troca; ao final a mesma variável segue selecionada,
+        só com outro rótulo/posição."""
+        atual = self.dd_var2.value
+        cands = list(self.seg.candidates)
+        if self.tg_an_iv.value:
+            ivm = self._iv_por_variavel()
+            def _chave(f):
+                v = ivm.get(f)
+                sem = v is None or pd.isna(v)
+                return (sem, -(0.0 if sem else float(v)))
+            cands = sorted(cands, key=_chave)
+            opts = []
+            for f in cands:
+                v = ivm.get(f)
+                rot = self.seg.label(f)
+                if v is not None and not pd.isna(v):
+                    rot = f"{rot} (IV {float(v):.4f})"
+                opts.append((rot, f))
+        else:
+            opts = self._opts(cands)
+        self._an_opts_syncing = True
+        try:
+            self.dd_var2.options = opts
+            if atual in [val for _, val in opts]:
+                self.dd_var2.value = atual
+        finally:
+            self._an_opts_syncing = False
+
+    def _iv_por_variavel(self):
+        """``{coluna: iv}`` a partir do ranking (memoizado no segmentador)."""
+        try:
+            rk = self.seg.variable_iv()
+        except Exception:                       # noqa: BLE001 — ordenação é best-effort
+            return {}
+        col = "variavel" if "variavel" in rk.columns else rk.columns[0]
+        return {r[col]: r.get("iv") for _, r in rk.iterrows()}
+
     def _opts(self, names):
         """(alias, nome_cru) para dropdowns/listas — exibe o feature_label e mantém
         o valor cru (o .value continua sendo o nome real da coluna, então toda a
@@ -693,6 +750,42 @@ class ModelSegmenterUI:
                 btn.description = btn._cc_desc
                 btn.button_style = btn._cc_style
         threading.Timer(timeout, _revert).start()
+
+    _BALANCE_POR_ALGO = {
+        "logistica": "<code>class_weight='balanced'</code>",
+        "linear": "<code>class_weight='balanced'</code>",
+        "random_forest": "<code>class_weight='balanced'</code>",
+        "extra_trees": "<code>class_weight='balanced'</code>",
+        "hist_gb": "<code>class_weight='balanced'</code>",
+        "xgboost": "<code>scale_pos_weight = n_neg/n_pos</code>",
+        "lightgbm": "<code>scale_pos_weight = n_neg/n_pos</code>",
+        "catboost": "<code>auto_class_weights</code>",
+        "gradient_boosting": "<code>sample_weight</code> balanceado no <code>fit</code>",
+    }
+
+    def _sync_balance_hint(self):
+        """Explica, ao marcar, o que o balanceamento faz NESTE algoritmo.
+
+        Não é reamostragem: nenhuma linha é duplicada ou descartada. O que muda é
+        o PESO de cada classe na função de perda do treino."""
+        if not self.cb_balance.value:
+            self.out_balance_hint.value = ""
+            return
+        algo = getattr(self, "dd_algo", None)
+        algo = getattr(algo, "value", None)
+        como = self._BALANCE_POR_ALGO.get(algo, "o parâmetro de peso de classe do algoritmo")
+        self.out_balance_hint.value = (
+            "<div class='mseg-legend' style='margin:2px 0 6px 22px'>"
+            "Dá mais <b>peso à classe rara</b> na função de perda do treino — "
+            f"aqui, via {como}. <b>Não</b> reamostra: nenhuma linha é duplicada ou "
+            "descartada, e a base não muda.<br>"
+            "O modelo passa a errar menos os <i>maus</i> e mais os <i>bons</i>: a "
+            "<b>ordenação</b> (KS/AUC/Gini) costuma mudar pouco, mas o score deixa de "
+            "ser lido como probabilidade — as previstas ficam <b>acima</b> da taxa "
+            "real. Se a calibração importa (provisão, precificação), recalibre depois "
+            "ou deixe desmarcado.<br>"
+            "No <b>tuning</b>: desmarcado, o Optuna testa as duas opções; marcado, "
+            "fica fixo em todos os trials.</div>")
 
     def _mark_dirty(self):
         """Marca o modelo como DESATUALIZADO (variáveis/derivadas/bins/WoE OU
@@ -966,7 +1059,10 @@ class ModelSegmenterUI:
         self.btn_set_cat = W.Button(description="Categorizar", icon="tag")
         self.btn_incl_all = W.Button(description="Incluir todas", icon="plus")
         self.btn_clear = W.Button(description="Limpar", icon="trash")
-        self.btn_refresh_vars = W.Button(description="Recalcular", icon="refresh")
+        self.btn_refresh_vars = W.Button(description="Recalcular IV", icon="refresh")
+        self.btn_refresh_vars.tooltip = ("Recalcula o ranking (IV, força, inversão e PSI) de "
+                                         "todas as candidatas — use após criar variáveis "
+                                         "derivadas ou mudar bins manuais.")
         self.btn_clear_derived = W.Button(description="Resetar variáveis criadas", icon="eraser",
                                           button_style="warning",
                                           tooltip="Remove todas as variáveis categóricas criadas "
@@ -1008,8 +1104,11 @@ class ModelSegmenterUI:
         ])
         redund_card.add_class("mseg-card")
         self._redund_card = redund_card
-        # --- Esteira de seleção: escolher as etapas, rodar e levar o relatório ---
-        sel_card = self._build_selection_card()
+        # A ESTEIRA DE SELEÇÃO não é montada nesta aba: a triagem roda ANTES de
+        # chegar ao ModelSegmenter (yggdrasil.feature_selection e/ou a própria
+        # `seg.select_features(...)` pela API). O que fica aqui é o ajuste fino
+        # sobre a lista já curta. O construtor do card segue disponível em
+        # `_build_selection_card()` para quem quiser montá-lo.
         # --- Feature 1: definir a seleção de variáveis (escolha ótima × manual) ---
         self.btn_feat_optimal = W.Button(
             description="Escolha ótima (backward)", button_style="primary", icon="star",
@@ -1072,9 +1171,6 @@ class ModelSegmenterUI:
         # é por ela que a maioria começa, e o resto da aba é o ajuste fino.
         tab_vars = W.VBox([
             W.HTML("<div class='mseg-h'>Seleção de variáveis</div>"),
-            sel_card,
-            W.HTML("<div class='mseg-h' style='margin-top:6px'>Ajuste fino · "
-                   "incluir e excluir na mão</div>"),
             W.HBox([self.sl_min_iv, self.sl_max_psi, self.cb_require_mono,
                     self.btn_auto, self.btn_auto_cat]),
             self.out_mono_hint,
@@ -1103,6 +1199,15 @@ class ModelSegmenterUI:
                                      style={"description_width": "initial"})
         self.tx_time2 = W.Text(value=self.date_col or "", description="Coluna safra:",
                                style={"description_width": "initial"})
+        # ordenar o seletor por IV: joga as variáveis com mais sinal para o topo e
+        # mostra o IV no rótulo. O `variable_iv()` é memoizado por assinatura de
+        # bins/amostra, então alternar não recalcula o binning.
+        self.tg_an_iv = W.ToggleButton(
+            value=False, description="ordenar por IV", icon="sort-amount-desc",
+            tooltip="Reordena as opções pelo IV (desc) e mostra o IV no rótulo; "
+                    "sem IV calculado, a variável vai para o fim.",
+            layout=W.Layout(width="auto"))
+        self.tg_an_iv.observe(lambda _: self._refresh_an_var_options(), names="value")
         self.btn_analyze = W.Button(description="Analisar variável", button_style="primary",
                                     icon="search")
         # padroniza o eixo do alvo médio (risco por faixa) em [0,1] na regressão —
@@ -1160,7 +1265,8 @@ class ModelSegmenterUI:
         # análise (tabela/gráficos/cards). Antes só sincronizava os bins, então os
         # painéis ficavam presos na variável anterior até clicar em "Analisar".
         self.dd_var2.observe(
-            lambda c: (self._sync_bin_controls(), self._on_analyze(None)), names="value")
+            lambda c: None if getattr(self, "_an_opts_syncing", False)
+            else (self._sync_bin_controls(), self._on_analyze(None)), names="value")
         self.out_an_cards = W.HTML()
         self.out_an_distbad = W.HTML()    # distribuição + % de maus (gráfico único)
         self.out_an_logodds = W.HTML()    # logodds/WoE por faixa (comportamento)
@@ -1195,11 +1301,14 @@ class ModelSegmenterUI:
             [a, b], layout=W.Layout(justify_content="space-between", align_items="flex-start"))
         # aba unificada (mesmas seções/ordem do TreeSegmenterUI):
         # comportamento · resumo & estabilidade + tabela · inversão · tempo · optbin
+        # O logodds/WoE por faixa saiu: dizia a MESMA coisa do gráfico ao lado
+        # (a mesma ordenação de risco, em outra escala), ocupando meia tela. O
+        # "Resumo & estabilidade" assume o espaço, e a tabela por faixa passa a
+        # ocupar a largura inteira — ela é larga e vinha espremida em 50%.
         row_comport = _row(_col(f"Comportamento · distribuição &amp; {_dist_h} por faixa",
                                 self.out_an_distbad),
-                           _col("Logodds / WoE por faixa", self.out_an_logodds))
-        row_resumo = _row(_col("Tabela por faixa", self.out_an_table),
-                          _col("Resumo &amp; estabilidade", self.out_an_cards))
+                           _col("Resumo &amp; estabilidade", self.out_an_cards))
+        row_resumo = _col("Tabela por faixa", self.out_an_table)
         row2 = _row(_col("Inversão da ordem de risco · por amostra", self.out_an_inv_sample),
                     _col("Inversão da ordem de risco · por safra", self.out_an_inv_safra))
         row3 = _row(_col("Ao longo do tempo · percentis por safra", self.out_an_time),
@@ -1209,8 +1318,8 @@ class ModelSegmenterUI:
                     "ao longo do tempo (numéricas)</div>"),
              self.out_an_optbin_share], layout=W.Layout(width="100%"))
         tab_an = W.VBox([
-            W.HBox([self.dd_var2, self.dd_sample2, self.tx_time2, self.btn_analyze,
-                    self.cb_target01]),
+            W.HBox([self.dd_var2, self.tg_an_iv, self.dd_sample2, self.tx_time2,
+                    self.btn_analyze, self.cb_target01]),
             bin_card,
             row_comport, row_resumo, row2, row3, row_optbin,
         ], layout=W.Layout(padding="2px"))
@@ -1362,9 +1471,15 @@ class ModelSegmenterUI:
         self.lb_balance = W.HTML(
             f"<span style='font-size:12px;color:var(--sub-ink);padding-left:6px'>"
             f"{_ev_txt}</span>")
-        self.cb_balance.observe(lambda c: self._mark_dirty(), names="value")
-        self.row_balance = W.HBox([self.cb_balance, self.lb_balance],
-                                  layout=W.Layout(align_items="center"))
+        # descrição do que o balanceamento faz — aparece AO MARCAR, porque a
+        # tradução depende do algoritmo escolhido (cada um tem seu parâmetro)
+        self.out_balance_hint = W.HTML()
+        self.cb_balance.observe(lambda c: (self._mark_dirty(), self._sync_balance_hint()),
+                                names="value")
+        self.row_balance = W.VBox([
+            W.HBox([self.cb_balance, self.lb_balance],
+                   layout=W.Layout(align_items="center")),
+            self.out_balance_hint])
         if self.task_type != "classification":
             self.row_balance.layout.display = "none"
         # --- restrições de monotonicidade (boostings com suporte nativo) ----
@@ -1729,11 +1844,17 @@ class ModelSegmenterUI:
             ], layout=W.Layout(justify_content="space-between")),
             # Análises novas desta versão, ao FIM da aba: o fluxo original
             # (treino → métricas → fórmula → SHAP) fica intacto acima.
-            diag_card,
             calib_card,
             champion_card,
         ], layout=W.Layout(padding="2px"))
         self._sync_algo_visibility()
+
+        # ---------- Aba: Diagnóstico (placar de saúde do modelo) ----------
+        # O placar reúne o veredito das OUTRAS abas (discriminação, estabilidade,
+        # calibração e estrutura); num rodapé da aba Modelo ele ficava soterrado
+        # pelo SHAP. Como é a leitura de fechamento, ganha aba própria — logo
+        # antes de Ratings & Score, que é o passo seguinte do fluxo.
+        tab_diag = W.VBox([diag_card], layout=W.Layout(padding="2px"))
 
         # ---------- Aba 4: Ratings & Score ----------
         self.dd_method = W.Dropdown(options=[("Decis", "decis"), ("Quantil + fusão", "quantil"),
@@ -2374,11 +2495,11 @@ class ModelSegmenterUI:
                     self.out_backelim_apply]),
         ], layout=W.Layout(padding="2px"))
 
-        self.tabs = W.Tab(children=[tab_vars, tab_an, tab_model, tab_backelim, tab_rating,
-                                    tab_export, tab_adv])
+        self.tabs = W.Tab(children=[tab_vars, tab_an, tab_model, tab_backelim, tab_diag,
+                                    tab_rating, tab_export, tab_adv])
         for i, t in enumerate(["Variáveis", "Análise de variáveis", "Modelo",
-                               "Backward Elim.", "Ratings & Score", "Validar & Exportar",
-                               "Avançado"]):
+                               "Backward Elim.", "Diagnóstico", "Ratings & Score",
+                               "Validar & Exportar", "Avançado"]):
             self.tabs.set_title(i, t)
         self.tabs.add_class("mseg-tabs")
 
@@ -2798,15 +2919,17 @@ class ModelSegmenterUI:
         self.sel_included.value = tuple(f for f in self.seg.candidates if f in self.seg.included)
 
     def _refresh_vars(self, force=False):
-        """Ranking IV/PSI das candidatas. LAZY na construção: ``variable_iv()`` de
-        TODAS as candidatas é caro (optbinning por variável) e bloqueava o primeiro
-        paint — até o usuário pedir (⟳ Recalcular, ``force=True``) ou um fluxo
-        forçar (auto-selecionar/pós-load), mostra só um placeholder. Depois do
-        primeiro cálculo, as chamadas seguintes atualizam normalmente."""
+        """Ranking IV/PSI das candidatas.
+
+        Calculado já na CONSTRUÇÃO (``force=True`` no ``__init__``): a aba
+        Variáveis é a primeira que se abre e o ranking é o que se quer ver ali.
+        O caminho ``force=False`` continua existindo como guarda — se por algum
+        fluxo o ranking ainda não tiver sido computado, mostra o placeholder em
+        vez de recalcular sem o usuário pedir."""
         if not force and not self._vars_ready:
             self.out_vars.value = (
                 "<div style='font-size:12px;color:var(--sub-ink);padding:10px 6px;"
-                "line-height:1.6'>Ranking pendente — clique em <b>⟳ Recalcular</b> "
+                "line-height:1.6'>Ranking pendente — clique em <b>⟳ Recalcular IV</b> "
                 "para ranquear as variáveis (IV/força/inversão/PSI de todas as "
                 "candidatas; pode levar alguns segundos).</div>")
             self._refresh_var_preview()
@@ -3079,44 +3202,29 @@ class ModelSegmenterUI:
             vif = self.seg.vif_table()
         except Exception as e:                  # noqa: BLE001 — VIF é best-effort
             return f"<div class='mseg-h'>VIF</div><div class='mseg-legend'>indisponível: {e}</div>"
-        import html as _h
-        import math
         col = next((c for c in ("variavel", "variable", "feature") if c in vif.columns),
                    vif.columns[0])
-        linhas = []
         dados = [(r[col], r["vif"]) for _, r in vif.iterrows()]
-        dados.sort(key=lambda t: (-(1e18 if t[1] == np.inf else
-                                    (-1 if pd.isna(t[1]) else float(t[1])))))
+        dados.sort(key=lambda t: -(1e18 if t[1] == np.inf else
+                                   (-1 if pd.isna(t[1]) else float(t[1]))))
+        linhas = []
         for nome, v in dados:
             if pd.isna(v):
-                txt, cls, frac = "—", "muted", 0.0
+                txt, leitura = "—", "sem leitura"
             elif v == np.inf:
-                txt, cls, frac = "∞", "bad", 1.0
+                txt, leitura = "∞", "colinear"
             else:
                 v = float(v)
                 txt = f"{v:.2f}"
-                cls = "ok" if v < 5 else ("warn" if v <= 10 else "bad")
-                frac = min(math.log10(max(v, 1.0)) / math.log10(20.0), 1.0)
-            cor = {"ok": "var(--ok-tx)", "warn": "var(--warn-tx)",
-                   "bad": "var(--bad-tx)", "muted": "var(--sub-ink)"}[cls]
-            bg = {"ok": "var(--ok-bg)", "warn": "var(--warn-bg)",
-                  "bad": "var(--bad-bg)", "muted": "var(--ac-soft)"}[cls]
-            linhas.append(
-                "<div style='display:flex;align-items:center;gap:8px;margin:4px 0'>"
-                f"<div style='width:38%;font-size:11.5px;color:var(--body-ink);"
-                f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap' "
-                f"title='{_h.escape(str(nome))}'>{_h.escape(self.seg.label(nome))}</div>"
-                f"<div style='flex:1;height:9px;border-radius:5px;background:var(--ac-soft)'>"
-                f"<div style='width:{frac * 100:.1f}%;height:100%;border-radius:5px;"
-                f"background:{bg};border:1px solid {cor}'></div></div>"
-                f"<div class='mono' style='width:52px;text-align:right;font-size:12px;"
-                f"font-weight:600;color:{cor}'>{txt}</div></div>")
+                leitura = "ok" if v < 5 else ("atenção" if v <= 10 else "alto")
+            linhas.append({"variável": self.seg.label(nome), "VIF": txt, "leitura": leitura})
+        tbl = self._df_html(pd.DataFrame(linhas), max_height="260px", color_vif=True)
         return ("<div class='mseg-h'>VIF · matriz de desenho do modelo</div>"
-                "<div class='mseg-legend'>Quanto da variável é explicado pelas <b>outras "
-                "juntas</b>. <span style='color:var(--ok-tx)'>&lt;5 ok</span> · "
+                "<div class='mseg-legend'>Quanto da variância de cada variável é explicada "
+                "pelas <b>outras juntas</b> — a leitura que a correlação par a par não dá. "
+                "<span style='color:var(--ok-tx)'>&lt;5 ok</span> · "
                 "<span style='color:var(--warn-tx)'>5–10 atenção</span> · "
-                "<span style='color:var(--bad-tx)'>&gt;10 alto</span> (barra em escala "
-                "logarítmica, cheia em 20).</div>" + "".join(linhas))
+                "<span style='color:var(--bad-tx)'>&gt;10 alto</span>.</div>" + tbl)
 
     def _on_redund_drop(self, b):
         """Aplica a sugestão de poda da última análise de redundância: EXCLUI do
@@ -3219,7 +3327,7 @@ class ModelSegmenterUI:
         sample = None if self.dd_sample2.value == "(referência)" else self.dd_sample2.value
         tcol = self.tx_time2.value.strip() or None
         y01 = bool(getattr(self, "cb_target01", None) is not None and self.cb_target01.value)
-        _an_ws = (self.out_an_distbad, self.out_an_logodds, self.out_an_table,
+        _an_ws = (self.out_an_distbad, self.out_an_table,
                   self.out_an_inv_sample, self.out_an_cards, self.out_an_time,
                   self.out_an_inv_safra, self.out_an_psi, self.out_an_optbin_share)
         # cache das figuras por (feature, amostra, safra, versão de bins): revisitar
@@ -3242,10 +3350,6 @@ class ModelSegmenterUI:
                 self.seg.plot_variable_distribution_badrate(feat, sample=sample,
                                                             figsize=(6.4, 3.4),
                                                             target_ylim01=y01), tight=False)
-            self.out_an_logodds.value = self._fig_html(
-                self.seg.plot_variable_logodds(feat, sample=sample, figsize=(6.4, 3.4),
-                                               target_ylim01=y01),
-                tight=False)
             vt = self.seg.variable_table(feat, sample=sample)
             self.out_an_table.value = self._df_html(vt, max_height="240px", center=True)
             # "risco das faixas por amostra" esticado p/ preencher a coluna (menos

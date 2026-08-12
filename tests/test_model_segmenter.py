@@ -1405,12 +1405,15 @@ def test_ui_layout_abas(task):
     ch = list(ui.panel.children)
     tabs = next(c for c in ch if isinstance(c, W.Tab))
     titulos = [tabs.get_title(i) for i in range(len(tabs.children))]
-    assert len(titulos) == 7
+    assert len(titulos) == 8
     assert any("Variáveis" in t or "variáveis" in t for t in titulos)
     assert any("Modelo" in t for t in titulos)
     assert any("Backward" in t for t in titulos)
     assert any("Rating" in t for t in titulos)
     assert any("Avançado" in t for t in titulos)
+    # o placar de saúde ganhou aba própria, entre Backward Elim. e Ratings & Score
+    assert titulos.index("Diagnóstico") == titulos.index("Backward Elim.") + 1
+    assert titulos.index("Ratings & Score") == titulos.index("Diagnóstico") + 1
     # abas sem numeração (①–⑥), alinhado às UIs lgd/pd
     assert all(not t[:1] in "①②③④⑤⑥" for t in titulos)
 

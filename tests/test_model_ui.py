@@ -33,6 +33,18 @@ def make_df(n=3000, seed=0):
     return df
 
 
+def _build_com_esteira(**kw):
+    """UI + card da esteira de seleção montado sob demanda.
+
+    A esteira saiu da aba Variáveis (a triagem roda ANTES do ModelSegmenter),
+    mas o construtor segue disponível: estes testes cobrem a fiação dos widgets
+    do card. A lógica da esteira em si é coberta, à parte, pelos 31 testes de
+    API em tests/test_model_selection.py."""
+    ui = _build(**kw)
+    ui._build_selection_card()
+    return ui
+
+
 def _build(**kw):
     pytest.importorskip("ipywidgets")
     pytest.importorskip("optbinning")
@@ -687,7 +699,7 @@ def test_card_esteira_selecao_roda_e_desfaz():
     de tema) e é DESFAZÍVEL pelo ↶."""
     from yggdrasil.credit_risk.model.selection import SELECTION_STEPS, STEPS_DEFAULT
 
-    ui = _build()
+    ui = _build_com_esteira()
     marcadas = [n for n, cb in ui._sel_step_cbs.items() if cb.value]
     assert marcadas == list(STEPS_DEFAULT)
     assert set(ui._sel_step_cbs) == set(SELECTION_STEPS)
@@ -724,7 +736,7 @@ def test_card_esteira_selecao_roda_e_desfaz():
 def test_esteira_selecao_modo_simular_nao_muda_nada():
     """'apenas simular' roda a esteira e mostra o resultado sem tocar no
     segmentador (seleção intacta e nada empilhado no desfazer)."""
-    ui = _build()
+    ui = _build_com_esteira()
     antes = set(ui.seg.included)
     cats = {f: (ui.seg.var_meta[f] or {}).get("categoria") for f in ui.seg.candidates}
     n_undo = len(ui._undo)
@@ -744,7 +756,7 @@ def test_esteira_selecao_modo_simular_nao_muda_nada():
 
 def test_esteira_selecao_sem_etapa_marcada():
     """Nenhuma etapa marcada: aviso no card e nada é executado."""
-    ui = _build()
+    ui = _build_com_esteira()
     for cb in ui._sel_step_cbs.values():
         cb.value = False
     with contextlib.redirect_stdout(io.StringIO()):
@@ -755,7 +767,7 @@ def test_esteira_selecao_sem_etapa_marcada():
 
 def _ui_com_selecao(steps=("missing", "iv")):
     """UI com uma esteira curta já rodada em modo simulação (teste rápido)."""
-    ui = _build()
+    ui = _build_com_esteira()
     ui.cb_sel_simular.value = True
     for nome, cb in ui._sel_step_cbs.items():
         cb.value = nome in steps

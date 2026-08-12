@@ -927,13 +927,14 @@ class TreeSegmenterUI:
         self.ck_sib_pct = W.Checkbox(value=False, indent=False, description="eixo em %",
                                      tooltip="Mostra o eixo Y em % — útil quando o alvo está em "
                                              "[0,1] (ex.: LGD)")
-        # --- validação regulatória (monotonicidade, calibração, backtest) e relatório ---
+        # --- validação regulatória (monotonicidade, calibração) e relatório ---
         self.tx_time_col = W.Text(description="coluna tempo", value="dt_ref",
                                   layout=full, style=dstyle,
-                                  placeholder="coluna de safra p/ o backtest (ex.: dt_ref)")
-        self.btn_validate = mk("Validar (monoton. · calibração · backtest)", "info",
-                               "Mostra monotonicidade das folhas, calibração prevista×realizada e "
-                               "backtest por safra", "check-square-o")
+                                  placeholder="coluna de safra p/ o backtest do relatório (ex.: dt_ref)")
+        self.btn_validate = mk("Validar (monotonicidade · calibração)", "info",
+                               "Mostra monotonicidade das folhas e calibração prevista×realizada. "
+                               "O backtest por safra sai no relatório (a figura fica ilegível "
+                               "na tela quando há muitas safras).", "check-square-o")
         self.tx_report_path = W.Text(description="relatório", value="relatorio_validacao.md",
                                      layout=full, style=dstyle, placeholder="caminho .md")
         self.btn_report = mk("Gerar relatório de validação (MD)", "success",
@@ -1448,19 +1449,51 @@ class TreeSegmenterUI:
             self.out_move_cut,
         ], layout=W.Layout(width="100%"))
         card_actions.add_class("treeui-card")
+        # Ações automáticas sobre a árvore inteira, num card só: crescer (auto-fit),
+        # fundir irmãs indistinguíveis (auto-merge) e podar folhas pequenas. As três
+        # eram cards separados — as duas últimas moravam no Avançado, longe do
+        # ponto onde a árvore é construída. O seletor troca a configuração exibida;
+        # cada modo mantém seus próprios controles e seu botão de ação.
+        self.tg_build_mode = W.ToggleButtons(
+            options=[("Auto-fit", "fit"), ("Auto-merge", "merge"), ("Podar", "prune")],
+            value="fit", style={"button_width": "auto"},
+            layout=W.Layout(width="100%"))
+        self.tg_build_mode.tooltip = ("Auto-fit cresce a árvore · Auto-merge funde irmãs "
+                                      "indistinguíveis · Podar remove folhas pouco "
+                                      "representativas")
+        self.box_build_cfg = W.VBox([])
+        self.tg_build_mode.observe(lambda _: self._sync_build_mode(), names="value")
+        self._build_panels = {
+            "fit": (
+                W.HTML("<div class='treeui-legend'>Constrói a árvore gulosa por IV até a "
+                       "profundidade escolhida. As concentrações são <b>% da carteira inteira</b>: "
+                       "<b>mín.</b> evita folhas terminais pequenas; <b>máx.</b> impede que uma "
+                       "quebra concentre demais. Com uma <b>folha selecionada</b> (≠ raiz), cresce "
+                       "<b>apenas aquela folha</b>; na raiz, reconstrói tudo.</div>"),
+                self.sl_depth, self.dd_criterion,
+                self.cb_autoconc_min, self.sl_autoconc_min,
+                self.cb_autoconc_max, self.sl_autoconc_max,
+                W.HBox([self.btn_autofit, self.btn_reset]),
+            ),
+            "merge": (
+                W.HTML("<div class='treeui-legend'>Funde folhas-irmãs com risco estatisticamente "
+                       "<b>indistinguível</b> (p &gt; α no teste entre adjacentes) ou com diferença "
+                       f"de {_rl} abaixo do <b>Δ{_rl} mínimo</b>.</div>"),
+                self.sl_alpha, self.sl_gap, self.cb_automerge_na, self.btn_automerge,
+            ),
+            "prune": (
+                W.HTML("<div class='treeui-legend'>Funde com a irmã as folhas com "
+                       "representatividade abaixo do <b>min repr%</b> ou com diferença de "
+                       f"{_rl} menor que o <b>Δ{_rl} mínimo</b> — o mesmo limiar do "
+                       "Auto-merge. Folhas fechadas (🔒) são preservadas.</div>"),
+                self.sl_repr, self.sl_gap, self.btn_prune,
+            ),
+        }
         card_autofit = W.VBox([
-            W.HTML("<div class='treeui-h'>Auto-fit</div>"),
-            W.HTML("<div class='treeui-legend'>Constrói a árvore gulosa por IV até a "
-                   "profundidade escolhida. As concentrações são <b>% da carteira inteira</b>: "
-                   "<b>mín.</b> evita folhas terminais pequenas; <b>máx.</b> impede que uma "
-                   "quebra concentre demais. Com uma <b>folha selecionada</b> (≠ raiz), cresce "
-                   "<b>apenas aquela folha</b>; na raiz, reconstrói tudo.</div>"),
-            self.sl_depth,
-            self.dd_criterion,
-            self.cb_autoconc_min, self.sl_autoconc_min,
-            self.cb_autoconc_max, self.sl_autoconc_max,
-            W.HBox([self.btn_autofit, self.btn_reset]),
+            W.HTML("<div class='treeui-h'>Construir a árvore automaticamente</div>"),
+            self.tg_build_mode, self.box_build_cfg,
         ]); card_autofit.add_class("treeui-card")
+        self._sync_build_mode()
         det_c3 = W.VBox([card_actions, card_autofit], layout=W.Layout(width="24%"))
 
         det_row = W.HBox([det_c1, det_c2, det_c3],
@@ -1750,12 +1783,13 @@ class TreeSegmenterUI:
         # ABA 4. VALIDAR & EXPORTAR — duas faixas: validação · exportar/registrar
         # ================================================================
         sep_val = W.HTML("<div class='treeui-band'>Validação regulatória · "
-                         "monotonicidade · calibração · backtest</div>")
+                         "monotonicidade · calibração</div>")
         valid_legend = W.HTML(
-            f"<div class='treeui-legend'>Roda as três checagens: <b>monotonicidade</b> do {_rl} nas "
-            f"folhas ({_ref} e demais amostras), <b>calibração</b> prevista ({_ref}) × realizada (OOT) por "
-            f"folha, e <b>backtest</b> do {_rl} previsto × realizado por safra (informe a coluna de "
-            "tempo). O <b>relatório</b> reúne tudo num Markdown com as imagens.</div>")
+            f"<div class='treeui-legend'>Mostra na tela duas checagens: <b>monotonicidade</b> do "
+            f"{_rl} nas folhas ({_ref} e demais amostras) e <b>calibração</b> prevista ({_ref}) × "
+            f"realizada (OOT) por folha. O <b>backtest</b> por safra ({_rl} previsto × realizado) "
+            "entra no <b>relatório</b>, junto do resto — informe a coluna de tempo para incluí-lo. "
+            "Na tela ele ficava ilegível com muitas safras.</div>")
         card_validacao = W.VBox([
             W.HTML("<div class='treeui-h'>Rodar validação</div>"),
             valid_legend,
@@ -1932,19 +1966,6 @@ class TreeSegmenterUI:
                           var_row_time, card_var_optbin])
 
         # ---- ABA AVANÇADO: auto-merge · poda · diff de versões · cenários ----
-        card_merge = W.VBox([
-            W.HTML("<div class='treeui-h'>Auto-merge de folhas semelhantes</div>"),
-            W.HTML("<div class='treeui-legend'>Funde folhas-irmãs com risco estatisticamente "
-                   "<b>indistinguível</b> (p &gt; α no teste entre adjacentes) ou com diferença "
-                   f"de {_rl} abaixo do <b>Δ{_rl} mínimo</b>.</div>"),
-            self.sl_alpha, self.sl_gap, self.cb_automerge_na, self.btn_automerge]); card_merge.add_class("treeui-card")
-        card_prune = W.VBox([
-            W.HTML("<div class='treeui-h'>Poda por representatividade</div>"),
-            W.HTML("<div class='treeui-legend'>Funde com a irmã as folhas com "
-                   "representatividade abaixo do <b>min repr%</b> ou com diferença de "
-                   f"{_rl} menor que o <b>Δ{_rl} mínimo</b> (slider do card ao lado). "
-                   "Folhas fechadas (🔒) são preservadas.</div>"),
-            self.sl_repr, self.btn_prune]); card_prune.add_class("treeui-card")
         card_diff = W.VBox([
             W.HTML("<div class='treeui-h'>Comparar duas árvores (versões)</div>"),
             W.HTML("<div class='treeui-legend'>Carrega outra árvore salva em JSON e compara com a "
@@ -1966,15 +1987,12 @@ class TreeSegmenterUI:
                    layout=W.Layout(align_items="center")),
             self.out_scn_summary, self.box_scn_list, self.out_scn_diff])
         card_scn.add_class("treeui-card")
-        card_merge.layout.width = "49%"
-        card_prune.layout.width = "49%"
         tab_avancado = W.VBox([
-            # sem o "Sugerir splits (TOP 5)": a sugestão já vive na aba Construir,
-            # onde a folha é escolhida. A importância foi para Diagnóstico e o
+            # O que sobrou aqui é o que NÃO é construção da árvore. Auto-merge e
+            # poda foram para Construir, junto do auto-fit (as três ações
+            # automáticas num card só); "Sugerir splits" saiu por duplicar a
+            # sugestão da aba Construir; a importância foi para Diagnóstico e o
             # export SQL para Exportar — cada um perto do que serve.
-            W.HBox([card_merge, card_prune],
-                   layout=W.Layout(justify_content="space-between", width="100%",
-                                   align_items="stretch")),
             card_diff, card_scn,
             # validação regulatória (monotonicidade/calibração/backtest + relatório)
             # movida para cá: é uma etapa de fechamento, não da decisão de segmentação.
@@ -3290,6 +3308,14 @@ class TreeSegmenterUI:
         self.sl_minbin.layout.display = "" if (otimo and self.cb_minbin.value) else "none"
         self.sl_maxbin.layout.display = "" if (otimo and self.cb_maxbin.value) else "none"
         self.sl_mindiff.layout.display = "" if (otimo and self.cb_mindiff.value) else "none"
+
+    def _sync_build_mode(self):
+        """Mostra a configuração do modo escolhido (auto-fit · auto-merge · podar).
+
+        O ``Δ<alvo> mínimo`` (``sl_gap``) é COMPARTILHADO pelos modos merge e
+        prune — os dois handlers leem o mesmo slider. Como só um painel fica
+        montado por vez, o widget simplesmente migra de container na troca."""
+        self.box_build_cfg.children = self._build_panels[self.tg_build_mode.value]
 
     def _sync_autoconc_visibility(self):
         """Cada slider de concentração do auto-fit só aparece com o checkbox marcado."""
@@ -5192,22 +5218,10 @@ class TreeSegmenterUI:
             except Exception as e:
                 cards.append(("Calibração · prevista × realizada", _erro(e)))
 
-        # 3) Backtest por safra — previsto × realizado no tempo (gráfico)
-        tcol = self.tx_time_col.value.strip()
-        if not tcol:
-            cards.append(("Backtest por safra",
-                          "<div style='font-size:12px;color:var(--sub-ink)'>Informe a coluna de "
-                          "tempo para o backtest.</div>"))
-        elif tcol not in self.df.columns:
-            cards.append(("Backtest por safra",
-                          f"<div style='font-size:12px;color:var(--sub-ink)'>Coluna de tempo "
-                          f"'{tcol}' não existe no DataFrame — backtest pulado.</div>"))
-        else:
-            try:
-                cards.append((f"Backtest por '{tcol}'",
-                              self._fig_html(self.seg.plot_backtest(tcol, figsize=(6.6, 3.8)))))
-            except Exception as e:
-                cards.append((f"Backtest por '{tcol}'", _erro(e)))
+        # O backtest por safra saiu DA TELA: com muitas safras o eixo x vira um
+        # borrão e os marcadores de alerta se sobrepõem — ilegível. Ele continua
+        # no RELATÓRIO de validação (Markdown/PDF), onde a figura sai em tamanho
+        # real, e na API (`seg.backtest()` / `seg.plot_backtest()`).
 
         cells = "".join(
             f"<div class='treeui-card' style='margin:0'>"
