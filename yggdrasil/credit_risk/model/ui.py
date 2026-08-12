@@ -1065,8 +1065,16 @@ class ModelSegmenterUI:
         self.btn_feat_optimal.on_click(lambda b: self._confirm_twice(
             self.btn_feat_optimal, lambda: self._on_feat_optimal(None)))
 
+        # A categorização (rótulo de triagem) saiu da tela: era só anotação, não
+        # treinava nem removia nada, e competia com a lista "No modelo", que é
+        # quem de fato decide. Saiu também "Aplicar escolha manual" — marcar na
+        # lista já é a escolha manual. A ESTEIRA sobe para logo abaixo do título:
+        # é por ela que a maioria começa, e o resto da aba é o ajuste fino.
         tab_vars = W.VBox([
-            W.HTML("<div class='mseg-h'>Seleção & categorização de variáveis</div>"),
+            W.HTML("<div class='mseg-h'>Seleção de variáveis</div>"),
+            sel_card,
+            W.HTML("<div class='mseg-h' style='margin-top:6px'>Ajuste fino · "
+                   "incluir e excluir na mão</div>"),
             W.HBox([self.sl_min_iv, self.sl_max_psi, self.cb_require_mono,
                     self.btn_auto, self.btn_auto_cat]),
             self.out_mono_hint,
@@ -1076,20 +1084,13 @@ class ModelSegmenterUI:
                     W.HBox([self.btn_incl_all, self.btn_clear,
                             self.btn_refresh_vars, self.btn_clear_derived],
                            layout=W.Layout(justify_content="space-between", width="99%"))]),
-            W.HTML("<div class='mseg-h' style='margin-top:4px'>Definir a seleção do modelo</div>"),
-            W.HBox([self.btn_feat_manual]),
             self.out_star_ratings,
             self.out_feat_sel,
-            W.HBox([self.dd_categoria, self.btn_set_cat]),
-            self.out_cat_hint,
             W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Ranking (IV / força / inversão / PSI)</div>"),
                             self.out_vars], layout=W.Layout(width="58%")),
                     W.VBox([self.out_var_preview_h,
                             self.out_var_preview], layout=W.Layout(width="42%"))]),
-            # Cards novos desta versão, ao FIM da aba — o fluxo original de
-            # seleção/categorização fica intacto acima.
             redund_card,
-            sel_card,
         ], layout=W.Layout(padding="2px"))
 
         # ---------- Aba 2: Análise de variáveis ----------
@@ -2827,8 +2828,9 @@ class ModelSegmenterUI:
             if "bins_manuais" in rk.columns:
                 rk["bins_manuais"] = rk["bins_manuais"].map(lambda b: "✎" if b else "")
                 rk = rk.rename(columns={"bins_manuais": "manual"})
+            rk = rk.drop(columns=["categoria"], errors="ignore")   # rótulo de triagem: fora da tela
             self.out_vars.value = self._df_html(rk, max_height="320px",
-                                                color_categoria=True, color_forca=True,
+                                                color_forca=True,
                                                 color_tendencia=True, color_estabilidade=True,
                                                 highlight_included=True)
         except Exception as e:
@@ -3043,22 +3045,17 @@ class ModelSegmenterUI:
                         f"<div class='mseg-legend'>Nenhum par com associação ≥ {thr:g} "
                         "entre as variáveis selecionadas — sem redundância a podar.</div>")
                 fig = self.seg.plot_correlation_heatmap(report=rep)
-                partes.append(self._fig_html(fig))
-                # VIF: leitura complementar quando há modelo linear/logístico vigente
-                if (self.seg.model is not None
-                        and self.seg.algorithm in ("logistica", "linear")):
-                    try:
-                        vif = self.seg.vif_table()
-                        vif["vif"] = vif["vif"].map(
-                            lambda v: "∞" if v == np.inf
-                            else ("" if pd.isna(v) else f"{float(v):.2f}"))
-                        partes.append("<div class='mseg-h' style='margin-top:6px'>VIF — "
-                                      "matriz de desenho do modelo (&lt;5 ok · 5–10 atenção "
-                                      "· &gt;10 alto)</div>")
-                        partes.append(self._df_html(vif, max_height="180px"))
-                    except Exception as e:      # noqa: BLE001 — VIF é best-effort
-                        partes.append(f"<div class='mseg-legend'>VIF indisponível: {e}</div>")
-                self.out_redund.value = "".join(partes)
+                # correlação (esquerda) e VIF (direita) LADO A LADO: são as duas
+                # leituras da mesma pergunta — a associação par a par e o quanto
+                # cada variável é explicada por TODAS as outras juntas.
+                esq = ("<div class='mseg-h'>Correlação entre as selecionadas</div>"
+                       + self._fig_html(fig, stretch=True))
+                dir_ = self._vif_html()
+                self.out_redund.value = (
+                    "".join(partes)
+                    + "<div style='display:flex;gap:12px;align-items:flex-start;margin-top:8px'>"
+                    f"<div style='flex:58 1 0;min-width:0'>{esq}</div>"
+                    f"<div style='flex:42 1 0;min-width:0'>{dir_}</div></div>")
                 self._log(f"[redundância] {len(rep)} par(es) ≥ {thr:g} · poda sugerida: "
                           f"{len(poda)} variável(is).")
             except Exception as e:
@@ -3066,6 +3063,60 @@ class ModelSegmenterUI:
                 self._log(f"[redundância] erro: {e}")
         # depois do _busy (o finally re-habilita os botões): só há o que excluir com poda
         self.btn_redund_drop.disabled = not tem_poda
+
+    def _vif_html(self):
+        """VIF como barras coloridas — uma linha por variável, ordenada do pior
+        para o melhor. A tabela crua de números não dizia de relance quem é o
+        problema; a barra (escala log, saturando em 20) e a cor resolvem isso.
+        Só existe com modelo linear/logístico treinado — o VIF é lido na matriz
+        de desenho, não nos dados brutos."""
+        if self.seg.model is None or self.seg.algorithm not in ("logistica", "linear"):
+            return ("<div class='mseg-h'>VIF</div><div class='mseg-legend'>Treine um modelo "
+                    "<b>logístico</b> ou <b>linear</b> para ver o VIF: ele mede a inflação da "
+                    "variância na <b>matriz de desenho</b> do modelo vigente, então depende de "
+                    "um ajuste feito.</div>")
+        try:
+            vif = self.seg.vif_table()
+        except Exception as e:                  # noqa: BLE001 — VIF é best-effort
+            return f"<div class='mseg-h'>VIF</div><div class='mseg-legend'>indisponível: {e}</div>"
+        import html as _h
+        import math
+        col = next((c for c in ("variavel", "variable", "feature") if c in vif.columns),
+                   vif.columns[0])
+        linhas = []
+        dados = [(r[col], r["vif"]) for _, r in vif.iterrows()]
+        dados.sort(key=lambda t: (-(1e18 if t[1] == np.inf else
+                                    (-1 if pd.isna(t[1]) else float(t[1])))))
+        for nome, v in dados:
+            if pd.isna(v):
+                txt, cls, frac = "—", "muted", 0.0
+            elif v == np.inf:
+                txt, cls, frac = "∞", "bad", 1.0
+            else:
+                v = float(v)
+                txt = f"{v:.2f}"
+                cls = "ok" if v < 5 else ("warn" if v <= 10 else "bad")
+                frac = min(math.log10(max(v, 1.0)) / math.log10(20.0), 1.0)
+            cor = {"ok": "var(--ok-tx)", "warn": "var(--warn-tx)",
+                   "bad": "var(--bad-tx)", "muted": "var(--sub-ink)"}[cls]
+            bg = {"ok": "var(--ok-bg)", "warn": "var(--warn-bg)",
+                  "bad": "var(--bad-bg)", "muted": "var(--ac-soft)"}[cls]
+            linhas.append(
+                "<div style='display:flex;align-items:center;gap:8px;margin:4px 0'>"
+                f"<div style='width:38%;font-size:11.5px;color:var(--body-ink);"
+                f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap' "
+                f"title='{_h.escape(str(nome))}'>{_h.escape(self.seg.label(nome))}</div>"
+                f"<div style='flex:1;height:9px;border-radius:5px;background:var(--ac-soft)'>"
+                f"<div style='width:{frac * 100:.1f}%;height:100%;border-radius:5px;"
+                f"background:{bg};border:1px solid {cor}'></div></div>"
+                f"<div class='mono' style='width:52px;text-align:right;font-size:12px;"
+                f"font-weight:600;color:{cor}'>{txt}</div></div>")
+        return ("<div class='mseg-h'>VIF · matriz de desenho do modelo</div>"
+                "<div class='mseg-legend'>Quanto da variável é explicado pelas <b>outras "
+                "juntas</b>. <span style='color:var(--ok-tx)'>&lt;5 ok</span> · "
+                "<span style='color:var(--warn-tx)'>5–10 atenção</span> · "
+                "<span style='color:var(--bad-tx)'>&gt;10 alto</span> (barra em escala "
+                "logarítmica, cheia em 20).</div>" + "".join(linhas))
 
     def _on_redund_drop(self, b):
         """Aplica a sugestão de poda da última análise de redundância: EXCLUI do

@@ -1,6 +1,6 @@
 # 🌳 Yggdrasil — `feature_selection`
 
-Módulo de **triagem de features** do Yggdrasil. Ele recebe um DataFrame **pandas ou Spark** que segue o contrato de colunas do projeto (`feat_*`, alvo e, opcionalmente, coluna de amostra), organiza as candidatas em **books** (origens de dados, ex.: bureau, bvs) e roda, por book, um pipeline de filtros duros, indicadores de importância, **Boruta** e **consenso**. A esteira é **independente**: não faz parte da EDA nem do pipeline de treino do modelo — apenas seleciona variáveis e produz tabelas, painéis e um ranking global.
+Módulo de **triagem de features** do Yggdrasil. Ele recebe um DataFrame **pandas ou Spark** que segue o contrato de colunas do projeto (`feat_*`, alvo e, opcionalmente, coluna de amostra), organiza as candidatas em **books** (origens de dados, ex.: externo, mercado) e roda, por book, um pipeline de filtros duros, indicadores de importância, **Boruta** e **consenso**. A esteira é **independente**: não faz parte da EDA nem do pipeline de treino do modelo — apenas seleciona variáveis e produz tabelas, painéis e um ranking global.
 
 > **Onde isto entra.** Esta é a peneira do **universo de features** — centenas de colunas, vários books, antes de escolher o modelo. A régua **final** sobre a lista já curta (PSI, monotonia, VIF, backward, política em JSON e relatório do comitê) é a `ModelSegmenter.select_features`, documentada no tutorial 10. Um corta o universo; o outro documenta a régua do modelo.
 
@@ -32,7 +32,7 @@ O `yggdrasil.feature_selection` responde a uma pergunta objetiva: **dado um conj
 Características centrais:
 
 - **Esteira independente.** Não entra no pipeline do modelo nem na EDA. É um **entrypoint próprio** (`run_feature_selection`) que recebe o DataFrame e devolve um relatório.
-- **Organização por book.** Features são agrupadas por **origem de dados** (book), ex.: `bureau`, `bvs`. Todo o pipeline roda **por book**, e ao final há um **ranking global** (`overall_importance`) das selecionadas.
+- **Organização por book.** Features são agrupadas por **origem de dados** (book), ex.: `externo`, `mercado`. Todo o pipeline roda **por book**, e ao final há um **ranking global** (`overall_importance`) das selecionadas.
 - **Pipeline por book.** Filtros duros (missing, variância, redundância) → avaliação de importância (RandomForest + univariadas) e **Boruta** → consolidação num **consenso**.
 - **pandas ou Spark, mesma chamada.** O backend vem do **tipo do DataFrame** (ver [§13](#13-backend-e-performance)): pandas roda tudo no driver com `sklearn` e percentis exatos; Spark distribui com `pyspark.ml`. Em ambos, os resultados pequenos voltam como `pandas` e a lógica de decisão é idêntica.
 
@@ -121,7 +121,7 @@ O parâmetro `books` (`BooksSpec = Union[Sequence[str], Dict[str, Sequence[str]]
 Uma `Sequence[str]` de palavras-chave. O match é **case-insensitive** e por **`contains`** (substring): `token = str(kw).lower()` e `feats = [c for c in cols if token in c.lower()]`. O **nome do book** preserva o caso original do `kw` (via `str(kw)`).
 
 ```python
-report = run_feature_selection(sdf, ColumnConfig(), books=["bureau", "bvs"])  # dois books por palavra-chave
+report = run_feature_selection(sdf, ColumnConfig(), books=["externo", "mercado"])  # dois books por palavra-chave
 ```
 
 Se **nenhuma** feature contiver o token, emite-se um *warning* e o book vazio é **ignorado** (não levanta erro por book vazio individual).
@@ -132,8 +132,8 @@ Um `Dict[str, Sequence[str]]` mapeando nome do book → colunas explícitas:
 
 ```python
 books = {
-    "bureau": ["feat_bureau_score", "feat_bureau_pendencias"],   # colunas explícitas do book
-    "bvs":    ["feat_bvs_consultas"],
+    "externo": ["feat_externo_score", "feat_externo_pendencias"],   # colunas explícitas do book
+    "mercado":    ["feat_mercado_consultas"],
 }
 report = run_feature_selection(sdf, ColumnConfig(), books=books)
 ```
@@ -148,8 +148,8 @@ Regras do modo dict:
 Sem `books` (ou `books=None`), as colunas de feature são agrupadas pelo **1º segmento** após o prefixo, derivado por `_auto_token` (separador `_`):
 
 ```python
-# feat_bureau_score  -> book "bureau"
-# feat_bvs_consultas -> book "bvs"
+# feat_externo_score  -> book "externo"
+# feat_mercado_consultas -> book "mercado"
 report = run_feature_selection(sdf)   # books=None: auto pelo 1º segmento após o prefixo
 ```
 
@@ -334,8 +334,8 @@ report.panels["overview"]                      # render inline no Jupyter (sem d
 fig = report.panels["overall_importance"]
 fig.savefig("overall.png", dpi=110, bbox_inches="tight")   # salva o ranking global
 
-report.panels["book::bureau"]                  # painel de seleção do book bureau
-report.panels["corr::bureau"]                  # heatmap de correlação do book bureau (se existir)
+report.panels["book::externo"]                  # painel de seleção do book externo
+report.panels["corr::externo"]                  # heatmap de correlação do book externo (se existir)
 ```
 
 > Em dados vazios/insuficientes, as funções de plot ainda retornam uma `Figure` (com mensagem como `book vazio` ou `nenhuma feature selecionada`), nunca `None` nem exceção.
@@ -433,9 +433,9 @@ Se `mlflow_experiment` for *truthy*, `run_feature_selection` chama o logger inte
 report = run_feature_selection(
     sdf,
     ColumnConfig(),
-    books=["bureau", "bvs"],
+    books=["externo", "mercado"],
     mlflow_experiment="/Shared/feature_selection",   # nome do experimento MLflow
-    run_name="fs_bureau_bvs_v1",                      # nome do run
+    run_name="fs_externo_mercado_v1",                      # nome do run
 )
 ```
 
@@ -448,7 +448,7 @@ O que é registrado:
 
 ## 15. Exemplo ponta a ponta
 
-Cenário realista: classificação, dois books (`bureau` e `bvs`), amostra DEV no contrato, log no MLflow.
+Cenário realista: classificação, dois books (`externo` e `mercado`), amostra DEV no contrato, log no MLflow.
 
 ```python
 from yggdrasil import ColumnConfig
@@ -468,22 +468,22 @@ report = run_feature_selection(
     sdf,                                          # Spark DataFrame com feat_*, alvo e coluna de amostra
     cfg,
     fs_cfg,
-    books=["bureau", "bvs"],                      # dois books por palavra-chave
+    books=["externo", "mercado"],                      # dois books por palavra-chave
     problem_type="classification",                # explícito (poderia ser inferido)
     with_panels=True,                             # monta os painéis
     mlflow_experiment="/Shared/feature_selection",
-    run_name="fs_bureau_bvs_v1",
+    run_name="fs_externo_mercado_v1",
 )
 
 # Inspeção
-print(report.selected_features)                   # {"bureau": [...], "bvs": [...]}
+print(report.selected_features)                   # {"externo": [...], "mercado": [...]}
 report.summary()                                  # por book: n_features / selecionadas / descartadas
 report.overall_importance.head(25)                # ranking global das selecionadas
 
 # Painéis
 report.panels["overview"]                         # selecionadas x descartadas por book
 report.panels["overall_importance"]               # top global
-report.panels["book::bureau"]                     # seleção detalhada do book bureau
+report.panels["book::externo"]                     # seleção detalhada do book externo
 
 # Exportações
 report.to_csv("selecao_features.csv")             # CSV da selection_table

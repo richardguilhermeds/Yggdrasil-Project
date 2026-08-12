@@ -322,11 +322,11 @@ def test_ui_tree_img_clique_seleciona_e_barra(task):
     assert ui.dd_leaf.value == outra         # painel Detalhe segue o clique
     assert ui.tree_img_bar.layout.display == "flex"
     assert not ui.btn_img_merge_l.disabled and not ui.btn_img_collapse.disabled
-    assert not ui.btn_img_suggest.disabled and not ui.btn_img_lock.disabled
+    assert not ui.btn_img_lock.disabled
     w.selected = "root"                      # raiz: só o chip; nada de agir
     assert ui.dd_leaf.value == outra         # nó interno não muda a folha ativa
     assert ui.btn_img_merge_l.disabled and ui.btn_img_collapse.disabled
-    assert ui.btn_img_suggest.disabled and ui.btn_img_lock.disabled
+    assert ui.btn_img_lock.disabled
     w.selected = ""                          # clique fora dos nós esconde a barra
     assert ui.tree_img_bar.layout.display == "none"
 
@@ -365,50 +365,39 @@ def _widgets_de(container):
     return achados
 
 
-def test_ui_split_panel_espelha_card_da_aba(task):
-    """O painel de divisão do preview contém as MESMAS instâncias do card
-    'Dividir a folha' da aba (2ª view sincronizada) e a barra traz os clones de
-    desfazer/refazer/auto-fit/resetar. Independe do anywidget."""
+def test_ui_barra_do_preview_tem_os_clones(task):
+    """A barra do preview traz os clones compactos (desfazer/refazer/auto-fit/
+    resetar), o zoom e as ações de folha. O painel compacto "Dividir a folha" foi
+    removido junto com o botão 'Sugerir quebra', que era seu único gatilho: clicar
+    num nó já seleciona a folha, e a divisão acontece no card da própria aba."""
     ui = _build(task)
-    painel = _widgets_de(ui.tree_img_split)
-    for wdg in (ui.dd_leaf, ui.dd_feature, ui.tg_mode, ui.sl_bins,
-                ui.dd_split_criterion, ui.tx_cuts, ui.cat_box, ui.btn_sugcuts,
-                ui.btn_preview, ui.btn_split, ui.out_preview_seg,
-                ui.btn_img_split_close):
-        assert wdg in painel, f"widget ausente do painel de divisão: {wdg!r}"
+    assert not hasattr(ui, "tree_img_split")
+    assert not hasattr(ui, "btn_img_suggest")
     barra = _widgets_de(ui.tree_img_bar)
-    for wdg in (ui.btn_img_suggest, ui.btn_img_lock,
+    for wdg in (ui.btn_img_lock,
                 ui.btn_img_merge_l, ui.btn_img_merge_r, ui.btn_img_merge_na,
                 ui.btn_img_collapse, ui.btn_img_undo, ui.btn_img_redo,
-                ui.btn_img_autofit, ui.btn_img_reset):
+                ui.btn_img_autofit, ui.btn_img_reset,
+                ui.sl_tree_zoom, ui.btn_tree_zoom_reset):
         assert wdg in barra, f"widget ausente da barra do preview: {wdg!r}"
-    assert not any(getattr(w, "description", "") == "Dividir…" for w in barra)
     # clones compactos (lado a lado): largura auto, sem o width 98% dos cards
-    for wdg in (ui.btn_img_undo, ui.btn_img_redo, ui.btn_img_autofit, ui.btn_img_reset):
+    for wdg in (ui.btn_img_undo, ui.btn_img_redo, ui.btn_img_autofit,
+                ui.btn_img_reset, ui.btn_tree_zoom_reset):
         assert wdg.layout.width == "auto"
     # habilitação de desfazer/refazer espelhada dos originais (dlink)
     assert ui.btn_img_undo.disabled and ui.btn_img_redo.disabled   # sem histórico
     # respiro entre os grupos fundir-irmãs · fundir-missing · recolher
     assert ui.btn_img_merge_na.layout.margin.endswith("18px")
     assert ui.btn_img_collapse.layout.margin.endswith("18px")
-    # fechado por padrão; 'Sugerir quebra' abre, o 'Fechar' do painel fecha
-    assert ui.tree_img_split.layout.display == "none"
-    with contextlib.redirect_stdout(io.StringIO()):
-        ui._on_img_suggest(None)
-    assert ui.tree_img_split.layout.display == "flex"
-    ui._on_split_panel_close(None)
-    assert ui.tree_img_split.layout.display == "none"
 
 
 def test_ui_grow_pelo_preview(task):
-    """Crescer a árvore A PARTIR do preview: 'Sugerir quebra' abre o painel
-    compacto e o fluxo variável→cortes→preview→criar segmento funciona idêntico
-    ao da aba (mesmos modelos de widget). Funciona com e sem anywidget."""
+    """Crescer a árvore com o preview aberto: o fluxo variável→cortes→preview→
+    criar segmento roda no card da aba e a imagem se re-renderiza com a árvore
+    nova. Funciona com e sem anywidget."""
     ui = _build(task)
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_tree_preview(None)            # abre o preview (interativo ou estático)
-        ui._on_img_suggest(None)             # sugere quebra e abre o painel
-        assert ui.tree_img_split.layout.display == "flex"
         ui.dd_leaf.value = "root"
         ui.dd_feature.value = "score"
         ui.tg_mode.value = "Manual"
@@ -421,8 +410,8 @@ def test_ui_grow_pelo_preview(task):
 
 
 @pytest.mark.skipif(not _has_anywidget(), reason="requer anywidget")
-def test_ui_tree_img_lock_e_suggest(task):
-    """Travar/destravar e sugerir quebra direto da barra do preview."""
+def test_ui_tree_img_lock(task):
+    """Travar/destravar a folha clicada direto da barra do preview."""
     ui = _build(task)
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_autofit(None)
@@ -439,9 +428,6 @@ def test_ui_tree_img_lock_e_suggest(task):
         ui._on_img_lock(None)                # destrava
     assert folha not in ui.locked
     assert ui.btn_img_lock.description == "Travar"
-    with contextlib.redirect_stdout(io.StringIO()):
-        ui._on_img_suggest(None)             # sugere variável e abre o painel
-    assert ui.tree_img_split.layout.display == "flex"
 
 
 def test_ui_diag_teste_des_oot(task):

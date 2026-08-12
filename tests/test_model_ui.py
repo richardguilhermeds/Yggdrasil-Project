@@ -500,8 +500,11 @@ def test_card_redundancia():
     """Aba Variáveis · card de multicolinearidade: 'Analisar redundância' lista o
     par quase-duplicado (tabela + heatmap) e habilita a poda; 'Excluir
     redundantes' exclui do modelo a variável de menor IV do par pelo fluxo
-    normal (lista sincronizada, categoria 'descartar'); com modelo logístico
-    treinado, a análise anexa a tabela de VIF."""
+    normal (lista sincronizada, categoria 'descartar').
+
+    Correlação e VIF ficam LADO A LADO. Sem modelo treinado o painel de VIF não
+    some: ele explica que o VIF é lido na matriz de desenho e por isso exige um
+    ajuste feito — some-lo deixava o usuário sem saber por que não aparecia."""
     df = make_df()
     rng = np.random.default_rng(7)
     df["score_dup"] = df["score"] + rng.normal(0, 0.005, len(df))   # ρ ≈ 1
@@ -512,7 +515,8 @@ def test_card_redundancia():
         ui._on_redund(None)
     html = ui.out_redund.value
     assert "<table" in html and "<img" in html          # pares + heatmap
-    assert "VIF" not in html                            # sem modelo treinado
+    assert "display:flex" in html                       # correlação | VIF lado a lado
+    assert "VIF" in html and "Treine um modelo" in html  # sem modelo: orienta, não some
     assert ui.btn_redund_drop.disabled is False
     poda = list(ui._redund_report.attrs["poda_sugerida"])
     assert len(poda) == 1 and poda[0] in ("score", "score_dup")

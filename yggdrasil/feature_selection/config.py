@@ -15,8 +15,8 @@ from dataclasses import dataclass
 class FeatureSelectionConfig:
     """Parâmetros da seleção de features sobre um Spark DataFrame.
 
-    A seleção é feita por *book* (grupo de features de mesma origem, ex.: bureau,
-    bvs). Cada feature passa por filtros duros (missing, variância, redundância) e
+    A seleção é feita por *book* (grupo de features de mesma origem, ex.: externo,
+    mercado). Cada feature passa por filtros duros (missing, variância, redundância) e
     depois por uma avaliação de importância + Boruta, consolidadas num **consenso**.
     """
 

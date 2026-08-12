@@ -1,7 +1,7 @@
 """Seleção de features para modelos de classificação/regressão (pandas ou PySpark).
 
 Esteira **independente** (não entra no pipeline de modelo) que seleciona features
-organizadas por *book* (origem de dados — ex.: bureau, bvs). Cada book passa por
+organizadas por *book* (origem de dados — ex.: externo, mercado). Cada book passa por
 filtros duros (missing, variância, redundância) e por uma avaliação de importância
 (RandomForest + univariadas) e **Boruta**, consolidadas num consenso. No fim,
 produz uma tabela e painéis por book, além de um ranking global das variáveis mais
@@ -13,8 +13,8 @@ DataFrame — a chamada e o relatório são idênticos nos dois casos::
     from yggdrasil import ColumnConfig
     from yggdrasil.feature_selection import run_feature_selection
 
-    report = run_feature_selection(df, ColumnConfig(), books=["bureau", "bvs"])
-    report.selected_features      # {"bureau": [...], "bvs": [...]}
+    report = run_feature_selection(df, ColumnConfig(), books=["externo", "mercado"])
+    report.selected_features      # {"externo": [...], "mercado": [...]}
     report.overall_importance     # ranking global das selecionadas
     report.panels["overall_importance"]   # figura
 

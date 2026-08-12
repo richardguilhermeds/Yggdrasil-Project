@@ -448,7 +448,7 @@ $$\text{gini\_univ} > 2\cdot\text{leakage\_auc} - 1 \quad\text{(equiv. AUC} > 0{
 
 `leakage_suspects` lista as marcadas. Coerente com a faixa `suspeito_leakage` do `iv_power` (§4.5).
 
-**Armadilhas.** É um *flag* de **suspeita**, não prova: variáveis legitimamente fortes (ex.: *score* de bureau) podem disparar. Sempre investigue a **origem temporal** da feature antes de descartar. Inversamente, *leakage* sutil (Gini moderado) escapa a esses cortes — não confie só neles.
+**Armadilhas.** É um *flag* de **suspeita**, não prova: variáveis legitimamente fortes (ex.: *score* de crédito externo) podem disparar. Sempre investigue a **origem temporal** da feature antes de descartar. Inversamente, *leakage* sutil (Gini moderado) escapa a esses cortes — não confie só neles.
 
 ### 4.8 Estabilidade (PSI/CSI por feature)
 

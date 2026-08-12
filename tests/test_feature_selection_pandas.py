@@ -30,7 +30,7 @@ from yggdrasil.feature_selection.importance import importance_indicators
 
 def _make_pdf(problem: str = "classification", n: int = 1200, seed: int = 0,
               ruido: float = 2.0) -> pd.DataFrame:
-    """Tabela sintética com books bureau/bvs + colunas problemáticas para os filtros.
+    """Tabela sintética com books externo/mercado + colunas problemáticas para os filtros.
 
     ``ruido`` calibra a força do sinal: no default (2.0) as features boas ficam em
     IV ≈ 0.3 / AUC ≈ 0.64 — forte, mas abaixo de ``iv_leakage`` (0.50), que é a faixa
@@ -41,16 +41,16 @@ def _make_pdf(problem: str = "classification", n: int = 1200, seed: int = 0,
     s1 = rng.normal(size=n)
     s2 = rng.normal(size=n)
     df = pd.DataFrame({
-        "feat_bureau_score": s1,
-        "feat_bureau_atraso": s1 * 0.97 + rng.normal(0, 0.05, n),   # redundante c/ score
-        "feat_bureau_const": 1.0,                                    # sem variância
-        "feat_bvs_renda": s2,
-        "feat_bvs_util": rng.normal(size=n),
-        "feat_bvs_miss": rng.normal(size=n),                         # alto missing
+        "feat_externo_score": s1,
+        "feat_externo_atraso": s1 * 0.97 + rng.normal(0, 0.05, n),   # redundante c/ score
+        "feat_externo_const": 1.0,                                    # sem variância
+        "feat_mercado_renda": s2,
+        "feat_mercado_util": rng.normal(size=n),
+        "feat_mercado_miss": rng.normal(size=n),                         # alto missing
     })
     linear = 0.9 * s1 - 0.7 * s2 + rng.normal(0, ruido, n)
     df["target"] = (linear > 0).astype(int) if problem == "classification" else linear
-    df.loc[df.sample(frac=0.8, random_state=1).index, "feat_bvs_miss"] = np.nan
+    df.loc[df.sample(frac=0.8, random_state=1).index, "feat_mercado_miss"] = np.nan
     df["dt_ref"] = pd.Timestamp("2024-01-01")
     df["amostra"] = "DES"
     return df
@@ -166,7 +166,7 @@ def test_dispatch_das_primitivas_publicas():
     from yggdrasil.feature_selection import spark_stats
 
     pdf = _make_pdf(n=400)
-    feats = ["feat_bureau_score", "feat_bvs_renda"]
+    feats = ["feat_externo_score", "feat_mercado_renda"]
     assert spark_stats.numeric_columns(pdf, feats) == feats
     assert spark_stats.missing_rate(pdf, feats).notna().all()
     assert not spark_stats.variance_flags(pdf, feats).empty
@@ -187,25 +187,25 @@ def test_dispatch_das_primitivas_publicas():
 # ───────────────────────── ponta a ponta ─────────────────────────
 def test_pandas_missing_variancia_e_redundancia(fs_cfg_rapido):
     rep = run_feature_selection(_make_pdf("classification"), ColumnConfig(), fs_cfg_rapido,
-                                books=["bureau", "bvs"], with_panels=False)
+                                books=["externo", "mercado"], with_panels=False)
     tab = rep.selection_table.set_index("feature")
-    assert tab.loc["feat_bureau_const", "motivo"] == "sem variância"
-    assert tab.loc["feat_bvs_miss", "motivo"] == "alto missing"
-    assert not bool(tab.loc["feat_bureau_const", "selecionada"])
-    assert not bool(tab.loc["feat_bvs_miss", "selecionada"])
-    motivos = {tab.loc["feat_bureau_score", "motivo"], tab.loc["feat_bureau_atraso", "motivo"]}
+    assert tab.loc["feat_externo_const", "motivo"] == "sem variância"
+    assert tab.loc["feat_mercado_miss", "motivo"] == "alto missing"
+    assert not bool(tab.loc["feat_externo_const", "selecionada"])
+    assert not bool(tab.loc["feat_mercado_miss", "selecionada"])
+    motivos = {tab.loc["feat_externo_score", "motivo"], tab.loc["feat_externo_atraso", "motivo"]}
     assert any(isinstance(m, str) and m.startswith("redundante") for m in motivos)
 
 
 def test_pandas_end_to_end_classificacao(fs_cfg_rapido):
     rep = run_feature_selection(_make_pdf("classification"), ColumnConfig(), fs_cfg_rapido,
-                                books=["bureau", "bvs"])
+                                books=["externo", "mercado"])
     assert isinstance(rep, FeatureSelectionReport)
     assert rep.problem_type == "classification"
-    assert set(rep.selected_features) == {"bureau", "bvs"}
+    assert set(rep.selected_features) == {"externo", "mercado"}
     assert len(rep.selected_overall) >= 1
     assert not rep.overall_importance.empty
-    assert "overall_importance" in rep.panels and "book::bureau" in rep.panels
+    assert "overall_importance" in rep.panels and "book::externo" in rep.panels
     assert "Seleção de Features" in rep.to_html(embed_panels=False)
 
 
@@ -213,16 +213,16 @@ def test_pandas_barra_feature_com_leakage(fs_cfg_rapido):
     """Sinal quase perfeito (IV >> iv_leakage) não pode ser selecionado."""
     pdf = _make_pdf("classification", ruido=0.5)   # IV ~2.0 nas features boas
     rep = run_feature_selection(pdf, ColumnConfig(), fs_cfg_rapido,
-                                books=["bureau"], with_panels=False)
+                                books=["externo"], with_panels=False)
     tab = rep.selection_table.set_index("feature")
-    assert bool(tab.loc["feat_bureau_score", "leakage_flag"])
-    assert tab.loc["feat_bureau_score", "motivo"] == "suspeita de leakage (revisar)"
-    assert "feat_bureau_score" not in rep.selected_overall
+    assert bool(tab.loc["feat_externo_score", "leakage_flag"])
+    assert tab.loc["feat_externo_score", "motivo"] == "suspeita de leakage (revisar)"
+    assert "feat_externo_score" not in rep.selected_overall
 
 
 def test_pandas_regressao(fs_cfg_rapido):
     rep = run_feature_selection(_make_pdf("regression"), ColumnConfig(), fs_cfg_rapido,
-                                books=["bureau", "bvs"], with_panels=False)
+                                books=["externo", "mercado"], with_panels=False)
     assert rep.problem_type == "regression"
     # em regressão não há IV/KS — as colunas nem entram no ranking global
     assert "iv" not in rep.overall_importance.columns
@@ -233,7 +233,7 @@ def test_pandas_nao_muta_a_entrada(fs_cfg_rapido):
     pdf = _make_pdf("classification", n=400)
     antes = pdf.copy()
     run_feature_selection(pdf, ColumnConfig(), fs_cfg_rapido,
-                          books=["bureau"], with_panels=False)
+                          books=["externo"], with_panels=False)
     pd.testing.assert_frame_equal(pdf, antes)
 
 
@@ -243,9 +243,9 @@ def test_pandas_filtra_amostra_de_desenvolvimento(fs_cfg_rapido):
     # o alvo do OOT é lixo: se ele vazasse na seleção, a tabela mudaria
     pdf.loc[pdf.index[400:], "target"] = 1
     rep = run_feature_selection(pdf, ColumnConfig(), fs_cfg_rapido,
-                                books=["bureau"], with_panels=False)
+                                books=["externo"], with_panels=False)
     so_des = run_feature_selection(pdf.iloc[:400], ColumnConfig(), fs_cfg_rapido,
-                                   books=["bureau"], with_panels=False)
+                                   books=["externo"], with_panels=False)
     pd.testing.assert_series_equal(
         rep.selection_table.set_index("feature")["selecionada"],
         so_des.selection_table.set_index("feature")["selecionada"],
@@ -275,16 +275,16 @@ def test_paridade_com_spark(fs_cfg_rapido):
     try:
         pdf = _make_pdf("classification")
         rep_pd = run_feature_selection(pdf, ColumnConfig(), fs_cfg_rapido,
-                                       books=["bureau", "bvs"], with_panels=False)
+                                       books=["externo", "mercado"], with_panels=False)
         rep_sp = run_feature_selection(spark.createDataFrame(pdf), ColumnConfig(), fs_cfg_rapido,
-                                       books=["bureau", "bvs"], with_panels=False)
+                                       books=["externo", "mercado"], with_panels=False)
     finally:
         if not ja_existia:
             spark.stop()
 
     assert rep_pd.problem_type == rep_sp.problem_type
     # os filtros duros são determinísticos nos dois backends
-    for f in ("feat_bureau_const", "feat_bvs_miss"):
+    for f in ("feat_externo_const", "feat_mercado_miss"):
         m_pd = rep_pd.selection_table.set_index("feature").loc[f, "motivo"]
         m_sp = rep_sp.selection_table.set_index("feature").loc[f, "motivo"]
         assert m_pd == m_sp

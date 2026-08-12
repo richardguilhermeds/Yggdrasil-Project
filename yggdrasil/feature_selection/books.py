@@ -1,6 +1,6 @@
 """Resolução de *books* — grupos de features analisados em conjunto.
 
-Um **book** representa uma origem/bloco de variáveis (ex.: bureau, bvs). A seleção
+Um **book** representa uma origem/bloco de variáveis (ex.: externo, mercado). A seleção
 de features roda book a book e depois consolida uma visão global. Os books podem
 ser definidos de três formas (ver :func:`resolve_books`).
 """
@@ -62,10 +62,10 @@ def resolve_books(sdf, cfg: ColumnConfig, books: BooksSpec = None) -> List[Book]
     books:
         * ``Sequence[str]`` — lista de palavras-chave. Cada palavra vira um book com
           as features cujo nome **contém** o token (case-insensitive).
-          Ex.: ``["bureau", "bvs"]``.
+          Ex.: ``["externo", "mercado"]``.
         * ``Dict[str, Sequence[str]]`` — colunas explícitas por book.
         * ``None`` — auto-deriva o book do 1º segmento após o prefixo
-          (``feat_bureau_score`` → book ``"bureau"``).
+          (``feat_externo_score`` → book ``"externo"``).
     """
     cols = feature_columns(sdf, cfg)
     cols_set = set(sdf.columns)

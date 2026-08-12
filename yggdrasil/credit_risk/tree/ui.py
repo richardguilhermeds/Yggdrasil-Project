@@ -848,6 +848,10 @@ class TreeSegmenterUI:
                                "Guarda a árvore ATUAL como cenário nomeado em memória "
                                "(vale só nesta sessão; não grava em disco)", "bookmark")
         self.out_scn_summary = W.HTML()   # mini-tabela resumo (atual + cenários)
+        self.btn_scn_clear = mk("Limpar todos", "danger",
+                                "Remove TODOS os cenários desta sessão (confirma em 2 "
+                                "cliques). Cada linha da lista tem um ✕ para remover só "
+                                "aquele cenário.", "trash")
         self.box_scn_list = W.VBox([])    # linhas: nome + Restaurar/Comparar/remover
         self.out_scn_diff = W.HTML()      # resultado da comparação cenário × atual
         # concentração das folhas no auto-fit — REPRESENTATIVIDADE GLOBAL (% da
@@ -1081,10 +1085,6 @@ class TreeSegmenterUI:
                                    "sitemap")
         self.btn_tree_preview_hide = mk("Ocultar", "", "Oculta a imagem da árvore", "eye-slash")
         # --- barra de ações do preview INTERATIVO (aparece ao clicar num nó da imagem) ---
-        self.btn_img_suggest = mk("Sugerir quebra", "primary",
-                                  "Sugere a melhor variável para dividir a folha clicada e abre "
-                                  "o painel de divisão com ela pré-selecionada (variável, cortes, "
-                                  "preview e criar segmento)", "lightbulb-o")
         self.btn_img_merge_l = mk("Fundir ← irmã", "warning",
                                   "Funde a folha clicada com a irmã adjacente à ESQUERDA", "compress")
         self.btn_img_merge_r = mk("Fundir irmã →", "warning",
@@ -1109,13 +1109,12 @@ class TreeSegmenterUI:
                                   "reconstrói tudo)", "magic")
         self.btn_img_reset = mk("Resetar", "", "Recomeça a árvore do zero", "refresh")
         # fecha o painel de divisão (fica no cabeçalho do próprio painel)
-        self.btn_img_split_close = mk("Fechar", "", "Fecha o painel de divisão", "times")
         W.dlink((self.btn_undo, "disabled"), (self.btn_img_undo, "disabled"))
         W.dlink((self.btn_redo, "disabled"), (self.btn_img_redo, "disabled"))
-        for _b in (self.btn_img_suggest, self.btn_img_merge_l,
+        for _b in (self.btn_img_merge_l,
                    self.btn_img_merge_r, self.btn_img_merge_na, self.btn_img_collapse,
                    self.btn_img_lock, self.btn_img_undo, self.btn_img_redo,
-                   self.btn_img_autofit, self.btn_img_reset, self.btn_img_split_close):
+                   self.btn_img_autofit, self.btn_img_reset):
             _b.layout.width = "auto"
             _b.layout.margin = "2px 8px 2px 0"     # respiro horizontal entre botões
         # pequena espaçada entre os GRUPOS: fundir-irmãs · fundir-missing · recolher
@@ -1152,6 +1151,7 @@ class TreeSegmenterUI:
         self.dd_fallback.observe(self._on_fallback, names="value")
         self.btn_diff.on_click(self._on_diff)
         self.btn_scn_save.on_click(self._on_scn_save)
+        self.btn_scn_clear.on_click(self._on_scn_clear)
         self.btn_autofit.on_click(self._on_autofit)
         self.btn_mlflow.on_click(self._on_mlflow)
         self.btn_clear_log.on_click(self._on_clear_log)
@@ -1211,8 +1211,6 @@ class TreeSegmenterUI:
         self.btn_var_analyze.on_click(self._on_var_analyze)
         self.btn_tree_preview.on_click(self._on_tree_preview)
         self.btn_tree_preview_hide.on_click(self._on_tree_preview_hide)
-        self.btn_img_suggest.on_click(self._on_img_suggest)
-        self.btn_img_split_close.on_click(self._on_split_panel_close)
         self.btn_img_merge_l.on_click(lambda _: self._on_merge("left"))
         self.btn_img_merge_r.on_click(lambda _: self._on_merge("right"))
         self.btn_img_merge_na.on_click(self._on_merge_missing)
@@ -1305,11 +1303,12 @@ class TreeSegmenterUI:
                                      "árvores com muitas folhas.")
         self.btn_tree_zoom_reset = mk("Ajustar", "", "Volta o zoom a 100% (ajustado ao card)",
                                       "compress")
+        self.btn_tree_zoom_reset.layout.width = "auto"     # senão ocupa a linha inteira
+        self.btn_tree_zoom_reset.layout.margin = "2px 8px 2px 0"
         self.sl_tree_zoom.observe(self._on_tree_zoom, names="value")
         self.btn_tree_zoom_reset.on_click(lambda _: setattr(self.sl_tree_zoom, "value", 1.0))
         self.tree_img_bar = W.VBox([
-            W.HBox([self.tree_img_info, self.btn_img_suggest,
-                    self.btn_img_lock], layout=_row_lay),
+            W.HBox([self.tree_img_info, self.btn_img_lock], layout=_row_lay),
             W.HBox([self.btn_img_merge_l, self.btn_img_merge_r, self.btn_img_merge_na,
                     self.btn_img_collapse, _vsep(), self.btn_img_undo,
                     self.btn_img_redo, self.btn_img_autofit, self.btn_img_reset,
@@ -1317,15 +1316,7 @@ class TreeSegmenterUI:
                    layout=_row_lay),
         ], layout=W.Layout(display="none", margin="0 0 6px 0"))
         self.tree_img_bar.add_class("treeui-imgbar")
-        # painel COMPACTO "Dividir a folha" do preview (aberto pelo 'Dividir…'):
-        # os children são as mesmas instâncias do card da aba (2ª view, sempre
-        # sincronizada) — montado adiante em _build, quando cat_box já existe.
-        self.tree_img_split = W.VBox([], layout=W.Layout(display="none",
-                                                         max_width="620px",
-                                                         margin="8px 0 0 0"))
-        self.tree_img_split.add_class("treeui-card")
-        self.box_tree_img = W.VBox([self.tree_img_bar, self.out_tree_img,
-                                    self.tree_img_split])
+        self.box_tree_img = W.VBox([self.tree_img_bar, self.out_tree_img])
         self.cat_box = W.VBox([], layout=W.Layout(width="98%", display="none",
                                                   border="1px solid var(--hair)",
                                                   padding="6px 8px", margin="2px 0"))
@@ -1512,23 +1503,6 @@ class TreeSegmenterUI:
         self.btn_tree_preview.layout.width = "auto"
         self.btn_tree_preview_hide.layout.width = "auto"
         # painel compacto "Dividir a folha" do preview: as MESMAS instâncias do
-        # card_split acima (2ª view sincronizada — variável/modo/cortes/preview
-        # idênticos nos dois lugares), sem os cards de detalhe/gráficos.
-        self.tree_img_split.children = (
-            W.HBox([W.HTML("<div class='treeui-h' style='margin:0;flex:1'>✂️ Dividir a "
-                           "folha selecionada</div>"),
-                    self.btn_img_split_close],
-                   layout=W.Layout(align_items="center", width="100%")),
-            W.HTML("<div class='treeui-legend'>Os mesmos controles do card "
-                   "'Dividir a folha' da aba — tudo sincronizado. Clique noutra folha "
-                   "da imagem para trocar o alvo.</div>"),
-            self.dd_leaf, self.box_feature, self.btn_sugcuts, self.tg_mode,
-            self.sl_bins, self.dd_split_criterion,
-            self.cb_minbin, self.sl_minbin, self.cb_maxbin, self.sl_maxbin,
-            self.cb_mindiff, self.sl_mindiff,
-            self.tx_cuts, self.cat_box,
-            W.HBox([self.btn_preview, self.btn_split]),
-            self.out_preview_seg)
         card_tree_img = W.VBox([
             W.HBox([W.HTML("<div class='treeui-h' style='margin:0;flex:1'>Preview da árvore "
                            "(imagem)</div>"),
@@ -1766,10 +1740,11 @@ class TreeSegmenterUI:
                    "com fallback, o <code>ELSE</code> vira a folha escolhida em vez de NULL.</div>"),
             W.HBox([self.tx_sql_table, self.dd_fallback, self.btn_sql]),
             self.out_sql]); card_sql.add_class("treeui-card")
-        tab_diag = W.VBox([sep_diag, card_score, sep_diag2,
+        # importância abre a aba: é a leitura mais direta de "o que a árvore usou"
+        tab_diag = W.VBox([card_imp, sep_diag, card_score, sep_diag2,
                            card_metrics, card_table, card_sib,
                            card_estab, card_varprof,
-                           card_discrim, card_boot, card_imp])
+                           card_discrim, card_boot])
 
         # ================================================================
         # ABA 4. VALIDAR & EXPORTAR — duas faixas: validação · exportar/registrar
@@ -1976,6 +1951,8 @@ class TreeSegmenterUI:
                    "atual: migração de folhas, concordância e métricas lado a lado.</div>"),
             W.HBox([self.tx_diff_path, self.btn_diff]), self.out_diff]); card_diff.add_class("treeui-card")
         self.btn_scn_save.layout.width = "auto"
+        self.btn_scn_clear.layout.width = "auto"
+        self.btn_scn_clear.disabled = True          # habilita quando houver cenário
         card_scn = W.VBox([
             W.HTML("<div class='treeui-h'>Cenários (em memória · só nesta sessão)</div>"),
             W.HTML("<div class='treeui-legend'>Guarde versões nomeadas da árvore e compare-as "
@@ -1985,7 +1962,7 @@ class TreeSegmenterUI:
                    "mostra concordância, migração de folhas e Δ de métricas. Os cenários vivem "
                    "<b>apenas nesta sessão</b> (memória do kernel) — para persistir em disco use "
                    "Salvar (JSON) ou o MLflow, na aba Exportar.</div>"),
-            W.HBox([self.tx_scn_name, self.btn_scn_save],
+            W.HBox([self.tx_scn_name, self.btn_scn_save, self.btn_scn_clear],
                    layout=W.Layout(align_items="center")),
             self.out_scn_summary, self.box_scn_list, self.out_scn_diff])
         card_scn.add_class("treeui-card")
@@ -3592,8 +3569,6 @@ class TreeSegmenterUI:
         sid = self._selected_leaf()
         if sid is None:
             self._log("Selecione uma folha."); return
-        # (não inclui btn_img_suggest: seu disabled é CONTEXTUAL — _refresh_img_bar
-        # o desabilita p/ nós internos e o _busy não pode re-habilitá-lo à força)
         with self._busy(self.btn_suggest, msg="procurando a melhor variável…"):
             sug = self.seg.suggest_split(sid)
             if sug["feature"] is None:
@@ -3802,6 +3777,7 @@ class TreeSegmenterUI:
         widgets a cada _refresh acumularia instâncias no registry do ipywidgets).
         ``stale_diff=True`` marca uma comparação já renderizada como desatualizada
         (a árvore atual ou a lista de cenários mudou)."""
+        self.btn_scn_clear.disabled = not self._scenarios
         if rebuild_rows:
             for row in self.box_scn_list.children:   # libera os widgets antigos
                 for w in row.children:
@@ -3903,6 +3879,19 @@ class TreeSegmenterUI:
         if self._scenarios.pop(nome, None) is not None:
             self._refresh_scn_panel(stale_diff=True, rebuild_rows=True)
             self._log(f"Cenário '{nome}' removido da sessão.")
+
+    def _on_scn_clear(self, b):
+        """Apaga TODOS os cenários da sessão (destrutivo → confirma em 2 cliques)."""
+        def _limpar():
+            n = len(self._scenarios)
+            if not n:
+                self._log("Nenhum cenário salvo para limpar.")
+                return
+            self._scenarios.clear()
+            self.out_scn_diff.value = ""
+            self._refresh_scn_panel(stale_diff=True, rebuild_rows=True)
+            self._log(f"{n} cenário(s) removido(s) da sessão.")
+        self._confirm_twice(b, _limpar)
 
     def _on_autofit(self, _):
         sid = self._selected_leaf()
@@ -5471,23 +5460,26 @@ class TreeSegmenterUI:
                     full_width=True, tight=False)
             except Exception as e:
                 h_psi_safra = self._estab_err("PSI no tempo", e)
+        # PSI da segmentação ENTRE amostras (barras verticais): fica ENTRE as
+        # métricas por amostra e o PSI no tempo — a leitura vai do agregado por
+        # amostra, para o PSI por amostra, para a evolução no tempo.
+        try:
+            h_psi_s = self._fig_html(
+                self.seg.plot_psi_by_sample(figsize=(6.0, 4.6), ylim=ylim, auto_zoom=zoom),
+                full_width=True, tight=False)
+        except Exception as e:
+            h_psi_s = self._estab_err("PSI entre amostras", e)
         self.out_estab.value = (
             "<div style='display:flex;gap:10px;align-items:flex-start'>"
-            f"<div style='flex:66 1 0;min-width:0'>"
+            f"<div style='flex:60 1 0;min-width:0'>"
             f"<div class='treeui-h'>Principais métricas por amostra</div>{h_m}</div>"
+            f"<div style='flex:60 1 0;min-width:0'>"
+            "<div class='treeui-h'>PSI da segmentação entre amostras</div>"
+            f"{h_psi_s}</div>"
             f"<div style='flex:84 1 0;min-width:0'>"
             "<div class='treeui-h'>PSI da segmentação ao longo do tempo</div>"
             f"{h_psi_safra}</div></div>")
-        # PSI da segmentação ENTRE amostras (barras verticais) + concentração guardada
-        try:
-            h_psi_s = self._fig_html(
-                self.seg.plot_psi_by_sample(figsize=(7.6, 3.6), ylim=ylim, auto_zoom=zoom),
-                full_width=True)
-        except Exception as e:
-            h_psi_s = self._estab_err("PSI entre amostras", e)
-        self.out_conc.value = (
-            "<div class='treeui-h' style='margin-top:10px'>PSI da segmentação entre "
-            f"amostras</div>{h_psi_s}")
+        self.out_conc.value = ""
 
     def _on_psi_zoom(self, _):
         self._psi_zoom = True
@@ -5970,13 +5962,11 @@ class TreeSegmenterUI:
                                        f"desenhar a árvore: {type(e).__name__}: {e}</div>")
 
     def _on_tree_preview_hide(self, _):
-        """Oculta o preview (estático ou interativo), a barra e o painel de split."""
+        """Oculta o preview (estático ou interativo) e a sua barra."""
         self.out_tree_img.value = ""
         self.tree_img_bar.layout.display = "none"
-        self.tree_img_split.layout.display = "none"
         if self._tree_img_visible():
-            self.box_tree_img.children = (self.tree_img_bar, self.out_tree_img,
-                                          self.tree_img_split)
+            self.box_tree_img.children = (self.tree_img_bar, self.out_tree_img)
 
     def check_tree_preview_offline(self, verbose: bool = True) -> dict:
         """Valida que **"Ver árvore" não baixa nenhuma fonte/arquivo externo**.
@@ -6065,7 +6055,7 @@ class TreeSegmenterUI:
             self._tree_img_widget.zoom = float(self.sl_tree_zoom.value)
         if not self._tree_img_visible():
             self.box_tree_img.children = (self.tree_img_bar, self._tree_img_widget,
-                                          self.out_tree_img, self.tree_img_split)
+                                          self.out_tree_img)
         return True
 
     def _refresh_tree_widget(self):
@@ -6163,9 +6153,9 @@ class TreeSegmenterUI:
         lock_txt = "🔒 " if sid in self.locked else ""
         self.tree_img_info.value = (f"<span class='treeui-imgchip'>{icone} {lock_txt}{head} · "
                                     f"{_html.escape(desc)} · {self._risk_label} {v_txt}</span>")
-        for b in (self.btn_img_suggest, self.btn_img_merge_l,
-                  self.btn_img_merge_r, self.btn_img_merge_na, self.btn_img_lock):
-            b.disabled = not is_leaf           # sugerir/fundir/travar só em folha
+        for b in (self.btn_img_merge_l, self.btn_img_merge_r,
+                  self.btn_img_merge_na, self.btn_img_lock):
+            b.disabled = not is_leaf           # fundir/travar só em folha
         self.btn_img_collapse.disabled = is_root
         self.btn_img_collapse.description = ("Recolher quebra (pai)" if is_leaf
                                              else "Recolher ramo")
@@ -6197,16 +6187,6 @@ class TreeSegmenterUI:
         if sid in folhas:
             self.dd_leaf.value = sid           # o ramo recolhido virou a folha ativa
         self._log_delta("recolher ramo", antes)
-
-    def _on_split_panel_close(self, _):
-        """Fecha o painel compacto de divisão do preview."""
-        self.tree_img_split.layout.display = "none"
-
-    def _on_img_suggest(self, _):
-        """'Sugerir quebra' na barra do preview: abre o painel de divisão e roda
-        a sugestão de variável para a folha clicada (preenche variável/modo)."""
-        self.tree_img_split.layout.display = "flex"
-        self._on_suggest(None)
 
     def _on_img_lock(self, _):
         """Trava/destrava a folha clicada como final (alterna 🔒/🔓)."""
