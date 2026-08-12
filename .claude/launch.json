@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "render-ui",
+      "runtimeExecutable": "C:\\Users\\Heage\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "runtimeArgs": ["-m", "http.server", "8777", "--directory", ".render"],
+      "port": 8777
+    }
+  ]
+}
