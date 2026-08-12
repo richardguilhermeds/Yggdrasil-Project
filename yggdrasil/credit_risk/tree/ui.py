@@ -1932,32 +1932,39 @@ class TreeSegmenterUI:
                              W.HBox([self.btn_copy_table]), self.out_table_tsv])
         card_table.add_class("treeui-card")
 
+        # legenda em LINHAS (não um parágrafo corrido): uma ideia por linha —
+        # o que compara · o que é inversão · o que cada gráfico mostra · o
+        # semáforo do indicador
         sib_legend = W.HTML(
-            f"<div class='treeui-legend'>Compara o <b>{_rl} médio</b> das folhas de um mesmo "
-            "pai (<b>folhas-irmãs</b>) e checa se a <b>ordem de risco</b> se mantém. "
-            f"A ordem de <b>referência</b> é o {_rl} na <b>{_ref}</b>; uma <b>inversão</b> ocorre "
-            f"quando, numa amostra ou safra, uma folha de menor risco passa a ter {_rl} "
-            "<i>maior</i> que uma irmã de maior risco (as linhas se cruzam). "
-            f"O gráfico da esquerda mostra o {_rl} por <b>amostra</b> ({_ref}, OOT, …) e o da "
-            "direita por <b>safra</b> ao longo do tempo (faixas vermelhas = safras com "
-            "inversão). O <b>indicador</b> resume: "
+            "<div class='treeui-legend' style='line-height:1.7'>"
+            f"Compara o <b>{_rl} médio</b> das folhas de um mesmo pai "
+            "(<b>folhas-irmãs</b>) e checa se a <b>ordem de risco</b> se mantém.<br/>"
+            f"<b>Inversão</b>: numa amostra ou safra, uma folha de menor risco passa a "
+            f"ter {_rl} <i>maior</i> que uma irmã de maior risco (as linhas se cruzam). "
+            f"A ordem de referência é o {_rl} na <b>{_ref}</b>.<br/>"
+            f"<b>Gráficos</b>: à esquerda, o {_rl} por <b>amostra</b> ({_ref}, OOT, …); "
+            "à direita, por <b>safra</b> ao longo do tempo (faixas vermelhas = safras "
+            "com inversão).<br/>"
+            "<b>Indicador</b>: "
             "<span style='background:var(--ok-bg);padding:1px 5px;border-radius:3px'>verde sem inversão</span> "
             "<span style='background:var(--warn-bg);padding:1px 5px;border-radius:3px'>amarelo inverte em algumas safras</span> "
-            "<span style='background:var(--bad-bg);padding:1px 5px;border-radius:3px'>vermelho inverte entre amostras ou em muitas safras</span>.</div>")
-        # os CONTROLES ficam numa coluna estreita (~40% de um monitor comum):
-        # dropdown/inputs/botão esticados na largura inteira do card ficavam
-        # desproporcionais — controle é para ser lido de perto, só os GRÁFICOS
-        # (out_sib) merecem a largura toda
+            "<span style='background:var(--bad-bg);padding:1px 5px;border-radius:3px'>vermelho inverte entre amostras ou em muitas safras</span>."
+            "</div>")
+        # os CONTROLES ficam numa coluna de metade da tela: esticados na largura
+        # inteira do card ficavam desproporcionais — controle é para ser lido de
+        # perto, só os GRÁFICOS (out_sib) merecem a largura toda. Um controle
+        # por linha, todos com o MESMO description_width (sib_style) — as caixas
+        # começam e terminam alinhadas.
         box_sib_ctl = W.VBox([
-            W.HBox([self.dd_sib_group], layout=W.Layout(width="100%")),
-            W.HBox([self.tx_sib_time, self.dd_sib_sample],
-                   layout=W.Layout(width="100%")),
+            self.dd_sib_group,
+            self.tx_sib_time,
+            self.dd_sib_sample,
             W.HBox([self.btn_sib], layout=W.Layout(width="100%")),
             # zoom do eixo Y (auto/mín-máx) + eixo em % dos gráficos de estabilidade
             W.HBox([self.btn_sib_zoom, self.btn_sib_reset, self.tx_sib_ymin,
                     self.tx_sib_ymax, self.ck_sib_pct],
                    layout=W.Layout(align_items="center", flex_flow="row wrap")),
-        ], layout=W.Layout(width="100%", max_width="640px"))
+        ], layout=W.Layout(width="100%", max_width="50%"))
         card_sib = W.VBox([
             W.HTML("<div class='treeui-h'>Folhas-irmãs · inversão entre amostras &amp; safras</div>"),
             sib_legend,
