@@ -1108,27 +1108,49 @@ def test_ui_canvas_preview_e_corte(task):
     assert _nleaf(ui) == antes
 
 
-def test_ui_canvas_corte_manual_num_e_cat(task):
-    """No modo Manual a caixa de cortes muda de formato conforme o tipo: lista de
-    números para numérica, grupos separados por ';' para categórica."""
+def _sel_var_cv(ui, col):
+    alvo = next(l for l, f in ui._cv_feat_by_label.items() if f == col)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.dd_cv_feature.value = alvo
+
+
+def test_ui_canvas_corte_manual_numerico(task):
+    """Variável numérica no modo Manual: caixa de texto com um corte por vírgula."""
     ui = _build(task)
     _abre_canvas(ui)
     with contextlib.redirect_stdout(io.StringIO()):
         ui.tg_cv_mode.value = "Manual"
+    _sel_var_cv(ui, "score")
     assert ui.box_cv_cuts.layout.display == ""
-    for col, rotulo, texto, esperado in (
-            ("score", "Cortes", "0.8, 1.1", [0.8, 1.1]),
-            ("garantia", "Grupos", "A, B; C; D", [["A", "B"], ["C"], ["D"]])):
-        alvo = next(l for l, f in ui._cv_feat_by_label.items() if f == col)
-        with contextlib.redirect_stdout(io.StringIO()):
-            ui.dd_cv_feature.value = alvo
-        assert ui.tx_cv_cuts.description == rotulo
-        ui.tx_cv_cuts.value = texto
-        assert ui._cv_parse_cuts(col, ui._cv_node()) == esperado
+    assert ui.cv_cat_box.layout.display == "none"
+    ui.tx_cv_cuts.value = "0.8, 1.1"
+    assert ui._cv_parse_cuts("score", ui._cv_node()) == [0.8, 1.1]
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_cv_preview(None)
         ui._on_cv_apply(None)
-    assert _nleaf(ui) == 3                                 # os 3 grupos pedidos
+    assert _nleaf(ui) == 3                                 # 2 cortes → 3 faixas
+
+
+def test_ui_canvas_corte_manual_categorico_usa_agrupador(task):
+    """Variável categórica no modo Manual: o MESMO agrupador da aba Construir —
+    um seletor de grupo por categoria, e categorias do mesmo grupo viram um nó."""
+    ui = _build(task)
+    _abre_canvas(ui)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.tg_cv_mode.value = "Manual"
+    _sel_var_cv(ui, "garantia")
+    assert ui.cv_cat_box.layout.display == ""              # agrupador no lugar do texto
+    assert ui.box_cv_cuts.layout.display == "none"
+    assert set(ui._cv_cat_widgets) == set("ABCD")
+    assert ui._cv_parse_cuts("garantia", ui._cv_node()) == [["A"], ["B"], ["C"], ["D"]]
+    cats = list(ui._cv_cat_widgets)                        # junta as 2 primeiras num grupo
+    ui._cv_cat_widgets[cats[1]].value = ui._cv_cat_widgets[cats[0]].value
+    grupos = ui._cv_parse_cuts("garantia", ui._cv_node())
+    assert sorted(len(g) for g in grupos) == [1, 1, 2]
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_preview(None)
+        ui._on_cv_apply(None)
+    assert _nleaf(ui) == 3                                 # os 3 grupos montados
 
 
 def test_ui_canvas_regras_de_negocio_da_folha(task):
@@ -1205,6 +1227,222 @@ def test_ui_canvas_offline_cai_no_painel_sem_mapa(task):
         ui._on_cv_preview(None)
         ui._on_cv_apply(None)
     assert _nleaf(ui) > antes                      # o corte funciona sem o mapa
+
+
+def test_ui_canvas_mover_corte_da_divisa(task):
+    """A divisa entre duas folhas vizinhas é editável pelo painel: o bloco só
+    aparece quando há corte móvel, e mover aplica exatamente o valor pedido."""
+    ui = _build(task)
+    w = _abre_canvas(ui)
+    _sel_var_cv(ui, "score")                               # corte móvel só existe em num
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_apply(None)
+    folhas = [s for s, v in ui.seg.segments.items() if v["is_leaf"]]
+    _foca(ui, w, folhas[0])
+    assert ui.box_cv_move.layout.display == ""
+    vigente = float(ui.tx_cv_move.value)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_move_preview(None)
+    assert ui.out_cv_move.value                            # preview dos dois lados
+    pedido = round(vigente * 0.97, 6)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.tx_cv_move.value = pedido
+        ui._on_cv_move(None)
+    assert ui.seg.movable_cut(ui._cv_sel)["cut"] == pytest.approx(pedido)
+    assert ui._undo
+
+
+def test_ui_canvas_aloca_faltantes_na_folha(task):
+    """O nó de faltantes (NaN) do split pode ser absorvido por uma folha
+    populada — o botão só habilita onde esse nó existe."""
+    ui = _build(task, com_na=True)
+    w = _abre_canvas(ui)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_apply(None)
+    folhas = [s for s, v in ui.seg.segments.items() if v["is_leaf"]]
+    na = [s for s in folhas
+          if ui.seg.segments[s]["conditions"]
+          and ui.seg.segments[s]["conditions"][-1]["kind"] == "na"]
+    if not na:
+        pytest.skip("o split desta base não gerou nó de faltantes")
+    alvo = next(s for s in folhas if ui._cv_missing_sibling(s))
+    _foca(ui, w, alvo)
+    assert not ui.btn_cv_missing.disabled
+    antes = _nleaf(ui)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_missing(None)
+    assert _nleaf(ui) == antes - 1                         # o nó de NaN foi absorvido
+    _foca(ui, w, ui._cv_sel)
+    assert ui.btn_cv_missing.disabled                      # não há mais o que alocar
+
+
+def test_ui_canvas_reset_pede_confirmacao(task):
+    """Resetar joga fora a árvore toda, então pede dois cliques — e continua
+    desfazível."""
+    ui = _build(task)
+    _abre_canvas(ui)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+    antes = _nleaf(ui)
+    assert antes > 1
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_reset(ui.btn_cv_reset)                   # 1º clique: só confirma
+    assert _nleaf(ui) == antes
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_reset(ui.btn_cv_reset)                   # 2º clique: reseta
+    assert _nleaf(ui) == 1
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_undo(None)
+    assert _nleaf(ui) == antes
+
+
+def test_ui_canvas_barra_de_acoes_da_arvore(task):
+    """A barra traz desfazer/refazer e as três ações automáticas, que são os
+    MESMOS handlers da aba Construir e leem a configuração de lá."""
+    ui = _build(task)
+    _abre_canvas(ui)
+    assert ui.btn_cv_undo.disabled and ui.btn_cv_redo.disabled
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.sl_depth.value = 2
+        ui.tabs.selected_index = 0                          # mexe em Construir…
+        ui.tabs.selected_index = ui._canvas_tab_index       # …e volta
+    assert "profundidade <b>2</b>" in ui.out_cv_auto_cfg.value   # a linha acompanha
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+    assert _nleaf(ui) > 1 and not ui.btn_cv_undo.disabled
+    apos_fit = _nleaf(ui)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_automerge(None)
+    assert _nleaf(ui) <= apos_fit
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_undo(None)
+    assert _nleaf(ui) == apos_fit and not ui.btn_cv_redo.disabled
+
+
+def test_ui_canvas_otimo_herda_limites_de_bin_da_construir(task):
+    """O binning ótimo do painel usa os MESMOS limites de tamanho de bin
+    marcados na aba Construir — senão as duas telas dariam faixas diferentes
+    mostrando a mesma configuração — e diz na tela que os herdou."""
+    ui = _build(task)
+    _abre_canvas(ui)
+    assert ui.out_cv_optbin_hint.value == ""            # nenhum limite marcado
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_preview(None)
+    livre = ui._cv_prev_tbl.shape[0]
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.cb_minbin.value = True
+        ui.sl_minbin.value = 0.20                       # faixas de no mínimo 20%
+        ui._sync_cv_mode()
+        ui._on_cv_preview(None)
+    assert ui._pending["min_bin_size"] == pytest.approx(0.20)
+    assert ui._cv_prev_tbl.shape[0] < livre             # o limite mordeu de fato
+    assert "herdados da aba Construir" in ui.out_cv_optbin_hint.value
+
+
+def test_ui_canvas_recebe_o_teste_entre_folhas_comparaveis(task):
+    """O card de folhas-irmãs saiu de Diagnóstico e vive na aba do mapa: ele
+    compara a folha com as IRMÃS ADJACENTES, que é o que o mapa mostra."""
+    ui = _build(task)
+    canvas_tab = ui.tabs.children[ui._canvas_tab_index]
+    diag_tab = ui.tabs.children[[ui.tabs.get_title(i)
+                                 for i in range(len(ui.tabs.children))].index("Diagnóstico")]
+    assert ui._card_sib in canvas_tab.children
+    assert ui._card_sib not in diag_tab.children
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        _abre_canvas(ui)
+        ui._on_sib_analyze(None)
+    assert ui.out_sib.value                                 # roda de dentro da aba nova
+
+
+def test_ui_canvas_semaforo_de_psi_nos_cartoes(task):
+    """Cada FOLHA do mapa ganha um ponto colorido com o pior PSI entre as
+    amostras não-referência (detalhe por amostra no hover) — o mapa dobra como
+    heatmap de estabilidade. Nós internos não têm PSI de folha."""
+    ui = _build(task)
+    w = _abre_canvas(ui)
+    if w is None:
+        pytest.skip("anywidget não instalado")
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_apply(None)
+    cards = {n["sid"]: n["html"] for n in w.nodes}
+    folhas = [s for s, v in ui.seg.segments.items() if v["is_leaf"]]
+    assert all("pdot" in cards[s] for s in folhas)
+    assert any("PSI OOT" in cards[s] for s in folhas)      # hover com o detalhe
+    assert "pdot" not in cards["root"]                     # raiz virou nó interno
+
+
+def test_ui_canvas_sem_amostras_nao_ha_semaforo(task):
+    """Sem `sample_col` não existe PSI por folha — os cartões saem sem o ponto,
+    em vez de um ponto sem significado."""
+    pytest.importorskip("ipywidgets")
+    import matplotlib
+    matplotlib.use("Agg")
+    from yggdrasil.credit_risk.tree import TreeSegmenterUI
+    df = make_df(task).drop(columns=["amostra"])
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui = TreeSegmenterUI(df, target="target", task_type=task, date_col="dt_ref")
+    w = _abre_canvas(ui)
+    if w is None:
+        pytest.skip("anywidget não instalado")
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_apply(None)
+    assert all("pdot" not in n["html"] for n in w.nodes)
+
+
+def test_ui_canvas_p_valor_junto_da_decisao_de_fundir(task):
+    """A folha em foco mostra o teste contra cada vizinha adjacente, com o
+    veredito na régua do α do auto-fundir: p > α = candidata a fusão."""
+    ui = _build(task)
+    w = _abre_canvas(ui)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_apply(None)
+    folhas = [s for s, v in ui.seg.segments.items() if v["is_leaf"]]
+    _foca(ui, w, folhas[1])                                # folha do meio: 2 vizinhas
+    txt = ui.out_cv_merge_p.value
+    assert txt.count("p=") + txt.count("p<") == 2          # um teste por vizinha
+    assert "α=0.05" in txt
+    assert "candidata a fusão" in txt or "distinta" in txt
+    _foca(ui, w, "root")                                   # nó interno: sem vizinhas
+    assert ui.out_cv_merge_p.value == ""
+
+
+def test_ui_canvas_ir_para_folha(task):
+    """O dropdown da barra é uma AÇÃO: escolhe a folha, o canvas voa até ela, a
+    seleção sincroniza com as outras abas e ele volta ao rótulo."""
+    ui = _build(task)
+    w = _abre_canvas(ui)
+    if w is None:
+        pytest.skip("anywidget não instalado")
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_apply(None)
+    folhas = [s for s, v in ui.seg.segments.items() if v["is_leaf"]]
+    assert len(ui.dd_cv_goto.options) == len(folhas) + 1   # rótulo + folhas atuais
+    centro_antes = w.center_token
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.dd_cv_goto.value = folhas[-1]
+    assert ui._cv_sel == folhas[-1]
+    assert ui.dd_leaf.value == folhas[-1]
+    assert w.center_token > centro_antes                   # o canvas voou até lá
+    # voltou ao rótulo de ação — que usa "" como valor, nunca None: p/ o
+    # Selection do ipywidgets value=None é "sem seleção" e o dropdown fica branco
+    assert ui.dd_cv_goto.index == 0 and ui.dd_cv_goto.value == ""
+
+
+def test_ui_canvas_salvar_cenario_da_barra(task):
+    """O botão da barra fotografa a árvore na MESMA lista de cenários de
+    Avançado — um só formato de foto, restaurar/comparar continuam lá."""
+    ui = _build(task)
+    _abre_canvas(ui)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_apply(None)
+        ui.tx_cv_scn.value = "antes do experimento"
+        ui._on_cv_scn_save(None)
+    assert "antes do experimento" in ui._scenarios
+    assert ui.tx_cv_scn.value == ""                        # campo pronto p/ a próxima
+    with contextlib.redirect_stdout(io.StringIO()):        # sem nome → nome sequencial
+        ui._on_cv_scn_save(None)
+    assert len(ui._scenarios) == 2
 
 
 def test_ui_canvas_nao_carrega_nada_da_rede(task):

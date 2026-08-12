@@ -198,6 +198,12 @@ _CSS = """
 .treeui-cvpanel .widget-box, .treeui-cvpanel .jupyter-button,
 .treeui-cvpanel .widget-html, .treeui-cvpanel .widget-inline-hbox {
   flex-shrink:0 !important; }
+/* o card do mapa é o único que ganha a largura toda: encosta nas bordas do
+   painel (margem negativa cobre o padding de .treeui + o do conteúdo das abas)
+   e quase zera o próprio padding lateral. Sobra ~70px a mais de plano, e o
+   canvas começa mais à esquerda que os cards das outras abas. */
+.treeui-card-mapa { padding-left:5px !important; padding-right:5px !important;
+  margin-left:-9px; margin-right:-9px; }
 /* sliders/controles encolhem para caber na coluna (min-width:0 libera o flex)
    e os cards clipam qualquer sobra horizontal — elimina a barra de rolagem
    horizontal que aparecia embaixo dos cards na aba Construir */
@@ -257,9 +263,10 @@ _CSS = """
   margin-right:6px; max-width:420px; white-space:nowrap; overflow:hidden;
   text-overflow:ellipsis; vertical-align:middle; }
 .treeui.dark .treeui-imgchip { background:#37444F; border-color:#5F7281; color:#E8ECF0; }
-/* barra de ações do preview: separador vertical entre grupos (o respiro entre
-   botões é margem inline — o mk() já define margin, que venceria o CSS) */
-.treeui-imgbar .treeui-vsep { display:inline-block; width:1px; height:24px;
+/* barras de ações (preview clicável e mapa da árvore interativa): separador
+   vertical entre grupos de botões. A regra vale em qualquer barra dentro da UI —
+   estava presa a .treeui-imgbar e o separador nascia 0×0 fora dela. */
+.treeui .treeui-vsep { display:inline-block; width:1px; height:24px; flex:none;
   background:var(--line); margin:4px 12px 4px 4px; }
 </style>
 """
@@ -658,6 +665,7 @@ _TREE_CANVAS_CSS = """
 .ygg-cv-node.sel { border-color:var(--sel-ac,#e8870b); border-width:2px;
   box-shadow:0 0 0 3px rgba(232,135,11,.22), 0 4px 14px rgba(16,24,40,.18); }
 .ygg-cv-node .t { display:flex; align-items:center; gap:5px; }
+.ygg-cv-node .pdot { width:9px; height:9px; border-radius:50%; flex:none; }
 .ygg-cv-node .lb { font-size:11.5px; font-weight:600; line-height:1.25; flex:1;
   color:var(--strong-ink,#15324a); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .ygg-cv-node .m { display:flex; align-items:baseline; gap:6px; margin-top:2px; }
@@ -1574,7 +1582,10 @@ class TreeSegmenterUI:
         self._cv_widget = None
         self._cv_sel = None                # sid do nó em foco no painel
         self._cv_syncing = False           # guarda dos observers durante a sincronia
+        self._cv_syncing_side = False      # idem p/ o seletor de lado do mover corte
         self._cv_prev_tbl = None           # tabela das faixas do último preview
+        self._cv_cat_ctx = None            # (variável, folha) do agrupador de categorias
+        self._cv_cat_widgets: dict = {}    # categoria → Dropdown de grupo
         # self.allow_interactive_tree foi resolvido no __init__ (Databricks → PNG
         # estático autocontido, sem CDN do anywidget) — ver comentário lá.
         # barra de ações em 2 linhas: 1. chip do nó + ações principais da folha;
@@ -2067,8 +2078,9 @@ class TreeSegmenterUI:
             W.HBox([self.tx_sql_table, self.dd_fallback, self.btn_sql]),
             self.out_sql]); card_sql.add_class("treeui-card")
         # importância abre a aba: é a leitura mais direta de "o que a árvore usou"
+        # (card_sib saiu daqui para a aba "Árvore interativa" — ver lá o porquê)
         tab_diag = W.VBox([card_imp, sep_diag, card_score, sep_diag2,
-                           card_metrics, card_table, card_sib,
+                           card_metrics, card_table,
                            card_estab, card_varprof,
                            card_discrim, card_boot])
 
@@ -2352,9 +2364,14 @@ class TreeSegmenterUI:
                                        layout=W.Layout(width="auto"))
         self.btn_cv_sugcuts.on_click(self._on_cv_sugcuts)
         self.out_cv_cuts_hint = W.HTML()
+        self.out_cv_optbin_hint = W.HTML()    # limites de bin herdados de Construir
         self.box_cv_cuts = W.VBox([W.HBox([self.tx_cv_cuts, self.btn_cv_sugcuts],
                                           layout=W.Layout(align_items="center", width="100%")),
                                    self.out_cv_cuts_hint])
+        # variável CATEGÓRICA no modo Manual: um seletor de grupo por categoria,
+        # exatamente como na aba Construir — digitar grupos separados por ';' era
+        # um segundo jeito de dizer a mesma coisa, e as duas telas divergiam
+        self.cv_cat_box = W.VBox(layout=W.Layout(width="100%"))
         self.out_cv_preview = W.HTML()
         self.btn_cv_preview = W.Button(description="Prever divisão", icon="eye",
                                        layout=W.Layout(width="auto"))
@@ -2367,7 +2384,7 @@ class TreeSegmenterUI:
             self.out_cv_sug_h, *self.btns_cv_sug,
             W.HTML("<div class='treeui-h' style='margin:10px 0 5px'>Corte desta folha</div>"),
             self.dd_cv_feature, self.tg_cv_mode, self.sl_cv_bins, self.dd_cv_crit,
-            self.box_cv_cuts,
+            self.out_cv_optbin_hint, self.box_cv_cuts, self.cv_cat_box,
             W.HBox([self.btn_cv_preview, self.btn_cv_apply],
                    layout=W.Layout(align_items="center", width="100%", flex_flow="row wrap")),
             self.out_cv_preview,
@@ -2391,25 +2408,111 @@ class TreeSegmenterUI:
                                         tooltip="Desfaz o corte deste ramo: os filhos somem "
                                                 "e ele volta a ser folha")
         self.btn_cv_collapse.on_click(self._on_cv_collapse)
+        self.btn_cv_missing = W.Button(description="Alocar faltantes aqui",
+                                       layout=W.Layout(width="auto"),
+                                       tooltip="Junta o nó de faltantes (NaN) deste split DENTRO "
+                                               "desta folha — a regra vira 'faixa OU faltante'")
+        self.btn_cv_missing.on_click(self._on_cv_missing)
+        self.out_cv_merge_p = W.HTML()        # p-valor vs vizinhas (decisão de fusão)
+        # -- mover corte: mesmo mecanismo da aba Construir (o segmentador move
+        # sempre o `hi` de uma folha, então mover o corte à ESQUERDA desta é mover
+        # o da DIREITA da irmã anterior — o seletor escolhe o lado e a UI acha o dono)
+        self.dd_cv_move_side = W.Dropdown(description="lado", options=[("à direita ▶", "dir")],
+                                          value="dir", layout=W.Layout(width="100%"),
+                                          style={"description_width": "62px"})
+        self.dd_cv_move_side.observe(self._on_cv_move_side, names="value")
+        self.lbl_cv_move = W.HTML()
+        self.tx_cv_move = W.FloatText(description="novo corte", layout=W.Layout(width="100%"),
+                                      style={"description_width": "62px"})
+        self.btn_cv_move_prev = W.Button(description="Prever corte", icon="eye",
+                                         layout=W.Layout(width="auto"))
+        self.btn_cv_move_prev.on_click(self._on_cv_move_preview)
+        self.btn_cv_move = W.Button(description="Mover corte", icon="arrows-h",
+                                    layout=W.Layout(width="auto"))
+        self.btn_cv_move.on_click(self._on_cv_move)
+        self.out_cv_move = W.HTML()
+        self.box_cv_move = W.VBox([
+            W.HTML("<div class='treeui-h' style='margin:10px 0 4px'>Mover o corte da divisa"
+                   "</div>"),
+            self.lbl_cv_move, self.dd_cv_move_side, self.tx_cv_move,
+            W.HBox([self.btn_cv_move_prev, self.btn_cv_move],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center", width="100%")),
+            self.out_cv_move,
+        ], layout=W.Layout(width="100%"))
         box_cv_regras = W.VBox([
             W.HTML("<div class='treeui-h' style='margin:12px 0 5px'>Regras de negócio</div>"),
             W.HTML("<div class='treeui-legend' style='margin:0 0 6px'>O <b>apelido</b> é o nome "
                    "que este segmento leva para a régua, o Excel e o SQL. <b>Fechar</b> protege "
-                   "a folha de novos cortes e da poda automática.</div>"),
+                   "a folha de novos cortes e da poda automática. <b>Alocar faltantes</b> traz "
+                   "o nó de NaN do split para dentro desta folha.</div>"),
             self.tx_cv_name,
             W.HBox([self.btn_cv_lock, self.btn_cv_merge_l, self.btn_cv_merge_r,
-                    self.btn_cv_collapse],
+                    self.btn_cv_collapse, self.btn_cv_missing],
                    layout=W.Layout(flex_flow="row wrap", align_items="center", width="100%")),
+            self.out_cv_merge_p,
+            self.box_cv_move,
         ], layout=W.Layout(width="100%"))
 
         self.box_cv_panel = W.VBox([self.out_cv_head, self.out_cv_stats, self.out_cv_note,
                                     self.box_cv_split, box_cv_regras],
                                    layout=W.Layout(width="100%"))
         painel_cv = W.VBox([self.out_cv_empty, self.box_cv_panel],
-                           layout=W.Layout(width="390px", flex="0 0 390px", min_width="0",
+                           layout=W.Layout(width="348px", flex="0 0 348px", min_width="0",
                                            max_height="640px", overflow="hidden auto",
-                                           padding="0 2px 0 12px"))
+                                           padding="0 2px 0 10px"))
         painel_cv.add_class("treeui-cvpanel")
+        self.btn_cv_reset = W.Button(description="Resetar árvore", icon="refresh",
+                                     button_style="danger", layout=W.Layout(width="auto"),
+                                     tooltip="Volta à árvore vazia (só a raiz). Pede confirmação "
+                                             "e é desfazível com ↶ Desfazer")
+        self.btn_cv_reset.on_click(self._on_cv_reset)
+        # barra de ações da árvore INTEIRA. Desfazer/refazer moram aqui porque
+        # manipulação direta sem desfazer à mão é desconfortável; as três ações
+        # automáticas são os MESMOS handlers da aba Construir e leem a
+        # configuração de lá (um só lugar de verdade — ver out_cv_auto_cfg).
+        self.btn_cv_undo = W.Button(description="↶ Desfazer", layout=W.Layout(width="auto"),
+                                    tooltip="Desfaz a última alteração na árvore")
+        self.btn_cv_undo.on_click(self._on_undo)
+        self.btn_cv_redo = W.Button(description="Refazer ↷", layout=W.Layout(width="auto"),
+                                    tooltip="Refaz a alteração desfeita")
+        self.btn_cv_redo.on_click(self._on_redo)
+        self.btn_cv_autofit = W.Button(description="Auto-fit", icon="magic",
+                                       layout=W.Layout(width="auto"),
+                                       tooltip="Cresce a árvore gulosa por IV. Com uma FOLHA "
+                                               "selecionada no mapa, cresce só aquele ramo; "
+                                               "na raiz, reconstrói tudo")
+        self.btn_cv_autofit.on_click(self._on_autofit)
+        self.btn_cv_automerge = W.Button(description="Auto-fundir", icon="compress",
+                                         layout=W.Layout(width="auto"),
+                                         tooltip="Funde folhas-irmãs com risco estatisticamente "
+                                                 "indistinguível (p > α) ou com Δ abaixo do mínimo")
+        self.btn_cv_automerge.on_click(self._on_automerge)
+        self.btn_cv_prune = W.Button(description="Podar", icon="scissors",
+                                     layout=W.Layout(width="auto"),
+                                     tooltip="Funde as folhas pouco representativas ou com Δ "
+                                             "pequeno em relação à irmã")
+        self.btn_cv_prune.on_click(self._on_prune)
+        self.out_cv_auto_cfg = W.HTML()
+        # "ir para folha": numa árvore larga, achar uma folha arrastando é chato.
+        # O dropdown é uma AÇÃO (voa até a folha e volta ao rótulo), não um estado.
+        # o rótulo de ação usa "" como valor (NUNCA None: para o Selection do
+        # ipywidgets, value=None significa "sem seleção" e zera o index — o
+        # dropdown renderiza em branco). O observer fica no INDEX, o trait
+        # primitivo que o frontend envia.
+        self.dd_cv_goto = W.Dropdown(options=[("ir para folha…", "")], index=0,
+                                     layout=W.Layout(width="200px"))
+        self.dd_cv_goto.observe(self._on_cv_goto, names="index")
+        self._cv_goto_syncing = False
+        # "salvar cenário": o fluxo do mapa é experimental por natureza, e
+        # experimento pede foto antes. Reusa a lista de cenários de Avançado
+        # (restaurar/comparar continuam lá).
+        self.tx_cv_scn = W.Text(placeholder="nome do cenário",
+                                layout=W.Layout(width="150px"))
+        self.btn_cv_scn = W.Button(description="Salvar cenário", icon="camera",
+                                   tooltip="Fotografa a árvore atual como cenário em memória — "
+                                           "restaurar/comparar ficam na aba Avançado",
+                                   layout=W.Layout(width="auto"))
+        self.btn_cv_scn.on_click(self._on_cv_scn_save)
         card_cv = W.VBox([
             W.HTML("<div class='treeui-h'>Árvore interativa · construa os cortes no mapa</div>"),
             W.HTML("<div class='treeui-legend'>Arraste para navegar, role para ampliar e "
@@ -2419,14 +2522,29 @@ class TreeSegmenterUI:
                    "outras abas.<br/>A tela abre centralizada na folha em foco; "
                    "<b>Enquadrar</b> mostra a árvore inteira — em árvores largas os cartões "
                    "ficam pequenos, então aproxime de volta para ler.</div>"),
-            W.HBox([self.btn_cv_fit], layout=W.Layout(width="100%")),
+            W.HBox([self.btn_cv_undo, self.btn_cv_redo,
+                    W.HTML("<div class='treeui-vsep'></div>"),
+                    self.btn_cv_autofit, self.btn_cv_automerge, self.btn_cv_prune,
+                    W.HTML("<div class='treeui-vsep'></div>"),
+                    self.dd_cv_goto, self.btn_cv_fit,
+                    W.HTML("<div class='treeui-vsep'></div>"),
+                    self.tx_cv_scn, self.btn_cv_scn,
+                    W.HTML("<div class='treeui-vsep'></div>"),
+                    self.btn_cv_reset],
+                   layout=W.Layout(width="100%", align_items="center",
+                                   flex_flow="row wrap")),
+            self.out_cv_auto_cfg,
             W.HBox([W.VBox([self.box_cv_canvas, self.out_cv_msg],
                            layout=W.Layout(flex="1 1 auto", min_width="0")),
                     painel_cv],
                    layout=W.Layout(width="100%", align_items="stretch")),
         ])
         card_cv.add_class("treeui-card")
-        tab_canvas = W.VBox([card_cv])
+        card_cv.add_class("treeui-card-mapa")
+        # o teste entre folhas comparáveis vem junto: ele compara a folha com as
+        # IRMÃS ADJACENTES, então pertence ao lugar onde se olha a vizinhança da
+        # folha — o mapa — e não a uma aba de diagnóstico separada.
+        tab_canvas = W.VBox([card_cv, card_sib])
 
         # ---- montagem das abas (o canvas entra logo depois de Construir) ----
         tabs = W.Tab(children=[tab_build, tab_canvas, tab_var, tab_diag, tab_valid,
@@ -4374,7 +4492,7 @@ class TreeSegmenterUI:
         slim = (", " + " · ".join(lim)) if lim else ""
         scrit = "" if criterion == "optbin" else f", critério={criterion}"
         self._log(f"Auto-fit em '{alvo}' (profundidade ≤ {depth}{slim}{scrit})…")
-        with self._busy(self.btn_autofit, self.btn_img_autofit,
+        with self._busy(self.btn_autofit, self.btn_img_autofit, self.btn_cv_autofit,
                         msg="rodando o auto-fit…"):
             redo_bak = list(self._redo)
             antes = self._delta_snapshot()
@@ -4654,6 +4772,10 @@ class TreeSegmenterUI:
                 # deixaria os cartões pequenos demais para ler (o botão
                 # "Enquadrar" continua ali para a visão geral)
                 self._refresh_canvas(center=primeira)
+            elif getattr(self, "out_cv_auto_cfg", None) is not None:
+                # nada a redesenhar, mas os sliders da aba Construir podem ter
+                # mudado enquanto estávamos lá — a linha de parâmetros acompanha
+                self._sync_cv_auto_cfg()
 
     def _refresh_iv(self):
         # só calcula se a aba de variáveis estiver à vista; senão marca pendente e
@@ -5304,7 +5426,7 @@ class TreeSegmenterUI:
             self._refresh_lock_labels()
 
     def _on_prune(self, _):
-        with self._busy(self.btn_prune, msg="podando a árvore…"):
+        with self._busy(self.btn_prune, self.btn_cv_prune, msg="podando a árvore…"):
             redo_bak = list(self._redo)
             antes = self._delta_snapshot()
             self._checkpoint()
@@ -6175,6 +6297,10 @@ class TreeSegmenterUI:
     def _sync_undo_buttons(self):
         self.btn_undo.disabled = not self._undo
         self.btn_redo.disabled = not self._redo
+        # os gêmeos da barra do canvas (podem não existir na 1ª chamada do _build)
+        if getattr(self, "btn_cv_undo", None) is not None:
+            self.btn_cv_undo.disabled = not self._undo
+            self.btn_cv_redo.disabled = not self._redo
 
     def _on_undo(self, _):
         if not self._undo:
@@ -6206,7 +6332,8 @@ class TreeSegmenterUI:
     def _on_automerge(self, _):
         import contextlib
         import io
-        with self._busy(self.btn_automerge, msg="rodando o auto-merge…"):
+        with self._busy(self.btn_automerge, self.btn_cv_automerge,
+                        msg="rodando o auto-merge…"):
             n0 = sum(s["is_leaf"] for s in self.seg.segments.values())
             antes = self._delta_snapshot()
             self._checkpoint()
@@ -6495,7 +6622,26 @@ class TreeSegmenterUI:
                    else f"{vol} obs · {rep:.1f}% da carteira")
         lock = ("<span title='folha fechada' style='font-size:11px;flex:none'>🔒</span>"
                 if sid in self.locked else "")
-        return (f"<div class='t'><span class='lb' title=\"{_esc(rot)}\">{_esc(rot)}</span>{lock}</div>"
+        # semáforo de PSI da folha (pior amostra não-referência): com ele o mapa
+        # vira um heatmap de estabilidade — a cor do ALVO já está no número, a
+        # do PSI fica neste ponto. Detalhe por amostra no title (hover).
+        psi_dot = ""
+        if s["is_leaf"] and self.sample_col is not None and self._nonref:
+            partes, pior = [], None
+            for a in self._nonref:
+                p = self._leaf_psi(sid, a)
+                if pd.isna(p):
+                    continue
+                ab = "ESTAB" if a == "ESTABILIDADE" else a
+                partes.append(f"PSI {ab} {p:.1%}")
+                pior = p if pior is None else max(pior, p)
+            if pior is not None:
+                cor_psi = {"green": "var(--ok-tx)", "yellow": "var(--warn-tx)",
+                           "red": "var(--bad-tx)"}[self._psi_class(pior)]
+                psi_dot = (f"<span class='pdot' style='background:{cor_psi}' "
+                           f"title=\"{_esc(' · '.join(partes))}\"></span>")
+        return (f"<div class='t'><span class='lb' title=\"{_esc(rot)}\">{_esc(rot)}</span>"
+                f"{psi_dot}{lock}</div>"
                 f"<div class='m'><span class='v' style='color:{cor}'>{v_txt}</span>"
                 f"<span class='g'>{_esc(chip)}</span></div>"
                 f"<div class='s'>{sub}</div>"
@@ -6539,6 +6685,9 @@ class TreeSegmenterUI:
     def _refresh_canvas(self, fit=False, center=False):
         """(Re)desenha o canvas a partir da árvore atual. ``fit`` enquadra tudo,
         ``center`` centraliza no nó selecionado (contadores nos traits)."""
+        # o "ir para folha" e o salvar cenário vivem na barra e independem do
+        # mapa — as opções acompanham as folhas atuais mesmo no modo offline
+        self._sync_cv_goto_options()
         if not self._ensure_canvas_widget():
             # sem o plano navegável, o painel ainda vale: ele é ipywidgets puro
             # (zero rede) e opera sobre a folha ativa da UI — o que se perde é o
@@ -6551,6 +6700,7 @@ class TreeSegmenterUI:
         self.box_cv_canvas.layout.display = ""
         self.btn_cv_fit.layout.display = ""
         self.out_cv_msg.value = ""
+        self._sync_cv_auto_cfg()
         w = self._cv_widget
         try:
             nodes, edges, cw, ch = self._canvas_layout()
@@ -6727,15 +6877,55 @@ class TreeSegmenterUI:
         finally:
             self._cv_syncing = False
         self.tx_cv_name.disabled = not is_leaf
-        self.btn_cv_lock.description = "🔓 Reabrir folha" if travada else "🔒 Fechar folha"
+        self._sync_cv_actions()
+        self.out_cv_preview.value = ""      # o preview era de outro nó
+
+    def _sync_cv_actions(self):
+        """Habilita cada ação do nó em foco conforme o que é válido ali.
+
+        Vive fora do ``_refresh_cv_panel`` de propósito: precisa rodar DEPOIS do
+        ``_busy`` dos handlers. O ``_busy`` re-habilita ao sair todos os botões
+        que desabilitou, o que apagaria o estado calculado aqui — foi assim que
+        "Alocar faltantes" continuava clicável depois de já ter alocado."""
+        sid = self._cv_node()
+        if sid is None:
+            return
+        s = self.seg.segments[sid]
+        is_leaf, is_root = bool(s["is_leaf"]), s["parent"] is None
+        self.btn_cv_lock.description = ("🔓 Reabrir folha" if sid in self.locked
+                                        else "🔒 Fechar folha")
         self.btn_cv_lock.disabled = not is_leaf
         # a raiz é folha enquanto a árvore está vazia, mas não tem irmãs
         esq, dir_ = ((None, None) if (not is_leaf or is_root)
                      else self.seg._adjacent_sibling_neighbors(sid))
         self.btn_cv_merge_l.disabled = esq is None
         self.btn_cv_merge_r.disabled = dir_ is None
+        self.out_cv_merge_p.value = self._cv_merge_p_html(sid)
         self.btn_cv_collapse.disabled = is_leaf
-        self.out_cv_preview.value = ""      # o preview era de outro nó
+        self.btn_cv_missing.disabled = self._cv_missing_sibling(sid) is None
+        self._sync_cv_move()                # corte da divisa da folha em foco
+
+    def _cv_merge_p_html(self, sid):
+        """Teste de hipótese contra cada vizinha ADJACENTE, no ponto onde a
+        fusão é decidida: p acima do α (o mesmo do auto-fundir) = alvo
+        indistinguível da vizinha = candidata natural a fundir."""
+        name, testes = self._sibling_adjacent_tests(sid)
+        if not testes:
+            return ""
+        alpha = float(self.sl_alpha.value)
+        partes = []
+        for lado, _desc, p in testes:
+            if pd.isna(p):
+                txt, cor, nota = "—", "var(--sub-ink)", "amostra pequena"
+            elif p > alpha:
+                txt = f"p={p:.3f}"
+                cor, nota = "var(--warn-tx)", "indistinguível — candidata a fusão"
+            else:
+                txt = f"p={p:.3f}" if p >= 0.001 else "p<0.001"
+                cor, nota = "var(--ok-tx)", "distinta"
+            partes.append(f"{lado} <b style='color:{cor}'>{txt}</b> ({nota})")
+        return (f"<div class='treeui-legend' style='margin:4px 0 0'>{_esc(name)} vs "
+                f"vizinhas (α={alpha:g}): " + " · ".join(partes) + "</div>")
 
     def _refresh_cv_suggestions(self, sid):
         """Três variáveis de maior IV nesta folha, como atalhos: clicar já
@@ -6755,21 +6945,84 @@ class TreeSegmenterUI:
         self.out_cv_sug_h.layout.display = "" if top else "none"
 
     def _sync_cv_mode(self):
-        """Ótimo mostra máx. bins + critério; Manual mostra a caixa de cortes,
-        cujo formato depende do tipo da variável."""
+        """Ótimo mostra máx. faixas + critério. Manual mostra a caixa de cortes
+        (numérica) ou o agrupador de categorias (categórica) — a MESMA regra da
+        aba Construir: uma categoria por linha, categorias do mesmo grupo viram
+        um nó só."""
         manual = self.tg_cv_mode.value == "Manual"
         cat = self._cv_kind() == "cat"
         self.sl_cv_bins.layout.display = "none" if manual else ""
         self.dd_cv_crit.layout.display = "none" if manual else ""
-        self.box_cv_cuts.layout.display = "" if manual else "none"
-        self.tx_cv_cuts.description = "Grupos" if cat else "Cortes"
-        self.tx_cv_cuts.placeholder = ("N,NE; CO; SE,S" if cat else "ex.: 420, 580, 720")
+        self.box_cv_cuts.layout.display = "" if (manual and not cat) else "none"
+        self.cv_cat_box.layout.display = "" if (manual and cat) else "none"
         self.out_cv_cuts_hint.value = (
             "<div style='font-size:10.5px;color:var(--sub-ink);margin:2px 0 0 4px'>"
-            + ("categórica — separe as CATEGORIAS por vírgula e os GRUPOS por ponto e vírgula."
-               if cat else
-               "numérica — um corte por vírgula; cada corte fecha à direita (≤).")
-            + "</div>")
+            "numérica — um corte por vírgula; cada corte fecha à direita (≤).</div>")
+        # o binning ótimo daqui honra os limites de tamanho de bin marcados em
+        # Construir; sem dizer isso, faixas "faltando" pareceriam bug
+        limites = self._optbin_extra()
+        rot = {"min_bin_size": "mín. por faixa", "max_bin_size": "máx. por faixa",
+               "min_mean_diff": "Δ mínimo entre faixas"}
+        self.out_cv_optbin_hint.value = (
+            "" if (manual or not limites) else
+            "<div style='font-size:10.5px;color:var(--sub-ink);margin:2px 0 4px 4px'>"
+            "limites herdados da aba Construir: "
+            + " · ".join(f"{rot[k]} <b>{v:g}</b>" for k, v in limites.items()) + "</div>")
+        if manual and cat:
+            self._rebuild_cv_cat_box()
+
+    def _rebuild_cv_cat_box(self):
+        """Um seletor de grupo por categoria presente na folha, ordenadas pelo
+        alvo — espelha ``_rebuild_cat_box`` da aba Construir, inclusive a guarda
+        que evita reinstanciar os Dropdowns quando o contexto não mudou."""
+        sid, feat = self._cv_node(), self._cv_feature(warn=False)
+        if feat is None or sid is None or sid not in self.seg.segments:
+            self.cv_cat_box.children = (); return
+        if (getattr(self, "_cv_cat_ctx", None) == (feat, sid)
+                and getattr(self, "_cv_cat_widgets", None)):
+            return
+        self._cv_cat_widgets = {}
+        self._cv_cat_ctx = (feat, sid)
+        sub = self.df[self.seg.segments[sid]["mask"]]
+        s = sub[feat]
+        valid = sub[s.notna()]
+        if len(valid) == 0:
+            self.cv_cat_box.children = (W.HTML(
+                "<div style='font-size:11px;color:var(--sub-ink)'>Sem categorias nesta "
+                "folha.</div>"),)
+            return
+        means = (valid.assign(_c=valid[feat].astype(str))
+                 .groupby("_c")[self.target].mean().sort_values())
+        order = means.index.tolist()
+        n = len(order)
+        linhas = [W.HTML("<div style='font-size:10.5px;color:var(--muted);margin-bottom:4px'>"
+                         f"Categorias no <b>mesmo grupo</b> viram um nó. Ordenadas por "
+                         f"{_esc(self._risk_label)}. Faltantes (NaN) já viram um nó "
+                         "próprio.</div>")]
+        for k, c in enumerate(order, 1):
+            dd = W.Dropdown(options=[(f"grupo {g}", g) for g in range(1, n + 1)], value=k,
+                            layout=W.Layout(width="96px"))
+            self._cv_cat_widgets[c] = dd
+            lab = W.HTML(f"<span style='font-size:11.5px'><b>{_esc(c)}</b>"
+                         f"<span style='color:var(--sub-ink)'> · {means[c]:.3f}</span></span>")
+            linhas.append(W.HBox([dd, lab], layout=W.Layout(align_items="center")))
+        na_n = int(s.isna().sum())
+        if na_n:
+            linhas.append(W.HTML(f"<div style='font-size:10.5px;color:var(--warn-tx);"
+                                 f"margin-top:3px'>+ <b>(faltante)</b>: {na_n} linhas → nó "
+                                 "próprio automático</div>"))
+        self.cv_cat_box.children = tuple(linhas)
+
+    def _cv_cat_groups(self):
+        """Grupos montados no agrupador de categorias do painel."""
+        if (getattr(self, "_cv_cat_ctx", None) != (self._cv_feature(warn=False),
+                                                   self._cv_node())
+                or not getattr(self, "_cv_cat_widgets", None)):
+            self._rebuild_cv_cat_box()
+        grupos: dict = {}
+        for c, dd in (getattr(self, "_cv_cat_widgets", None) or {}).items():
+            grupos.setdefault(dd.value, []).append(c)
+        return [grupos[g] for g in sorted(grupos)]
 
     def _on_cv_mode(self, _):
         if self._cv_syncing:
@@ -6802,20 +7055,18 @@ class TreeSegmenterUI:
         return _handler
 
     def _cv_parse_cuts(self, feature, sid):
-        """Lê a caixa de cortes do painel. Numérica: '420, 580'. Categórica:
-        grupos separados por ';' e categorias por ',' — 'N,NE; CO; SE,S'."""
+        """Cortes do modo Manual: a lista de números da caixa de texto, ou os
+        grupos montados no agrupador de categorias (mesma regra da Construir)."""
+        if self._cv_kind(feature, sid) != "num":
+            return self._cv_cat_groups() or None
         txt = (self.tx_cv_cuts.value or "").strip()
         if not txt:
             return None
-        if self._cv_kind(feature, sid) == "num":
-            vals = [x.strip() for x in txt.replace(";", ",").split(",") if x.strip()]
-            try:
-                return [float(x) for x in vals] or None
-            except ValueError as e:
-                raise ValueError(f"corte não numérico em '{txt}' ({e})") from None
-        grupos = [[c.strip() for c in g.split(",") if c.strip()]
-                  for g in txt.split(";") if g.strip()]
-        return [g for g in grupos if g] or None
+        vals = [x.strip() for x in txt.replace(";", ",").split(",") if x.strip()]
+        try:
+            return [float(x) for x in vals] or None
+        except ValueError as e:
+            raise ValueError(f"corte não numérico em '{txt}' ({e})") from None
 
     def _cv_prepare(self):
         """Monta ``self._pending`` a partir dos controles do painel (mesma
@@ -6833,8 +7084,11 @@ class TreeSegmenterUI:
         try:
             if self.tg_cv_mode.value == "Ótimo":
                 splits = None
+                # os limites de tamanho de bin (min/max/Δ mínimo) vêm dos mesmos
+                # checkboxes da aba Construir: sem isto o "Ótimo" daqui produziria
+                # faixas diferentes das de lá com a UI mostrando a mesma config
                 extra = dict(max_n_bins=self.sl_cv_bins.value,
-                             criterion=self.dd_cv_crit.value)
+                             criterion=self.dd_cv_crit.value, **self._optbin_extra())
             else:
                 splits, extra = self._cv_parse_cuts(feature, sid), {}
                 if not splits:
@@ -6872,7 +7126,13 @@ class TreeSegmenterUI:
             if r["kind"] == "num":
                 self.tx_cv_cuts.value = ", ".join(f"{c:.4g}" for c in r["cuts"])
             else:
-                self.tx_cv_cuts.value = "; ".join(", ".join(map(str, g)) for g in r["groups"])
+                # categórica: a sugestão vira a ATRIBUIÇÃO de grupo de cada
+                # categoria no agrupador, não um texto — é lá que o corte é lido
+                self._rebuild_cv_cat_box()
+                por_cat = {str(c): g for g, grupo in enumerate(r["groups"], 1) for c in grupo}
+                for c, dd in (getattr(self, "_cv_cat_widgets", None) or {}).items():
+                    if str(c) in por_cat:
+                        dd.value = por_cat[str(c)]
             self._log(f"Sugestão p/ '{lbl}': {r['n_bins']} faixas — cortes preenchidos.")
 
     def _on_cv_preview(self, _):
@@ -7016,6 +7276,7 @@ class TreeSegmenterUI:
                 self._cv_sel = None            # o sid antigo morreu na fusão
                 self._refresh()                # já redesenha o canvas (aba à vista)
                 self._log_delta("fundir (canvas)", antes)
+            self._sync_cv_actions()    # fora do _busy: ver o docstring de lá
         return _handler
 
     def _on_cv_collapse(self, _):
@@ -7036,6 +7297,236 @@ class TreeSegmenterUI:
             self._refresh()                    # já redesenha o canvas (aba à vista)
             self._cv_center()
             self._log_delta("recolher (canvas)", antes)
+        self._sync_cv_actions()        # fora do _busy: ver o docstring de lá
+
+    def _cv_missing_sibling(self, sid):
+        """Nó de faltantes (NaN) irmão desta folha, se o split gerou um e ele
+        ainda não foi juntado — mesma condição que ``merge_missing`` usa."""
+        s = self.seg.segments.get(sid)
+        if s is None or not s["is_leaf"] or not s.get("conditions"):
+            return None
+        if s["conditions"][-1].get("kind") == "na":     # o próprio nó de faltantes
+            return None
+        return next((c for c, o in self.seg.segments.items()
+                     if o.get("parent") == s["parent"] and o["is_leaf"] and o.get("conditions")
+                     and o["conditions"][-1].get("kind") == "na"), None)
+
+    def _on_cv_missing(self, _):
+        """Traz o nó de faltantes do split para dentro desta folha: a regra da
+        folha passa a ser 'faixa OU faltante'."""
+        sid = self._cv_node()
+        if sid is None or self._cv_missing_sibling(sid) is None:
+            self._log("Esta folha não tem nó de faltantes irmão para alocar."); return
+        with self._busy(self.btn_cv_missing, msg="alocando os faltantes…"):
+            before = set(self.seg.segments)
+            redo_bak = list(self._redo)
+            antes = self._delta_snapshot()
+            self._checkpoint()
+            try:
+                self.seg.merge_missing(sid, verbose=False)
+            except Exception as e:
+                self._revert_checkpoint(redo_bak)
+                self._log(f"Erro ao alocar os faltantes: {type(e).__name__}: {e}"); return
+            if set(self.seg.segments) == before:        # no-op: não polui o histórico
+                self._revert_checkpoint(redo_bak)
+                self._log("Nada a alocar — este split não tem nó de faltantes."); return
+            self.locked &= set(self.seg.segments)
+            self._pending = None
+            novos = [i for i in self.seg.segments
+                     if i not in before and self.seg.segments[i]["is_leaf"]]
+            self._cv_sel = novos[0] if novos else None
+            self._refresh()
+            self._cv_center()
+            self._log_delta("alocar faltantes (canvas)", antes)
+        self._sync_cv_actions()        # fora do _busy: ver o docstring de lá
+
+    # ---- mover o corte da divisa ------------------------------------
+    def _cv_move_owner(self):
+        """Folha cujo ``hi`` será movido, conforme o lado escolhido."""
+        sid = self._cv_node()
+        if sid is None:
+            return None
+        return sid if self.dd_cv_move_side.value == "dir" else self._left_cut_owner(sid)
+
+    def _sync_cv_move(self):
+        """Monta o seletor de lado com os cortes que a folha REALMENTE tem e
+        espelha o corte vigente no campo. Sem corte móvel, some da tela: mover
+        corte só existe entre folhas vizinhas de um split numérico."""
+        sid = self._cv_node()
+        valido = (sid is not None and sid in self.seg.segments
+                  and self.seg.segments[sid]["is_leaf"])
+        dono_esq = self._left_cut_owner(sid) if valido else None
+        tem_dir = bool(self.seg.movable_cut(sid)) if valido else False
+        opcoes = ([("◀ à esquerda", "esq")] if dono_esq else []) + \
+                 ([("à direita ▶", "dir")] if tem_dir else [])
+        self.out_cv_move.value = ""            # preview antigo era de outra folha
+        self.box_cv_move.layout.display = "" if opcoes else "none"
+        if not opcoes:
+            return
+        self._cv_syncing_side = True
+        try:
+            manter = self.dd_cv_move_side.value
+            self.dd_cv_move_side.options = opcoes
+            valores = [v for _, v in opcoes]
+            self.dd_cv_move_side.value = manter if manter in valores else valores[-1]
+        finally:
+            self._cv_syncing_side = False
+        self.dd_cv_move_side.disabled = len(opcoes) == 1
+        self._render_cv_move_side()
+
+    def _render_cv_move_side(self):
+        """Corte vigente e intervalo válido do lado escolhido."""
+        dono = self._cv_move_owner()
+        info = self.seg.movable_cut(dono) if dono else None
+        if info is None:
+            self.lbl_cv_move.value = ("<div class='treeui-legend'>Corte indisponível deste "
+                                      "lado.</div>")
+            for w in (self.tx_cv_move, self.btn_cv_move_prev, self.btn_cv_move):
+                w.disabled = True
+            return
+        rot = self.seg.feature_labels.get(info["feature"], info["feature"])
+        lado = "à esquerda" if self.dd_cv_move_side.value == "esq" else "à direita"
+        self.lbl_cv_move.value = (
+            f"<div class='treeui-legend'>Corte {lado} em <b>{_esc(rot)}</b>: "
+            f"<b>{_fmt(info['cut'])}</b> · válido entre {_fmt(info['lo'])} e "
+            f"{_fmt(info['hi_sib'])} (exclusivo)</div>")
+        self.tx_cv_move.value = info["cut"]
+        for w in (self.tx_cv_move, self.btn_cv_move_prev, self.btn_cv_move):
+            w.disabled = False
+
+    def _on_cv_move_side(self, _):
+        if not getattr(self, "_cv_syncing_side", False):
+            self.out_cv_move.value = ""        # o preview era do outro lado
+            self._render_cv_move_side()
+
+    def _on_cv_move_preview(self, _):
+        dono = self._cv_move_owner()
+        if dono is None or dono not in self.seg.segments:
+            self._log("Selecione uma folha com corte móvel."); return
+        try:
+            tbl = self.seg.preview_move_cut(dono, self.tx_cv_move.value)
+        except Exception as e:
+            self.out_cv_move.value = (f"<div style='font-size:11.5px;color:var(--bad-tx)'>"
+                                      f"{_esc(e)}</div>")
+            return
+        self.out_cv_move.value = self._df_html(tbl, center=True)
+
+    def _on_cv_move(self, _):
+        dono = self._cv_move_owner()
+        if dono is None or dono not in self.seg.segments:
+            self._log("Selecione uma folha com corte móvel."); return
+        with self._busy(self.btn_cv_move, msg="movendo o corte…"):
+            before = set(self.seg.segments)
+            redo_bak = list(self._redo)
+            antes = self._delta_snapshot()
+            self._checkpoint()
+            try:
+                self.seg.move_cut(dono, self.tx_cv_move.value, verbose=False)
+            except Exception as e:
+                self._revert_checkpoint(redo_bak)
+                self._log(f"Erro ao mover o corte: {type(e).__name__}: {e}")
+                self.out_cv_move.value = (f"<div style='font-size:11.5px;color:var(--bad-tx)'>"
+                                          f"{_esc(e)}</div>")
+                return
+            if set(self.seg.segments) == before:        # corte igual ao vigente
+                self._revert_checkpoint(redo_bak)
+                self._log("O novo corte é igual ao vigente — nada a mudar."); return
+            self.locked &= set(self.seg.segments)
+            self._pending = None
+            novos = [i for i in self.seg.segments
+                     if i not in before and self.seg.segments[i]["is_leaf"]]
+            self._cv_sel = novos[0] if novos else None
+            self._refresh()
+            self._cv_center()
+            self._log_delta("mover corte (canvas)", antes)
+        self._sync_cv_actions()        # fora do _busy: ver o docstring de lá
+
+    def _on_cv_reset(self, b):
+        """Volta à árvore vazia. Pede confirmação em dois cliques (é o botão que
+        joga fora o trabalho todo) e continua desfazível pelo ↶ Desfazer."""
+        def _resetar():
+            with self._busy(self.btn_cv_reset, msg="reiniciando a árvore…"):
+                antes = self._delta_snapshot()
+                self._checkpoint()
+                self.seg = TreeSegmenter(self.df, **self._kwargs)
+                self.seg.fallback = self.dd_fallback.value
+                self.locked.clear()
+                self._pending = None
+                self._cv_sel = "root"
+                self._log("Árvore reiniciada.")
+                self._refresh()            # já redesenha o canvas (aba à vista)
+                self._on_cv_fit(None)      # e reenquadra: sobrou só a raiz
+                self._log_delta("resetar (canvas)", antes)
+        self._confirm_twice(b, _resetar)
+
+    def _sync_cv_auto_cfg(self):
+        """Uma linha com os parâmetros que as três ações automáticas vão usar.
+
+        Os sliders ficam na aba Construir e NÃO são duplicados aqui: duas cópias
+        do mesmo número divergem na primeira vez que alguém mexe numa delas. Aqui
+        mostramos o valor em vigor e onde mudá-lo."""
+        alvo = ("a folha selecionada" if (self._cv_node() or "root") != "root"
+                else "a árvore toda (raiz em foco)")
+        self.out_cv_auto_cfg.value = (
+            f"<div class='treeui-legend' style='margin:2px 0 0'>"
+            f"<b>Auto-fit</b> cresce {alvo} até profundidade "
+            f"<b>{int(self.sl_depth.value)}</b> pelo critério "
+            f"<b>{_esc(self.dd_criterion.value)}</b> · <b>Auto-fundir</b> usa α="
+            f"<b>{self.sl_alpha.value:.2f}</b> e Δ mínimo <b>{self.sl_gap.value:.3f}</b> · "
+            f"<b>Podar</b> usa repr. mínima <b>{self.sl_repr.value:.1f}%</b>. "
+            f"Os controles desses números ficam na aba <b>Construir</b>.</div>")
+        self.btn_cv_undo.disabled = not self._undo
+        self.btn_cv_redo.disabled = not self._redo
+
+    def _on_cv_goto(self, ch):
+        """Atalho da barra: seleciona a folha (mesmo caminho do clique no nó) e
+        centraliza o canvas nela. Funciona também sem o mapa (modo offline):
+        vira só o foco do painel."""
+        if self._cv_goto_syncing:
+            return
+        idx = ch.get("new")
+        if not idx:                            # None ou 0 = o rótulo de ação
+            return
+        sid = self.dd_cv_goto.options[idx][1]
+        if sid is None or sid not in self.seg.segments:
+            return
+        w = self._cv_widget
+        if w is not None and w.selected != sid:
+            w.selected = sid                   # dispara _on_cv_select, como o clique
+        else:
+            self._cv_sel = sid
+            if (self.seg.segments[sid]["is_leaf"] and self.dd_leaf.value != sid
+                    and sid in [s for _, s in self.dd_leaf.options]):
+                self.dd_leaf.value = sid       # sincroniza as outras abas
+            else:
+                self._refresh_cv_panel()
+        self._cv_center()
+        self._cv_goto_syncing = True           # o dropdown é ação: volta ao rótulo
+        try:
+            self.dd_cv_goto.index = 0          # index, não value — ver _sync_cv_goto_options
+        finally:
+            self._cv_goto_syncing = False
+
+    def _sync_cv_goto_options(self):
+        """Opções do 'ir para folha' acompanham as folhas atuais da árvore.
+
+        O reset é pelo ``index`` (não pelo ``value``): trocar as ``options``
+        deixa o index em ``None`` mesmo havendo uma opção de valor ``None`` —
+        e index ``None`` é um dropdown em branco, sem o rótulo de ação."""
+        self._cv_goto_syncing = True
+        try:
+            self.dd_cv_goto.options = ([("ir para folha…", "")]
+                                       + self._ordered_leaf_options())
+            self.dd_cv_goto.index = 0
+        finally:
+            self._cv_goto_syncing = False
+
+    def _on_cv_scn_save(self, _):
+        """Fotografa a árvore direto da barra do mapa, reusando o salvar de
+        Avançado — mesma lista de cenários, um só formato de foto."""
+        self.tx_scn_name.value = (self.tx_cv_scn.value or "").strip()
+        self._on_scn_save(None)
+        self.tx_cv_scn.value = ""
 
     def _on_cv_fit(self, _):
         if self._cv_widget is not None:
