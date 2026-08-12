@@ -6592,8 +6592,14 @@ class TreeSegmenterUI:
             return
         if self._cv_sel != sid:
             self._cv_sel = sid
-            if getattr(self, "box_cv_panel", None) is not None:
+            # o painel ordena as variáveis por IV NA FOLHA, o que custa um
+            # variable_iv. Fora da aba, só anotamos o nó e marcamos pendente: quem
+            # trabalha na aba Construir não paga por uma tela que não está vendo.
+            if (getattr(self, "tabs", None) is not None
+                    and self.tabs.selected_index == self._canvas_tab_index):
                 self._refresh_cv_panel()
+            else:
+                self._cv_dirty = True
         w = self._cv_widget
         if w is not None and w.selected != sid:
             w.selected = sid
