@@ -200,6 +200,14 @@ _CSS = """
 .treeui-cvpanel .widget-box, .treeui-cvpanel .jupyter-button,
 .treeui-cvpanel .widget-html, .treeui-cvpanel .widget-inline-hbox {
   flex-shrink:0 !important; }
+/* o CSS do ipywidgets dá `overflow:auto` a TODO widget-box — com isso qualquer
+   estouro SUBPIXEL numa linha de botões vira uma barrinha de rolagem horizontal
+   (dependente do tema de scrollbar do ambiente). Nenhuma caixa desta UI rola
+   por conta própria: linhas quebram (row wrap), altura cresce livre, e quem
+   rola de verdade são os scrollers PRÓPRIOS dentro do HTML (tabelas do Styler,
+   preview da árvore). Os cards ficam de fora da regra: eles seguem com o
+   overflow-x:clip declarado acima, que CONTÉM qualquer sobra horizontal. */
+.treeui .widget-box:not(.treeui-card) { overflow:visible !important; }
 /* o card do mapa é o único que ganha a largura toda: encosta nas bordas do
    painel (margem negativa cobre o padding de .treeui + o do conteúdo das abas)
    e quase zera o próprio padding lateral. Sobra ~70px a mais de plano, e o
@@ -1936,17 +1944,24 @@ class TreeSegmenterUI:
             "<span style='background:var(--ok-bg);padding:1px 5px;border-radius:3px'>verde sem inversão</span> "
             "<span style='background:var(--warn-bg);padding:1px 5px;border-radius:3px'>amarelo inverte em algumas safras</span> "
             "<span style='background:var(--bad-bg);padding:1px 5px;border-radius:3px'>vermelho inverte entre amostras ou em muitas safras</span>.</div>")
-        card_sib = W.VBox([
-            W.HTML("<div class='treeui-h'>Folhas-irmãs · inversão entre amostras &amp; safras</div>"),
-            sib_legend,
+        # os CONTROLES ficam numa coluna estreita (~40% de um monitor comum):
+        # dropdown/inputs/botão esticados na largura inteira do card ficavam
+        # desproporcionais — controle é para ser lido de perto, só os GRÁFICOS
+        # (out_sib) merecem a largura toda
+        box_sib_ctl = W.VBox([
             W.HBox([self.dd_sib_group], layout=W.Layout(width="100%")),
             W.HBox([self.tx_sib_time, self.dd_sib_sample],
                    layout=W.Layout(width="100%")),
-            W.HBox([self.btn_sib]),
+            W.HBox([self.btn_sib], layout=W.Layout(width="100%")),
             # zoom do eixo Y (auto/mín-máx) + eixo em % dos gráficos de estabilidade
             W.HBox([self.btn_sib_zoom, self.btn_sib_reset, self.tx_sib_ymin,
                     self.tx_sib_ymax, self.ck_sib_pct],
                    layout=W.Layout(align_items="center", flex_flow="row wrap")),
+        ], layout=W.Layout(width="100%", max_width="640px"))
+        card_sib = W.VBox([
+            W.HTML("<div class='treeui-h'>Folhas-irmãs · inversão entre amostras &amp; safras</div>"),
+            sib_legend,
+            box_sib_ctl,
             self.out_sib,
         ], layout=W.Layout(width="100%"))
         card_sib.add_class("treeui-card")
