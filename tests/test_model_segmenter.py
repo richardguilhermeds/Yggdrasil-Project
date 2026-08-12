@@ -2009,8 +2009,8 @@ def test_ui_two_stage_regressao():
     assert ui.seg.two_stage
     assert ui.box_twostage.layout.display == ""
     assert ui.row_algo.layout.display == "none"             # modelo único fica escondido
-    assert "① Classificador" in ui.out_metrics.value
-    assert "③ Resposta combinada" in ui.out_metrics.value
+    assert "1. Classificador" in ui.out_metrics.value
+    assert "3. Resposta combinada" in ui.out_metrics.value
     assert ui.seg.rating_labels_                            # rating trazido automaticamente
     assert bool(ui.out_rating_table.value)
 
@@ -2410,13 +2410,13 @@ def test_to_sql_reproduz_ratings_do_python(seg, metodo):
     seg.build_ratings(method=metodo, n_ratings=5)
     sql = seg.to_sql(table="base", col_value="valor_previsto")
 
-    # ① todas as faixas, na ordem dos rótulos da régua
+    # 1. todas as faixas, na ordem dos rótulos da régua
     labels = list(seg.rating_labels_)
     pos = [sql.index(f"THEN '{lab}'") for lab in labels]
     assert len(pos) == len(labels) and pos == sorted(pos)
     assert "ELSE NULL" in sql and "convenção de borda" in sql
 
-    # ② fronteiras: rating do SQL == rating do Python, linha a linha
+    # 2. fronteiras: rating do SQL == rating do Python, linha a linha
     novo = _synthetic(seg.task_type, n=500, seed=7, com_cat=True)
     pred = seg.predict(novo, col_value="valor_previsto")
     con = sqlite3.connect(":memory:")

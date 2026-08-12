@@ -2258,9 +2258,9 @@ class ModelSegmenterUI:
                    "longo das safras (<i>dbase</i>), em dois gráficos com <b>grade de 3 colunas</b>. "
                    "Requer coluna de data.</div>"),
             W.HBox([self.btn_varprofile]),
-            W.HTML("<div class='mseg-h'>① % de missing por safra</div>"),
+            W.HTML("<div class='mseg-h'>1. % de missing por safra</div>"),
             self.out_adv_missing,
-            W.HTML("<div class='mseg-h'>② Dispersão por safra · p5 · média · p95 "
+            W.HTML("<div class='mseg-h'>2. Dispersão por safra · p5 · média · p95 "
                    "<span style='font-weight:400'>(categóricas: proporção das categorias em área "
                    "preenchida)</span></div>"),
             self.out_adv_stats,
@@ -4204,11 +4204,11 @@ class ModelSegmenterUI:
             f"<b>{t:.4f}</b>. Etapa 1 classifica P(y ≥ t); etapa 2 regride y no grupo ≥ t; a "
             f"resposta final é <b>E[y] = P(≥t)·reg(x) + (1−P)·âncora</b> "
             f"(âncora = {anchor:.4f}).</div>"
-            "<div class='mseg-h'>① Classificador · P(y ≥ threshold)</div>"
+            "<div class='mseg-h'>1. Classificador · P(y ≥ threshold)</div>"
             + self._df_html(clf, center=True)
-            + "<div class='mseg-h'>② Regressão · restrita ao grupo y ≥ threshold</div>"
+            + "<div class='mseg-h'>2. Regressão · restrita ao grupo y ≥ threshold</div>"
             + self._df_html(reg, center=True)
-            + "<div class='mseg-h'>③ Resposta combinada E[y] — base do rating</div>"
+            + "<div class='mseg-h'>3. Resposta combinada E[y] — base do rating</div>"
             + self._df_html(comb, center=True))
 
     def _auto_build_rating(self):
@@ -4571,7 +4571,7 @@ class ModelSegmenterUI:
                 return None
             return v if np.isfinite(v) else None
 
-        # ---------- ① discriminação: métrica na referência + shift DES→OOT ----
+        # ---------- 1. discriminação: métrica na referência + shift DES→OOT ---
         shifts = {}
         with suppress(Exception):
             shifts = seg.metric_shifts() or {}
@@ -4599,7 +4599,7 @@ class ModelSegmenterUI:
             elif d_shift <= -0.05:
                 cor_d = self._diag_pior(cor_d, "yellow")
 
-        # ---------- ② estabilidade: PSI da régua + PSI das variáveis ----------
+        # ---------- 2. estabilidade: PSI da régua + PSI das variáveis ---------
         psi_regua = psi_var = None
         var_psi = None
         if seg.sample_col is not None and getattr(seg, "rating_", None) is not None:
@@ -4620,7 +4620,7 @@ class ModelSegmenterUI:
             [("PSI da régua —" if psi_regua is None else f"PSI da régua {psi_regua:.1%}"),
              ("variáveis —" if psi_var is None else f"pior variável {psi_var:.1%}")])
 
-        # ---------- ③ calibração: Jeffreys/t (safra e rating) + HL ------------
+        # ---------- 3. calibração: Jeffreys/t (safra e rating) + HL -----------
         bt = rt = None
         hl = None
         cores_c, evid_c = [], []
@@ -4653,7 +4653,7 @@ class ModelSegmenterUI:
         cor_c = self._diag_pior(*cores_c) if cores_c else "yellow"
         val_c = " · ".join(evid_c) if evid_c else "sem teste disponível"
 
-        # ---------- ④ estrutura: variáveis · monotonia · separação ------------
+        # ---------- 4. estrutura: variáveis · monotonia · separação -----------
         n_var = len(seg.model_features or [])
         mono = sep = None
         n_inv, n_sep_falha, n_pares = 0, 0, 0

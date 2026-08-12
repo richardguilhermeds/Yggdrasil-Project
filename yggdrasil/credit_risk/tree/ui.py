@@ -295,13 +295,28 @@ function render({ model, el }) {
 
   // tamanho de exibição: preenche a largura do card; se a árvore for LARGA a
   // ponto de ficar baixa demais, garante min_height (a largura excede e o
-  // scroller rola). Nunca amplia além do tamanho natural do PNG (borraria).
+  // scroller rola). Nunca amplia além do tamanho natural do PNG (borraria) —
+  // salvo quando o usuário pede zoom explícito.
+  //
+  // Zoom: multiplica a escala ajustada. Como os hotspots, o contorno e o
+  // tooltip são posicionados em % do `wrap`, todos acompanham a imagem sem
+  // recalcular nada. Com zoom > 1 o scroller ganha altura máxima e rolagem
+  // vertical, para a árvore ampliada não empurrar o resto da página; em zoom 1
+  // o comportamento é exatamente o anterior.
   function fit() {
     const W = model.get("width"), H = model.get("height");
     const minH = model.get("min_height") || 560;
+    const z = model.get("zoom") || 1;
     const avail = scroller.clientWidth || W;
     const s = Math.min(1, Math.max(avail / W, minH / H));
-    img.style.width = Math.round(W * s) + "px";
+    img.style.width = Math.round(W * s * z) + "px";
+    if (z > 1) {
+      scroller.style.maxHeight = (model.get("max_height") || 720) + "px";
+      scroller.style.overflowY = "auto";
+    } else {
+      scroller.style.maxHeight = "";
+      scroller.style.overflowY = "hidden";
+    }
   }
 
   function rebuild() {
@@ -342,6 +357,7 @@ function render({ model, el }) {
   evs.forEach(ev => model.on(ev, schedule));
   model.on("change:selected", syncSel);
   model.on("change:min_height", fit);
+  model.on("change:zoom", fit);
   const ro = new ResizeObserver(() => fit());      // card redimensionado → reajusta
   ro.observe(scroller);
   rebuild();
@@ -350,6 +366,7 @@ function render({ model, el }) {
     evs.forEach(ev => model.off(ev, schedule));
     model.off("change:selected", syncSel);
     model.off("change:min_height", fit);
+    model.off("change:zoom", fit);
   };
 }
 export default { render };
@@ -400,6 +417,10 @@ def _tree_image_widget_cls():
         # altura MÍNIMA de exibição (px): árvores largas não encolhem além
         # disso — a largura excede o card e rola na horizontal
         min_height = traitlets.Int(560).tag(sync=True)
+        # zoom do preview (1 = ajustado ao card). >1 amplia e liga a rolagem
+        # vertical dentro de max_height, p/ ler nós de árvores grandes
+        zoom = traitlets.Float(1.0).tag(sync=True)
+        max_height = traitlets.Int(720).tag(sync=True)
 
     _TREE_IMG_WIDGET_CLS = _TreeImageWidget
     return _TREE_IMG_WIDGET_CLS
@@ -542,6 +563,11 @@ class TreeSegmenterUI:
 
         self.seg = TreeSegmenter(df, **self._kwargs)
         self.locked: set = set()
+        # guarda do seletor de lado do "mover corte": trocar as options dispara o
+        # observer, que não deve re-sincronizar enquanto a sincronia está em curso
+        self._syncing_side = False
+        # idem p/ o seletor de variável (ver _refresh_feature_options)
+        self._syncing_feat_opts = False
         self._pending = None
         self.result = None
         self.spark_result = None      # último Spark DataFrame com a régua aplicada
@@ -625,14 +651,17 @@ class TreeSegmenterUI:
                     "Vazio remove. Fundir/dividir a folha descarta o apelido "
                     "(o identificador da folha muda).",
             layout=W.Layout(width="98%"), style={"description_width": "52px"})
-        # seletor de variável com BUSCA (Combobox: digite para filtrar). As opções
-        # são os NOMES DE EXIBIÇÃO (feature_labels); o mapa rótulo→coluna fica em
-        # _feat_by_label e a resolução (texto livre → coluna) em _sel_feature.
+        # Seletor de variável: Dropdown, igual ao da folha — a lista inteira abre
+        # com um clique em qualquer ponto do campo. Um Combobox foi tentado aqui
+        # (busca por digitação), mas o <datalist> do navegador filtra as opções
+        # pelo texto do campo: com uma variável já escolhida, o rótulo inteiro fica
+        # no input e a lista exibia UMA opção só — impossível navegar. A ordenação
+        # por IV (toggle ao lado) cobre a necessidade de achar a variável certa.
+        # As opções são os NOMES DE EXIBIÇÃO (feature_labels); o mapa rótulo→coluna
+        # fica em _feat_by_label e a resolução em _sel_feature.
         labels, self._feat_by_label = self._feature_option_labels(by_iv=False)
-        self.dd_feature = W.Combobox(description="Variável", options=labels,
-                                     value=(labels[0] if labels else ""),
-                                     placeholder="digite p/ filtrar…",
-                                     continuous_update=False, ensure_option=False,
+        self.dd_feature = W.Dropdown(description="Variável", options=labels,
+                                     value=(labels[0] if labels else None),
                                      layout=W.Layout(width="100%", flex="1 1 auto"),
                                      style={"description_width": "62px"})
         # toggle "ordenar por IV": reordena as opções pelo IV da variável na folha
@@ -738,11 +767,22 @@ class TreeSegmenterUI:
                                "Junta o nó de faltantes/missings (NaN) deste split dentro da folha "
                                "populada selecionada — a regra vira 'bin OU missing'", "link")
         # ---- mover corte numérico (hi da folha ↔ lo da irmã à direita) ----
+        # A folha tem DOIS cortes: o da esquerda (que ela divide com a irmã anterior)
+        # e o da direita (com a próxima). O segmentador move sempre o `hi` de uma
+        # folha, então mover o corte à ESQUERDA de X é mover o corte à DIREITA da
+        # irmã anterior — mesma operação, outro dono. O seletor abaixo escolhe o
+        # lado e a UI resolve quem é o dono; assim qualquer folha ajusta os dois
+        # lados, inclusive a primeira (só direita) e a última (só esquerda).
+        self.dd_move_side = W.Dropdown(description="corte", options=[("à direita ▶", "dir")],
+                                       value="dir", layout=full, style=dstyle)
+        self.dd_move_side.tooltip = ("Qual dos dois cortes da folha mover: o da esquerda "
+                                     "(divisa com a irmã anterior) ou o da direita "
+                                     "(divisa com a próxima).")
         self.lbl_move_cut = W.HTML()           # corte vigente + intervalo válido
         self.tx_move_cut = W.FloatText(description="novo corte", layout=full,
                                        style=dstyle)
-        self.tx_move_cut.tooltip = ("Novo valor do corte — estritamente entre o início "
-                                    "desta folha e o fim da irmã à direita")
+        self.tx_move_cut.tooltip = ("Novo valor do corte — estritamente dentro do intervalo "
+                                    "válido mostrado acima")
         self.btn_move_prev = mk("Preview corte", "info",
                                 f"Mostra n e {self._risk_label} por amostra dos dois lados "
                                 "do novo corte (não altera a árvore)", "eye")
@@ -1012,12 +1052,12 @@ class TreeSegmenterUI:
         self.out_spark_progress = W.HTML()   # tabela de progresso ⏳/✅/❌ por etapa
         self.out_spark = W.HTML()            # resultado/erro resumido + distribuição por folha
         # --- controles da aba "Análise de variáveis" ---
-        # seletor com BUSCA (Combobox) — rótulos de exibição; mapa em _var_by_label
+        # Dropdown (não Combobox) pelo mesmo motivo do seletor da aba Construir:
+        # a lista toda tem de abrir num clique — rótulos de exibição; mapa em
+        # _var_by_label.
         var_labels, self._var_by_label = self._feature_option_labels(by_iv=False)
-        self.dd_var = W.Combobox(description="Variável", options=var_labels,
-                                 value=(var_labels[0] if var_labels else ""),
-                                 placeholder="digite p/ filtrar…",
-                                 continuous_update=False, ensure_option=False,
+        self.dd_var = W.Dropdown(description="Variável", options=var_labels,
+                                 value=(var_labels[0] if var_labels else None),
                                  layout=full, style=dstyle)
         self.tg_var_iv = W.ToggleButton(
             value=False, description="ordenar por IV", icon="sort-amount-desc",
@@ -1104,6 +1144,7 @@ class TreeSegmenterUI:
         self.btn_merge_na.on_click(self._on_merge_missing)
         self.btn_move_prev.on_click(self._on_move_cut_preview)
         self.btn_move_cut.on_click(self._on_move_cut)
+        self.dd_move_side.observe(self._on_move_side, names="value")
         self.btn_suggest.on_click(self._on_suggest)
         self.btn_suggest3.on_click(self._on_suggest3)
         self.btn_importance.on_click(self._on_importance)
@@ -1244,19 +1285,35 @@ class TreeSegmenterUI:
         self._img_selected = None          # sid do nó clicado na imagem (folha OU ramo)
         # self.allow_interactive_tree foi resolvido no __init__ (Databricks → PNG
         # estático autocontido, sem CDN do anywidget) — ver comentário lá.
-        # barra de ações em 2 linhas: ① chip do nó + ações principais da folha;
-        # ② estrutura (fusões/recolher) · histórico (desfazer/refazer) · árvore
+        # barra de ações em 2 linhas: 1. chip do nó + ações principais da folha;
+        # 2. estrutura (fusões/recolher) · histórico (desfazer/refazer) · árvore
         # inteira (auto-fit/resetar — as MESMAS instâncias dos cards, em 2ª view).
         self.tree_img_info = W.HTML(layout=W.Layout(flex="1 1 auto", min_width="0",
                                                     overflow="hidden"))
         _vsep = lambda: W.HTML("<div class='treeui-vsep'></div>")  # noqa: E731
         _row_lay = W.Layout(flex_flow="row wrap", align_items="center", width="100%")
+        # zoom do preview: árvore grande vira nó ilegível no ajuste-ao-card. O
+        # slider amplia a MESMA imagem (hotspots acompanham, pois são em %) e o
+        # scroller passa a rolar nos dois eixos.
+        self.sl_tree_zoom = W.FloatSlider(value=1.0, min=1.0, max=4.0, step=0.25,
+                                          description="zoom", readout_format=".0%",
+                                          continuous_update=False,
+                                          layout=W.Layout(width="230px"),
+                                          style={"description_width": "38px"})
+        self.sl_tree_zoom.tooltip = ("Amplia o preview da árvore. Acima de 100% a imagem "
+                                     "rola dentro do card — útil para ler os nós de "
+                                     "árvores com muitas folhas.")
+        self.btn_tree_zoom_reset = mk("Ajustar", "", "Volta o zoom a 100% (ajustado ao card)",
+                                      "compress")
+        self.sl_tree_zoom.observe(self._on_tree_zoom, names="value")
+        self.btn_tree_zoom_reset.on_click(lambda _: setattr(self.sl_tree_zoom, "value", 1.0))
         self.tree_img_bar = W.VBox([
             W.HBox([self.tree_img_info, self.btn_img_suggest,
                     self.btn_img_lock], layout=_row_lay),
             W.HBox([self.btn_img_merge_l, self.btn_img_merge_r, self.btn_img_merge_na,
                     self.btn_img_collapse, _vsep(), self.btn_img_undo,
-                    self.btn_img_redo, self.btn_img_autofit, self.btn_img_reset],
+                    self.btn_img_redo, self.btn_img_autofit, self.btn_img_reset,
+                    _vsep(), self.sl_tree_zoom, self.btn_tree_zoom_reset],
                    layout=_row_lay),
         ], layout=W.Layout(display="none", margin="0 0 6px 0"))
         self.tree_img_bar.add_class("treeui-imgbar")
@@ -1290,18 +1347,14 @@ class TreeSegmenterUI:
         banner = W.HTML(_CSS +
             f"<div class='treeui-banner'><div class='logo'>{_bg_logo}</div>"
             f"<div><div class='t'>{_bg_titulo}</div>"
-            f"<div class='s'>Construtor de modelos de árvore — cultive a sua Yggdrasil, ramo a ramo · {_bg_sub} · "
+            f"<div class='s'>Interface de construção de modelos de árvore — cultive a sua "
+            f"Yggdrasil, ramo a ramo, para os seus modelos de crédito · {_bg_sub} · "
             f"PSI ao vivo ({self.ref_sample}) · teste de hipótese entre folhas adjacentes"
             "</div></div></div>")
         bar_box = W.VBox([self.bar]); bar_box.add_class("treeui-bar")
 
         # ---- legendas reutilizadas (task-aware) -------------------------
         _rl = self._risk_label
-        tree_legend = W.HTML(
-            f"<div class='treeui-legend'>cor do quadrado = {_rl} "
-            "(<span style='color:var(--risk-lo)'>baixo</span> &rarr; "
-            "<span style='color:var(--risk-mid)'>médio</span> &rarr; "
-            "<span style='color:var(--risk-hi)'>alto</span>) · 🔒 folha fechada</div>")
         if self._is_clf:
             _iv_intro = "<b>IV</b> (optbinning · WoE binário) = poder de"
             _iv_faixas = ("Faixas (Siddiqi): <span style='color:var(--ok-tx)'>forte (0,3–0,5)</span> · "
@@ -1312,32 +1365,44 @@ class TreeSegmenterUI:
             _iv_faixas = ("Faixas: <span style='color:var(--ok-tx)'>forte (0,1–0,35)</span> · "
                           "<span style='color:var(--warn-tx)'>médio (0,03–0,1)</span> · fraco/inútil (&lt;0,03) · "
                           "<span style='color:var(--sus-tx)'>suspeito (&ge;0,35)</span>.")
+        # o "o que é" vem antes das faixas: quem abre a aba pela primeira vez
+        # precisa da definição, não do corte.
+        _iv_oque = ("<i>Information Value</i> mede o quanto uma variável "
+                    "<b>separa bom de mau</b>: divide-se a variável em faixas e compara-se, "
+                    "faixa a faixa, a concentração de cada grupo. Se as faixas concentram "
+                    "grupos diferentes, a variável carrega informação e o IV sobe; se todas "
+                    "se parecem, o IV vai a zero. É o critério para escolher <b>qual variável "
+                    "usar na próxima quebra</b>.")
         iv_legend = W.HTML(
-            f"<div class='treeui-legend'>{_iv_intro} "
+            f"<div class='treeui-legend'>{_iv_oque}</div>"
+            "<div class='treeui-legend' style='margin-top:6px'>"
+            f"{_iv_intro} "
             f"separação da variável na <b>folha selecionada</b> (★ = maior). {_iv_faixas} "
             "<b>bins</b> = nº de faixas ideais do binning ótimo na folha.</div>"
             "<div class='treeui-legend' style='margin-top:6px;padding-top:6px;"
             f"border-top:1px solid var(--hair)'><b>PSI</b> = estabilidade da variável "
-            f"({self.ref_sample} × demais amostras), calculado <b>nos mesmos bins do IV</b>, pior caso: "
+            f"({self.ref_sample} × demais amostras), calculado <b>nos bins fixados no "
+            f"desenvolvimento</b> ({self.ref_sample}) — os mesmos do IV, para que a comparação "
+            "meça deslocamento da população e não mudança de régua. Pior caso: "
             "<span style='color:var(--ok-tx)'>&lt;0.10 estável</span> · "
             "<span style='color:var(--warn-tx)'>0.10–0.25 atenção</span> · "
             "<span style='color:var(--bad-tx)'>&ge;0.25 instável</span>.</div>")
 
         # ================================================================
-        # ABA ① CONSTRUIR — "Cockpit em T"
+        # ABA 1. CONSTRUIR — "Cockpit em T"
         #   TOPO: Árvore & quebras  ·AO LADO·  Information Value  + régua da folha
         #   DETALHE: folha (detalhe) | dividir | ações + auto-fit  e, abaixo,
         #     distribuição da variável+cortes | histograma do alvo da folha
         #   RODAPÉ: Preview da árvore (imagem) em largura total
         # ================================================================
-        sep_top = W.HTML("<div class='treeui-band'>① Topo · loop árvore → folha → IV → agir</div>")
+        sep_top = W.HTML("<div class='treeui-band'>1. Topo · loop árvore → folha → IV → agir</div>")
 
         tree_scroll = W.Box([self.out_tree],
                             layout=W.Layout(overflow="auto", width="100%",
                                             max_height="420px"))
         card_tree = W.VBox([
             W.HTML("<div class='treeui-h'>Árvore &amp; quebras</div>"),
-            tree_legend, tree_scroll,
+            tree_scroll,
         ], layout=W.Layout(width="54%"))
         card_tree.add_class("treeui-card")
         iv_scroll = W.Box([self.out_iv],
@@ -1356,7 +1421,7 @@ class TreeSegmenterUI:
                                           justify_content="space-between"))
 
         # ---- DETALHE · linha 1: folha (detalhe) | dividir | ações + auto-fit
-        sep_det = W.HTML("<div class='treeui-band treeui-band-muted'>② Detalhe / inspeção — "
+        sep_det = W.HTML("<div class='treeui-band treeui-band-muted'>2. Detalhe / inspeção — "
                          "role quando precisar</div>")
         card_leaf = W.VBox([self.leaf_header, self.tx_leaf_name])
         card_leaf.add_class("treeui-card")
@@ -1387,7 +1452,7 @@ class TreeSegmenterUI:
             self.btn_lock, self.btn_unlock, self.btn_collapse,
             W.HBox([self.btn_merge_l, self.btn_merge_r]),   # fundir ◀ / ▶ lado a lado
             self.btn_merge_na,
-            self.lbl_move_cut, self.tx_move_cut,
+            self.lbl_move_cut, self.dd_move_side, self.tx_move_cut,
             W.HBox([self.btn_move_prev, self.btn_move_cut]),  # preview / mover lado a lado
             self.out_move_cut,
         ], layout=W.Layout(width="100%"))
@@ -1442,7 +1507,7 @@ class TreeSegmenterUI:
         # dd_test → card da tabela de folhas (aba Diagnóstico)
 
         # ---- RODAPÉ: Preview da árvore (imagem), largura total -----------
-        sep_img = W.HTML("<div class='treeui-band treeui-band-muted'>③ Preview da árvore — "
+        sep_img = W.HTML("<div class='treeui-band treeui-band-muted'>3. Preview da árvore — "
                          "imagem em largura total</div>")
         self.btn_tree_preview.layout.width = "auto"
         self.btn_tree_preview_hide.layout.width = "auto"
@@ -1476,7 +1541,7 @@ class TreeSegmenterUI:
                             sep_det, det_row, det_bottom, sep_img, card_tree_img])
 
         # ================================================================
-        # ABA ③ DIAGNÓSTICO — folhas · discriminação · métricas · bootstrap · qualidade
+        # ABA 3. DIAGNÓSTICO — folhas · discriminação · métricas · bootstrap · qualidade
         # ================================================================
         _ref = self.ref_sample
         # visão dupla contratos × saldo: só entra na legenda com weight_col definida
@@ -1496,22 +1561,30 @@ class TreeSegmenterUI:
             "<span style='background:var(--ok-bg);padding:1px 5px;border-radius:3px'>&lt;0.10 estável</span> "
             "<span style='background:var(--warn-bg);padding:1px 5px;border-radius:3px'>0.10–0.25 atenção</span> "
             "<span style='background:var(--bad-bg);padding:1px 5px;border-radius:3px'>&ge;0.25 instável</span>"
-            "<br><b>p (irmãs)</b> = p-valor de um <b>teste de hipótese</b> que compara a "
-            "<b>distribuição do alvo</b> da folha com a da <b>irmã adjacente</b> (mesmo "
-            f"pai, na amostra de referência {_ref}). H₀: as duas irmãs têm {self._risk_label} igual. "
+            # cada teste em seu bloco, com H₀ e a leitura do p em linhas próprias:
+            # num parágrafo corrido a hipótese nula se perdia no meio do texto
+            "<div style='margin-top:7px'><b>p (irmãs)</b> = p-valor de um "
+            "<b>teste de hipótese</b> que compara a <b>distribuição do alvo</b> da folha "
+            f"com a da <b>irmã adjacente</b> (mesmo pai, na amostra de referência {_ref}). "
             "O teste é o <b>Mann-Whitney U</b> (não-paramétrico, padrão) ou o <b>t de Welch</b> "
-            "(médias, variâncias desiguais) — escolha no seletor <b>Teste</b>. "
+            "(médias, variâncias desiguais) — escolha no seletor <b>Teste</b>."
+            f"<div style='margin-top:3px'>H₀: as duas irmãs têm {self._risk_label} igual.</div>"
+            "<div style='margin-top:3px'>"
             "<span style='background:var(--bad-bg);padding:1px 5px;border-radius:3px'>p alto (&gt;0,05, em vermelho)</span> "
-            "⇒ <b>não</b> dá para distinguir as irmãs ⇒ candidatas a fusão; "
-            "<span style='color:var(--ok-tx)'>p baixo</span> ⇒ folhas bem separadas. "
-            "Só <b>irmãs</b> são comparadas (a última de cada grupo e o nó de faltantes ficam em branco)."
-            f"<br><b>p ({_ref}×OOT)</b> = p-valor de um teste de hipótese da <b>aderência da "
-            "estimativa</b>: compara a <b>distribuição do alvo</b> da "
-            f"MESMA folha entre <b>{_ref}</b> e <b>OOT</b> (mesmo teste do seletor). H₀: a folha "
-            f"tem {self._risk_label} igual em {_ref} e OOT. Semântica <b>inversa</b> à do p (irmãs): "
-            "<span style='color:var(--ok-tx)'>p alto (&gt;0,05)</span> ⇒ estimativa <b>estável</b> entre as amostras; "
+            "⇒ <b>não</b> dá para distinguir as irmãs ⇒ candidatas a fusão &nbsp;·&nbsp; "
+            "<span style='color:var(--ok-tx)'>p baixo</span> ⇒ folhas bem separadas.</div>"
+            "<div style='margin-top:3px'>Só <b>irmãs</b> são comparadas (a última de cada "
+            "grupo e o nó de faltantes ficam em branco).</div></div>"
+            f"<div style='margin-top:7px'><b>p ({_ref}×OOT)</b> = p-valor de um teste de "
+            "hipótese da <b>aderência da estimativa</b>: compara a <b>distribuição do alvo</b> "
+            f"da MESMA folha entre <b>{_ref}</b> e <b>OOT</b> (mesmo teste do seletor)."
+            f"<div style='margin-top:3px'>H₀: a folha tem {self._risk_label} igual em "
+            f"{_ref} e OOT.</div>"
+            "<div style='margin-top:3px'>Semântica <b>inversa</b> à do p (irmãs): "
+            "<span style='color:var(--ok-tx)'>p alto (&gt;0,05)</span> ⇒ estimativa "
+            "<b>estável</b> entre as amostras &nbsp;·&nbsp; "
             "<span style='background:var(--bad-bg);padding:1px 5px;border-radius:3px'>p baixo (em vermelho)</span> "
-            f"⇒ a estimativa <b>deslocou</b> de {_ref} para OOT (folha pouco aderente)."
+            f"⇒ a estimativa <b>deslocou</b> de {_ref} para OOT (folha pouco aderente).</div></div>"
             + _wleg + "</div>")
         table_scroll = W.Box([self.out_table],
                              layout=W.Layout(overflow="auto", width="100%",
@@ -1671,13 +1744,35 @@ class TreeSegmenterUI:
             self.out_varprof_stats,
         ], layout=W.Layout(width="100%"))
         card_varprof.add_class("treeui-card")
+        # Importância (vai p/ Diagnóstico) e export SQL (vai p/ Exportar):
+        # definidos aqui porque as abas abaixo já os consomem.
+        imp_row = W.HBox(
+            [W.VBox([self.out_importance], layout=W.Layout(width="49%")),
+             W.VBox([self.out_importance_chart], layout=W.Layout(width="49%"))],
+            layout=W.Layout(width="100%", justify_content="space-between",
+                            align_items="flex-start"))
+        card_imp = W.VBox([
+            W.HTML("<div class='treeui-h'>Importância das variáveis (na árvore)</div>"),
+            W.HTML("<div class='treeui-legend'>Ganho de IV ponderado pela representatividade do nó, "
+                   "somado por variável que <b>entrou</b> na árvore.</div>"),
+            self.btn_importance, imp_row, self.out_importance_legend])
+        card_imp.add_class("treeui-card")
+        card_sql = W.VBox([
+            W.HTML("<div class='treeui-h'>Exportar como SQL (CASE WHEN)</div>"),
+            W.HTML("<div class='treeui-legend'>Régua pronta para copiar e colar. Ajuste o nome da "
+                   "tabela de origem. O <b>fallback p/ não classificados</b> define o destino das "
+                   "linhas que não caem em nenhuma folha ao aplicar a régua (categoria não vista, "
+                   "faltante sem rota) — mesmo com 0 na base atual, isso acontece em OOT/produção; "
+                   "com fallback, o <code>ELSE</code> vira a folha escolhida em vez de NULL.</div>"),
+            W.HBox([self.tx_sql_table, self.dd_fallback, self.btn_sql]),
+            self.out_sql]); card_sql.add_class("treeui-card")
         tab_diag = W.VBox([sep_diag, card_score, sep_diag2,
                            card_metrics, card_table, card_sib,
                            card_estab, card_varprof,
-                           card_discrim, card_boot])
+                           card_discrim, card_boot, card_imp])
 
         # ================================================================
-        # ABA ④ VALIDAR & EXPORTAR — duas faixas: validação · exportar/registrar
+        # ABA 4. VALIDAR & EXPORTAR — duas faixas: validação · exportar/registrar
         # ================================================================
         sep_val = W.HTML("<div class='treeui-band'>Validação regulatória · "
                          "monotonicidade · calibração · backtest</div>")
@@ -1704,8 +1799,9 @@ class TreeSegmenterUI:
             W.HTML("<div class='treeui-h'>Exportar DataFrame rotulado</div>"),
             W.HTML("<div class='treeui-legend'>Gera <b>ui.result</b> (pandas) com a coluna de "
                    "segmento e a folha por linha.</div>"),
+            W.Box([], layout=W.Layout(flex="1 1 auto")),   # alinha o botão à base
             W.HBox([self.btn_export]),
-        ], layout=W.Layout(width="100%"))
+        ], layout=W.Layout(width="49%"))
         card_export_df.add_class("treeui-card")
         # card novo (Excel multi-abas) empilhado ABAIXO do export original,
         # em largura cheia — o card antigo mantém o formato que tinha.
@@ -1717,9 +1813,15 @@ class TreeSegmenterUI:
                    "Cabeçalhos congelados e percentuais formatados. Requer o pacote opcional "
                    "<code>openpyxl</code>.</div>"),
             self.tx_xlsx_path,
+            W.Box([], layout=W.Layout(flex="1 1 auto")),
             W.HBox([self.btn_xlsx]),
-        ], layout=W.Layout(width="100%"))
+        ], layout=W.Layout(width="49%"))
         card_xlsx.add_class("treeui-card")
+        # os dois exports lado a lado (mesma altura): são a mesma ação em formatos
+        # diferentes, e empilhados ocupavam a tela toda antes do registro/MLflow.
+        export_top = W.HBox([card_export_df, card_xlsx],
+                            layout=W.Layout(width="100%", align_items="stretch",
+                                            justify_content="space-between"))
         card_mlflow = W.VBox([
             W.HTML("<div class='treeui-h'>Registrar no MLflow / Unity Catalog</div>"),
             W.HTML("<div class='treeui-legend'>Loga régua, métricas e o modelo pyfunc e registra a "
@@ -1783,11 +1885,11 @@ class TreeSegmenterUI:
         ])
         card_pdf.add_class("treeui-card")
         # a antiga aba "Histórico" virou uma SEÇÃO no fim da aba Exportar
-        tab_valid = W.VBox([sep_exp, card_export_df, card_xlsx, export_row,
+        tab_valid = W.VBox([sep_exp, export_top, card_sql, export_row,
                             sep_hist, hist_row, self.box_confirm, card_pdf])
 
         # ================================================================
-        # ABA ② ANÁLISE DE VARIÁVEL — perfil, distribuição e estabilidade
+        # ABA 2. ANÁLISE DE VARIÁVEL — perfil, distribuição e estabilidade
         # ================================================================
         self.dd_var.layout = W.Layout(width="100%", flex="1 1 auto")
         self.dd_var.style.description_width = "62px"
@@ -1854,13 +1956,7 @@ class TreeSegmenterUI:
         tab_var = W.VBox([var_controls, var_row_a, var_row_inv,
                           var_row_time, card_var_optbin])
 
-        # ---- ABA AVANÇADO: sugerir splits · auto-merge · importância · SQL · diff ----
-        card_sug = W.VBox([
-            W.HTML("<div class='treeui-h'>Sugerir splits (TOP 5)</div>"),
-            W.HTML("<div class='treeui-legend'>As 5 variáveis de maior IV para a <b>folha "
-                   "selecionada</b> (aba Construir), com nº de bins, PSI por amostra (OOT/"
-                   "ESTABILIDADE), se a separação de risco passa no teste de hipótese e o IV.</div>"),
-            self.btn_suggest3, self.out_suggest]); card_sug.add_class("treeui-card")
+        # ---- ABA AVANÇADO: auto-merge · poda · diff de versões · cenários ----
         card_merge = W.VBox([
             W.HTML("<div class='treeui-h'>Auto-merge de folhas semelhantes</div>"),
             W.HTML("<div class='treeui-legend'>Funde folhas-irmãs com risco estatisticamente "
@@ -1874,26 +1970,6 @@ class TreeSegmenterUI:
                    f"{_rl} menor que o <b>Δ{_rl} mínimo</b> (slider do card ao lado). "
                    "Folhas fechadas (🔒) são preservadas.</div>"),
             self.sl_repr, self.btn_prune]); card_prune.add_class("treeui-card")
-        imp_row = W.HBox(
-            [W.VBox([self.out_importance], layout=W.Layout(width="49%")),
-             W.VBox([self.out_importance_chart], layout=W.Layout(width="49%"))],
-            layout=W.Layout(width="100%", justify_content="space-between",
-                            align_items="flex-start"))
-        card_imp = W.VBox([
-            W.HTML("<div class='treeui-h'>Importância das variáveis (na árvore)</div>"),
-            W.HTML("<div class='treeui-legend'>Ganho de IV ponderado pela representatividade do nó, "
-                   "somado por variável que <b>entrou</b> na árvore.</div>"),
-            self.btn_importance, imp_row, self.out_importance_legend])
-        card_imp.add_class("treeui-card")
-        card_sql = W.VBox([
-            W.HTML("<div class='treeui-h'>Exportar como SQL (CASE WHEN)</div>"),
-            W.HTML("<div class='treeui-legend'>Régua pronta para copiar e colar. Ajuste o nome da "
-                   "tabela de origem. O <b>fallback p/ não classificados</b> define o destino das "
-                   "linhas que não caem em nenhuma folha ao aplicar a régua (categoria não vista, "
-                   "faltante sem rota) — mesmo com 0 na base atual, isso acontece em OOT/produção; "
-                   "com fallback, o <code>ELSE</code> vira a folha escolhida em vez de NULL.</div>"),
-            W.HBox([self.tx_sql_table, self.dd_fallback, self.btn_sql]),
-            self.out_sql]); card_sql.add_class("treeui-card")
         card_diff = W.VBox([
             W.HTML("<div class='treeui-h'>Comparar duas árvores (versões)</div>"),
             W.HTML("<div class='treeui-legend'>Carrega outra árvore salva em JSON e compara com a "
@@ -1913,14 +1989,16 @@ class TreeSegmenterUI:
                    layout=W.Layout(align_items="center")),
             self.out_scn_summary, self.box_scn_list, self.out_scn_diff])
         card_scn.add_class("treeui-card")
-        card_sug.layout.width = "36%"
-        card_merge.layout.width = "32%"
-        card_prune.layout.width = "30%"
+        card_merge.layout.width = "49%"
+        card_prune.layout.width = "49%"
         tab_avancado = W.VBox([
-            W.HBox([card_sug, card_merge, card_prune],
+            # sem o "Sugerir splits (TOP 5)": a sugestão já vive na aba Construir,
+            # onde a folha é escolhida. A importância foi para Diagnóstico e o
+            # export SQL para Exportar — cada um perto do que serve.
+            W.HBox([card_merge, card_prune],
                    layout=W.Layout(justify_content="space-between", width="100%",
                                    align_items="stretch")),
-            card_imp, card_sql, card_diff, card_scn,
+            card_diff, card_scn,
             # validação regulatória (monotonicidade/calibração/backtest + relatório)
             # movida para cá: é uma etapa de fechamento, não da decisão de segmentação.
             sep_val, card_validacao])
@@ -2247,27 +2325,14 @@ class TreeSegmenterUI:
                     f"<div style='display:flex;align-items:center;margin-top:2px'>"
                     f"<span class='mono' style='font-size:19px;font-weight:600;color:{color}'>"
                     f"{value}</span>{bh}</div></div>")
+        # A barra guarda o tamanho da árvore, a estabilidade e a discriminação.
+        # Linhas sem rota (órfãs) saíram daqui: são 0 no desenvolvimento e vivem no
+        # card Exportar como SQL, junto do fallback que decide o destino delas em
+        # OOT/produção.
+        _tip_lock = ("Folhas travadas como finais (🔒): não são divididas e ficam "
+                     "protegidas da poda e do auto-merge. Trave em Ações da folha.")
         cells = [cell("Folhas", n_folhas), cell("Profundidade", prof),
-                 cell("Fechadas", n_lock)]
-        # linhas da base atual sem rota na régua vigente (órfãs): esperado 0 no
-        # desenvolvimento; >0 educa sobre o que acontecerá em OOT/produção — o
-        # destino é configurável no card Exportar como SQL (aba Avançado).
-        try:
-            n_orf = seg.n_orfas()
-            tip = ("Linhas da base atual que não caem em nenhuma folha da régua "
-                   "(categoria não vista / faltante sem rota). Esperado 0 no "
-                   "desenvolvimento; em OOT/produção essas linhas viram nulo — "
-                   "configure o fallback no card Exportar como SQL (aba Avançado).")
-            if n_orf == 0:
-                cells.append(cell("Sem rota", 0, badge="ok", cls="green", tip=tip))
-            else:
-                fb = getattr(seg, "fallback", None)
-                badge = "→ fallback" if fb is not None else "→ nulo"
-                cells.append(cell("Sem rota", f"{n_orf:,}".replace(",", "."),
-                                  color=hexc["yellow"], badge=badge, cls="yellow",
-                                  tip=tip))
-        except Exception:
-            pass
+                 cell("Fechadas", n_lock, tip=_tip_lock)]
         if self.sample_col is not None and n_folhas >= 1:
             try:
                 for _, r in seg.psi().iterrows():
@@ -2362,8 +2427,10 @@ class TreeSegmenterUI:
                 if pd.isna(p):
                     continue
                 ab = "ESTAB" if a == "ESTABILIDADE" else a
+                # em % como na barra de métricas e na tabela de folhas — o PSI
+                # aparecia aqui em decimal, único ponto da tela fora do padrão.
                 parts.append(f"<span style='color:{psi_hex[self._psi_class(p)]}'>"
-                             f"{ab} {p:.2f}</span>")
+                             f"{ab} {p:.1%}</span>")
             return (sep_bar + "PSI " + " ".join(parts)) if parts else ""
 
         def rotulo(sid):
@@ -2477,8 +2544,8 @@ class TreeSegmenterUI:
                 fmt[c] = "{:.1f}"
             elif c.startswith("pd_"):       # alvo em % (coerente com a árvore)
                 fmt[c] = "{:.2%}"
-            elif c.startswith("psi_"):      # PSI é adimensional → decimal
-                fmt[c] = "{:.4f}"
+            elif c.startswith("psi_"):      # em % como na barra, na árvore e no painel
+                fmt[c] = "{:.1%}"
         if "p_vs_prox" in lv.columns:
             fmt["p_vs_prox"] = "{:.3f}"
         if "p_des_oot" in lv.columns:
@@ -2646,13 +2713,18 @@ class TreeSegmenterUI:
                            "(p&gt;0,05)</span>" if p > 0.05 else
                            "<span class='pill pill-red'>não aderente · rejeita H₀ "
                            "(p≤0,05)</span>")
+            # duas linhas: identificação + teste em cima, p-valor + veredito embaixo.
+            # Numa linha só, o p-valor ficava espremido entre o nome do teste e a
+            # pílula, e a quebra caía em lugar diferente conforme o tamanho do texto.
             test_rows += (
-                "<div style='display:flex;align-items:center;gap:7px;flex-wrap:wrap;"
-                "font-size:12px;color:var(--body-ink);margin:3px 0'>"
+                "<div style='font-size:12px;color:var(--body-ink);margin:7px 0'>"
+                "<div style='display:flex;align-items:center;gap:7px;flex-wrap:wrap'>"
                 f"<b>DES → {ab(a)}</b>"
-                f"<span style='color:var(--muted)'>teste:</span><b>{name}</b>"
+                f"<span style='color:var(--muted)'>teste:</span><b>{name}</b></div>"
+                "<div style='display:flex;align-items:center;gap:7px;flex-wrap:wrap;"
+                "margin-top:4px'>"
                 f"<span style='color:var(--muted)'>p-valor:</span>"
-                f"<b class='mono'>{pv}</b>{verdict}</div>")
+                f"<b class='mono'>{pv}</b>{verdict}</div></div>")
 
         # 4) Distinção vs folha-irmã adjacente (mesmo pai)
         sib_name, sib_tests = self._sibling_adjacent_tests(sid)
@@ -2668,12 +2740,14 @@ class TreeSegmenterUI:
                            "a fusão (p&gt;0,05)</span>")
             d = desc if len(desc) <= 40 else desc[:37] + "…"
             sib_rows += (
-                "<div style='display:flex;align-items:center;gap:7px;flex-wrap:wrap;"
-                "font-size:12px;color:var(--body-ink);margin:3px 0'>"
+                "<div style='font-size:12px;color:var(--body-ink);margin:7px 0'>"
+                "<div style='display:flex;align-items:center;gap:7px;flex-wrap:wrap'>"
                 f"<b>{lado} {d}</b>"
-                f"<span style='color:var(--muted)'>teste:</span><b>{sib_name}</b>"
+                f"<span style='color:var(--muted)'>teste:</span><b>{sib_name}</b></div>"
+                "<div style='display:flex;align-items:center;gap:7px;flex-wrap:wrap;"
+                "margin-top:4px'>"
                 f"<span style='color:var(--muted)'>p-valor:</span>"
-                f"<b class='mono'>{pv}</b>{verdict}</div>")
+                f"<b class='mono'>{pv}</b>{verdict}</div></div>")
 
         # 5) Estabilidade · PSI por amostra com barrinha verde/amarelo/vermelho
         psi_hex = {"green": "var(--ok-tx)", "yellow": "var(--warn-tx)", "red": "var(--bad-tx)"}
@@ -2697,7 +2771,7 @@ class TreeSegmenterUI:
             if pd.isna(p):
                 pv, pcol = "—", "var(--sub-ink)"
             else:
-                pv, pcol = f"{p:.3f}", psi_hex[self._psi_class(p)]
+                pv, pcol = f"{p:.1%}", psi_hex[self._psi_class(p)]
             psi_rows += (
                 "<div style='display:flex;align-items:center;gap:9px;margin:5px 0'>"
                 f"<div style='width:78px;font-size:11px;color:var(--muted);white-space:nowrap'>"
@@ -3066,7 +3140,7 @@ class TreeSegmenterUI:
         return self.dd_leaf.value
 
     # ------------------------------------------------------------------
-    # Seletores de variável (Combobox com busca + ordenação por IV)
+    # Seletores de variável (Dropdown + ordenação por IV)
     # ------------------------------------------------------------------
     def _iv_map(self, sid):
         """IV por variável p/ ordenar os seletores — memoizado por (folha,
@@ -3109,23 +3183,24 @@ class TreeSegmenterUI:
         return labels, mapa
 
     def _combo_feature(self, combo, mapa, warn=True):
-        """Resolve o texto do Combobox (texto LIVRE) para o nome da coluna.
-        Aceita o rótulo exibido, o próprio nome da coluna ou o rótulo sem o
-        sufixo "(IV …)"; entrada que não bate com nenhuma opção → None (com
-        aviso no console quando ``warn``)."""
+        """Resolve o rótulo selecionado no seletor para o nome da coluna.
+
+        Com o Dropdown o valor é sempre um rótulo da lista, então o 1º caso
+        resolve. Os demais são tolerância a estado antigo (rótulo com o sufixo
+        "(IV …)" de uma ordenação anterior, ou o nome cru da coluna vindo de um
+        ``to_dict``/cenário salvo)."""
         txt = (combo.value or "").strip()
         if not txt:
             return None
         if txt in mapa:
             return mapa[txt]
-        if txt in self.features:           # digitou o nome da coluna direto
+        if txt in self.features:           # nome da coluna direto
             return txt
         for lbl, f in mapa.items():        # rótulo sem o sufixo de IV
             if lbl.split(" (IV ")[0] == txt:
                 return f
         if warn:
-            self._log(f"⚠ Variável '{txt}' não reconhecida — escolha uma opção da "
-                      "lista (digite para filtrar).")
+            self._log(f"⚠ Variável '{txt}' não reconhecida — escolha uma opção da lista.")
         return None
 
     def _sel_feature(self, warn=True):
@@ -3144,11 +3219,19 @@ class TreeSegmenterUI:
         labels, mapa = self._feature_option_labels(
             by_iv=by_iv, sid=self.dd_leaf.value if by_iv else None)
         self._feat_by_label = mapa
-        self.dd_feature.options = tuple(labels)
-        if cur is not None:
-            inv = {f: l for l, f in mapa.items()}
-            if inv.get(cur, self.dd_feature.value) != self.dd_feature.value:
-                self.dd_feature.value = inv[cur]
+        # Trocar `options` num Dropdown reseta o `value` por um instante — o que
+        # dispara _on_feature_change com uma coluna diferente e apaga o preview
+        # pendente. Silencia o observer enquanto a lista é reconstruída: ao final
+        # a MESMA coluna volta selecionada, só com outro rótulo.
+        self._syncing_feat_opts = True
+        try:
+            self.dd_feature.options = tuple(labels)
+            if cur is not None:
+                inv = {f: l for l, f in mapa.items()}
+                if cur in inv and inv[cur] != self.dd_feature.value:
+                    self.dd_feature.value = inv[cur]
+        finally:
+            self._syncing_feat_opts = False
 
     def _refresh_var_options(self):
         """Idem p/ o seletor da aba Análise (folha de referência = dd_var_leaf)."""
@@ -3158,9 +3241,9 @@ class TreeSegmenterUI:
             by_iv=by_iv, sid=self.dd_var_leaf.value if by_iv else None)
         self._var_by_label = mapa
         self.dd_var.options = tuple(labels)
-        if cur is not None:
+        if cur is not None:                        # preserva a coluna, novo rótulo
             inv = {f: l for l, f in mapa.items()}
-            if inv.get(cur, self.dd_var.value) != self.dd_var.value:
+            if cur in inv and inv[cur] != self.dd_var.value:
                 self.dd_var.value = inv[cur]
 
     def _on_var_leaf_iv(self, _):
@@ -3172,7 +3255,7 @@ class TreeSegmenterUI:
             self._refresh_var_options()
 
     def _set_feature_selection(self, feat):
-        """Seleciona ``feat`` no Combobox da aba Construir (via rótulo atual)."""
+        """Seleciona ``feat`` no seletor da aba Construir (via rótulo atual)."""
         inv = {f: l for l, f in self._feat_by_label.items()}
         if feat in inv:
             self.dd_feature.value = inv[feat]
@@ -3209,6 +3292,8 @@ class TreeSegmenterUI:
         seleção) e reconfigura os controles do modo atual. Reordenar as opções
         (toggle de IV) muda só o RÓTULO da mesma coluna — nesse caso não há o
         que invalidar (o contexto variável+folha é o mesmo)."""
+        if getattr(self, "_syncing_feat_opts", False):
+            return                                 # só reconstrução da lista
         ctx = (self._sel_feature(warn=False), self.dd_leaf.value)
         if ctx[0] is not None and ctx == getattr(self, "_feat_ctx", None):
             return
@@ -3380,36 +3465,89 @@ class TreeSegmenterUI:
     # Mover corte numérico: hi da folha ↔ lo da irmã à direita (sem recolher
     # o pai; a irmã pode ter sub-splits — o segmentador propaga ao subtree)
     # ------------------------------------------------------------------
+    def _left_cut_owner(self, sid):
+        """Irmã que possui o corte à ESQUERDA de ``sid`` (o ``hi`` dela é o ``lo``
+        desta folha), ou ``None``. Reusa o ``movable_cut`` do segmentador em vez de
+        reimplementar a adjacência: a dona é a irmã cujo vizinho à direita é ``sid``."""
+        s = self.seg.segments.get(sid)
+        if s is None or not s.get("conditions"):
+            return None
+        pai = s.get("parent")
+        for cid, outro in self.seg.segments.items():
+            if cid == sid or outro.get("parent") != pai:
+                continue
+            info = self.seg.movable_cut(cid)
+            if info and info["sibling"] == sid:
+                return cid
+        return None
+
+    def _move_cut_owner(self):
+        """Folha cujo ``hi`` será movido, conforme o lado escolhido no seletor."""
+        sid = self._selected_leaf()
+        if sid is None:
+            return None
+        return sid if self.dd_move_side.value == "dir" else self._left_cut_owner(sid)
+
     def _sync_move_cut_field(self):
-        """Espelha o corte numérico vigente da folha selecionada (o ``hi`` dela,
-        compartilhado com a irmã à direita) no campo 'novo corte' e habilita os
-        controles só quando há corte móvel — senão explica o porquê no rótulo."""
+        """Monta o seletor de lado com os cortes que a folha selecionada realmente
+        tem e espelha o corte vigente do lado escolhido no campo 'novo corte'.
+        Sem corte móvel de nenhum lado, desabilita e explica o porquê."""
         sid = self.dd_leaf.value
-        info = (self.seg.movable_cut(sid)
-                if sid is not None and sid in self.seg.segments else None)
+        valido = sid is not None and sid in self.seg.segments
+        dono_esq = self._left_cut_owner(sid) if valido else None
+        tem_dir = bool(self.seg.movable_cut(sid)) if valido else False
+        opcoes = ([("◀ à esquerda", "esq")] if dono_esq else []) + \
+                 ([("à direita ▶", "dir")] if tem_dir else [])
         self.out_move_cut.value = ""          # preview antigo não vale p/ outra folha
+        if not opcoes:
+            self.dd_move_side.disabled = True
+            self.lbl_move_cut.value = (
+                "<div class='treeui-legend'>Mover corte: só para folha vizinha de um "
+                "corte numérico — esta não tem corte móvel de nenhum lado.</div>")
+            for w in (self.tx_move_cut, self.btn_move_prev, self.btn_move_cut):
+                w.disabled = True
+            return
+        # trocar as options dispara o observer: silencia p/ não re-sincronizar no meio
+        self._syncing_side = True
+        try:
+            manter = self.dd_move_side.value
+            self.dd_move_side.options = opcoes
+            valores = [v for _, v in opcoes]
+            self.dd_move_side.value = manter if manter in valores else valores[-1]
+        finally:
+            self._syncing_side = False
+        self.dd_move_side.disabled = len(opcoes) == 1
+        self._render_move_cut_side()
+
+    def _render_move_cut_side(self):
+        """Rótulo + valor do campo para o lado atualmente escolhido."""
+        dono = self._move_cut_owner()
+        info = self.seg.movable_cut(dono) if dono else None
         if info is None:
             self.lbl_move_cut.value = (
-                "<div class='treeui-legend'>Mover corte: só para folha que termina "
-                "num corte numérico com irmã à direita (não é a última faixa).</div>")
-            self.tx_move_cut.disabled = True
-            self.btn_move_prev.disabled = True
-            self.btn_move_cut.disabled = True
+                "<div class='treeui-legend'>Corte indisponível deste lado.</div>")
+            for w in (self.tx_move_cut, self.btn_move_prev, self.btn_move_cut):
+                w.disabled = True
             return
         rot = self.seg.feature_labels.get(info["feature"], info["feature"])
+        lado = "à esquerda" if self.dd_move_side.value == "esq" else "à direita"
         self.lbl_move_cut.value = (
-            f"<div class='treeui-legend'>Corte vigente em <b>{_esc(rot)}</b>: "
+            f"<div class='treeui-legend'>Corte {lado} em <b>{_esc(rot)}</b>: "
             f"<b>{_fmt(info['cut'])}</b> · válido entre {_fmt(info['lo'])} e "
             f"{_fmt(info['hi_sib'])} (exclusivo)</div>")
         self.tx_move_cut.value = info["cut"]
-        self.tx_move_cut.disabled = False
-        self.btn_move_prev.disabled = False
-        self.btn_move_cut.disabled = False
+        for w in (self.tx_move_cut, self.btn_move_prev, self.btn_move_cut):
+            w.disabled = False
+
+    def _on_move_side(self, _):
+        if not getattr(self, "_syncing_side", False):
+            self.out_move_cut.value = ""      # preview do outro lado não vale
+            self._render_move_cut_side()
 
     def _on_move_cut_preview(self, _):
-        sid = self._selected_leaf()
+        sid = self._move_cut_owner()
         if sid is None or sid not in self.seg.segments:
-            self._log("Selecione uma folha."); return
+            self._log("Selecione uma folha com corte móvel."); return
         try:
             tbl = self.seg.preview_move_cut(sid, self.tx_move_cut.value)
         except Exception as e:
@@ -3421,9 +3559,9 @@ class TreeSegmenterUI:
                   "confira os dois lados e clique em Mover corte para efetivar.")
 
     def _on_move_cut(self, _):
-        sid = self._selected_leaf()
+        sid = self._move_cut_owner()
         if sid is None or sid not in self.seg.segments:
-            self._log("Selecione uma folha."); return
+            self._log("Selecione uma folha com corte móvel."); return
         before = set(self.seg.segments)
         redo_bak = list(self._redo)
         antes = self._delta_snapshot()
@@ -4217,7 +4355,8 @@ class TreeSegmenterUI:
             try:
                 plot = (self.seg.plot_leaf_target_hist if self._is_clf
                         else self.seg.plot_leaf_value_hist)
-                html = self._fig_html(plot(sid, figsize=self._PREVIEW_FIGSIZE))
+                html = self._fig_html(plot(sid, figsize=self._PREVIEW_FIGSIZE),
+                                      full_width=True)
             except Exception as e:
                 html = (f"<div style='font-size:11px;color:var(--bad-tx)'>"
                         f"(gráfico não gerado: {type(e).__name__})</div>")
@@ -4448,7 +4587,7 @@ class TreeSegmenterUI:
         if feat is None:
             txt = (self.dd_var.value or "").strip()
             self._log(f"⚠ Variável '{txt}' não reconhecida — escolha uma opção da "
-                      "lista (digite para filtrar)." if txt
+                      "lista." if txt
                       else "Selecione uma variável para analisar.")
             return
         with self._busy(self.btn_var_analyze, msg="analisando a variável…"):
@@ -4499,7 +4638,8 @@ class TreeSegmenterUI:
         if self.sample_col is not None:
             try:
                 self.out_var_inv_s.value = self._fig_html(
-                    self.seg.plot_variable_inversion_by_sample(feat, sid=sid))
+                    self.seg.plot_variable_inversion_by_sample(feat, sid=sid),
+                    full_width=True)
             except Exception as e:
                 self.out_var_inv_s.value = err("inversão por amostra", e)
         else:
@@ -4566,7 +4706,7 @@ class TreeSegmenterUI:
         feature = self._sel_feature(warn=False)
         if feature is None:
             return False, (f"⚠ Variável '{(self.dd_feature.value or '').strip()}' não "
-                           "reconhecida — escolha uma opção da lista (digite p/ filtrar).")
+                           "reconhecida — escolha uma opção da lista.")
         try:
             if self.tg_mode.value == "Ótimo":
                 splits = None
@@ -4634,9 +4774,13 @@ class TreeSegmenterUI:
             mmd = p.get("min_mean_diff", 0.0)
             # SEGMENTAÇÃO PROPOSTA (barras repr. × alvo por faixa) — dentro de "Dividir".
             try:
+                # full_width: o PNG tem tamanho fixo (figsize×dpi); sem esticar, ele
+                # sobra em monitor largo e encolhe em monitor estreito. Com
+                # width:100% + height:auto ele acompanha a largura do card.
                 self.out_preview_seg.value = self._fig_html(self.seg.plot_feature_value(
                     p["feature"], sid=sid, splits=splits, max_n_bins=mnb,
-                    min_bin_size=mbs, max_bin_size=xbs, min_mean_diff=mmd))
+                    min_bin_size=mbs, max_bin_size=xbs, min_mean_diff=mmd),
+                    full_width=True)
             except Exception as e:
                 self.out_preview_seg.value = (f"<div style='color:var(--bad-tx);font-size:11px'>"
                                               f"(segmentação não gerada: {type(e).__name__})</div>")
@@ -4646,7 +4790,7 @@ class TreeSegmenterUI:
                     self.out_preview_chart.value = self._fig_html(self.seg.plot_feature_hist(
                         p["feature"], sid=sid, splits=splits, max_n_bins=max(mnb, 6),
                         min_bin_size=mbs, max_bin_size=xbs, min_mean_diff=mmd,
-                        figsize=self._PREVIEW_FIGSIZE))
+                        figsize=self._PREVIEW_FIGSIZE), full_width=True)
                 except Exception as e:
                     self.out_preview_chart.value = (f"<div style='color:var(--bad-tx);font-size:11px'>"
                                                     f"(distribuição não gerada: {type(e).__name__})</div>")
@@ -4953,25 +5097,6 @@ class TreeSegmenterUI:
         scorecard = ("<div class='treeui-metrics' style='grid-template-columns:"
                      "repeat(4,minmax(0,1fr))'>"
                      + "".join(light(*d) for d in dims) + "</div>")
-        # explicação da CALIBRAÇÃO (o que o diagnóstico mede)
-        _ref = self.ref_sample if self.sample_col is not None else "todos"
-        _chk = (calib.attrs.get("check_sample") if calib is not None
-                and hasattr(calib, "attrs") else None) or "OOT"
-        calib_ajuda = (
-            "<div class='treeui-legend' style='margin-top:8px'>"
-            "<b>O que é calibração aqui?</b> Cada folha vira um segmento com um "
-            f"<b>{_rl} previsto</b> = média do alvo na <b>{_ref}</b> (a régua). A calibração "
-            f"checa se esse valor <b>se confirma fora da amostra</b>: para cada folha, compara "
-            f"o {_rl} previsto (na {_ref}) com o <b>{_obs}</b> na amostra de aferição "
-            f"(<b>{_chk}</b>). O <b>gap</b> = previsto − realizado por folha; o placar usa o "
-            "<b>máx |gap|</b> entre as folhas: "
-            "<span style='color:var(--ok-tx)'>&le;0,02 OK</span> · "
-            "<span style='color:var(--warn-tx)'>0,02–0,05 atenção</span> · "
-            "<span style='color:var(--bad-tx)'>&gt;0,05 crítico</span>. "
-            "Gap alto = a folha promete um risco que não se realiza (régua "
-            "des-calibrada) — veja o gráfico de calibração e o backtest na aba "
-            "<b>Validar &amp; Exportar</b>.</div>")
-
         ev = ""
         if psi_df is not None and len(psi_df):
             def bar(p):
@@ -5038,7 +5163,7 @@ class TreeSegmenterUI:
             except Exception as e:
                 ev += (f"<div style='color:var(--bad-tx);font-size:12px'>Gráficos de inversão "
                        f"não gerados: {type(e).__name__}</div>")
-        return scorecard + calib_ajuda + ev
+        return scorecard + ev
 
     # ==================================================================
     # Validação (monotonicidade · calibração · backtest) e relatório
@@ -5296,12 +5421,10 @@ class TreeSegmenterUI:
         with self._busy(self.btn_estab, status=self.out_estab,
                         msg="calculando a estabilidade…"):
             self._estab_tcol = (self.tx_sib_time.value or "").strip() or self.date_col
-            # concentração das folhas: NÃO muda com métricas/zoom — renderiza 1× e guarda
-            try:
-                self._estab_conc_html = self._fig_html(
-                    self.seg.plot_leaf_concentration(figsize=(9.0, 4.0)), full_width=True)
-            except Exception as e:
-                self._estab_conc_html = self._estab_err("concentração", e)
+            # O gráfico de concentração das folhas entre amostras saiu daqui: com
+            # muitas folhas as barras ficavam finas demais para ler. O mesmo dado
+            # está na TABELA de folhas (colunas % DES / % OOT / % ESTAB), que
+            # escala bem e permite ordenar.
             self._estab_ready = True
             self._render_estab_charts()
 
@@ -5364,9 +5487,7 @@ class TreeSegmenterUI:
             h_psi_s = self._estab_err("PSI entre amostras", e)
         self.out_conc.value = (
             "<div class='treeui-h' style='margin-top:10px'>PSI da segmentação entre "
-            f"amostras</div>{h_psi_s}"
-            "<div class='treeui-h' style='margin-top:12px'>Concentração das folhas "
-            f"entre amostras</div>{getattr(self, '_estab_conc_html', '')}")
+            f"amostras</div>{h_psi_s}")
 
     def _on_psi_zoom(self, _):
         self._psi_zoom = True
@@ -5921,6 +6042,12 @@ class TreeSegmenterUI:
         w = self._tree_img_widget
         return w is not None and w in getattr(self.box_tree_img, "children", ())
 
+    def _on_tree_zoom(self, ch):
+        """Espelha o slider no trait do widget — o front só reescala a imagem já
+        renderizada (nenhum replot no Python)."""
+        if self._tree_img_widget is not None:
+            self._tree_img_widget.zoom = float(ch["new"])
+
     def _ensure_tree_widget(self):
         """Garante o widget interativo montado no card (instancia 1× e reusa).
         Devolve False quando o preview interativo está desligado
@@ -5935,6 +6062,7 @@ class TreeSegmenterUI:
                 return False
             self._tree_img_widget = cls()
             self._tree_img_widget.observe(self._on_tree_img_select, names="selected")
+            self._tree_img_widget.zoom = float(self.sl_tree_zoom.value)
         if not self._tree_img_visible():
             self.box_tree_img.children = (self.tree_img_bar, self._tree_img_widget,
                                           self.out_tree_img, self.tree_img_split)

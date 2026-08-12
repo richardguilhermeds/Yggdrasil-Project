@@ -482,15 +482,16 @@ def test_ui_avancado_suggest_importance_sql(task):
 def test_ui_sql_fallback_dropdown_e_chip_sem_rota(task):
     """O card de SQL tem o dropdown de fallback p/ não classificados: NULL por
     padrão; 'pior nota' persiste no segmentador (viaja no to_dict) e troca o
-    ELSE do SQL. A barra de status mostra o chip de linhas sem rota (0 na base
-    de desenvolvimento)."""
+    ELSE do SQL. A cobertura (linhas sem rota) é aferida pelo segmentador — a
+    barra de status não a exibe mais."""
     ui = _build(task)
     assert ui.dd_fallback.value is None             # padrão: sem fallback
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_autofit(None)
         ui._on_sql(None)
     assert "ELSE NULL" in ui.out_sql.value          # padrão preservado
-    assert "Sem rota" in ui.bar.value               # chip na barra de status
+    assert "Sem rota" not in ui.bar.value           # barra enxuta: sem o chip
+    assert "Fechadas" in ui.bar.value               # contador de travadas segue na barra
     assert ui.seg.n_orfas() == 0                    # base atual coberta (DES)
     with contextlib.redirect_stdout(io.StringIO()):
         ui.dd_fallback.value = "pior_nota"          # escolhe o fallback
@@ -533,12 +534,18 @@ def test_ui_importancia_colorida_com_dicionario(task):
     assert "O que é a importância" in ui.out_importance_legend.value   # dicionário (abaixo)
 
 
-def test_ui_diag_explica_calibracao(task):
+def test_ui_diag_placar_quatro_dimensoes(task):
+    """O placar traz as 4 dimensões com veredito, sem o parágrafo explicativo da
+    calibração (removido: o card já é denso e a explicação vive na aba de
+    validação)."""
     ui = _build(task)
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_autofit(None)
         ui._on_diag(None)
-    assert "O que é calibração" in ui.out_diag.value
+    html = ui.out_diag.value
+    for dim in ("Discriminação", "Estabilidade", "Calibração", "Estrutura"):
+        assert dim in html
+    assert "O que é calibração" not in html
 
 
 def test_ui_tema_escuro(task):
@@ -837,24 +844,27 @@ def test_ui_refresh_invalida_diag_sql_validacao(task):
     assert ui2.out_sql.value == ""
 
 
-def test_ui_combobox_variavel_busca_e_valida(task):
-    """Os seletores de variável são Combobox (digite p/ filtrar): rótulo→coluna
-    via mapa; texto que não bate com opção nenhuma não resolve, avisa no console
-    e não deixa o split preparar."""
+def test_ui_seletor_variavel_e_dropdown_com_lista_completa(task):
+    """Os seletores de variável são Dropdown — o MESMO widget da folha, que abre
+    a lista inteira num clique. Um Combobox já esteve aqui e o <datalist> do
+    navegador filtrava as opções pelo texto do campo: com uma variável escolhida,
+    só ela aparecia. O Dropdown também torna impossível selecionar valor fora da
+    lista (o widget recusa), então não há entrada inválida a validar."""
     import ipywidgets as W
+    import traitlets
     ui = _build(task)
-    assert isinstance(ui.dd_feature, W.Combobox) and isinstance(ui.dd_var, W.Combobox)
+    assert isinstance(ui.dd_feature, W.Dropdown) and isinstance(ui.dd_var, W.Dropdown)
+    assert isinstance(ui.dd_leaf, W.Dropdown)      # mesma classe do seletor de folha
+    # a lista traz TODAS as candidatas, nas duas abas
+    assert len(ui.dd_feature.options) == len(ui.features)
+    assert len(ui.dd_var.options) == len(ui.features)
     assert ui._sel_feature() == "score"            # sem feature_labels: rótulo = coluna
-    with contextlib.redirect_stdout(io.StringIO()):
+    with pytest.raises(traitlets.TraitError):      # o widget barra o inválido
         ui.dd_feature.value = "variavel_que_nao_existe"
-    assert ui._sel_feature() is None
-    assert any("não reconhecida" in l for l in ui._log_lines)
-    with contextlib.redirect_stdout(io.StringIO()):
-        ok, msg = ui._prepare_split()              # entrada inválida não explode
-    assert ok is False and "não reconhecida" in msg
+    assert ui._sel_feature() == "score"            # seleção intacta após a recusa
 
 
-def test_ui_combobox_ordena_por_iv(task):
+def test_ui_seletor_ordena_por_iv(task):
     """O toggle 'ordenar por IV' reordena as opções por IV desc e anexa o IV ao
     rótulo; a seleção sobrevive à reordenação e segue resolvendo p/ a coluna."""
     ui = _build(task)
@@ -874,7 +884,7 @@ def test_ui_combobox_ordena_por_iv(task):
     assert ui._sel_feature() == "score"
 
 
-def test_ui_combobox_iv_nao_invalida_preview(task):
+def test_ui_reordenar_por_iv_nao_invalida_preview(task):
     """Reordenar por IV só re-rotula a MESMA coluna: o preview pendente não é
     invalidado (contexto variável+folha inalterado)."""
     ui = _build(task)
@@ -893,19 +903,19 @@ def test_ui_combobox_iv_nao_invalida_preview(task):
     assert _nleaf(ui) >= 2                         # split funciona com o rótulo de IV
 
 
-def test_ui_combobox_var_analise_ordena_e_valida(task):
-    """Aba Análise: toggle de IV reordena o seletor; entrada inválida no
-    'Analisar variável' avisa e não renderiza nada."""
+def test_ui_var_analise_ordena_por_iv_e_mantem_lista(task):
+    """Aba Análise: o toggle de IV reordena e re-rotula o seletor sem perder
+    nenhuma candidata, e a coluna selecionada sobrevive à reordenação."""
+    import traitlets
     ui = _build(task)
+    antes = ui._sel_var()
     with contextlib.redirect_stdout(io.StringIO()):
         ui.tg_var_iv.value = True
     assert any("(IV " in o for o in ui.dd_var.options)
-    assert ui._sel_var() in ui.features
-    with contextlib.redirect_stdout(io.StringIO()):
+    assert len(ui.dd_var.options) == len(ui.features)   # nenhuma sumiu
+    assert ui._sel_var() == antes                       # mesma coluna, outro rótulo
+    with pytest.raises(traitlets.TraitError):
         ui.dd_var.value = "typo_qualquer"
-        ui._on_var_analyze(None)
-    assert any("não reconhecida" in l for l in ui._log_lines)
-    assert ui.out_var_cards.value == ""
 
 
 def test_ui_exportar_excel(task, tmp_path):

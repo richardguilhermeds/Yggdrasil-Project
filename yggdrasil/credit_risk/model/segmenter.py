@@ -173,6 +173,18 @@ OPTUNA_SEARCH_SPACE: dict[str, dict[str, dict]] = {
 _EPS = 1e-6
 
 
+def _sem_prefixo_da_variavel(labels, feature):
+    """Rótulos de bin sem o prefixo ``"<feature>: "``.
+
+    O nome da variável já aparece no TÍTULO do gráfico; repeti-lo em cada item
+    da legenda só rouba espaço e faz o rótulo ser truncado no meio do número
+    (ex.: "comprometimento_renda: (0.3287, 0.56…"). Sobra a faixa, que é o que
+    distingue as séries."""
+    pref = f"{feature}: "
+    return [l[len(pref):] if isinstance(l, str) and l.startswith(pref) else l
+            for l in labels]
+
+
 def _optuna_space(trial, algorithm: str, space: dict | None = None) -> dict:
     """Sugere um conjunto de hiperparâmetros para o Optuna, a partir do catálogo
     :data:`OPTUNA_SEARCH_SPACE` do algoritmo.
@@ -1857,11 +1869,12 @@ class ModelSegmenter:
             fig.tight_layout(); return fig
         xs = s["xs_sample"]; x = list(range(len(xs)))
         cmap = _cmap("RdYlGn_r"); k = len(inv["ordered"])
+        _rot = _sem_prefixo_da_variavel(s["labels"], feature)
         for rank, i in enumerate(inv["ordered"]):
             ax.plot(x, s["ser_sample"][i], marker="o", lw=1.9, ms=5.5,
                     color=cmap(rank / (k - 1) if k > 1 else 0.5),
                     markeredgecolor="#33424f", markeredgewidth=0.6,
-                    label=s["labels"][i])
+                    label=_rot[i])
         ax.set_xticks(x); ax.set_xticklabels(xs, fontsize=9)
         ax.set_ylabel("risco médio"); ax.set_xlabel("amostra")
         if target_ylim01 and self.task_type != "classification":
@@ -1897,10 +1910,11 @@ class ModelSegmenter:
             if npp and n_inv:
                 ax.axvspan(j - 0.5, j + 0.5, color="#d6453e", alpha=0.08, lw=0)
         cmap = _cmap("RdYlGn_r"); k = len(ordered)
+        _rot = _sem_prefixo_da_variavel(s["labels"], feature)
         for rank, i in enumerate(ordered):
             ax.plot(x, s["ser_safra"][i], marker="o", lw=1.7, ms=4.5,
                     color=cmap(rank / (k - 1) if k > 1 else 0.5),
-                    markeredgecolor="#33424f", markeredgewidth=0.5, label=s["labels"][i])
+                    markeredgecolor="#33424f", markeredgewidth=0.5, label=_rot[i])
         ax.set_xticks(x); ax.set_xticklabels(_fmt_safras(xs), rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("risco médio"); ax.set_xlabel("safra")
         if target_ylim01 and self.task_type != "classification":

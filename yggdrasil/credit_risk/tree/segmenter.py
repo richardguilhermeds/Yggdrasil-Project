@@ -66,6 +66,18 @@ _UNIT_METRICS = frozenset({"ks", "auc", "gini"})
 # ======================================================================
 # Helpers (formatação/classificação/optbinning vêm de credit_risk._common)
 # ======================================================================
+def _sem_prefixo_da_variavel(labels, feature):
+    """Rótulos de bin sem o prefixo ``"<feature>: "``.
+
+    O nome da variável já aparece no TÍTULO do gráfico; repeti-lo em cada item
+    da legenda só rouba espaço e faz o rótulo ser truncado no meio do número
+    (ex.: "comprometimento_renda: (0.3287, 0.56…"). Sobra a faixa, que é o que
+    distingue as séries."""
+    pref = f"{feature}: "
+    return [l[len(pref):] if isinstance(l, str) and l.startswith(pref) else l
+            for l in labels]
+
+
 def _intervalo_por_extenso(lo: float, hi: float) -> str:
     """Converte um intervalo (lo, hi] em texto legível."""
     if lo == -np.inf:
@@ -3976,8 +3988,8 @@ class TreeSegmenter:
         ax.bar(xs, reprs, color=cols, edgecolor="#2f5d82", alpha=0.85, width=0.7,
                label="% da amostra")
         for x0, rp in zip(xs, reprs):
-            ax.text(x0, rp, f"{rp:.0f}%", ha="center", va="bottom", fontsize=7.5,
-                    color="#15324a")
+            ax.text(x0, rp, f"{rp:.0f}%", ha="center", va="bottom", fontsize=9.5,
+                    fontweight="semibold", color="#15324a")
         ax.set_ylabel("% da amostra"); ax.set_ylim(0, float(np.nanmax(reprs)) * 1.2 + 1)
         is_clf = self._is_clf
         risco = vt[rcol].to_numpy(dtype="float64")
@@ -3990,7 +4002,8 @@ class TreeSegmenter:
         for x0, yv in zip(xs, yline):
             if np.isfinite(yv):
                 ax2.text(x0, yv, (f"{yv:.1f}%" if is_clf else f"{yv:.3f}"),
-                         ha="center", va="bottom", fontsize=7.5, color="crimson")
+                         ha="center", va="bottom", fontsize=9.5, fontweight="semibold",
+                         color="crimson")
         ax2.set_ylabel(ylabel, color="crimson"); ax2.tick_params(axis="y", labelcolor="crimson")
         finite = yline[np.isfinite(yline)]
         if finite.size:
@@ -4099,10 +4112,11 @@ class TreeSegmenter:
             fig.tight_layout(); return fig
         xs = s["xs_sample"]; x = list(range(len(xs)))
         cmap = plt.get_cmap("RdYlGn_r"); k = len(inv["ordered"])
+        _rot = _sem_prefixo_da_variavel(s["labels"], feature)
         for rank, i in enumerate(inv["ordered"]):
             ax.plot(x, s["ser_sample"][i], marker="o", lw=1.9, ms=5.5,
                     color=cmap(rank / (k - 1) if k > 1 else 0.5),
-                    markeredgecolor="#33424f", markeredgewidth=0.6, label=s["labels"][i])
+                    markeredgecolor="#33424f", markeredgewidth=0.6, label=_rot[i])
         ax.set_xticks(x); ax.set_xticklabels(xs, fontsize=9)
         ax.set_ylabel("risco médio"); ax.set_xlabel("amostra")
         ax.set_title(f"'{self.label(feature)}' — risco das faixas por amostra",
@@ -4137,10 +4151,11 @@ class TreeSegmenter:
             if npp and n_inv:
                 ax.axvspan(j - 0.5, j + 0.5, color="#d6453e", alpha=0.08, lw=0)
         cmap = plt.get_cmap("RdYlGn_r"); k = len(ordered)
+        _rot = _sem_prefixo_da_variavel(s["labels"], feature)
         for rank, i in enumerate(ordered):
             ax.plot(x, s["ser_safra"][i], marker="o", lw=1.7, ms=4.5,
                     color=cmap(rank / (k - 1) if k > 1 else 0.5),
-                    markeredgecolor="#33424f", markeredgewidth=0.5, label=s["labels"][i])
+                    markeredgecolor="#33424f", markeredgewidth=0.5, label=_rot[i])
         ax.set_xticks(x); ax.set_xticklabels(_fmt_safras(xs), rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("risco médio"); ax.set_xlabel("safra")
         self._draw_sample_dividers(ax, list(xs), time_col)
