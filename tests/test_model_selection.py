@@ -230,6 +230,19 @@ def test_steps_vazio_nao_exclui_ninguem(seg):
     assert set(res.tabela["motivo"]) == {"nenhuma etapa executada"}
 
 
+def test_resumo_so_traz_o_sufixo_quando_ha_variavel_a_revisar():
+    """Uma linha por etapa, e o ``, N a revisar`` só aparece com N > 0."""
+    funil = pd.DataFrame([("candidatas", 10, 0, 0, 10),
+                          ("missing", 10, 3, 0, 7),
+                          ("iv", 7, 2, 1, 5)], columns=list(COLUNAS_FUNIL))
+    res = SelectionResult(tabela=pd.DataFrame(columns=list(COLUNAS_TABELA)),
+                          funil=funil, selecionadas=["a"], excluidas=["b"],
+                          revisar=["c"], politica={"etapas": ["missing", "iv"]})
+    linhas = res.resumo().splitlines()
+    assert linhas[-2] == f"  {rotulo_etapa('missing')}: 10 → 7 (−3)"
+    assert linhas[-1] == f"  {rotulo_etapa('iv')}: 7 → 5 (−2, 1 a revisar)"
+
+
 # ----------------------------------------------------------------------
 # apply=False (simulação) × apply=True
 # ----------------------------------------------------------------------

@@ -231,9 +231,13 @@ class SelectionResult:
         for _, r in self.funil.iterrows():
             if r["etapa"] == "candidatas":
                 continue
+            # Sem f-string aninhada aqui: o sufixo sai numa variável porque aspas
+            # repetidas dentro de uma f-string só valem do Python 3.12 (PEP 701)
+            # e a lib declara requires-python >=3.9.
+            n_revisar = int(r["n_revisar"])
+            sufixo = f", {n_revisar} a revisar" if n_revisar else ""
             linhas.append(f"  {rotulo_etapa(r['etapa'])}: {int(r['n_entrada'])} → "
-                          f"{int(r['n_saida'])} (−{int(r['n_excluidas'])}"
-                          f"{f', {int(r['n_revisar'])} a revisar' if int(r['n_revisar']) else ''})")
+                          f"{int(r['n_saida'])} (−{int(r['n_excluidas'])}{sufixo})")
         if not self.politica.get("aplicado", True):
             linhas.append("  (simulação — nada foi aplicado no segmentador)")
         return "\n".join(linhas)
