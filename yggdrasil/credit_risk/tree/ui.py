@@ -333,9 +333,17 @@ _CSS = """
 .treeui.dark .treeui-tabs .lm-TabBar-tab.lm-mod-current:hover {
   background:#8ACAFF !important; color:#11171C !important; border-color:#8ACAFF !important; }
 .treeui.dark .widget-text input, .treeui.dark .widget-dropdown select,
-.treeui.dark textarea { background:#11171C !important; color:#E8ECF0 !important;
+.treeui.dark textarea, .treeui.dark .widget-select select {
+  background:#11171C !important; color:#E8ECF0 !important;
   border-color:#37444F !important; }
+.treeui.dark .widget-select select option { background:#11171C; color:#E8ECF0; }
 .treeui.dark .widget-label, .treeui.dark .jupyter-widgets label { color:#D1D9E1 !important; }
+/* rótulos com <span> interno (checkbox) e readout de slider: o host pode
+   pintar o elemento INTERNO direto — cor herdada do <label> não vence */
+.treeui.dark .widget-checkbox label, .treeui.dark .widget-checkbox label span,
+.treeui.dark .widget-label-basic, .treeui.dark .widget-label-basic span {
+  color:#D1D9E1 !important; }
+.treeui.dark .widget-readout { color:#E8ECF0 !important; }
 /* botões ipywidgets sem button_style: seguem a superfície DuBois */
 .treeui.dark .jupyter-button:not(.mod-primary):not(.mod-success):not(.mod-info):not(.mod-warning):not(.mod-danger) { background:#37444F !important; color:#E8ECF0 !important; }
 .treeui.dark .jupyter-button.mod-active { background:#4299E0 !important; color:#11171C !important; }
@@ -2921,8 +2929,17 @@ class TreeSegmenterUI:
                     if _tinta_escura(t.get_color()):
                         t.set_color(ink)
             for t in ax.texts:                 # anotações (percentuais etc.)
+                if t.get_gid() == "keep-ink":  # cor casada com a CÉLULA (dado)
+                    continue
                 if _tinta_escura(t.get_color()):
                     t.set_color(ink)
+        # suptitles vivem em fig.texts, não em ax.texts — sem este loop o
+        # título grande fica navy (ilegível) sobre o fundo escuro
+        for t in fig.texts:
+            if t.get_gid() == "keep-ink":
+                continue
+            if _tinta_escura(t.get_color()):
+                t.set_color(ink)
         return fig
 
     def _on_dark(self, change):

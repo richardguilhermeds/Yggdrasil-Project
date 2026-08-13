@@ -288,12 +288,49 @@ _CSS = """
 .mseg.dark .mseg-tabs .p-TabBar-tab.p-mod-current:hover,
 .mseg.dark .mseg-tabs .lm-TabBar-tab.lm-mod-current:hover {
   background:#8ACAFF !important; color:#11171C !important; border-color:#8ACAFF !important; }
-.mseg.dark .widget-text input, .mseg.dark .widget-dropdown select, .mseg.dark textarea {
+.mseg.dark .widget-text input, .mseg.dark .widget-dropdown select, .mseg.dark textarea,
+.mseg.dark .widget-select select {
   background:#11171C !important; color:#E8ECF0 !important; border-color:#37444F !important; }
+.mseg.dark .widget-select select option { background:#11171C; color:#E8ECF0; }
 .mseg.dark .widget-label, .mseg.dark .jupyter-widgets label { color:#D1D9E1 !important; }
+/* rótulos com <span> interno (checkbox) e readout de slider: o host pode pintar
+   o elemento INTERNO direto — aí a cor herdada do <label> perde para qualquer
+   regra que mire o span/readout, por menor que seja a especificidade dela */
+.mseg.dark .widget-checkbox label, .mseg.dark .widget-checkbox label span,
+.mseg.dark .widget-label-basic, .mseg.dark .widget-label-basic span {
+  color:#D1D9E1 !important; }
+.mseg.dark .widget-readout { color:#E8ECF0 !important; }
+/* gaveta (Accordion) do tuning: cabeçalho e conteúdo na superfície DuBois —
+   sem isto o cabeçalho fica BRANCO no escuro (skin default do lumino/host) */
+.mseg.dark .p-Collapse-header, .mseg.dark .lm-Collapse-header,
+.mseg.dark .jp-Collapse-header, .mseg.dark .jupyter-widget-Collapse-header {
+  background:#1F272D !important; color:#E8ECF0 !important;
+  border-color:#37444F !important; }
+.mseg.dark .p-Collapse-contents, .mseg.dark .lm-Collapse-contents,
+.mseg.dark .jp-Collapse-contents, .mseg.dark .jupyter-widget-Collapse-contents {
+  background:transparent !important; border-color:#37444F !important; }
 /* botões ipywidgets sem button_style: seguem a superfície DuBois */
 .mseg.dark .jupyter-button:not(.mod-primary):not(.mod-success):not(.mod-info):not(.mod-warning):not(.mod-danger) { background:#37444F !important; color:#E8ECF0 !important; }
 .mseg.dark .jupyter-button.mod-active { background:#4299E0 !important; color:#11171C !important; }
+
+/* ===== seções colapsáveis (padrão do TreeSegmenterUI): cabeçalho-botão
+   (chevron + título em caixa alta) com área de resumo à direita; o corpo abre
+   sob demanda. A seção é um card; os cards INTERNOS perdem moldura (card
+   dentro de card pesa) e, quando o título interno repete o da seção, o header
+   interno some (classe sec-esconde-h). */
+.mseg button.mseg-sec-btn { justify-content:flex-start !important;
+  text-align:left; width:100%; height:42px !important; padding:0 10px !important;
+  font-size:12.5px; font-weight:600; letter-spacing:.03em;
+  text-transform:uppercase; color:var(--strong-ink) !important;
+  background:transparent !important; border:none !important;
+  box-shadow:none !important; }
+.mseg button.mseg-sec-btn:hover { background-color:var(--ac-soft) !important; }
+.mseg-sec { padding:4px 8px !important; }
+.mseg-sec-resumo { padding-right:10px; white-space:nowrap; }
+.mseg-sec .mseg-card { border:none !important; box-shadow:none !important;
+  margin-bottom:4px; background:transparent !important; }
+.mseg-sec .sec-esconde-h > .widget-html:first-child { display:none; }
+.mseg.dark .mseg-sec .mseg-card { background:transparent !important; }
 
 /* ===== pacote de tema escuro (portado do TreeSegmenterUI) =====
    1) células de tabela e conteúdo de widget herdavam a cor do TEMA DO HOST
@@ -397,6 +434,40 @@ class ModelSegmenterUI:
         self._sync_bin_controls()
 
     # ------------------------------------------------------------------ render utils
+    def _make_secao(self, key, titulo, corpo, aberto=False):
+        """Seção colapsável (padrão do TreeSegmenterUI): cabeçalho-botão
+        (chevron + título em caixa alta) com área de resumo à direita, e o
+        corpo abrindo sob demanda. É o antídoto do paredão de cards: fechada,
+        a seção é uma LINHA; o conjunto de cabeçalhos vira o índice da aba."""
+        if not hasattr(self, "_secoes"):
+            self._secoes = {}
+        btn = W.Button(description=("▾  " if aberto else "▸  ") + titulo,
+                       layout=W.Layout(flex="1 1 auto", width="auto"))
+        btn.add_class("mseg-sec-btn")
+        resumo = W.HTML(layout=W.Layout(flex="0 0 auto"))
+        resumo.add_class("mseg-sec-resumo")
+        body = W.VBox(list(corpo), layout=W.Layout(
+            width="100%", display="" if aberto else "none"))
+
+        def _alterna(_):
+            fechado = body.layout.display == "none"
+            body.layout.display = "" if fechado else "none"
+            btn.description = ("▾  " if fechado else "▸  ") + titulo
+        btn.on_click(_alterna)
+        sec = W.VBox([W.HBox([btn, resumo],
+                             layout=W.Layout(width="100%", align_items="center")),
+                      body], layout=W.Layout(width="100%"))
+        sec.add_class("mseg-card")
+        sec.add_class("mseg-sec")
+        self._secoes[key] = (btn, resumo, body, titulo)
+        return sec
+
+    def _sec_chip(self, key, html):
+        """Escreve os chips de resumo de uma seção (no-op se ela não existir)."""
+        secs = getattr(self, "_secoes", None)
+        if secs and key in secs:
+            secs[key][1].value = html
+
     _DARK_FIG = {"bg": "#1F272D", "ink": "#E8ECF0", "line": "#37444F"}
 
     def _dark_fig(self, fig):
@@ -434,8 +505,17 @@ class ModelSegmenterUI:
                     if _tinta_escura(t.get_color()):
                         t.set_color(ink)
             for t in ax.texts:
+                if t.get_gid() == "keep-ink":     # cor casada com a CÉLULA (dado)
+                    continue                      # — célula não muda com o tema
                 if _tinta_escura(t.get_color()):
                     t.set_color(ink)
+        # suptitles vivem em fig.texts, não em ax.texts — sem este loop o
+        # título grande fica navy (ilegível) sobre o fundo escuro
+        for t in fig.texts:
+            if t.get_gid() == "keep-ink":
+                continue
+            if _tinta_escura(t.get_color()):
+                t.set_color(ink)
         return fig
 
     def _fig_html(self, fig, border=False, tight=True, stretch=False):
@@ -2020,76 +2100,91 @@ class ModelSegmenterUI:
         self.btn_boot.on_click(self._on_boot)
         self.btn_build_ratings.on_click(self._on_build_ratings)
 
+        # a aba vira um índice de seções colapsáveis: só a construção da régua
+        # nasce aberta; os diagnósticos abrem sob demanda (pedido do usuário —
+        # "clicar para visualizar melhor os tópicos")
+        box_boot = W.VBox([
+            W.HTML("<div class='mseg-h'>Intervalos de confiança (bootstrap) &amp; "
+                   "aderência entre amostras</div>"),
+            W.HTML("<div class='mseg-legend'>IC do alvo médio por <b>rating</b> via "
+                   "bootstrap na referência: reamostra as linhas de cada rating e "
+                   "reagrega o alvo — o score e o rating de cada linha ficam "
+                   "<b>fixos</b> (sem reescorar o modelo por réplica). Se houver "
+                   "outra amostra (ex. OOT), compara o realizado por rating: "
+                   "<span style='color:var(--ok-tx)'>dentro</span> do IC = estável; "
+                   "<span style='color:var(--bad-tx)'>acima/abaixo</span> = o alvo "
+                   "deslocou além da incerteza amostral. Calcule com a régua "
+                   "fechada.</div>"),
+            W.HBox([self.sl_boot, self.btn_boot],
+                   layout=W.Layout(align_items="center")),
+            self.out_boot])
+        box_boot.add_class("sec-esconde-h")   # o título da seção já diz o mesmo
         tab_rating = W.VBox([
-            W.HBox([self.dd_method, self.sl_nratings, self.cb_fusion,
-                    self.btn_suggest_n, self.btn_build_ratings]),
-            W.HTML("<div class='mseg-legend'><b>Fusão monotônica (inversão):</b> quando marcada, "
-                   "funde faixas de rating vizinhas cuja ordem de risco se inverte (rating de score "
-                   "maior com risco observado menor que o do rating anterior). A fusão só acontece "
-                   "se a inversão <b>não</b> for estatisticamente significativa (Mann-Whitney na "
-                   "regressão, qui-quadrado na classificação; α=0,05). Assim a régua fica "
-                   "monotônica sem descartar separações de risco que são reais.</div>"),
-            self.tx_manual,
-            self.out_rating_auto,
-            W.VBox([W.HTML("<div class='mseg-h'>Régua de ratings (risco por amostra)</div>"),
-                    W.HTML("<div class='mseg-legend'><b>Teste de calibração</b> (na referência): "
-                           "<code>ic_low/ic_high</code> = IC 95% do realizado dado o n do rating "
-                           "(Jeffreys na classificação; teste t na regressão) e "
-                           "<code>status_teste</code> = semáforo — <b>ok</b> se o score médio do "
-                           "rating cai dentro do IC 95%, <b>atencao</b> se fora do 95% mas dentro "
-                           "do 99%, <b>alerta</b> se fora do 99%. Rating pequeno tem IC largo (gap "
-                           "grande pode ser ruído); rating grande, IC estreito (gap pequeno já é "
-                           "significativo).</div>"),
-                    # tabela + indicador de separação entre ratings vizinhos lado a lado
-                    W.HBox([W.VBox([self.out_rating_table],
-                                   layout=W.Layout(flex="1 1 auto", overflow="auto")),
-                            W.VBox([self.out_rating_septest],
-                                   layout=W.Layout(flex="0 0 320px",
-                                                   margin="0 0 0 12px"))])]),
-            W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Risco por rating</div>"),
-                            self.out_rating_badrate], layout=W.Layout(width="50%")),
-                    W.VBox([W.HTML("<div class='mseg-h'>Distribuição dos ratings</div>"),
-                            self.out_rating_dist], layout=W.Layout(width="50%"))]),
-            W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Inversão entre ratings · amostras</div>"),
-                            self.out_rating_inv_s, self.box_zoom_inv_s],
-                           layout=W.Layout(width="50%")),
-                    W.VBox([W.HTML("<div class='mseg-h'>Inversão entre ratings · safras</div>"),
-                            self.out_rating_inv_t, self.box_zoom_inv_t],
-                           layout=W.Layout(width="50%"))]),
-            # PSI por amostra × PSI por safra lado a lado (mesma figsize + tight=False
-            # ⇒ mesma altura nas colunas 50/50, como os gráficos de inversão acima).
-            W.HBox([
-                W.VBox([W.HTML("<div class='mseg-h'>PSI dos ratings por amostra · DES × OOT e "
-                               "ESTABILIDADE</div>"),
-                        W.HTML("<div class='mseg-legend'>Estabilidade da régua entre amostras: PSI da "
-                               "distribuição dos ratings de cada amostra vs a referência (DES). "
-                               "Verde &lt; 0,10 (estável) · amarelo &lt; 0,25 (atenção) · vermelho "
-                               "≥ 0,25 (instável).</div>"),
-                        self.out_rating_psi_sample], layout=W.Layout(width="50%")),
-                W.VBox([W.HTML("<div class='mseg-h'>PSI dos ratings ao longo do tempo · por safra "
-                               "vs DES</div>"),
-                        W.HTML("<div class='mseg-legend'>Estabilidade da régua no tempo: PSI da "
-                               "distribuição dos ratings de cada safra vs a referência (DES). "
-                               "Verde &lt; 0,10 (estável) · amarelo &lt; 0,25 (atenção) · vermelho "
-                               "≥ 0,25 (instável). Requer coluna de data (<code>date_col</code>).</div>"),
-                        self.out_rating_psi_safra], layout=W.Layout(width="50%")),
-            ], layout=W.Layout(justify_content="space-between")),
-            W.VBox([W.HTML("<div class='mseg-h'>Monotonicidade por amostra</div>"),
-                    self.out_rating_mono]),
-            W.VBox([W.HTML("<div class='mseg-h'>Intervalos de confiança (bootstrap) &amp; "
-                           "aderência entre amostras</div>"),
-                    W.HTML("<div class='mseg-legend'>IC do alvo médio por <b>rating</b> via "
-                           "bootstrap na referência: reamostra as linhas de cada rating e "
-                           "reagrega o alvo — o score e o rating de cada linha ficam "
-                           "<b>fixos</b> (sem reescorar o modelo por réplica). Se houver "
-                           "outra amostra (ex. OOT), compara o realizado por rating: "
-                           "<span style='color:var(--ok-tx)'>dentro</span> do IC = estável; "
-                           "<span style='color:var(--bad-tx)'>acima/abaixo</span> = o alvo "
-                           "deslocou além da incerteza amostral. Calcule com a régua "
-                           "fechada.</div>"),
-                    W.HBox([self.sl_boot, self.btn_boot],
-                           layout=W.Layout(align_items="center")),
-                    self.out_boot]),
+            self._make_secao("rt_build", "Construir a régua", [
+                W.HBox([self.dd_method, self.sl_nratings, self.cb_fusion,
+                        self.btn_suggest_n, self.btn_build_ratings]),
+                W.HTML("<div class='mseg-legend'><b>Fusão monotônica (inversão):</b> quando marcada, "
+                       "funde faixas de rating vizinhas cuja ordem de risco se inverte (rating de score "
+                       "maior com risco observado menor que o do rating anterior). A fusão só acontece "
+                       "se a inversão <b>não</b> for estatisticamente significativa (Mann-Whitney na "
+                       "regressão, qui-quadrado na classificação; α=0,05). Assim a régua fica "
+                       "monotônica sem descartar separações de risco que são reais.</div>"),
+                self.tx_manual,
+                self.out_rating_auto,
+                W.VBox([W.HTML("<div class='mseg-h'>Régua de ratings (risco por amostra)</div>"),
+                        W.HTML("<div class='mseg-legend'><b>Teste de calibração</b> (na referência): "
+                               "<code>ic_low/ic_high</code> = IC 95% do realizado dado o n do rating "
+                               "(Jeffreys na classificação; teste t na regressão) e "
+                               "<code>status_teste</code> = semáforo — <b>ok</b> se o score médio do "
+                               "rating cai dentro do IC 95%, <b>atencao</b> se fora do 95% mas dentro "
+                               "do 99%, <b>alerta</b> se fora do 99%. Rating pequeno tem IC largo (gap "
+                               "grande pode ser ruído); rating grande, IC estreito (gap pequeno já é "
+                               "significativo).</div>"),
+                        # tabela + indicador de separação entre ratings vizinhos lado a lado
+                        W.HBox([W.VBox([self.out_rating_table],
+                                       layout=W.Layout(flex="1 1 auto", overflow="auto")),
+                                W.VBox([self.out_rating_septest],
+                                       layout=W.Layout(flex="0 0 320px",
+                                                       margin="0 0 0 12px"))])]),
+            ], aberto=True),
+            self._make_secao("rt_risco", "Risco & distribuição por rating", [
+                W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Risco por rating</div>"),
+                                self.out_rating_badrate], layout=W.Layout(width="50%")),
+                        W.VBox([W.HTML("<div class='mseg-h'>Distribuição dos ratings</div>"),
+                                self.out_rating_dist], layout=W.Layout(width="50%"))]),
+            ]),
+            self._make_secao("rt_inv", "Inversões entre ratings", [
+                W.HBox([W.VBox([W.HTML("<div class='mseg-h'>Inversão entre ratings · amostras</div>"),
+                                self.out_rating_inv_s, self.box_zoom_inv_s],
+                               layout=W.Layout(width="50%")),
+                        W.VBox([W.HTML("<div class='mseg-h'>Inversão entre ratings · safras</div>"),
+                                self.out_rating_inv_t, self.box_zoom_inv_t],
+                               layout=W.Layout(width="50%"))]),
+            ]),
+            self._make_secao("rt_psi", "Estabilidade (PSI) & monotonicidade", [
+                # PSI por amostra × PSI por safra lado a lado (mesma figsize + tight=False
+                # ⇒ mesma altura nas colunas 50/50, como os gráficos de inversão acima).
+                W.HBox([
+                    W.VBox([W.HTML("<div class='mseg-h'>PSI dos ratings por amostra · DES × OOT e "
+                                   "ESTABILIDADE</div>"),
+                            W.HTML("<div class='mseg-legend'>Estabilidade da régua entre amostras: PSI da "
+                                   "distribuição dos ratings de cada amostra vs a referência (DES). "
+                                   "Verde &lt; 0,10 (estável) · amarelo &lt; 0,25 (atenção) · vermelho "
+                                   "≥ 0,25 (instável).</div>"),
+                            self.out_rating_psi_sample], layout=W.Layout(width="50%")),
+                    W.VBox([W.HTML("<div class='mseg-h'>PSI dos ratings ao longo do tempo · por safra "
+                                   "vs DES</div>"),
+                            W.HTML("<div class='mseg-legend'>Estabilidade da régua no tempo: PSI da "
+                                   "distribuição dos ratings de cada safra vs a referência (DES). "
+                                   "Verde &lt; 0,10 (estável) · amarelo &lt; 0,25 (atenção) · vermelho "
+                                   "≥ 0,25 (instável). Requer coluna de data (<code>date_col</code>).</div>"),
+                            self.out_rating_psi_safra], layout=W.Layout(width="50%")),
+                ], layout=W.Layout(justify_content="space-between")),
+                W.VBox([W.HTML("<div class='mseg-h'>Monotonicidade por amostra</div>"),
+                        self.out_rating_mono]),
+            ]),
+            self._make_secao("rt_boot", "Bootstrap & aderência entre amostras",
+                             [box_boot]),
         ], layout=W.Layout(padding="2px"))
 
         # ---------- Aba 5: Validar & Exportar ----------
@@ -2198,10 +2293,15 @@ class ModelSegmenterUI:
                                       description="Salvar base DES + OOT")
         self.cb_savebase.tooltip = ("Loga as amostras de treino (DES) e validação (OOT) como "
                                     "artefatos parquet no run (útil p/ auditoria/reprodução).")
+        self.cb_savescored = W.Checkbox(value=False, indent=False,
+                                        description="Salvar base escorada (score + rating)")
+        self.cb_savescored.tooltip = ("Loga as mesmas amostras JÁ ESCORADAS — colunas score "
+                                      "(0-1000) e rating anexadas — como base_DES_escorada/"
+                                      "base_OOT_escorada (parquet) no run.")
         card_mlflow = W.VBox([
             W.HTML("<div class='mseg-h'>Registrar no MLflow / Unity Catalog</div>"),
             W.HBox([self.tx_experiment, self.tx_model, self.btn_mlflow]),
-            W.HBox([self.cb_savebase]),
+            W.HBox([self.cb_savebase, self.cb_savescored]),
         ], layout=W.Layout(width="49%")); card_mlflow.add_class("mseg-card")
         # --- comparar com modelo salvo em disco (molde do card de diff da árvore) ---
         self.tx_diff_path = W.Text(description="Modelo B (JSON):",
@@ -2462,10 +2562,24 @@ class ModelSegmenterUI:
             self.out_adv_stats,
         ]); card_adv_varprofile.add_class("mseg-card")
 
-        tab_adv = W.VBox([card_adv_disc, card_adv_safra, card_adv_varprofile,
-                          # métricas por segmento é novidade — entra ao fim da aba
-                          card_adv_bt, card_adv_group],
-                         layout=W.Layout(padding="2px"))
+        # cada card vira uma seção colapsável (só CAP/Lift nasce aberta); o
+        # título da seção repete o do card, então o header interno some
+        for _card in (card_adv_disc, card_adv_safra, card_adv_varprofile,
+                      card_adv_bt, card_adv_group):
+            _card.add_class("sec-esconde-h")
+        tab_adv = W.VBox([
+            self._make_secao("adv_disc", "Poder discriminante · CAP e Lift/Gains",
+                             [card_adv_disc], aberto=True),
+            self._make_secao("adv_safra", "Discriminação por safra",
+                             [card_adv_safra]),
+            self._make_secao("adv_varprof", "Perfil das variáveis do modelo por safra",
+                             [card_adv_varprofile]),
+            # métricas por segmento é novidade — entra ao fim da aba
+            self._make_secao("adv_bt", "Backtest gráfico · previsto × realizado",
+                             [card_adv_bt]),
+            self._make_secao("adv_group", "Métricas & ratings por segmento",
+                             [card_adv_group]),
+        ], layout=W.Layout(padding="2px"))
 
         # ---------- Aba: Importância (Backward Elimination) ----------
         _samples = list(dict.fromkeys(self.seg._samples()))
@@ -3026,10 +3140,9 @@ class ModelSegmenterUI:
                 setas = {"crescente": "↑ crescente", "decrescente": "↓ decrescente",
                          "não-monotônica": "⇅ não-monotônica"}
                 rk["tendencia"] = rk["tendencia"].map(lambda t: setas.get(t, t))
-            if "bins_manuais" in rk.columns:
-                rk["bins_manuais"] = rk["bins_manuais"].map(lambda b: "✎" if b else "")
-                rk = rk.rename(columns={"bins_manuais": "manual"})
-            rk = rk.drop(columns=["categoria"], errors="ignore")   # rótulo de triagem: fora da tela
+            # 'bins_manuais' (a antiga coluna "manual") e o rótulo de triagem
+            # ficam fora da tela — informação de bastidor, não de ranking
+            rk = rk.drop(columns=["bins_manuais", "categoria"], errors="ignore")
             self.out_vars.value = self._df_html(rk, max_height="320px",
                                                 color_forca=True,
                                                 color_tendencia=True, color_estabilidade=True,
@@ -3296,7 +3409,8 @@ class ModelSegmenterUI:
                 txt = f"{v:.2f}"
                 leitura = "ok" if v < 5 else ("atenção" if v <= 10 else "alto")
             linhas.append({"variável": self.seg.label(nome), "VIF": txt, "leitura": leitura})
-        tbl = self._df_html(pd.DataFrame(linhas), max_height="260px", color_vif=True)
+        # sem max_height: a tabela de VIF aparece INTEIRA (sem barra de rolagem)
+        tbl = self._df_html(pd.DataFrame(linhas), color_vif=True)
         return ("<div class='mseg-h'>VIF · matriz de desenho do modelo</div>"
                 "<div class='mseg-legend'>Quanto da variância de cada variável é explicada "
                 "pelas <b>outras juntas</b> — a leitura que a correlação par a par não dá. "
@@ -6151,6 +6265,7 @@ class ModelSegmenterUI:
                 rid = self.seg.log_to_mlflow(experiment=self.tx_experiment.value or None,
                                              registered_model_name=model_name or None,
                                              save_base=self.cb_savebase.value,
+                                             save_scored=self.cb_savescored.value,
                                              verbose=False)
                 self._log(f"[mlflow] run_id = {rid}")
             except Exception as e:

@@ -801,3 +801,96 @@ def test_esteira_selecao_exporta_excel(tmp_path):
     assert xlsx.exists() and "Excel salvo" in ui.out_sel_export.value
     abas = pd.read_excel(xlsx, sheet_name=None)
     assert set(abas) == {"Decisoes", "Funil", "Politica"}
+
+
+# ---------------------------------------------------------------------------
+# Rodada 2 de polimento: coluna manual fora, VIF sem rolagem, seções
+# colapsáveis, tema escuro dos gráficos e escoragem no registro MLflow
+# ---------------------------------------------------------------------------
+def test_ranking_iv_sem_coluna_manual():
+    """A coluna 'manual' (✎ de bins manuais) saiu da tabela de ranking de IV."""
+    ui = _build()
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._refresh_vars(force=True)
+    assert ">manual<" not in ui.out_vars.value
+    assert "bins_manuais" not in ui.out_vars.value
+
+
+def test_vif_sem_barra_de_rolagem():
+    """A tabela de VIF aparece inteira — sem o wrapper max-height/overflow."""
+    ui = _build()
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_fit(None)
+    html = ui._vif_html()
+    assert "VIF" in html
+    assert "max-height" not in html
+
+
+def test_secoes_ratings_e_avancado():
+    """Ratings & Score e Avançado viraram seções colapsáveis: só a primeira de
+    cada aba nasce aberta e o clique alterna corpo + chevron."""
+    ui = _build()
+    chaves = {"rt_build", "rt_risco", "rt_inv", "rt_psi", "rt_boot",
+              "adv_disc", "adv_safra", "adv_varprof", "adv_bt", "adv_group"}
+    assert chaves <= set(ui._secoes)
+    for key, aberta in [("rt_build", True), ("rt_risco", False),
+                        ("adv_disc", True), ("adv_safra", False)]:
+        _btn, _resumo, body, _titulo = ui._secoes[key]
+        assert (body.layout.display != "none") is aberta, key
+    btn, _resumo, body, _titulo = ui._secoes["rt_risco"]
+    btn.click()
+    assert body.layout.display == "" and btn.description.startswith("▾")
+    btn.click()
+    assert body.layout.display == "none" and btn.description.startswith("▸")
+
+
+def test_dark_fig_suptitle_e_keep_ink():
+    """O _dark_fig flipa o suptitle (fig.texts) mas preserva textos com gid
+    'keep-ink' — a cor deles casa com a célula (dado), não com o tema."""
+    ui = _build()
+    from matplotlib.figure import Figure
+    fig = Figure()
+    ax = fig.subplots()
+    fig.suptitle("associação", color="#15324a")        # navy: ilegível no escuro
+    t_keep = ax.text(0.5, 0.5, "0.42", color="#111")
+    t_keep.set_gid("keep-ink")
+    ui._dark_fig(fig)
+    assert fig.texts[0].get_color() == ui._DARK_FIG["ink"]
+    assert t_keep.get_color() == "#111"
+
+
+def test_heatmap_correlacao_anotacoes_por_celula():
+    """Os números da matriz de correlação são pretos nas células claras (e
+    marcados keep-ink para o tema escuro não os apagar)."""
+    ui = _build()
+    fig = ui.seg.plot_correlation_heatmap(features=["score", "renda"])
+    txts = [t for ax in fig.axes for t in ax.texts if t.get_gid() == "keep-ink"]
+    assert txts
+    assert all(t.get_color() in ("#111", "#fff") for t in txts)
+
+
+def test_mlflow_salva_base_escorada(tmp_path):
+    """'Salvar base escorada' loga base_DES/OOT_escorada (score + rating) no
+    run — acionado pelo checkbox novo do card de registro."""
+    pytest.importorskip("mlflow")
+    import mlflow
+    from mlflow.tracking import MlflowClient
+    mlflow.set_tracking_uri((tmp_path / "mlruns").as_uri())
+    ui = _build()
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_fit(None)
+        ui._on_build_ratings(None)
+    ui.tx_experiment.value = "t_escorada"
+    ui.cb_savebase.value = False                        # só a escorada
+    ui.cb_savescored.value = True
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_mlflow(None)
+    exp = mlflow.get_experiment_by_name("t_escorada")
+    runs = MlflowClient().search_runs([exp.experiment_id])
+    arts = [a.path for a in MlflowClient().list_artifacts(runs[0].info.run_id,
+                                                          "base")]
+    assert any(p.endswith("base_DES_escorada.parquet") for p in arts)
+    assert any(p.endswith("base_OOT_escorada.parquet") for p in arts)
+    assert not any("base_DES.parquet" in p for p in arts)   # crua não pedida
+    scored = ui.seg.assign()
+    assert {"score", "rating"} <= set(scored.columns)

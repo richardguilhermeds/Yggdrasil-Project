@@ -2535,8 +2535,15 @@ class ModelSegmenter:
                     if not np.isfinite(v):
                         continue
                     if k <= 12:              # anota só quando a matriz é legível
-                        ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=7,
-                                color="#fff" if abs(v) >= 0.65 else "#15324a")
+                        # a cor casa com a CÉLULA (preto nas claras, branco nas
+                        # saturadas) — e a célula não muda com o tema da UI, por
+                        # isso o gid "keep-ink" pede ao _dark_fig para NÃO trocar
+                        # a tinta (trocado, o preto virava branco invisível
+                        # sobre célula clara no tema escuro)
+                        txt = ax.text(j, i, f"{v:.2f}", ha="center", va="center",
+                                      fontsize=7,
+                                      color="#fff" if abs(v) >= 0.65 else "#111")
+                        txt.set_gid("keep-ink")
                     if i != j and abs(v) >= thr:   # par redundante em destaque
                         ax.add_patch(Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False,
                                                edgecolor="#b3392f", lw=1.6))
@@ -8379,9 +8386,13 @@ class ModelSegmenter:
     # ------------------------------------------------------------------
     def log_to_mlflow(self, experiment=None, run_name=None, registered_model_name=None,
                       artifact_path="modelo", registry_uri=None, save_base=False,
-                      verbose=True):
+                      save_scored=False, verbose=True):
         """Registra o modelo (mlflow.sklearn), métricas por amostra, a régua de
-        ratings e os gráficos SHAP como artefatos. Best-effort."""
+        ratings e os gráficos SHAP como artefatos. Best-effort.
+
+        ``save_base`` loga as amostras DES/OOT cruas; ``save_scored`` loga as
+        mesmas amostras JÁ ESCORADAS (colunas ``score`` e ``rating`` via
+        :meth:`assign` — nada é re-escorado) como ``base_*_escorada``."""
         import os
         import tempfile
         import mlflow
@@ -8451,13 +8462,23 @@ class ModelSegmenter:
                     dev_df = self._frame(self.ref_sample)
                     if val_sample is not None:
                         oot_df = self._frame(val_sample)
+                sc_dev = sc_oot = None
+                if save_scored and self.sample_col is not None:
+                    # base escorada SEM re-escorar: score_/rating_ já ficaram
+                    # prontos no fit — assign() só anexa as colunas
+                    scored = self.assign()
+                    sc_dev = scored[self._frame_mask(self.ref_sample)]
+                    if val_sample is not None:
+                        sc_oot = scored[self._frame_mask(val_sample)]
                 log_tabbed_report(
                     mlflow, run, title=f"ModelSegmenter — {self.task_type}",
                     subtitle=(f"alvo '{self.target}' · algoritmo {self.algorithm} · "
                               f"ref. {self.ref_sample}"),
                     val_sample=val_sample, metrics_df=m_df, psi_df=p_df,
                     stability_blocks=stab, save_base=save_base,
-                    dev_df=dev_df, oot_df=oot_df, verbose=verbose)
+                    dev_df=dev_df, oot_df=oot_df,
+                    save_scored=save_scored, scored_dev_df=sc_dev,
+                    scored_oot_df=sc_oot, verbose=verbose)
             except Exception as e:  # pragma: no cover
                 if verbose:
                     print(f"[mlflow] relatório em abas não gerado: {type(e).__name__}: {e}")

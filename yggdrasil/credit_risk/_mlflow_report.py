@@ -183,9 +183,12 @@ def _log_base(mlflow, d, name, df, verbose):
 
 def log_tabbed_report(mlflow, run, *, title, subtitle, val_sample, metrics_df,
                       psi_df, stability_blocks, save_base=False, dev_df=None,
-                      oot_df=None, verbose=True):
+                      oot_df=None, save_scored=False, scored_dev_df=None,
+                      scored_oot_df=None, verbose=True):
     """Loga (DENTRO de um run ativo) as métricas canônicas de comparação, o HTML de
-    abas e — se ``save_base`` — as bases DES/OOT. Devolve o dict de val_*."""
+    abas e — se ``save_base`` — as bases DES/OOT cruas; se ``save_scored``, as
+    mesmas bases JÁ ESCORADAS (colunas de score/rating anexadas pelo chamador).
+    Devolve o dict de val_*."""
     val_ks = val_rmse = val_psi = None
     try:
         if metrics_df is not None and "amostra" in getattr(metrics_df, "columns", []) \
@@ -228,6 +231,9 @@ def log_tabbed_report(mlflow, run, *, title, subtitle, val_sample, metrics_df,
             if save_base:
                 _log_base(mlflow, d, "base_DES", dev_df, verbose)
                 _log_base(mlflow, d, "base_OOT", oot_df, verbose)
+            if save_scored:
+                _log_base(mlflow, d, "base_DES_escorada", scored_dev_df, verbose)
+                _log_base(mlflow, d, "base_OOT_escorada", scored_oot_df, verbose)
         if verbose:
             print("[mlflow] relatório em abas logado em 'relatorio/relatorio.html'.")
     except Exception as e:                              # pragma: no cover

@@ -1451,8 +1451,9 @@ def test_ui_canvas_sem_amostras_nao_ha_semaforo(task):
 
 
 def test_ui_canvas_p_valor_junto_da_decisao_de_fundir(task):
-    """A folha em foco mostra o teste contra cada vizinha adjacente, com o
-    veredito na régua do α do auto-fundir: p > α = candidata a fusão."""
+    """A folha em foco mostra UMA pill por vizinha adjacente com o p-valor e o
+    veredito na régua do α do auto-fundir (distinta / fundir? / n pequeno).
+    O 'p<0.001' chega HTML-escapado (p&lt;0.001) — contar pelo texto cru."""
     ui = _build(task)
     w = _abre_canvas(ui)
     with contextlib.redirect_stdout(io.StringIO()):
@@ -1460,9 +1461,10 @@ def test_ui_canvas_p_valor_junto_da_decisao_de_fundir(task):
     folhas = [s for s, v in ui.seg.segments.items() if v["is_leaf"]]
     _foca(ui, w, folhas[1])                                # folha do meio: 2 vizinhas
     txt = ui.out_cv_merge_p.value
-    assert txt.count("p=") + txt.count("p<") == 2          # um teste por vizinha
-    assert "α=0.05" in txt
-    assert "candidata a fusão" in txt or "distinta" in txt
+    assert txt.count("<span class='pill") == 2             # uma pill por vizinha
+    assert (txt.count("p=") + txt.count("p&lt;")
+            + txt.count("n pequeno")) == 2                 # p (ou aviso) em cada
+    assert "distinta" in txt or "fundir?" in txt or "n pequeno" in txt
     _foca(ui, w, "root")                                   # nó interno: sem vizinhas
     assert ui.out_cv_merge_p.value == ""
 
