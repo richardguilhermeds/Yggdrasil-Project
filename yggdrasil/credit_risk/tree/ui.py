@@ -839,18 +839,26 @@ class TreeSegmenterUI:
         cmap.set_under("#ffffff")
         return cmap
 
-    @staticmethod
-    def _accent_ramp_css(v, vmin, vmax, *, ceiling=0.55, na="#ffffff"):
-        """Rampa branco → accent #3b4a63 interpolada à mão (tons pálidos).
-        Fallback do heatmap categórico quando background_gradient falha."""
+    def _accent_ramp_css(self, v, vmin, vmax, *, ceiling=0.55, na=None):
+        """Rampa base → accent interpolada à mão (tons pálidos). CIENTE DO
+        TEMA: no claro vai de branco a #3b4a63; no escuro, de grafite
+        #1F272D ao azul DuBois #4299E0 — célula branca no escuro brilhava
+        mais que o dado. Fallback do heatmap quando background_gradient
+        falha."""
+        escuro = bool(getattr(self, "cb_dark", None) is not None
+                      and self.cb_dark.value)
+        if na is None:
+            na = "transparent" if escuro else "#ffffff"
         if v is None or pd.isna(v):
             return "background-color:%s;color:var(--muted)" % na
         span = (vmax - vmin)
         t = 0.0 if span <= 0 else (float(v) - vmin) / span
-        t = min(max(t, 0.0), 1.0) * ceiling
-        r = int(round(255 + (59 - 255) * t))
-        g = int(round(255 + (74 - 255) * t))
-        b = int(round(255 + (99 - 255) * t))
+        t = min(max(t, 0.0), 1.0) * (1.0 if escuro else ceiling)
+        base, alvo = ((31, 39, 45), (66, 153, 224)) if escuro else \
+            ((255, 255, 255), (59, 74, 99))
+        r = int(round(base[0] + (alvo[0] - base[0]) * t))
+        g = int(round(base[1] + (alvo[1] - base[1]) * t))
+        b = int(round(base[2] + (alvo[2] - base[2]) * t))
         # escolhe preto/branco pela LUMINÂNCIA real do fundo (WCAG) — o limiar fixo
         # t>0.40 punha branco sobre fundos claros demais (contraste ~1.6–2.3:1, abaixo
         # de AA), já que t é limitado por ceiling=0.55 (fundo nunca fica escuro).
@@ -2843,6 +2851,50 @@ class TreeSegmenterUI:
         else:
             tabs.selected_index = self._canvas_tab_index
 
+    _DARK_FIG = {"bg": "#1F272D", "ink": "#E8ECF0", "line": "#37444F"}
+
+    def _dark_fig(self, fig):
+        """Repinta uma figura matplotlib para o tema escuro — fundo, tinta,
+        eixos, grades, legenda e textos PRETOS (os coloridos são dado e ficam).
+        Chamada pelo _fig_html na hora de rasterizar."""
+        bg, ink, line = (self._DARK_FIG[k] for k in ("bg", "ink", "line"))
+        import matplotlib.colors as mcolors
+
+        def _tinta_escura(cor):
+            """Texto ESCURO (preto ou cinza-escuro, ilegível no grafite) vira
+            tinta clara; texto COLORIDO é dado e fica como está."""
+            try:
+                r, g, b = mcolors.to_rgb(cor)
+            except (ValueError, TypeError):
+                return False
+            sat = max(r, g, b) - min(r, g, b)
+            lum = 0.299 * r + 0.587 * g + 0.114 * b
+            # sat < 0.25 inclui as TINTAS da casa (#15324a, #1f2733 — navys
+            # dessaturados) e exclui cores de dado (semáforos têm sat > 0.4)
+            return lum < 0.35 and sat < 0.25
+        fig.patch.set_facecolor(bg)
+        for ax in fig.get_axes():
+            ax.set_facecolor(bg)
+            for sp in ax.spines.values():
+                sp.set_color(line)
+            ax.tick_params(colors=ink, which="both")
+            ax.xaxis.label.set_color(ink)
+            ax.yaxis.label.set_color(ink)
+            ax.title.set_color(ink)
+            for gl in ax.get_xgridlines() + ax.get_ygridlines():
+                gl.set_color(line)
+            leg = ax.get_legend()
+            if leg is not None:
+                leg.get_frame().set_facecolor(bg)
+                leg.get_frame().set_edgecolor(line)
+                for t in leg.get_texts():
+                    if _tinta_escura(t.get_color()):
+                        t.set_color(ink)
+            for t in ax.texts:                 # anotações (percentuais etc.)
+                if _tinta_escura(t.get_color()):
+                    t.set_color(ink)
+        return fig
+
     def _on_dark(self, change):
         if change["new"]:
             self.panel.add_class("dark")
@@ -2850,6 +2902,10 @@ class TreeSegmenterUI:
         else:
             self.panel.remove_class("dark")
             self.cb_dark.description = "🌙 Tema escuro"
+        # os PNGs de matplotlib são rasterizados no tema vigente NA HORA do
+        # clique — os já desenhados não flipam sozinhos
+        self._log("Tema trocado — gráficos já desenhados seguem no tema "
+                  "anterior; clique de novo nos botões para redesenhá-los.")
 
     def _on_keepalive(self, change):
         from ...utils.keepalive import ClusterKeepAlive
@@ -4482,7 +4538,12 @@ class TreeSegmenterUI:
                 frac = 0.0 if vmax <= 0 else max(0.0, float(v)) / vmax
                 r = int(232 - 150 * frac); g = int(245 - 35 * frac); b = int(233 - 165 * frac)
                 peso = "700" if frac >= 0.66 else "600" if frac >= 0.33 else "400"
-                return f"background-color:rgb({r},{g},{b});font-weight:{peso}"
+                # tinta pela luminância do fundo: a rampa é clara, e a tinta
+                # clara do TEMA ESCURO sumia sobre ela (verde-claro + branco)
+                lum = 0.299 * r + 0.587 * g + 0.114 * b
+                fg = "#ffffff" if lum < 140 else "#1f2733"
+                return (f"background-color:rgb({r},{g},{b});color:{fg};"
+                        f"font-weight:{peso}")
 
             fmt = {"importancia": "{:.4f}"}
             if "importancia_%" in fi.columns:
@@ -6167,11 +6228,18 @@ class TreeSegmenterUI:
         recorta cada figura ao seu conteúdo e distorce a razão de aspecto)."""
         import base64
         import io as _io
+        # tema escuro ligado → repinta fundo/tinta/grades ANTES de rasterizar
+        # (o toggle é um checkbox do kernel, então o Python sabe o tema; as
+        # cores DOS DADOS ficam intactas). Figuras já desenhadas seguem no
+        # tema antigo até o próximo clique — ver o aviso no _on_dark.
+        if getattr(self, "cb_dark", None) is not None and self.cb_dark.value:
+            self._dark_fig(fig)
         buf = _io.BytesIO()
         # dpi limitado a 110 nas prévias inline (export usa save_path nos plot_*):
         # corta o PNG/base64 ~40% sem perda visual perceptível, aliviando o comm.
         buf_dpi = min(int(fig.get_dpi()), 110)
         fig.savefig(buf, format="png", dpi=buf_dpi,
+                    facecolor=fig.get_facecolor(),
                     bbox_inches="tight" if tight else None)
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         # fecha a figura: sem isso o pyplot retém TODA figura gerada (Gcf.figs) e a

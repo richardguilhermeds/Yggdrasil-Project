@@ -1806,6 +1806,36 @@ def test_ui_migracao_de_folhas_como_heatmap(task):
     assert "background-color:rgb" in html.split("mig-heat")[1]
 
 
+def test_ui_tema_escuro_repinta_figuras_e_rampas(task):
+    """Com o toggle escuro ligado, o _fig_html repinta a figura no kernel
+    (fundo grafite, tinta clara, dados intactos) e a rampa accent troca a base
+    branca pela grafite — célula branca no escuro brilhava mais que o dado."""
+    ui = _build(task)
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    claro = ui._accent_ramp_css(0.5, 0.0, 1.0)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.cb_dark.value = True
+    fig, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1], color="#d6453e")           # cor de DADO: intacta
+    ax.set_title("t")
+    html = ui._fig_html(fig)                           # repinta + rasteriza
+    assert html.startswith("<img")
+    escuro = ui._accent_ramp_css(0.5, 0.0, 1.0)
+    assert claro != escuro                             # rampa ciente do tema
+    assert "255,255,255" not in escuro                 # sem base branca no escuro
+    fig2, ax2 = plt.subplots()
+    ax2.set_title("x")
+    ui._dark_fig(fig2)
+    assert ax2.get_facecolor() != (1.0, 1.0, 1.0, 1.0)  # fundo deixou de ser branco
+    assert ax2.title.get_color() == "#E8ECF0"
+    plt.close(fig2)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.cb_dark.value = False                       # e o aviso do toggle
+    assert any("tema" in l.lower() for l in ui._log_lines)
+
+
 def test_ui_canvas_nao_carrega_nada_da_rede(task):
     """O JS/CSS do canvas não referencia CDN, fonte externa nem @import — mesma
     garantia offline exigida do preview clicável."""
