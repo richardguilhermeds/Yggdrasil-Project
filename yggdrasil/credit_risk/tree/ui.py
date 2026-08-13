@@ -246,6 +246,9 @@ _CSS = """
    abaixo (0,1,4) devolve a tinta aos tokens; células com cor própria
    (semáforos, heatmaps) seguem intactas por serem inline. */
 .treeui table tbody tr td, .treeui table tbody tr th { color:var(--ink); }
+/* idem para TODO conteúdo de widget HTML: o host injeta cor própria no
+   wrapper (.widget-html-content) e atropela a herança do painel */
+.treeui .widget-html-content { color:var(--ink); }
 .treeui.dark img { border-radius:6px; }
 /* ===== seções colapsáveis (Diagnóstico · Exportar · Avançado) =====
    Estilo do mockup: um cabeçalho-botão por seção (chevron + título) com os
@@ -7646,7 +7649,8 @@ class TreeSegmenterUI:
                 f"border-top:1px solid var(--hair)'>"
                 f"<div style='flex:1;min-width:0'>"
                 f"<div style='font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;"
-                f"text-overflow:ellipsis' title=\"{_esc(rot)}\">{_esc(rot)}</div>"
+                f"text-overflow:ellipsis;color:var(--strong-ink)' "
+                f"title=\"{_esc(rot)}\">{_esc(rot)}</div>"
                 f"<div style='height:5px;border-radius:999px;background:var(--gauge-track);"
                 f"margin-top:4px;overflow:hidden'><i style='display:block;height:100%;"
                 f"width:{max(3, min(100, share)):.1f}%;background:{cor};border-radius:999px'></i>"
