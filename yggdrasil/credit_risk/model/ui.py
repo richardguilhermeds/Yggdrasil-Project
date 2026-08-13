@@ -110,45 +110,45 @@ _CSS = """
 .mseg .mono { font-family:'IBM Plex Mono', ui-monospace, Menlo, Consolas, monospace;
   font-variant-numeric: tabular-nums; }
 .mseg-banner { display:flex; align-items:center; gap:11px; background:#fff;
-  border:1px solid var(--line); border-radius:13px; padding:11px 16px; margin-bottom:10px;
+  border-width:1px;border-style:solid;border-color:var(--line); border-radius:13px; padding:11px 16px; margin-bottom:10px;
   box-shadow:0 1px 3px rgba(16,24,40,.08); }
-.mseg-banner .logo { width:30px; height:30px; border-radius:9px; background:var(--ac);
+.mseg-banner .logo { width:30px; height:30px; border-radius:9px; background-color:var(--ac);
   color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700;
   font-size:12px; flex:none; }
 .mseg-banner .t { font-size:15px; font-weight:600; color:var(--ink); line-height:1.2; }
 .mseg-banner .s { font-size:11.5px; color:var(--muted); margin-top:1px; }
-.mseg-card { background:#fff; border:1px solid var(--line); border-radius:12px;
+.mseg-card { background:#fff; border-width:1px;border-style:solid;border-color:var(--line); border-radius:12px;
   padding:13px 15px; box-shadow:0 1px 3px rgba(16,24,40,.06); margin-bottom:11px;
   overflow-x:clip; }
 .mseg-h { font-weight:600; font-size:11px; color:var(--muted); text-transform:uppercase;
   letter-spacing:.07em; margin-bottom:9px; }
-.mseg-bar { background:#fff; border:1px solid var(--line); border-radius:11px;
+.mseg-bar { background:#fff; border-width:1px;border-style:solid;border-color:var(--line); border-radius:11px;
   box-shadow:0 1px 3px rgba(16,24,40,.05); padding:8px 12px; overflow-x:auto; }
 .pill { display:inline-block; padding:3px 10px; border-radius:999px; font-size:11.5px;
   font-weight:600; margin:2px 4px 2px 0; }
-.pill-muted  { background:var(--ac-soft); color:var(--ac-deep); }
-.pill-green  { background:var(--ok-bg); color:var(--ok-ink); }
-.pill-yellow { background:var(--warn-bg); color:var(--warn-ink); }
-.pill-red    { background:var(--bad-bg); color:var(--bad-ink); }
+.pill-muted  { background-color:var(--ac-soft); color:var(--ac-deep); }
+.pill-green  { background-color:var(--ok-bg); color:var(--ok-ink); }
+.pill-yellow { background-color:var(--warn-bg); color:var(--warn-ink); }
+.pill-red    { background-color:var(--bad-bg); color:var(--bad-ink); }
 .mseg-legend { font-size:11px; color:var(--muted); margin:6px 0 2px; line-height:1.55; }
 /* caixa de tutorial (algoritmo/parâmetros) e legenda de categorias */
-.mseg-help { background:var(--help-bg); border:1px solid var(--help-line);
-  border-left:3px solid var(--ac);
+.mseg-help { background-color:var(--help-bg); border-width:1px;border-style:solid;border-color:var(--help-line);
+  border-left-width:3px;border-left-style:solid;border-left-color:var(--ac);
   border-radius:9px; padding:11px 14px; font-size:11.5px; color:var(--body-ink);
   line-height:1.62; margin-top:8px; }
 .mseg-help .ttl { font-size:12px; font-weight:600; color:var(--ink); margin-bottom:5px; }
 .mseg-help ul { margin:5px 0 0; padding-left:6px; list-style:none; }
 .mseg-help li { margin:4px 0; }
 .mseg-help .pname { font-family:'IBM Plex Mono', ui-monospace, monospace; font-weight:600;
-  color:var(--code-ink); background:var(--code-bg); padding:1px 6px; border-radius:5px; }
+  color:var(--code-ink); background-color:var(--code-bg); padding:1px 6px; border-radius:5px; }
 .mseg-help .none { color:var(--muted); font-style:italic; }
 .mseg-cat { display:inline-block; padding:2px 9px; border-radius:999px; font-size:11px;
   font-weight:600; }
-.mseg-cat-keep { background:var(--ok-bg); color:var(--ok-ink); }
-.mseg-cat-rev  { background:var(--warn-bg); color:var(--warn-ink); }
-.mseg-cat-drop { background:var(--bad-bg); color:var(--bad-ink); }
-.mseg-rule { margin-top:8px; padding:11px 13px; background:var(--rule-bg);
-  border:1px solid var(--line); border-radius:8px; font-size:11px; }
+.mseg-cat-keep { background-color:var(--ok-bg); color:var(--ok-ink); }
+.mseg-cat-rev  { background-color:var(--warn-bg); color:var(--warn-ink); }
+.mseg-cat-drop { background-color:var(--bad-bg); color:var(--bad-ink); }
+.mseg-rule { margin-top:8px; padding:11px 13px; background-color:var(--rule-bg);
+  border-width:1px;border-style:solid;border-color:var(--line); border-radius:8px; font-size:11px; }
 .mseg-rule .rt { font-weight:600; color:var(--ink); margin-bottom:8px;
   font-family:'IBM Plex Mono', ui-monospace, monospace; }
 .mseg-rule .rr { display:flex; align-items:baseline; gap:9px; margin:7px 0; line-height:1.65; }
@@ -158,7 +158,7 @@ _CSS = """
 /* dicionário/guia de bolso das métricas (bloco recolhível) */
 .mseg-guide { margin-top:10px; font-size:11.5px; }
 .mseg-guide > summary { cursor:pointer; font-weight:600; color:var(--ac-deep);
-  padding:8px 12px; background:var(--ac-soft); border:1px solid var(--ac-border);
+  padding:8px 12px; background-color:var(--ac-soft); border-width:1px;border-style:solid;border-color:var(--ac-border);
   border-radius:8px; list-style:none; user-select:none; }
 .mseg-guide > summary::-webkit-details-marker { display:none; }
 .mseg-guide > summary::before { content:'▸ '; }
@@ -168,7 +168,7 @@ _CSS = """
 .mseg-guide table td { text-align:left !important; vertical-align:top; }
 .mseg-guide .mseg-cat { font-size:10px; }
 .mseg-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(96px,1fr)); gap:6px; }
-.mseg-metric { background:var(--tile-bg); border:1px solid var(--hair); border-radius:9px;
+.mseg-metric { background-color:var(--tile-bg); border-width:1px;border-style:solid;border-color:var(--hair); border-radius:9px;
   padding:7px 10px; }
 .mseg-metric .k { font-size:10px; text-transform:uppercase; letter-spacing:.04em;
   color:var(--sub-ink); }
@@ -181,7 +181,7 @@ _CSS = """
 .mseg-tabs > .widget-tab-contents { padding:30px 2px 2px !important; background:transparent;
   border:none !important; box-shadow:none !important; }
 .mseg-tabs .lm-TabBar.jupyter-widget-tab-nav,
-.mseg-tabs .p-TabBar.jupyter-widget-tab-nav { border-bottom:1px solid var(--line) !important;
+.mseg-tabs .p-TabBar.jupyter-widget-tab-nav { border-bottom-width:1px;border-bottom-style:solid;border-bottom-color:var(--line) !important;
   padding-bottom:14px !important; margin-bottom:0 !important; box-shadow:none !important; }
 .mseg-tabs .lm-TabBar-content, .mseg-tabs .p-TabBar-content { gap:7px;
   align-items:stretch; border:none; }
@@ -190,7 +190,7 @@ _CSS = """
      (flex/max-width: var(--jp-widgets-horizontal-tab-width)) que cortava o título) */
   min-width:max-content !important; max-width:none !important; flex:0 0 auto !important;
   margin:0 !important; padding:8px 16px !important;
-  border:1px solid var(--line) !important; border-radius:9px !important;
+  border-width:1px;border-style:solid;border-color:var(--line) !important; border-radius:9px !important;
   background:#fff !important; color:var(--muted) !important; font-weight:500;
   line-height:1.15; outline:none !important; box-shadow:none !important;
   transition:background .15s, color .15s, border-color .15s; }
@@ -200,21 +200,21 @@ _CSS = """
 .mseg-tabs .p-TabBar-tab::before, .mseg-tabs .p-TabBar-tab::after {
   display:none !important; content:none !important; background:none !important; }
 .mseg-tabs .lm-TabBar-tab:hover, .mseg-tabs .p-TabBar-tab:hover {
-  background:var(--ac-soft) !important; color:var(--ac-deep) !important;
+  background-color:var(--ac-soft) !important; color:var(--ac-deep) !important;
   border-color:var(--ac-border) !important; }
 .mseg-tabs .lm-TabBar-tabLabel, .mseg-tabs .p-TabBar-tabLabel {
   white-space:nowrap !important; overflow:visible !important;
   text-overflow:clip !important; max-width:none !important; }
 .mseg-tabs .lm-TabBar-tab.lm-mod-current,
 .mseg-tabs .p-TabBar-tab.p-mod-current { color:#fff !important; font-weight:600;
-  background:var(--ac) !important; border:1px solid var(--ac) !important;
+  background-color:var(--ac) !important; border-width:1px;border-style:solid;border-color:var(--ac) !important;
   outline:none !important; box-shadow:none !important; }
 .mseg-tabs .lm-TabBar-tab.lm-mod-current:hover,
 .mseg-tabs .p-TabBar-tab.p-mod-current:hover {
-  background:var(--ac-deep) !important; color:#fff !important;
+  background-color:var(--ac-deep) !important; color:#fff !important;
   border-color:var(--ac-deep) !important; }
 /* fórmula do modelo — preditor linear z como termos que quebram linha */
-.mseg-formula { background:var(--formula-bg); color:#e8edf4; border-radius:10px; padding:13px 15px;
+.mseg-formula { background-color:var(--formula-bg); color:#e8edf4; border-radius:10px; padding:13px 15px;
   font-family:'IBM Plex Mono', ui-monospace, Menlo, Consolas, monospace; font-size:12.5px;
   line-height:1.9; }
 .mseg-zlead { color:#8aa0b6; font-weight:600; margin-right:4px; }
@@ -225,26 +225,26 @@ _CSS = """
 .mseg-neg { background:rgba(214,69,69,.18); color:#f2a3a3; }
 .mseg-op  { opacity:.65; margin-right:3px; } .mseg-mul { opacity:.5; margin:0 4px; }
 .mseg-cf  { font-weight:600; } .mseg-vn { font-weight:500; }
-.mseg-eq { font-size:13px; color:var(--ink); background:var(--ac-soft);
-  border:1px solid var(--ac-border); border-radius:9px; padding:8px 12px; margin-bottom:8px;
+.mseg-eq { font-size:13px; color:var(--ink); background-color:var(--ac-soft);
+  border-width:1px;border-style:solid;border-color:var(--ac-border); border-radius:9px; padding:8px 12px; margin-bottom:8px;
   font-family:'IBM Plex Mono', ui-monospace, monospace; }
 /* tabela de coeficientes — sinal colorido + barra de magnitude + leitura */
 .mseg-coef { border-collapse:collapse; width:100%; font-size:12px; margin-top:4px; }
-.mseg-coef th { background:var(--tbl-head-bg); color:var(--tbl-head-ink); font-weight:600;
+.mseg-coef th { background-color:var(--tbl-head-bg); color:var(--tbl-head-ink); font-weight:600;
   text-align:right;
-  padding:6px 10px; border-bottom:2px solid var(--tbl-head-line); white-space:nowrap; }
-.mseg-coef td { padding:5px 10px; border-bottom:1px solid var(--hair); text-align:right;
+  padding:6px 10px; border-bottom-width:2px;border-bottom-style:solid;border-bottom-color:var(--tbl-head-line); white-space:nowrap; }
+.mseg-coef td { padding:5px 10px; border-bottom-width:1px;border-bottom-style:solid;border-bottom-color:var(--hair); text-align:right;
   white-space:nowrap; }
 .mseg-coef th.term, .mseg-coef td.term { text-align:left; font-weight:500; }
 .mseg-coef td.read, .mseg-coef th.read { text-align:left; }
 .mseg-coef td.num { font-variant-numeric:tabular-nums; font-weight:600; }
-.mseg-coef tbody tr:hover td { background:var(--tbl-hover); }
-.mseg-coef tr.base td { background:var(--tbl-zebra); color:var(--muted); font-style:italic; }
+.mseg-coef tbody tr:hover td { background-color:var(--tbl-hover); }
+.mseg-coef tr.base td { background-color:var(--tbl-zebra); color:var(--muted); font-style:italic; }
 .mseg-barcell { width:150px; }
-.mseg-barwrap { background:var(--gauge-track); border-radius:5px; height:9px; width:100%;
+.mseg-barwrap { background-color:var(--gauge-track); border-radius:5px; height:9px; width:100%;
   overflow:hidden; }
-.mseg-bar-pos { background:var(--gauge-ok); height:100%; }
-.mseg-bar-neg { background:var(--gauge-bad); height:100%; }
+.mseg-bar-pos { background-color:var(--gauge-ok); height:100%; }
+.mseg-bar-neg { background-color:var(--gauge-bad); height:100%; }
 .mseg-pos-tx { color:var(--ok-ink); } .mseg-neg-tx { color:var(--bad-ink); }
 .mseg .jupyter-button { border-radius:8px; font-family:inherit; }
 .mseg .jupyter-widgets { min-width:0 !important; }
@@ -294,6 +294,33 @@ _CSS = """
 /* botões ipywidgets sem button_style: seguem a superfície DuBois */
 .mseg.dark .jupyter-button:not(.mod-primary):not(.mod-success):not(.mod-info):not(.mod-warning):not(.mod-danger) { background:#37444F !important; color:#E8ECF0 !important; }
 .mseg.dark .jupyter-button.mod-active { background:#4299E0 !important; color:#11171C !important; }
+
+/* ===== pacote de tema escuro (portado do TreeSegmenterUI) =====
+   1) células de tabela e conteúdo de widget herdavam a cor do TEMA DO HOST
+      (o preto de .jp-RenderedHTMLCommon td e a cor do editor no
+      .widget-html-content) — regras com especificidade própria devolvem a
+      tinta aos tokens;
+   2) o widget de abas (barra e contents) herda fundo BRANCO do Jupyter —
+      faixa branca no escuro; transparente sempre, seletores DESCENDENTES
+      (o lumino mete wrappers) e os dois nomes de classe;
+   3) o HOSTEIRO pinta de branco o container do output (VS Code:
+      cell-output-ipywidget-background) — moldura branca em volta do painel
+      escuro; transparente SÓ quando o nosso dark está ligado (:has);
+   4) o print() do console vira <pre> com a cor do Jupyter, que não flipa. */
+.mseg table tbody tr td, .mseg table tbody tr th { color:var(--ink); }
+.mseg .widget-html-content { color:var(--ink); }
+.mseg .widget-html-content:empty { display:none; }
+.mseg .widget-html:has(> .widget-html-content:empty) { display:none; }
+.mseg-tabs, .mseg-tabs .lm-TabBar, .mseg-tabs .p-TabBar,
+.mseg-tabs .widget-tab-contents,
+.mseg-tabs .jupyter-widget-TabPanel-tabContents {
+  background:transparent !important; }
+.cell-output-ipywidget-background:has(.mseg.dark),
+.jp-OutputArea-output:has(.mseg.dark),
+.jp-Cell-outputArea:has(.mseg.dark),
+.widget-subarea:has(.mseg.dark) {
+  background:transparent !important; }
+.mseg.dark pre { color:var(--ink) !important; background:transparent !important; }
 </style>
 """
 
@@ -370,17 +397,64 @@ class ModelSegmenterUI:
         self._sync_bin_controls()
 
     # ------------------------------------------------------------------ render utils
+    _DARK_FIG = {"bg": "#1F272D", "ink": "#E8ECF0", "line": "#37444F"}
+
+    def _dark_fig(self, fig):
+        """Repinta uma figura matplotlib para o tema escuro — fundo, tinta,
+        eixos, grades, legenda e textos de TINTA (pretos/navys dessaturados);
+        cores de DADO ficam intactas. Portado do TreeSegmenterUI."""
+        bg, ink, line = (self._DARK_FIG[k] for k in ("bg", "ink", "line"))
+        import matplotlib.colors as mcolors
+
+        def _tinta_escura(cor):
+            try:
+                r, g, b = mcolors.to_rgb(cor)
+            except (ValueError, TypeError):
+                return False
+            sat = max(r, g, b) - min(r, g, b)
+            lum = 0.299 * r + 0.587 * g + 0.114 * b
+            return lum < 0.35 and sat < 0.25
+
+        fig.patch.set_facecolor(bg)
+        for ax in fig.get_axes():
+            ax.set_facecolor(bg)
+            for sp in ax.spines.values():
+                sp.set_color(line)
+            ax.tick_params(colors=ink, which="both")
+            ax.xaxis.label.set_color(ink)
+            ax.yaxis.label.set_color(ink)
+            ax.title.set_color(ink)
+            for gl in ax.get_xgridlines() + ax.get_ygridlines():
+                gl.set_color(line)
+            leg = ax.get_legend()
+            if leg is not None:
+                leg.get_frame().set_facecolor(bg)
+                leg.get_frame().set_edgecolor(line)
+                for t in leg.get_texts():
+                    if _tinta_escura(t.get_color()):
+                        t.set_color(ink)
+            for t in ax.texts:
+                if _tinta_escura(t.get_color()):
+                    t.set_color(ink)
+        return fig
+
     def _fig_html(self, fig, border=False, tight=True, stretch=False):
         import base64
         import io as _io
         import matplotlib.pyplot as plt
+        # tema escuro ligado → repinta ANTES de rasterizar (o toggle é um
+        # checkbox do kernel; figuras já desenhadas seguem no tema antigo
+        # até o próximo clique — ver aviso no _on_dark)
+        if getattr(self, "cb_dark", None) is not None and self.cb_dark.value:
+            self._dark_fig(fig)
         buf = _io.BytesIO()
         # tight=False → o PNG sai exatamente em figsize×dpi (mesma figsize ⇒ mesmo
         # tamanho de imagem), garantindo gráficos lado a lado com a MESMA altura.
         # dpi limitado a 110 nas PRÉVIAS inline (este método só gera <img> para
         # exibição; export usa save_path nos plot_*): corta o PNG/base64 ~40% sem
         # perda visual perceptível, aliviando o tráfego kernel↔browser.
-        save_kw = {"format": "png", "dpi": min(int(fig.get_dpi()), 110)}
+        save_kw = {"format": "png", "dpi": min(int(fig.get_dpi()), 110),
+                   "facecolor": fig.get_facecolor()}
         if tight:
             save_kw["bbox_inches"] = "tight"
         fig.savefig(buf, **save_kw)
@@ -2863,6 +2937,10 @@ class ModelSegmenterUI:
         else:
             self.panel.remove_class("dark")
             self.cb_dark.description = "🌙 Tema escuro"
+        # os PNGs de matplotlib rasterizam no tema vigente NA HORA do
+        # clique — os já desenhados não flipam sozinhos
+        self._log("Tema trocado — gráficos já desenhados seguem no tema "
+                  "anterior; clique de novo nos botões para redesenhá-los.")
 
     def _on_keepalive(self, change):
         from ...utils.keepalive import ClusterKeepAlive
