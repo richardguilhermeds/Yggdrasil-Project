@@ -45,9 +45,11 @@ htmlcov/
 venv/
 env/
 
-# artefatos de execução de notebooks/UI
+# artefatos de execução de notebooks/UI (imagem gerada pelo botão da UI —
+# o nome padrão segue o problem_label: arvore_pd.png, arvore_lgd.png, …)
 arvore_pd.png
 **/arvore_pd.png
+notebooks/tutoriais/arvore_*.png
 
 relatorio_arvore.pdf
 relatorio_modelo.pdf
