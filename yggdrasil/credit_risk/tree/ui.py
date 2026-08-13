@@ -235,6 +235,10 @@ _CSS = """
    spacer, essa sobra desalinhava os botões da base (MLflow × Spark,
    JSON × Imagem). Vazio = invisível. */
 .treeui .widget-html-content:empty { display:none; }
+/* esconder só o conteúdo deixa o INVÓLUCRO do widget reservando margens
+   (~12px) — o suficiente para desalinhar botões de base entre cards
+   vizinhos (JSON × Imagem). Vazio = o widget inteiro some. */
+.treeui .widget-html:has(> .widget-html-content:empty) { display:none; }
 /* células sem cor explícita herdavam o PRETO do tema do Jupyter
    (.jp-RenderedHTMLCommon tbody tr td, especificidade 0,1,3) — e como o tema
    escuro daqui é a classe .dark nos NOSSOS tokens, o token do Jupyter não
@@ -2322,14 +2326,14 @@ class TreeSegmenterUI:
         ])
         card_pdf.add_class("treeui-card")
         # a antiga aba "Histórico" virou uma SEÇÃO no fim da aba Exportar
-        # esteira numerada: o layout conta a ordem natural do trabalho —
-        # gerar arquivos → mandar para produção → persistir/documentar
+        # a ordem das seções conta o fluxo natural do trabalho (arquivos →
+        # produção → persistência); a numeração explícita saiu a pedido
         tab_valid = W.VBox([
-            self._make_secao("exp_arquivos", "1 · Rotular & arquivos",
+            self._make_secao("exp_arquivos", "Rotular & arquivos",
                              [export_top, card_sql], aberto=True),
-            self._make_secao("exp_producao", "2 · Produção",
+            self._make_secao("exp_producao", "Produção",
                              [export_row]),
-            self._make_secao("exp_persist", "3 · Persistência & relatório",
+            self._make_secao("exp_persist", "Persistência & relatório",
                              [hist_row, self.box_confirm, card_pdf]),
         ])
         self._sec_chip("exp_arquivos",
