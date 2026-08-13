@@ -98,15 +98,15 @@ _CSS = """
   monospace; font-variant-numeric: tabular-nums; }
 /* top bar (estilo mockup): branca, com chip alvo grafite */
 .treeui-banner { display:flex; align-items:center; gap:11px; background:#fff;
-  border:1px solid var(--line); border-radius:13px; padding:11px 16px; margin-bottom:10px;
+  border-width:1px;border-style:solid;border-color:var(--line); border-radius:13px; padding:11px 16px; margin-bottom:10px;
   box-shadow:0 1px 3px rgba(16,24,40,.08); }
-.treeui-banner .logo { width:30px; height:30px; border-radius:9px; background:var(--ac);
+.treeui-banner .logo { width:30px; height:30px; border-radius:9px; background-color:var(--ac);
   color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700;
   font-size:12px; flex:none; }
 .treeui-banner .t { font-size:15px; font-weight:600; color:var(--ink); line-height:1.2; }
 .treeui-banner .s { font-size:11.5px; color:var(--muted); margin-top:1px; }
 /* cards */
-.treeui-card { background:#fff; border:1px solid var(--line); border-radius:12px;
+.treeui-card { background:#fff; border-width:1px;border-style:solid;border-color:var(--line); border-radius:12px;
   padding:13px 15px; box-shadow:0 1px 3px rgba(16,24,40,.06); margin-bottom:11px; }
 .treeui-h { font-weight:600; font-size:11px; color:var(--muted); text-transform:uppercase;
   letter-spacing:.07em; margin-bottom:9px; }
@@ -117,27 +117,37 @@ _CSS = """
 .treeui-chips { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:0 2px 4px; }
 .treeui-chips .lab { font-size:11px; color:var(--muted); margin-right:2px; }
 .treeui-chips .chip { font-size:11px; font-family:'IBM Plex Mono', ui-monospace, monospace;
-  padding:2px 9px; border-radius:999px; border:1px solid var(--line); background:#fff; }
+  padding:2px 9px; border-radius:999px; border-width:1px;border-style:solid;border-color:var(--line); background:#fff; }
 /* faixa de KPIs (health strip) sempre visível acima das abas */
-.treeui-bar { background:#fff; border:1px solid var(--line); border-radius:11px;
+.treeui-bar { background:#fff; border-width:1px;border-style:solid;border-color:var(--line); border-radius:11px;
   box-shadow:0 1px 3px rgba(16,24,40,.05); padding:0; overflow-x:auto; }
 .pill { display:inline-block; padding:3px 10px; border-radius:999px; font-size:11.5px;
   font-weight:600; margin:2px 4px 2px 0; }
-.pill-muted  { background:var(--ac-soft); color:var(--ac-deep); }
-.pill-green  { background:var(--ok-bg); color:var(--ok-ink); }
-.pill-yellow { background:var(--warn-bg); color:var(--warn-ink); }
-.pill-red    { background:var(--bad-bg); color:var(--bad-ink); }
+.pill-muted  { background-color:var(--ac-soft); color:var(--ac-deep); }
+.pill-green  { background-color:var(--ok-bg); color:var(--ok-ink); }
+.pill-yellow { background-color:var(--warn-bg); color:var(--warn-ink); }
+.pill-red    { background-color:var(--bad-bg); color:var(--bad-ink); }
 .treeui-legend { font-size:11px; color:var(--muted); margin:6px 0 2px; line-height:1.55; }
 .treeui-tree { line-height:1.55; }
 /* abas do workbench — estilo "segmented control" (pílulas) */
 .treeui-tabs { margin-top:10px; border:none !important; box-shadow:none !important; }
+/* o WIDGET de abas (barra E contêiner de conteúdo) herda fundo BRANCO do
+   tema do Jupyter — no claro é invisível, no escuro vira uma faixa branca sob
+   as pílulas (os 30px de padding do contents). Fundo transparente sempre:
+   quem pinta é o painel .treeui. Seletores DESCENDENTES (não `>`): o lumino
+   põe wrappers no meio, e o nome da classe varia entre versões
+   (widget-tab-contents × jupyter-widget-TabPanel-tabContents). */
+.treeui-tabs, .treeui-tabs .lm-TabBar, .treeui-tabs .p-TabBar,
+.treeui-tabs .widget-tab-contents,
+.treeui-tabs .jupyter-widget-TabPanel-tabContents {
+  background:transparent !important; }
 /* respiro entre a barra de abas e os cards do conteúdo abaixo
    (!important vence a regra própria do ipywidgets p/ .widget-tab-contents);
    border/box-shadow:none remove a "caixa" padrão do Tab ao redor de tudo */
 .treeui-tabs > .widget-tab-contents { padding:30px 2px 2px !important; background:transparent;
   border:none !important; box-shadow:none !important; }
 .treeui-tabs .lm-TabBar.jupyter-widget-tab-nav,
-.treeui-tabs .p-TabBar.jupyter-widget-tab-nav { border-bottom:1px solid var(--line) !important;
+.treeui-tabs .p-TabBar.jupyter-widget-tab-nav { border-bottom-width:1px;border-bottom-style:solid;border-bottom-color:var(--line) !important;
   padding-bottom:14px !important; margin-bottom:0 !important; box-shadow:none !important; }
 .treeui-tabs .lm-TabBar-content, .treeui-tabs .p-TabBar-content { gap:7px;
   align-items:stretch; border:none; }
@@ -146,7 +156,7 @@ _CSS = """
      (flex/max-width: var(--jp-widgets-horizontal-tab-width)) que cortava o título */
   min-width:max-content !important; max-width:none !important; flex:0 0 auto !important;
   margin:0 !important; padding:8px 16px !important;
-  border:1px solid var(--line) !important; border-radius:9px !important;
+  border-width:1px;border-style:solid;border-color:var(--line) !important; border-radius:9px !important;
   background:#fff !important; color:var(--muted) !important; font-weight:500;
   line-height:1.15; outline:none !important; box-shadow:none !important;
   transition:background .15s, color .15s, border-color .15s; }
@@ -156,24 +166,24 @@ _CSS = """
 .treeui-tabs .p-TabBar-tab::before, .treeui-tabs .p-TabBar-tab::after {
   display:none !important; content:none !important; background:none !important; }
 .treeui-tabs .lm-TabBar-tab:hover, .treeui-tabs .p-TabBar-tab:hover {
-  background:var(--ac-soft) !important; color:var(--ac-deep) !important;
+  background-color:var(--ac-soft) !important; color:var(--ac-deep) !important;
   border-color:var(--ac-border) !important; }
 .treeui-tabs .lm-TabBar-tabLabel, .treeui-tabs .p-TabBar-tabLabel {
   white-space:nowrap !important; overflow:visible !important;
   text-overflow:clip !important; max-width:none !important; }
 .treeui-tabs .lm-TabBar-tab.lm-mod-current,
 .treeui-tabs .p-TabBar-tab.p-mod-current { color:#fff !important; font-weight:600;
-  background:var(--ac) !important; border:1px solid var(--ac) !important;
+  background-color:var(--ac) !important; border-width:1px;border-style:solid;border-color:var(--ac) !important;
   outline:none !important; box-shadow:none !important; }
 .treeui-tabs .lm-TabBar-tab.lm-mod-current:hover,
 .treeui-tabs .p-TabBar-tab.p-mod-current:hover {
-  background:var(--ac-deep) !important; color:#fff !important;
+  background-color:var(--ac-deep) !important; color:#fff !important;
   border-color:var(--ac-deep) !important; }
 /* cabeçalho da folha selecionada (métricas em chips) — auto-fit estica os chips
    para preencher toda a largura (linhas com menos chips ficam mais largas) */
 .treeui-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(92px,1fr));
   gap:6px; }
-.treeui-metric { background:var(--tile-bg); border:1px solid var(--hair); border-radius:9px;
+.treeui-metric { background-color:var(--tile-bg); border-width:1px;border-style:solid;border-color:var(--hair); border-radius:9px;
   padding:7px 10px; overflow:hidden; }
 .treeui-metric .k { font-size:10px; text-transform:uppercase; letter-spacing:.04em;
   color:var(--sub-ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -188,10 +198,10 @@ _CSS = """
 .treeui button.treeui-sug {
   justify-content:flex-start !important; text-align:left; font-size:11.5px;
   height:30px !important; line-height:1.2 !important; padding:0 11px !important;
-  margin-bottom:4px; background:var(--tile-bg) !important; color:var(--strong-ink);
-  border:1px solid var(--line) !important; }
+  margin-bottom:4px; background-color:var(--tile-bg) !important; color:var(--strong-ink);
+  border-width:1px;border-style:solid;border-color:var(--line) !important; }
 .treeui button.treeui-sug:hover {
-  background:var(--ac-soft) !important; border-color:var(--ac-border) !important; }
+  background-color:var(--ac-soft) !important; border-color:var(--ac-border) !important; }
 /* painel lateral da aba "Árvore interativa": as caixas do ipywidgets são todas
    `flex:0 1 auto` — em qualquer contexto de altura restrita o conteúdo seria
    ESMAGADO (caixas internas a 0px). O painel hoje cresce livre (sem barra de
@@ -231,7 +241,7 @@ _CSS = """
   text-transform:uppercase; color:var(--strong-ink) !important;
   background:transparent !important; border:none !important;
   box-shadow:none !important; }
-.treeui button.treeui-sec-btn:hover { background:var(--ac-soft) !important; }
+.treeui button.treeui-sec-btn:hover { background-color:var(--ac-soft) !important; }
 .treeui-sec { padding:4px 8px !important; }
 .treeui-sec-resumo { padding-right:10px; white-space:nowrap; }
 .treeui-sec .treeui-card { border:none !important; box-shadow:none !important;
@@ -311,7 +321,7 @@ _CSS = """
 .treeui.dark .jupyter-button.mod-active { background:#4299E0 !important; color:#11171C !important; }
 /* chip do nó selecionado na barra de ações do preview interativo da árvore */
 .treeui-imgchip { display:inline-block; font-size:11px; font-weight:600; color:var(--ac-deep);
-  background:var(--ac-soft); border:1px solid var(--ac-border); border-radius:999px; padding:3px 11px;
+  background-color:var(--ac-soft); border-width:1px;border-style:solid;border-color:var(--ac-border); border-radius:999px; padding:3px 11px;
   margin-right:6px; max-width:420px; white-space:nowrap; overflow:hidden;
   text-overflow:ellipsis; vertical-align:middle; }
 .treeui.dark .treeui-imgchip { background:#37444F; border-color:#5F7281; color:#E8ECF0; }
@@ -319,7 +329,7 @@ _CSS = """
    vertical entre grupos de botões. A regra vale em qualquer barra dentro da UI —
    estava presa a .treeui-imgbar e o separador nascia 0×0 fora dela. */
 .treeui .treeui-vsep { display:inline-block; width:1px; height:24px; flex:none;
-  background:var(--line); margin:4px 12px 4px 4px; }
+  background-color:var(--line); margin:4px 12px 4px 4px; }
 </style>
 """
 
@@ -455,7 +465,7 @@ _TREE_IMG_CSS = """
 .ygg-treeimg-scroll { width:100%; overflow-x:auto; overflow-y:hidden; }
 .ygg-treeimg-wrap { position:relative; display:inline-block; }
 .ygg-treeimg-img { display:block; height:auto;
-  border:1px solid var(--line, #e6e8eb); border-radius:6px; box-sizing:border-box; }
+  border-width:1px;border-style:solid;border-color:var(--line, #e6e8eb); border-radius:6px; box-sizing:border-box; }
 .ygg-treeimg-hot { position:absolute; cursor:pointer; z-index:3; }
 .ygg-treeimg-hov, .ygg-treeimg-sel { position:absolute; display:none;
   border-radius:7px; pointer-events:none; box-sizing:border-box; z-index:2; }
