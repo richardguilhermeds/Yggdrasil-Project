@@ -1709,6 +1709,31 @@ def test_ui_canvas_teste_de_hipotese_no_card_de_irmas(task):
     assert "Mann-Whitney" in ui.out_cv_merge_p.value
 
 
+def test_ui_canvas_janelinha_alterna_no_segundo_clique(task):
+    """Os botões que abrem a janelinha (Auto-fit, IV, Distribuições, …) são
+    toggles: o 2º clique no MESMO botão fecha; clicar noutro troca o conteúdo."""
+    ui = _build(task)
+    _abre_canvas(ui)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.btn_cv_autofit.click()
+    assert ui.box_cv_modal.layout.display == "" and ui._cv_modal_kind == "fit"
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.btn_cv_autofit.click()                      # 2º clique fecha
+    assert ui.box_cv_modal.layout.display == "none" and ui._cv_modal_kind is None
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.btn_cv_iv.click()
+        ui.btn_cv_automerge.click()                    # outro botão TROCA
+    assert ui._cv_modal_kind == "merge" and ui.box_cv_modal.layout.display == ""
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.btn_cv_modal_cancel.click()
+        _sel_var_cv(ui, "score")
+        ui._on_cv_dist(None)
+    assert ui._cv_modal_kind == "dist"
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_dist(None)                           # toggle das Distribuições
+    assert ui.box_cv_modal.layout.display == "none"
+
+
 def test_ui_canvas_nao_carrega_nada_da_rede(task):
     """O JS/CSS do canvas não referencia CDN, fonte externa nem @import — mesma
     garantia offline exigida do preview clicável."""

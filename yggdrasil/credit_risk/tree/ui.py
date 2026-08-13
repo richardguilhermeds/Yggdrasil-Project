@@ -2360,7 +2360,7 @@ class TreeSegmenterUI:
         # painel que abre no nó clicado. Ao contrário da aba Construir
         # (formulário → folha), aqui a árvore é o ponto de partida.
         # ==============================================================
-        self.box_cv_canvas = W.Box(layout=W.Layout(width="100%", height="640px",
+        self.box_cv_canvas = W.Box(layout=W.Layout(width="100%", height="820px",
                                                    min_width="0"))
         self.out_cv_msg = W.HTML()            # aviso quando o canvas não é possível
         self.btn_cv_fit = W.Button(description="Enquadrar", icon="compress",
@@ -2554,8 +2554,13 @@ class TreeSegmenterUI:
                    "a folha de novos cortes e da poda automática. <b>Alocar faltantes</b> traz "
                    "o nó de NaN do split para dentro desta folha.</div>"),
             self.tx_cv_name,
-            W.HBox([self.btn_cv_lock, self.btn_cv_merge_l, self.btn_cv_merge_r,
-                    self.btn_cv_collapse, self.btn_cv_missing],
+            # duas fileiras deliberadas (não uma com wrap): ações DA FOLHA na
+            # primeira (fechar/fundir) e ações de ESTRUTURA na segunda
+            # (recolher ao pai · alocar faltantes) — a quebra automática
+            # deixava "Alocar faltantes" sozinho numa linha
+            W.HBox([self.btn_cv_lock, self.btn_cv_merge_l, self.btn_cv_merge_r],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center", width="100%")),
+            W.HBox([self.btn_cv_collapse, self.btn_cv_missing],
                    layout=W.Layout(flex_flow="row wrap", align_items="center", width="100%")),
             self.out_cv_merge_p,
             self.box_cv_move,
@@ -7745,6 +7750,12 @@ class TreeSegmenterUI:
         ipywidgets) — não há cópia de configuração para divergir. Nada roda até
         o Aplicar; Cancelar fecha sem tocar na árvore."""
         def _abrir(_):
+            # 2º clique no MESMO botão fecha a janelinha (toggle); clicar noutro
+            # botão troca o conteúdo — a janela é uma só
+            if (self._cv_modal_kind == kind
+                    and self.box_cv_modal.layout.display == ""):
+                self._cv_modal_close()
+                return
             if kind == "iv":
                 # kind INFORMATIVO: janela larga, sem Aplicar (não há ação), o
                 # Cancelar vira Fechar. A tabela é a decisão de "qual variável
@@ -7916,6 +7927,11 @@ class TreeSegmenterUI:
         canvas (como o Auto-fit): a variável com os cortes propostos
         (numérica), as faixas com representatividade × alvo e o alvo DENTRO
         da folha, empilhados e roláveis."""
+        # 2º clique fecha a janelinha (mesmo toggle dos demais botões)
+        if (self._cv_modal_kind == "dist"
+                and self.box_cv_modal.layout.display == ""):
+            self._cv_modal_close()
+            return
         with self._busy(self.btn_cv_dist, msg="desenhando as distribuições…"):
             ok, msg = self._cv_prepare()
             if not ok:
