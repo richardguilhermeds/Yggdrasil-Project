@@ -1650,7 +1650,8 @@ def test_ui_diag_avaliacao_unificada(task):
     abre a aba, "Avaliar modelo" calcula os dois num clique (gráfico antes da
     tabela) e "Ocultar" limpa tudo."""
     ui = _build(task)
-    card = ui.tabs.children[ui._diag_tab_index].children[0]
+    sec = ui.tabs.children[ui._diag_tab_index].children[0]   # 1ª seção (aberta)
+    card = sec.children[1].children[0]                       # corpo → card
     filhos = list(card.children)
     assert ui.out_diag in filhos                       # placar e importância…
     assert ui.out_importance_chart in filhos           # …no MESMO card,
@@ -1688,24 +1689,24 @@ def test_ui_varprof_toggle_e_tamanho_natural(task):
     assert "<img" in ui.out_varprof_missing.value
 
 
-def test_ui_canvas_teste_de_hipotese_no_card_de_irmas(task):
-    """O seletor Mann-Whitney × Welch ganha uma view no card de irmãs (aba do
-    mapa) com o valor LIGADO ao do Diagnóstico — e trocar o teste refaz na hora
-    o p-valor das vizinhas no painel."""
+def test_ui_troca_de_teste_refaz_p_das_vizinhas(task):
+    """O seletor de teste vive SÓ no Diagnóstico (a view no card de irmãs foi
+    removida a pedido) — e trocá-lo lá refaz na hora as pills de p-valor das
+    vizinhas no painel do mapa."""
     ui = _build(task)
     w = _abre_canvas(ui)
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_cv_apply(None)
     folhas = [s for s, v in ui.seg.segments.items() if v["is_leaf"]]
     _foca(ui, w, folhas[1])
+    assert not hasattr(ui, "dd_sib_test")              # a view extra morreu
     assert "Mann-Whitney" in ui.out_cv_merge_p.value
+    assert "pill" in ui.out_cv_merge_p.value           # p-valores como pills
     with contextlib.redirect_stdout(io.StringIO()):
-        ui.dd_sib_test.value = "welch"                 # troca NO CARD DE IRMÃS…
-    assert ui.dd_test.value == "welch"                 # …reflete no Diagnóstico
+        ui.dd_test.value = "welch"
     assert "Welch" in ui.out_cv_merge_p.value          # painel refeito na hora
     with contextlib.redirect_stdout(io.StringIO()):
-        ui.dd_test.value = "mannwhitney"               # caminho inverso
-    assert ui.dd_sib_test.value == "mannwhitney"
+        ui.dd_test.value = "mannwhitney"
     assert "Mann-Whitney" in ui.out_cv_merge_p.value
 
 
@@ -1732,6 +1733,77 @@ def test_ui_canvas_janelinha_alterna_no_segundo_clique(task):
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_cv_dist(None)                           # toggle das Distribuições
     assert ui.box_cv_modal.layout.display == "none"
+
+
+def _secao(ui, key):
+    """(botão, resumo, corpo, título) da seção `key`."""
+    return ui._secoes[key]
+
+
+def test_ui_secoes_colapsaveis_nas_tres_abas(task):
+    """Diagnóstico/Exportar/Avançado viram índices de seções colapsáveis
+    (layout do mockup): TODAS as funções continuam montadas — só mudam de
+    lugar — e cada aba abre com UMA seção expandida."""
+    ui = _build(task)
+    chaves = {"diag_aval", "diag_discrim", "diag_folhas", "diag_estab",
+              "diag_varprof", "diag_boot", "exp_arquivos", "exp_producao",
+              "exp_persist", "av_scn", "av_diff", "av_val"}
+    assert chaves <= set(ui._secoes)
+    for aberta in ("diag_aval", "exp_arquivos", "av_scn"):
+        assert _secao(ui, aberta)[2].layout.display == ""
+    for fechada in ("diag_discrim", "diag_estab", "exp_producao", "av_val"):
+        assert _secao(ui, fechada)[2].layout.display == "none"
+    # nada se perdeu: cada widget-chave é ALCANÇÁVEL dentro de alguma seção
+    def _contem(box, alvo):
+        if box is alvo:
+            return True
+        return any(_contem(c, alvo) for c in getattr(box, "children", ()))
+    corpos = [ui._secoes[k][2] for k in chaves]
+    for w_ in (ui.out_diag, ui.out_importance, ui.out_table, ui.out_sql,
+               ui.btn_mlflow, ui.btn_spark_apply, ui.tx_json_path, ui.btn_pdf,
+               ui.tx_scn_name, ui.tx_diff_path, ui.btn_validate):
+        assert any(_contem(b, w_) for b in corpos)
+    btn, _resumo, corpo, _t = _secao(ui, "diag_estab")
+    with contextlib.redirect_stdout(io.StringIO()):
+        btn.click()
+    assert corpo.layout.display == ""                      # abriu
+    assert btn.description.startswith("▾")
+    with contextlib.redirect_stdout(io.StringIO()):
+        btn.click()
+    assert corpo.layout.display == "none"                  # fechou
+    assert btn.description.startswith("▸")
+
+
+def test_ui_secoes_chips_de_resumo(task):
+    """Os cabeçalhos carregam o resumo: nº de folhas, métrica na amostra de
+    comparação e PSI máx (com semáforo) — atualizados a cada mutação."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+    assert "folhas" in _secao(ui, "diag_folhas")[1].value
+    assert "PSI" in _secao(ui, "diag_estab")[1].value
+    assert "pill" in _secao(ui, "diag_discrim")[1].value
+    # cenários: o chip acompanha a lista
+    assert "nenhum cenário" in _secao(ui, "av_scn")[1].value
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.tx_scn_name.value = "v1"
+        ui._on_scn_save(None)
+    assert "1 cenário" in _secao(ui, "av_scn")[1].value
+
+
+def test_ui_migracao_de_folhas_como_heatmap(task):
+    """A matriz de migração da comparação de cenários sai como HEATMAP (fundo
+    proporcional à contagem, zeros discretos) — não mais texto pré-formatado."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        ui.tx_scn_name.value = "base"
+        ui._on_scn_save(None)
+        ui._on_scn_compare("base")
+    html = ui.out_scn_diff.value
+    assert "mig-heat" in html                              # o heatmap novo
+    assert 'class="dataframe"' not in html.split("mig-heat")[1]
+    assert "background-color:rgb" in html.split("mig-heat")[1]
 
 
 def test_ui_canvas_nao_carrega_nada_da_rede(task):

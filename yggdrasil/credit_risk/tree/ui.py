@@ -212,6 +212,32 @@ _CSS = """
    spacer, essa sobra desalinhava os botões da base (MLflow × Spark,
    JSON × Imagem). Vazio = invisível. */
 .treeui .widget-html-content:empty { display:none; }
+/* células sem cor explícita herdavam o PRETO do tema do Jupyter
+   (.jp-RenderedHTMLCommon tbody tr td, especificidade 0,1,3) — e como o tema
+   escuro daqui é a classe .dark nos NOSSOS tokens, o token do Jupyter não
+   flipa e as tabelas somem no escuro (texto preto sobre grafite). A regra
+   abaixo (0,1,4) devolve a tinta aos tokens; células com cor própria
+   (semáforos, heatmaps) seguem intactas por serem inline. */
+.treeui table tbody tr td, .treeui table tbody tr th { color:var(--ink); }
+.treeui.dark img { border-radius:6px; }
+/* ===== seções colapsáveis (Diagnóstico · Exportar · Avançado) =====
+   Estilo do mockup: um cabeçalho-botão por seção (chevron + título) com os
+   chips de resumo à direita; o corpo abre sob demanda. A seção é um card; os
+   cards INTERNOS perdem moldura (card dentro de card pesa) e, quando o título
+   interno repete o da seção, o header interno some (classe sec-esconde-h). */
+.treeui button.treeui-sec-btn { justify-content:flex-start !important;
+  text-align:left; width:100%; height:42px !important; padding:0 10px !important;
+  font-size:12.5px; font-weight:600; letter-spacing:.03em;
+  text-transform:uppercase; color:var(--strong-ink) !important;
+  background:transparent !important; border:none !important;
+  box-shadow:none !important; }
+.treeui button.treeui-sec-btn:hover { background:var(--ac-soft) !important; }
+.treeui-sec { padding:4px 8px !important; }
+.treeui-sec-resumo { padding-right:10px; white-space:nowrap; }
+.treeui-sec .treeui-card { border:none !important; box-shadow:none !important;
+  margin-bottom:4px; background:transparent !important; }
+.treeui-sec .sec-esconde-h > .widget-html:first-child { display:none; }
+.treeui.dark .treeui-sec .treeui-card { background:transparent !important; }
 /* o card do mapa é o único que ganha a largura toda: encosta nas bordas do
    painel (margem negativa cobre o padding de .treeui + o do conteúdo das abas)
    e quase zera o próprio padding lateral. Sobra ~70px a mais de plano, e o
@@ -1959,24 +1985,15 @@ class TreeSegmenterUI:
         # perto, só os GRÁFICOS (out_sib) merecem a largura toda. Um controle
         # por linha, todos com o MESMO description_width (sib_style) — as caixas
         # começam e terminam alinhadas.
-        # o teste de hipótese (Mann-Whitney × Welch) vale para TODOS os p-valores
-        # da UI (vizinhas no painel do mapa, irmãs, tabela de folhas), mas o
-        # seletor morava só no Diagnóstico. Segunda view aqui — clonada com o
-        # valor LIGADO (W.link), como os limites de bin: largura/rótulo próprios
-        # desta coluna, um só valor.
-        self.dd_sib_test = W.Dropdown(description="teste de hipótese",
-                                      options=list(self.dd_test.options),
-                                      value=self.dd_test.value,
-                                      layout=full, style=sib_style)
-        W.link((self.dd_test, "value"), (self.dd_sib_test, "value"))
-        # trocar o teste refaz na hora o p-valor das vizinhas no painel do mapa
-        # (a tabela de folhas já se refaz pelo observer registrado na criação)
+        # o teste de hipótese (Mann-Whitney × Welch) segue configurável SÓ no
+        # Diagnóstico (tabela de folhas) — uma segunda view aqui foi testada e
+        # removida a pedido: confundia mais do que ajudava. Trocar lá refaz na
+        # hora o p-valor das vizinhas no painel do mapa.
         self.dd_test.observe(self._on_test_change, names="value")
         box_sib_ctl = W.VBox([
             self.dd_sib_group,
             self.tx_sib_time,
             self.dd_sib_sample,
-            self.dd_sib_test,
             W.HBox([self.btn_sib], layout=W.Layout(width="100%")),
             # zoom do eixo Y (auto/mín-máx) + eixo em % dos gráficos de estabilidade
             W.HBox([self.btn_sib_zoom, self.btn_sib_reset, self.tx_sib_ymin,
@@ -2127,12 +2144,35 @@ class TreeSegmenterUI:
                    "com fallback, o <code>ELSE</code> vira a folha escolhida em vez de NULL.</div>"),
             W.HBox([self.tx_sql_table, self.dd_fallback, self.btn_sql]),
             self.out_sql]); card_sql.add_class("treeui-card")
-        # a avaliação (placar + importância) abre a aba num bloco único.
+        # a aba vira um ÍNDICE de seções colapsáveis (estilo do mockup): a
+        # avaliação abre; o resto é uma linha com chip de resumo até ser
+        # aberto. Cards cujo título repete o da seção escondem o header
+        # interno (sec-esconde-h).
         # (card_sib saiu daqui para a aba "Árvore interativa" — ver lá o porquê)
-        tab_diag = W.VBox([card_score, sep_diag2,
-                           card_metrics, card_table,
-                           card_estab, card_varprof,
-                           card_discrim, card_boot])
+        for _c in (card_score, card_table, card_estab, card_varprof, card_boot):
+            _c.add_class("sec-esconde-h")
+        tab_diag = W.VBox([
+            self._make_secao("diag_aval",
+                             "Avaliação do modelo · placar & importância",
+                             [card_score], aberto=True),
+            self._make_secao("diag_discrim", "Métricas & discriminação",
+                             [card_metrics, card_discrim]),
+            self._make_secao("diag_folhas",
+                             "Folhas · PSI & teste de hipótese",
+                             [card_table]),
+            self._make_secao("diag_estab",
+                             "Estabilidade · métricas × PSI no tempo",
+                             [card_estab]),
+            self._make_secao("diag_varprof", "Perfil das variáveis por safra",
+                             [card_varprof]),
+            self._make_secao("diag_boot", "IC bootstrap & aderência",
+                             [card_boot]),
+        ])
+        self._sec_chip("diag_aval", "<span class='pill pill-muted'>4 vereditos + "
+                       "importância</span>")
+        self._sec_chip("diag_varprof", "<span class='pill pill-muted'>missing & "
+                       "dispersão</span>")
+        _ = sep_diag2                   # faixa antiga, sem uso no novo layout
 
         # ================================================================
         # ABA 4. VALIDAR & EXPORTAR — duas faixas: validação · exportar/registrar
@@ -2251,8 +2291,23 @@ class TreeSegmenterUI:
         ])
         card_pdf.add_class("treeui-card")
         # a antiga aba "Histórico" virou uma SEÇÃO no fim da aba Exportar
-        tab_valid = W.VBox([sep_exp, export_top, card_sql, export_row,
-                            sep_hist, hist_row, self.box_confirm, card_pdf])
+        # esteira numerada: o layout conta a ordem natural do trabalho —
+        # gerar arquivos → mandar para produção → persistir/documentar
+        tab_valid = W.VBox([
+            self._make_secao("exp_arquivos", "1 · Rotular & arquivos",
+                             [export_top, card_sql], aberto=True),
+            self._make_secao("exp_producao", "2 · Produção",
+                             [export_row]),
+            self._make_secao("exp_persist", "3 · Persistência & relatório",
+                             [hist_row, self.box_confirm, card_pdf]),
+        ])
+        self._sec_chip("exp_arquivos",
+                       "<span class='pill pill-muted'>DataFrame · Excel · SQL</span>")
+        self._sec_chip("exp_producao",
+                       "<span class='pill pill-muted'>MLflow · Spark</span>")
+        self._sec_chip("exp_persist",
+                       "<span class='pill pill-muted'>JSON · imagem · PDF</span>")
+        _ = (sep_exp, sep_hist)         # faixas antigas, sem uso no novo layout
 
         # ================================================================
         # ABA 2. ANÁLISE DE VARIÁVEL — perfil, distribuição e estabilidade
@@ -2344,16 +2399,24 @@ class TreeSegmenterUI:
                    layout=W.Layout(align_items="center")),
             self.out_scn_summary, self.box_scn_list, self.out_scn_diff])
         card_scn.add_class("treeui-card")
+        # O que sobrou aqui é o que NÃO é construção da árvore — em seções
+        # colapsáveis: cenários (o mais usado) abre; comparação e validação
+        # são uma linha até serem chamadas.
+        for _c in (card_scn, card_diff, card_validacao):
+            _c.add_class("sec-esconde-h")
         tab_avancado = W.VBox([
-            # O que sobrou aqui é o que NÃO é construção da árvore. Auto-merge e
-            # poda foram para Construir, junto do auto-fit (as três ações
-            # automáticas num card só); "Sugerir splits" saiu por duplicar a
-            # sugestão da aba Construir; a importância foi para Diagnóstico e o
-            # export SQL para Exportar — cada um perto do que serve.
-            card_diff, card_scn,
-            # validação regulatória (monotonicidade/calibração/backtest + relatório)
-            # movida para cá: é uma etapa de fechamento, não da decisão de segmentação.
-            sep_val, card_validacao])
+            self._make_secao("av_scn", "Cenários (em memória · só nesta sessão)",
+                             [card_scn], aberto=True),
+            self._make_secao("av_diff", "Comparar duas árvores (JSON)",
+                             [card_diff]),
+            self._make_secao("av_val",
+                             "Validação regulatória · monotonicidade & calibração",
+                             [card_validacao]),
+        ])
+        self._sec_chip("av_val", "<span class='pill pill-muted'>2 checagens + "
+                       "relatório</span>")
+        self._refresh_scn_chip()
+        _ = sep_val                     # faixa antiga, sem uso no novo layout
 
         # ==============================================================
         # Aba "Árvore interativa": o canvas à esquerda e, à direita, o
@@ -3878,6 +3941,7 @@ class TreeSegmenterUI:
         if self.out_sql.value.strip():
             self.out_sql.value = ("-- Árvore alterada — SQL desatualizado. Clique em "
                                   "'Gerar SQL (CASE WHEN)' para regenerar.")
+        self._refresh_sec_chips()       # cabeçalhos das seções (memoizado)
         # a mini-tabela de cenários compara com o estado ATUAL — acompanha as
         # mutações (custo ~zero: metrics/psi memoizados por versão da árvore) e
         # marca uma comparação já renderizada como desatualizada
@@ -4480,12 +4544,37 @@ class TreeSegmenterUI:
         mig.index = [f"A·{i}" for i in mig.index]
         mig.columns = [f"B·{c}" for c in mig.columns]
         rotulo = (f" · A = {label_a} · B = {label_b}" if (label_a or label_b) else "")
+        # heatmap: fundo proporcional à contagem (rampa accent, a mesma dos
+        # outros heatmaps da UI); zero vira · discreto — a DIAGONAL cheia é o
+        # que se espera ver de relance quando as árvores concordam
+        vmax = float(mig.values.max()) if mig.size else 0.0
+        th = ("padding:4px 10px;font-size:10px;color:var(--tbl-head-ink);"
+              "text-align:center;border-bottom:2px solid var(--tbl-head-line)")
+        td = ("padding:4px 10px;font-size:11.5px;text-align:center;"
+              "border:1px solid var(--tbl-line);font-variant-numeric:tabular-nums")
+        cab = ("<tr><th style='" + th + "'></th>" + "".join(
+            f"<th style='{th}'>{_esc(c)}</th>" for c in mig.columns) + "</tr>")
+        linhas = []
+        for idx, row in mig.iterrows():
+            cels = "".join(
+                "<td style='%s;%s'>%s</td>" % (
+                    td,
+                    self._accent_ramp_css(float(v) if v > 0 else None, 0.0, vmax,
+                                          na="transparent"),
+                    f"{int(v):,}".replace(",", ".") if v > 0 else
+                    "<span style='color:var(--faint-ink)'>·</span>")
+                for v in row)
+            linhas.append(f"<tr><th style='{th};border-bottom:1px solid "
+                          f"var(--tbl-line)'>{_esc(idx)}</th>{cels}</tr>")
+        heat = ("<div class='mig-heat' style='overflow-x:auto'>"
+                "<table style='border-collapse:collapse'>" + cab
+                + "".join(linhas) + "</table></div>")
         return (f"<div class='treeui-legend'>Concordância de folhas (A=B): "
                 f"<b>{d['concordancia']:.1%}</b>{rotulo}</div>"
                 + self._df_html(d["resumo"], center=True)
                 + "<div class='treeui-h' style='margin-top:8px'>Migração de folhas "
                   "(linhas = árvore A · colunas = árvore B)</div>"
-                + mig.to_html(border=0))
+                + heat)
 
     def _on_diff(self, _):
         from .segmenter import TreeSegmenter
@@ -4563,6 +4652,7 @@ class TreeSegmenterUI:
                                       margin="1px 0"))
 
     def _refresh_scn_panel(self, stale_diff=False, rebuild_rows=False):
+        self._refresh_scn_chip()        # cabeçalho da seção acompanha a lista
         """Atualiza o card de cenários: a mini-tabela resumo (estado ATUAL na 1ª
         linha + um cenário por linha) acompanha toda mutação; as LINHAS de botões
         só são reconstruídas com ``rebuild_rows=True`` (salvar/remover — recriar
@@ -4595,6 +4685,11 @@ class TreeSegmenterUI:
                 "border-radius:6px;padding:4px 8px;display:inline-block'>⚠️ Árvore ou "
                 "cenários alterados — comparação desatualizada. Clique em <b>Comparar com "
                 "o atual</b> para recalcular.</div>")
+
+    def _refresh_scn_chip(self):
+        n = len(self._scenarios)
+        self._sec_chip("av_scn", "<span class='pill pill-muted'>"
+                       + (f"{n} cenário(s)" if n else "nenhum cenário") + "</span>")
 
     def _on_scn_save(self, _):
         nome = (self.tx_scn_name.value or "").strip()
@@ -7187,19 +7282,19 @@ class TreeSegmenterUI:
         if not testes:
             return ""
         alpha = float(self.sl_alpha.value)
-        partes = []
+        pills = []
         for lado, _desc, p in testes:
             if pd.isna(p):
-                txt, cor, nota = "—", "var(--sub-ink)", "amostra pequena"
+                cls, txt = "pill-muted", f"{lado} n pequeno"
             elif p > alpha:
-                txt = f"p={p:.3f}"
-                cor, nota = "var(--warn-tx)", "indistinguível — candidata a fusão"
+                cls, txt = "pill-yellow", f"{lado} p={p:.3f} · fundir?"
             else:
-                txt = f"p={p:.3f}" if p >= 0.001 else "p<0.001"
-                cor, nota = "var(--ok-tx)", "distinta"
-            partes.append(f"{lado} <b style='color:{cor}'>{txt}</b> ({nota})")
-        return (f"<div class='treeui-legend' style='margin:4px 0 0'>{_esc(name)} vs "
-                f"vizinhas (α={alpha:g}): " + " · ".join(partes) + "</div>")
+                pv = f"p={p:.3f}" if p >= 0.001 else "p&lt;0.001"
+                cls, txt = "pill-green", f"{lado} {pv} · distinta"
+            pills.append(f"<span class='pill {cls}'>{txt}</span>")
+        return ("<div style='margin:7px 0 0'><span class='treeui-h' "
+                "style='display:inline-block;margin:0 6px 0 0'>"
+                f"{_esc(name)} vs vizinhas</span>" + " ".join(pills) + "</div>")
 
     def _refresh_cv_suggestions(self, sid):
         """Três variáveis de maior IV nesta folha, como atalhos: clicar já
@@ -7847,6 +7942,58 @@ class TreeSegmenterUI:
         self.out_cv_dist.value = ""
         if self._cv_modal_kind == "dist":
             self._cv_modal_close()
+
+    def _make_secao(self, key, titulo, corpo, aberto=False):
+        """Seção colapsável no estilo do mockup: cabeçalho-botão (chevron +
+        título em caixa alta) com uma área de chips de resumo à direita, e o
+        corpo abrindo sob demanda. É o antídoto do paredão de cards: fechada,
+        a seção é uma LINHA; o conjunto de cabeçalhos vira o índice da aba."""
+        if not hasattr(self, "_secoes"):
+            self._secoes = {}
+        btn = W.Button(description=("▾  " if aberto else "▸  ") + titulo,
+                       layout=W.Layout(flex="1 1 auto", width="auto"))
+        btn.add_class("treeui-sec-btn")
+        resumo = W.HTML(layout=W.Layout(flex="0 0 auto"))
+        resumo.add_class("treeui-sec-resumo")
+        body = W.VBox(list(corpo), layout=W.Layout(
+            width="100%", display="" if aberto else "none"))
+
+        def _alterna(_):
+            fechado = body.layout.display == "none"
+            body.layout.display = "" if fechado else "none"
+            btn.description = ("▾  " if fechado else "▸  ") + titulo
+        btn.on_click(_alterna)
+        sec = W.VBox([W.HBox([btn, resumo],
+                             layout=W.Layout(width="100%", align_items="center")),
+                      body], layout=W.Layout(width="100%"))
+        sec.add_class("treeui-card")
+        sec.add_class("treeui-sec")
+        self._secoes[key] = (btn, resumo, body, titulo)
+        return sec
+
+    def _sec_chip(self, key, html):
+        """Escreve os chips de resumo de uma seção (no-op se ela não existir)."""
+        secs = getattr(self, "_secoes", None)
+        if secs and key in secs:
+            secs[key][1].value = html
+
+    def _refresh_sec_chips(self):
+        """Resumos dos cabeçalhos das seções do Diagnóstico — lidos do
+        _delta_snapshot, que é memoizado por versão da árvore (custo ~zero).
+        Ler os cabeçalhos = ler o diagnóstico; abrir = ver a evidência."""
+        if not getattr(self, "_secoes", None):
+            return
+        snap = self._delta_snapshot()
+        pill = "<span class='pill pill-{c}'>{t}</span>"
+        self._sec_chip("diag_folhas",
+                       pill.format(c="muted", t=f"{snap['folhas']} folhas"))
+        if snap.get("metrica"):
+            rot, v = snap["metrica"]
+            self._sec_chip("diag_discrim", pill.format(c="muted", t=f"{rot} {v:.1%}"))
+        if snap.get("psi_max") is not None:
+            p = snap["psi_max"]
+            self._sec_chip("diag_estab", pill.format(
+                c=self._psi_class(p), t=f"PSI máx {p:.1%}"))
 
     def _on_test_change(self, _):
         """Trocar o teste de hipótese muda os p-valores exibidos: refaz a linha
