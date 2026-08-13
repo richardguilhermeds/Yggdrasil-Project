@@ -1488,6 +1488,22 @@ def test_ui_canvas_salvar_cenario_da_barra(task):
     assert len(ui._scenarios) == 2
 
 
+def test_ui_canvas_criterios_seguem_o_task_type(task):
+    """O seletor de critério do painel usa as MESMAS opções (e o mesmo gate por
+    task_type) da aba Construir, e TODAS elas preparam um split válido.
+    Regressão: a 1ª versão hardcodava a lista de classificação e a regressão
+    (LGD) quebrava com "Critério de split desconhecido: 'entropy'"."""
+    ui = _build(task)
+    _abre_canvas(ui)
+    assert list(ui.dd_cv_crit.options) == list(ui.dd_split_criterion.options)
+    _sel_var_cv(ui, "score")
+    for rotulo, crit in ui.dd_cv_crit.options:
+        ui.dd_cv_crit.value = crit
+        with contextlib.redirect_stdout(io.StringIO()):
+            ok, msg = ui._cv_prepare()
+        assert ok, f"critério {crit!r} ({rotulo}) falhou: {msg}"
+
+
 def test_ui_canvas_nao_carrega_nada_da_rede(task):
     """O JS/CSS do canvas não referencia CDN, fonte externa nem @import — mesma
     garantia offline exigida do preview clicável."""

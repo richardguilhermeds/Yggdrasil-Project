@@ -2386,11 +2386,14 @@ class TreeSegmenterUI:
                                       continuous_update=False,
                                       layout=W.Layout(width="100%"),
                                       style={"description_width": "72px"})
+        # MESMAS opções (e mesmo gate por task_type) do seletor da Construir:
+        # o segmentador só aceita gini/entropy/ks/iv/chi2 na CLASSIFICAÇÃO e
+        # variance/mae/ftest na REGRESSÃO. A 1ª versão hardcodava a lista de
+        # classificação (copiada do mockup) e a LGD quebrava com
+        # "Critério de split desconhecido: 'entropy'".
         self.dd_cv_crit = W.Dropdown(
             description="critério", value="optbin",
-            options=[("Binning ótimo (IV)", "optbin"), ("Gini (CART)", "gini"),
-                     ("Entropia / ganho de informação", "entropy"), ("KS", "ks"),
-                     ("Qui-quadrado (CHAID)", "chi2")],
+            options=list(self.dd_split_criterion.options),
             layout=W.Layout(width="100%"), style={"description_width": "72px"})
         self.tx_cv_cuts = W.Text(description="Cortes", placeholder="ex.: 420, 580, 720",
                                  layout=W.Layout(width="100%"),
