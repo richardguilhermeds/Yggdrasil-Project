@@ -141,6 +141,19 @@ _CSS = """
 .treeui-tabs .widget-tab-contents,
 .treeui-tabs .jupyter-widget-TabPanel-tabContents {
   background:transparent !important; }
+/* o HOSPEDEIRO pinta de branco o container do output de widgets (VS Code:
+   .cell-output-ipywidget-background; Jupyter: .jp-OutputArea-output /
+   .widget-subarea) — com o painel escuro dentro, vira uma MOLDURA branca em
+   volta da interface. Só interferimos quando o NOSSO dark está ligado
+   (:has), e só para tornar transparente: o fundo passa a ser o do editor. */
+.cell-output-ipywidget-background:has(.treeui.dark),
+.jp-OutputArea-output:has(.treeui.dark),
+.jp-Cell-outputArea:has(.treeui.dark),
+.widget-subarea:has(.treeui.dark) {
+  background:transparent !important; }
+/* console (W.Output): o print() vira <pre> com a cor padrão do Jupyter, que
+   não flipa com a nossa classe — no escuro o log ficava cinza-escuro ilegível */
+.treeui.dark pre { color:var(--ink) !important; background:transparent !important; }
 /* respiro entre a barra de abas e os cards do conteúdo abaixo
    (!important vence a regra própria do ipywidgets p/ .widget-tab-contents);
    border/box-shadow:none remove a "caixa" padrão do Tab ao redor de tudo */
