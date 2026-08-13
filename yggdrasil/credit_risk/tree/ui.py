@@ -208,6 +208,10 @@ _CSS = """
    preview da árvore). Os cards ficam de fora da regra: eles seguem com o
    overflow-x:clip declarado acima, que CONTÉM qualquer sobra horizontal. */
 .treeui .widget-box:not(.treeui-card) { overflow:visible !important; }
+/* um W.HTML vazio ainda reserva ~altura de linha; em cards lado a lado com
+   spacer, essa sobra desalinhava os botões da base (MLflow × Spark,
+   JSON × Imagem). Vazio = invisível. */
+.treeui .widget-html-content:empty { display:none; }
 /* o card do mapa é o único que ganha a largura toda: encosta nas bordas do
    painel (margem negativa cobre o padding de .treeui + o do conteúdo das abas)
    e quase zera o próprio padding lateral. Sobra ~70px a mais de plano, e o
@@ -2208,12 +2212,14 @@ class TreeSegmenterUI:
                    "fechadas) num .json e recarrega depois. Para o passo a passo, use "
                    "◀ Desfazer / Refazer ▶ na aba <b>Construir</b>.</div>"),
             self.tx_json_path,
+            W.Box([], layout=W.Layout(flex="1 1 auto")),   # simetria com o card Imagem
             W.HBox([self.btn_save_json, self.btn_load_json]),
         ], layout=W.Layout(width="49%"))
         card_json.add_class("treeui-card")
         card_img = W.VBox([
             W.HTML(f"<div class='treeui-h'>Imagem da árvore ({_rl} médio &amp; % por folha)</div>"),
             self.tx_img_path,
+            W.Box([], layout=W.Layout(flex="1 1 auto")),   # alinha com o card JSON
             W.HBox([self.btn_plot, self.btn_plot_hide]),
             self.out_plot,
         ], layout=W.Layout(width="49%"))
@@ -2679,7 +2685,6 @@ class TreeSegmenterUI:
                                    flex_flow="row wrap")),
             W.HBox([_palco_cv, painel_cv],
                    layout=W.Layout(width="100%", align_items="stretch")),
-            self.out_cv_dist,
         ])
         card_cv.add_class("treeui-card")
         card_cv.add_class("treeui-card-mapa")
@@ -3823,8 +3828,9 @@ class TreeSegmenterUI:
         self.out_discrim.value = ("<div style='font-size:12px;color:var(--sub-ink)'>Árvore alterada — "
                                   "clique num dos botões do card (curvas · lift · métricas por "
                                   "safra) para renderizar.</div>")
-        self.out_plot.value = ("<div style='font-size:12px;color:var(--sub-ink)'>Árvore alterada — "
-                               "clique em <b>Ver / salvar árvore (imagem)</b> para renderizar.</div>")
+        # sem placeholder: a imagem antiga some e o card fica limpo até o
+        # próximo "Ver / salvar árvore (imagem)" (pedido: nada de aviso)
+        self.out_plot.value = ""
         # o placar de saúde, o SQL gerado e a validação também ficam obsoletos —
         # mas essas saídas nascem vazias/ocultas: só recebem a tarja âmbar de
         # desatualizado quando já havia resultado renderizado na tela.
@@ -5903,9 +5909,11 @@ class TreeSegmenterUI:
         if calib is not None and len(calib):
             cols = [c for c in ["folha", "n", "valor_previsto", "valor_realizado", "gap"]
                     if c in calib.columns]
+            # SEM max_height: a tabela tem uma linha por folha (dezenas no pior
+            # caso) — cortá-la em 240px escondia metade das folhas atrás de uma
+            # barra de rolagem; inteira, ela se lê de cima a baixo
             ev += (f"<div class='treeui-h' style='margin-top:14px'>Calibração · {_rl} previsto (DES) × "
-                   "realizado por folha</div>" + self._df_html(calib[cols], max_height="240px",
-                                                               center=True))
+                   "realizado por folha</div>" + self._df_html(calib[cols], center=True))
         # estrutura: monotonicidade — MESMA leitura visual das FOLHAS-IRMÃS,
         # comparando SÓ as folhas que invertem no alvo (não só as sob mesmo pai).
         # Mapeia os pares de NOTAS de mono["inversoes"] para os sids das folhas.
@@ -7110,7 +7118,7 @@ class TreeSegmenterUI:
         self.tx_cv_name.disabled = not is_leaf
         self._sync_cv_actions()
         self.out_cv_preview.value = ""      # o preview era de outro nó
-        self.out_cv_dist.value = ""         # idem para as distribuições
+        self._cv_dist_invalidate()          # idem para as distribuições
 
     def _sync_cv_actions(self):
         """Habilita cada ação do nó em foco conforme o que é válido ali.
@@ -7208,7 +7216,7 @@ class TreeSegmenterUI:
         """Marcar/desmarcar um limite muda o binning proposto — o preview e as
         distribuições antigos não valem mais."""
         self.out_cv_preview.value = ""
-        self.out_cv_dist.value = ""
+        self._cv_dist_invalidate()
         self._sync_cv_optbin_visibility()
 
     def _rebuild_cv_cat_box(self):
@@ -7268,14 +7276,14 @@ class TreeSegmenterUI:
         if self._cv_syncing:
             return
         self.out_cv_preview.value = ""
-        self.out_cv_dist.value = ""
+        self._cv_dist_invalidate()
         self._sync_cv_mode()
 
     def _on_cv_feature(self, _):
         if self._cv_syncing:
             return
         self.out_cv_preview.value = ""
-        self.out_cv_dist.value = ""
+        self._cv_dist_invalidate()
         self._sync_cv_mode()          # o tipo da variável muda o campo de cortes
 
     def _on_cv_sug(self, i):
@@ -7793,6 +7801,13 @@ class TreeSegmenterUI:
         self.btn_cv_undo.disabled = not self._undo
         self.btn_cv_redo.disabled = not self._redo
 
+    def _cv_dist_invalidate(self):
+        """Folha/variável/modo/limites mudaram: as distribuições desenhadas
+        não valem mais — limpa e, se a janelinha era delas, fecha."""
+        self.out_cv_dist.value = ""
+        if self._cv_modal_kind == "dist":
+            self._cv_modal_close()
+
     def _on_cv_psi_toggle(self, _):
         """Alterna a linha de baixo dos cartões entre volumetria e PSI por
         amostra. Só redesenha os cartões — o pan/zoom fica onde o usuário
@@ -7861,14 +7876,16 @@ class TreeSegmenterUI:
         return html
 
     def _on_cv_dist(self, _):
-        """Distribuições da dupla folha × variável, embaixo do mapa: a variável
-        com os cortes propostos (numérica), as faixas propostas com a
-        representatividade e a linha do alvo, e o alvo DENTRO da folha."""
+        """Distribuições da dupla folha × variável, numa JANELINHA sobre o
+        canvas (como o Auto-fit): a variável com os cortes propostos
+        (numérica), as faixas com representatividade × alvo e o alvo DENTRO
+        da folha, empilhados e roláveis."""
         with self._busy(self.btn_cv_dist, msg="desenhando as distribuições…"):
             ok, msg = self._cv_prepare()
             if not ok:
                 self.out_cv_dist.value = (f"<div style='font-size:11.5px;"
                                           f"color:var(--bad-tx)'>{_esc(msg)}</div>")
+                self._cv_dist_modal_open()
                 return
             p = self._pending
             sid, feat = p["only_segments"][0], p["feature"]
@@ -7896,11 +7913,31 @@ class TreeSegmenterUI:
             add(f"Distribuição de {self._risk_label} na folha",
                 lambda: plot_alvo(sid))
             self.out_cv_dist.value = (
-                "<div style='display:flex;flex-flow:row wrap;gap:16px;"
-                "align-items:flex-start'>" + "".join(
-                    f"<div style='flex:0 1 auto;min-width:0'>"
-                    f"<div class='treeui-h' style='margin:2px 0 4px'>{_esc(t)}</div>{h}</div>"
+                "<div style='max-height:520px;overflow:auto'>" + "".join(
+                    f"<div style='min-width:0'>"
+                    f"<div class='treeui-h' style='margin:8px 0 4px'>{_esc(t)}</div>{h}</div>"
                     for t, h in blocos) + "</div>")
+            self._cv_dist_modal_open()
+
+    def _cv_dist_modal_open(self):
+        """Moldura informativa da janelinha (larga, sem Aplicar) com o corpo
+        das distribuições já preenchido em out_cv_dist."""
+        sid = self._cv_node()
+        feat = self._cv_feature(warn=False)
+        rot_f = _esc(self.seg.feature_labels.get(feat, feat) or "—")
+        rot_s = _esc(self._leaf_label(sid)) if sid else "—"
+        self.out_cv_modal_head.value = (
+            "<div style='font-size:13px;font-weight:600;color:var(--strong-ink);"
+            "margin-bottom:3px'>Distribuições — " + rot_f + "</div>"
+            "<div class='treeui-legend' style='margin:0 0 6px'>na folha <b>"
+            + rot_s + "</b> · variável com os cortes propostos, faixas com "
+            "representatividade × alvo e o alvo dentro da folha.</div>")
+        self.box_cv_modal_body.children = (self.out_cv_dist,)
+        self.btn_cv_modal_ok.layout.display = "none"
+        self.btn_cv_modal_cancel.description = "Fechar"
+        self.box_cv_modal.layout.width = "720px"
+        self._cv_modal_kind = "dist"
+        self.box_cv_modal.layout.display = ""
 
     def _on_cv_goto(self, ch):
         """Atalho da barra: seleciona a folha (mesmo caminho do clique no nó) e

@@ -1572,21 +1572,28 @@ def test_ui_canvas_tiles_por_amostra(task):
 
 
 def test_ui_canvas_botao_distribuicoes(task):
-    """O botão Distribuições desenha, na largura do card: a variável com os
-    cortes propostos (numérica), as faixas repr. × alvo e o alvo da folha."""
+    """O botão Distribuições abre a JANELINHA sobre o canvas (como o Auto-fit),
+    com a variável + cortes propostos (numérica), as faixas repr. × alvo e o
+    alvo da folha; trocar a variável fecha e invalida."""
     ui = _build(task)
     _abre_canvas(ui)
     _sel_var_cv(ui, "score")
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_cv_dist(None)
+    assert ui._cv_modal_kind == "dist"               # é a janelinha informativa
+    assert ui.box_cv_modal.layout.display == ""
+    assert ui.btn_cv_modal_ok.layout.display == "none"
+    assert ui.btn_cv_modal_cancel.description == "Fechar"
+    assert ui.out_cv_dist in ui.box_cv_modal_body.children
     html = ui.out_cv_dist.value
     assert html.count("<img") >= 3                   # hist + faixas + alvo da folha
     assert "cortes propostos" in html
     assert f"Distribuição de {ui._risk_label} na folha" in html
-    _sel_var_cv(ui, "garantia")                      # categórica: sem histograma
-    assert ui.out_cv_dist.value == ""                # trocar variável invalida
+    _sel_var_cv(ui, "garantia")                      # trocar variável…
+    assert ui.out_cv_dist.value == ""                # …invalida
+    assert ui.box_cv_modal.layout.display == "none"  # …e fecha a janelinha
     with contextlib.redirect_stdout(io.StringIO()):
-        ui._on_cv_dist(None)
+        ui._on_cv_dist(None)                         # categórica: sem histograma
     html = ui.out_cv_dist.value
     assert html.count("<img") == 2 and "cortes propostos" not in html
 
