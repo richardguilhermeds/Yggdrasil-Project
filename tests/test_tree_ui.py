@@ -86,12 +86,14 @@ def test_ui_problem_label_sobrescreve_rotulo(task):
 
 
 def test_ui_leaf_hist_por_task(task):
+    """Com a Construir OCULTA, o card do histograma da folha nunca renderiza
+    (fica pendente, sem custo) — o alvo da folha vive nas Distribuições do
+    mapa. O plot em si continua correto por task_type (coberto lá)."""
     ui = _build(task)
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_autofit(None)
-        # o histograma é preguiçoso e a UI abre no mapa: renderiza ao abrir Construir
-        ui.tabs.selected_index = ui._build_tab_index
-    assert "não gerado" not in ui.out_leaf_hist.value    # reg usa plot_leaf_value_hist, clf badrate
+    assert ui._hist_dirty                                # marcado, nunca desenhado
+    assert "não gerado" not in ui.out_leaf_hist.value    # e sem erro renderizado
 
 
 def test_ui_preview_split(task):
@@ -1049,15 +1051,20 @@ def _foca(ui, w, sid):
             ui._refresh_cv_panel()
 
 
-def test_ui_aba_canvas_entre_construir_e_analise(task):
-    """A aba nova fica entre 'Construir' e 'Análise de variáveis', e o índice da
-    aba de IV acompanha o deslocamento (senão o render preguiçoso miraria a aba
-    errada)."""
+def test_ui_aba_canvas_abre_o_workbench(task):
+    """A Árvore interativa é a PRIMEIRA aba — a 'Construir' está OCULTA
+    (candidata a exclusão): os widgets dela seguem vivos porque o painel e as
+    janelinhas os compartilham, mas ela não aparece na barra de abas. Os
+    índices dos renders preguiçosos acompanham."""
     ui = _build(task)
     titulos = [ui.tabs.get_title(i) for i in range(len(ui.tabs.children))]
-    assert titulos[:3] == ["Construir", "Árvore interativa", "Análise de variáveis"]
-    assert ui._canvas_tab_index == 1
+    assert "Construir" not in titulos
+    assert titulos[0] == "Árvore interativa"
+    assert ui._canvas_tab_index == 0 and ui._build_tab_index is None
     assert ui._iv_tab_index == titulos.index("Análise de variáveis")
+    assert ui._diag_tab_index == titulos.index("Diagnóstico")
+    # os widgets da Construir continuam vivos (as janelinhas dependem deles)
+    assert ui.sl_depth is not None and ui.dd_feature is not None
 
 
 def test_ui_canvas_desenha_um_cartao_por_no(task):
@@ -1679,6 +1686,27 @@ def test_ui_varprof_toggle_e_tamanho_natural(task):
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_varprofile(None)                        # 3º volta a desenhar
     assert "<img" in ui.out_varprof_missing.value
+
+
+def test_ui_canvas_teste_de_hipotese_no_card_de_irmas(task):
+    """O seletor Mann-Whitney × Welch ganha uma view no card de irmãs (aba do
+    mapa) com o valor LIGADO ao do Diagnóstico — e trocar o teste refaz na hora
+    o p-valor das vizinhas no painel."""
+    ui = _build(task)
+    w = _abre_canvas(ui)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_apply(None)
+    folhas = [s for s, v in ui.seg.segments.items() if v["is_leaf"]]
+    _foca(ui, w, folhas[1])
+    assert "Mann-Whitney" in ui.out_cv_merge_p.value
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.dd_sib_test.value = "welch"                 # troca NO CARD DE IRMÃS…
+    assert ui.dd_test.value == "welch"                 # …reflete no Diagnóstico
+    assert "Welch" in ui.out_cv_merge_p.value          # painel refeito na hora
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.dd_test.value = "mannwhitney"               # caminho inverso
+    assert ui.dd_sib_test.value == "mannwhitney"
+    assert "Mann-Whitney" in ui.out_cv_merge_p.value
 
 
 def test_ui_canvas_nao_carrega_nada_da_rede(task):

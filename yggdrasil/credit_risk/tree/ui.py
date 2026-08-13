@@ -1959,10 +1959,24 @@ class TreeSegmenterUI:
         # perto, só os GRÁFICOS (out_sib) merecem a largura toda. Um controle
         # por linha, todos com o MESMO description_width (sib_style) — as caixas
         # começam e terminam alinhadas.
+        # o teste de hipótese (Mann-Whitney × Welch) vale para TODOS os p-valores
+        # da UI (vizinhas no painel do mapa, irmãs, tabela de folhas), mas o
+        # seletor morava só no Diagnóstico. Segunda view aqui — clonada com o
+        # valor LIGADO (W.link), como os limites de bin: largura/rótulo próprios
+        # desta coluna, um só valor.
+        self.dd_sib_test = W.Dropdown(description="teste de hipótese",
+                                      options=list(self.dd_test.options),
+                                      value=self.dd_test.value,
+                                      layout=full, style=sib_style)
+        W.link((self.dd_test, "value"), (self.dd_sib_test, "value"))
+        # trocar o teste refaz na hora o p-valor das vizinhas no painel do mapa
+        # (a tabela de folhas já se refaz pelo observer registrado na criação)
+        self.dd_test.observe(self._on_test_change, names="value")
         box_sib_ctl = W.VBox([
             self.dd_sib_group,
             self.tx_sib_time,
             self.dd_sib_sample,
+            self.dd_sib_test,
             W.HBox([self.btn_sib], layout=W.Layout(width="100%")),
             # zoom do eixo Y (auto/mín-máx) + eixo em % dos gráficos de estabilidade
             W.HBox([self.btn_sib_zoom, self.btn_sib_reset, self.tx_sib_ymin,
@@ -2693,10 +2707,20 @@ class TreeSegmenterUI:
         # folha — o mapa — e não a uma aba de diagnóstico separada.
         tab_canvas = W.VBox([card_cv, card_sib])
 
-        # ---- montagem das abas (o canvas entra logo depois de Construir) ----
-        tabs = W.Tab(children=[tab_build, tab_canvas, tab_var, tab_diag, tab_valid,
+        # ---- montagem das abas ------------------------------------------
+        # A aba "Construir" está OCULTA (candidata a exclusão futura): a Árvore
+        # interativa cobre o fluxo inteiro — corte (ótimo/manual/limites),
+        # regras de negócio, fusões, mover corte, faltantes, IV, distribuições
+        # e as ações automáticas com confirmação. O `tab_build` continua sendo
+        # CONSTRUÍDO porque o painel e as janelinhas compartilham widgets e
+        # handlers dele (sl_depth, sl_alpha, limites de bin, _on_autofit, …) —
+        # para reexibi-la, basta devolvê-la a `children`/títulos e restaurar os
+        # índices abaixo. Única capacidade que ela tinha e o mapa não tem: a
+        # árvore em TEXTO (out_tree) — fallback offline sem anywidget.
+        _ = tab_build                     # vivo de propósito; ver comentário acima
+        tabs = W.Tab(children=[tab_canvas, tab_var, tab_diag, tab_valid,
                                tab_avancado])
-        for i, titulo in enumerate(["Construir", "Árvore interativa", "Análise de variáveis",
+        for i, titulo in enumerate(["Árvore interativa", "Análise de variáveis",
                                     "Diagnóstico", "Exportar", "Avançado"]):
             tabs.set_title(i, titulo)
         tabs.add_class("treeui-tabs")
@@ -2704,10 +2728,11 @@ class TreeSegmenterUI:
         # caro do open/refresh e fica numa aba não-visível por padrão. Adiamos seu
         # cálculo até a aba ser realmente aberta (render preguiçoso) — ver _refresh_iv.
         self.tabs = tabs
-        self._build_tab_index = 0
-        self._canvas_tab_index = 1
-        self._iv_tab_index = 2
-        self._diag_tab_index = 3
+        self._build_tab_index = None      # Construir oculta → o histograma da
+        #                                   folha (card dela) fica sempre pendente
+        self._canvas_tab_index = 0
+        self._iv_tab_index = 1
+        self._diag_tab_index = 2
         tabs.observe(self._on_tab_change, names="selected_index")
 
         # ---- console persistente (log de todas as abas) -----------------
@@ -2740,11 +2765,15 @@ class TreeSegmenterUI:
         self.panel.add_class("treeui")
 
         # A interface ABRE na Árvore interativa, já com a importância (IV) de
-        # cada variável calculada: trocar o selected_index dispara o
-        # _on_tab_change, que desenha o canvas e o painel da raiz — sugestões
-        # por IV e o seletor de variável ordenado, sem nenhum clique. É custo
-        # pago 1× na abertura (o IV da raiz é memoizado para o resto da sessão).
-        tabs.selected_index = self._canvas_tab_index
+        # cada variável calculada — sugestões por IV e o seletor ordenado, sem
+        # nenhum clique. Com a Construir oculta o canvas É a aba 0 (o default do
+        # Tab), então NÃO há mudança de selected_index para disparar o observer:
+        # o render eager é invocado direto. Custo pago 1× na abertura (o IV da
+        # raiz é memoizado para o resto da sessão).
+        if tabs.selected_index == self._canvas_tab_index:
+            self._on_tab_change({"new": self._canvas_tab_index})
+        else:
+            tabs.selected_index = self._canvas_tab_index
 
     def _on_dark(self, change):
         if change["new"]:
@@ -7807,6 +7836,13 @@ class TreeSegmenterUI:
         self.out_cv_dist.value = ""
         if self._cv_modal_kind == "dist":
             self._cv_modal_close()
+
+    def _on_test_change(self, _):
+        """Trocar o teste de hipótese muda os p-valores exibidos: refaz a linha
+        de vizinhas do painel do mapa (barata — dois testes). As análises
+        pesadas (irmãs, tabela) se refazem nos seus próprios gatilhos."""
+        if getattr(self, "box_cv_panel", None) is not None and self._cv_node():
+            self._sync_cv_actions()
 
     def _on_cv_psi_toggle(self, _):
         """Alterna a linha de baixo dos cartões entre volumetria e PSI por
