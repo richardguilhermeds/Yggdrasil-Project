@@ -1362,24 +1362,34 @@ def test_ui_abre_na_arvore_interativa_com_iv_pronto(task):
     assert ui.dd_cv_feature.options and "(IV " in ui.dd_cv_feature.options[0]
 
 
-def test_ui_canvas_otimo_herda_limites_de_bin_da_construir(task):
-    """O binning ótimo do painel usa os MESMOS limites de tamanho de bin
-    marcados na aba Construir — senão as duas telas dariam faixas diferentes
-    mostrando a mesma configuração — e diz na tela que os herdou."""
+def test_ui_canvas_limites_de_bin_ligados_a_construir(task):
+    """Os limites de tamanho de bin do painel são widgets próprios (visibilidade
+    segue o modo DO PAINEL) com os VALORES ligados aos da Construir por W.link —
+    mexer em qualquer lado atualiza o outro, e o preview honra o limite."""
     ui = _build(task)
     _abre_canvas(ui)
-    assert ui.out_cv_optbin_hint.value == ""            # nenhum limite marcado
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_cv_preview(None)
     livre = ui._cv_prev_tbl.shape[0]
+    # bloco visível no modo Ótimo; slider só aparece com o checkbox marcado
+    assert ui.box_cv_optbin.layout.display == ""
+    assert ui.sl_cv_minbin.layout.display == "none"
     with contextlib.redirect_stdout(io.StringIO()):
-        ui.cb_minbin.value = True
-        ui.sl_minbin.value = 0.20                       # faixas de no mínimo 20%
-        ui._sync_cv_mode()
+        ui.cb_cv_minbin.value = True                    # marca NO PAINEL…
+        ui.sl_cv_minbin.value = 0.20
+    assert ui.cb_minbin.value and ui.sl_minbin.value == pytest.approx(0.20)  # …reflete lá
+    assert ui.sl_cv_minbin.layout.display == ""
+    with contextlib.redirect_stdout(io.StringIO()):
         ui._on_cv_preview(None)
     assert ui._pending["min_bin_size"] == pytest.approx(0.20)
     assert ui._cv_prev_tbl.shape[0] < livre             # o limite mordeu de fato
-    assert "herdados da aba Construir" in ui.out_cv_optbin_hint.value
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.sl_maxbin.value = 0.40                       # e o caminho inverso…
+        ui.cb_maxbin.value = True
+    assert ui.cb_cv_maxbin.value and ui.sl_cv_maxbin.value == pytest.approx(0.40)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.tg_cv_mode.value = "Manual"                  # Manual esconde o bloco
+    assert ui.box_cv_optbin.layout.display == "none"
 
 
 def test_ui_canvas_recebe_o_teste_entre_folhas_comparaveis(task):
@@ -1502,6 +1512,166 @@ def test_ui_canvas_criterios_seguem_o_task_type(task):
         with contextlib.redirect_stdout(io.StringIO()):
             ok, msg = ui._cv_prepare()
         assert ok, f"critério {crit!r} ({rotulo}) falhou: {msg}"
+
+
+def test_ui_canvas_toggle_psi_troca_a_linha_dos_cartoes(task):
+    """Ligado, o toggle "PSI por folha" troca a volumetria dos cartões pelos
+    NÚMEROS de PSI por amostra, coloridos pelo semáforo; desligado, volta."""
+    ui = _build(task)
+    w = _abre_canvas(ui)
+    if w is None:
+        pytest.skip("anywidget não instalado")
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_apply(None)
+    folhas = [s for s, v in ui.seg.segments.items() if v["is_leaf"]]
+    html = {n["sid"]: n["html"] for n in w.nodes}
+    assert all("obs ·" in html[s] for s in folhas)          # volumetria por padrão
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.tg_cv_psi.value = True
+    html = {n["sid"]: n["html"] for n in w.nodes}
+    assert all("PSI " in html[s] and "OOT" in html[s] for s in folhas)
+    assert all("obs ·" not in html[s] for s in folhas)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.tg_cv_psi.value = False
+    html = {n["sid"]: n["html"] for n in w.nodes}
+    assert all("obs ·" in html[s] for s in folhas)
+
+
+def test_ui_canvas_toggle_psi_some_sem_amostras(task):
+    """Sem sample_col não há PSI — o toggle nem aparece na barra."""
+    pytest.importorskip("ipywidgets")
+    import matplotlib
+    matplotlib.use("Agg")
+    from yggdrasil.credit_risk.tree import TreeSegmenterUI
+    df = make_df(task).drop(columns=["amostra"])
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui = TreeSegmenterUI(df, target="target", task_type=task, date_col="dt_ref")
+    assert ui.tg_cv_psi.layout.display == "none"
+
+
+def test_ui_canvas_tiles_por_amostra(task):
+    """Os tiles do painel trazem o alvo POR AMOSTRA com alvo (DES, OOT) e a
+    representatividade DENTRO de cada amostra (DES/OOT/ESTAB) — a inspeção de
+    'o alvo segura fora do DES?' e 'a folha mantém o peso?'."""
+    df = make_df(task, n=6000, seed=4)
+    idx = df.sample(frac=0.15, random_state=1).index
+    df.loc[idx, "amostra"] = "ESTABILIDADE"          # público recente…
+    df.loc[idx, "target"] = np.nan                   # …ainda SEM alvo (psi-only)
+    ui = _build(task, df=df)
+    w = _abre_canvas(ui)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_apply(None)
+    folhas = [s for s, v in ui.seg.segments.items() if v["is_leaf"]]
+    _foca(ui, w, folhas[0])
+    html = ui.out_cv_stats.value
+    rl = ui._risk_label
+    assert f"{rl} DES" in html and f"{rl} OOT" in html
+    assert f"{rl} ESTAB" not in html                 # ESTAB não tem alvo → sem tile de alvo
+    for r in ("repr. DES", "repr. OOT", "repr. ESTAB"):
+        assert r in html
+
+
+def test_ui_canvas_botao_distribuicoes(task):
+    """O botão Distribuições desenha, na largura do card: a variável com os
+    cortes propostos (numérica), as faixas repr. × alvo e o alvo da folha."""
+    ui = _build(task)
+    _abre_canvas(ui)
+    _sel_var_cv(ui, "score")
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_dist(None)
+    html = ui.out_cv_dist.value
+    assert html.count("<img") >= 3                   # hist + faixas + alvo da folha
+    assert "cortes propostos" in html
+    assert f"Distribuição de {ui._risk_label} na folha" in html
+    _sel_var_cv(ui, "garantia")                      # categórica: sem histograma
+    assert ui.out_cv_dist.value == ""                # trocar variável invalida
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_cv_dist(None)
+    html = ui.out_cv_dist.value
+    assert html.count("<img") == 2 and "cortes propostos" not in html
+
+
+def test_ui_canvas_modal_iv_das_variaveis(task):
+    """O botão à esquerda do Auto-fit abre a janelinha LARGA com IV, PSI por
+    amostra e o veredito de uso por variável; é informativa — sem Aplicar, o
+    Cancelar vira Fechar — e reabrir uma ação restaura a moldura padrão."""
+    ui = _build(task)
+    _abre_canvas(ui)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.btn_cv_iv.click()
+    assert ui._cv_modal_kind == "iv"
+    assert ui.box_cv_modal.layout.display == "" and ui.box_cv_modal.layout.width == "840px"
+    assert ui.btn_cv_modal_ok.layout.display == "none"
+    assert ui.btn_cv_modal_cancel.description == "Fechar"
+    html = ui.out_cv_iv.value
+    assert "PSI OOT" in html and "uso" in html
+    assert ("recomendada" in html or "cautela" in html or "evitar" in html)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.btn_cv_modal_cancel.click()
+        ui.btn_cv_autofit.click()                    # ação restaura a moldura
+    assert ui.box_cv_modal.layout.width == "360px"
+    assert ui.btn_cv_modal_ok.layout.display == ""
+    assert ui.btn_cv_modal_cancel.description == "Cancelar"
+
+
+def test_ui_canvas_cores_espelham_a_construir(task):
+    """A paleta de ação é a mesma nas duas telas: prever/auto-fit=info,
+    criar=success, fundir/podar automático=warning/danger etc."""
+    ui = _build(task)
+    esperado = {"btn_cv_preview": "info", "btn_cv_dist": "info", "btn_cv_iv": "info",
+                "btn_cv_autofit": "info", "btn_cv_move_prev": "info",
+                "btn_cv_apply": "success",
+                "btn_cv_automerge": "warning", "btn_cv_merge_l": "warning",
+                "btn_cv_merge_r": "warning", "btn_cv_missing": "warning",
+                "btn_cv_lock": "warning", "btn_cv_move": "warning",
+                "btn_cv_sugcuts": "warning",
+                "btn_cv_prune": "danger", "btn_cv_collapse": "danger",
+                "btn_cv_reset": "danger"}
+    for nome, estilo in esperado.items():
+        assert getattr(ui, nome).button_style == estilo, nome
+
+
+def test_ui_diag_avaliacao_unificada(task):
+    """Placar de saúde e importância são um BLOCO só no Diagnóstico: o card
+    abre a aba, "Avaliar modelo" calcula os dois num clique (gráfico antes da
+    tabela) e "Ocultar" limpa tudo."""
+    ui = _build(task)
+    card = ui.tabs.children[ui._diag_tab_index].children[0]
+    filhos = list(card.children)
+    assert ui.out_diag in filhos                       # placar e importância…
+    assert ui.out_importance_chart in filhos           # …no MESMO card,
+    assert filhos.index(ui.out_diag) < filhos.index(ui.out_importance_chart)
+    assert filhos.index(ui.out_importance_chart) < filhos.index(ui.out_importance)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        ui._on_diag(None)                              # UM clique calcula os dois
+    assert ui.out_diag.value
+    assert "<img" in ui.out_importance_chart.value
+    assert "<table" in ui.out_importance.value.lower()
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_diag_hide(None)                         # Ocultar limpa os dois
+    assert not ui.out_diag.value and not ui.out_importance.value
+    assert not ui.out_importance_chart.value
+
+
+def test_ui_varprof_toggle_e_tamanho_natural(task):
+    """Perfil por safra: o 2º clique RECOLHE as imagens (toggle), e as figuras
+    saem no tamanho natural (cap) — com 1–2 variáveis o full_width virava um
+    zoom gigante."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_autofit(None)
+        ui._on_varprofile(None)                        # 1º clique desenha
+    assert "<img" in ui.out_varprof_missing.value
+    # tamanho natural: nunca amplia (width:auto), só encolhe se faltar espaço
+    assert "max-width:100%;width:auto" in ui.out_varprof_missing.value
+    assert "width:100%;height" not in ui.out_varprof_missing.value
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_varprofile(None)                        # 2º clique recolhe
+    assert ui.out_varprof_missing.value == "" and ui.out_varprof_stats.value == ""
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._on_varprofile(None)                        # 3º volta a desenhar
+    assert "<img" in ui.out_varprof_missing.value
 
 
 def test_ui_canvas_nao_carrega_nada_da_rede(task):

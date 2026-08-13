@@ -2042,19 +2042,25 @@ class TreeSegmenterUI:
             self.out_boot])
         card_boot.add_class("treeui-card")
 
-        # ---- PLACAR DE SAÚDE DO MODELO (visão estatística de relance) -------
-        sep_diag = W.HTML("<div class='treeui-band'>Placar de saúde do modelo · "
-                          "discriminação · estabilidade · calibração · estrutura</div>")
+        # ---- AVALIAÇÃO DO MODELO: placar de saúde + importância num BLOCO só —
+        # um clique em "Avaliar modelo" calcula os dois; separados, o usuário
+        # tinha que clicar duas vezes para a mesma pergunta ("o modelo está bom
+        # e o que ele usa?")
         self.btn_diag.layout.width = "auto"
         self.btn_diag_hide.layout.width = "auto"
         _diag_metrics = "AUC/Gini/KS" if self._is_clf else "MAE/RMSE/R²"
         card_score = W.VBox([
+            W.HTML("<div class='treeui-h'>Avaliação do modelo · placar de saúde &amp; "
+                   "importância das variáveis</div>"),
             W.HTML("<div class='treeui-legend'>Veredito de relance em 4 dimensões "
                    "(verde/amarelo/vermelho) reunindo os testes das outras abas — " + _diag_metrics + ", "
                    "PSI/CSI, calibração prevista×observada e monotonicidade · distinção entre "
-                   "folhas-irmãs — com a evidência logo abaixo. Clique para (re)calcular.</div>"),
+                   "folhas-irmãs — seguido da <b>importância das variáveis na árvore</b> (ganho de "
+                   "IV ponderado pela representatividade, gráfico e tabela). Um clique calcula "
+                   "tudo.</div>"),
             W.HBox([self.btn_diag, self.btn_diag_hide], layout=W.Layout(gap="6px")),
             self.out_diag,
+            self.out_importance_chart, self.out_importance, self.out_importance_legend,
         ], layout=W.Layout(width="100%"))
         card_score.add_class("treeui-card")
         _diag_detail = ("discriminação (ROC/KS)" if self._is_clf
@@ -2091,19 +2097,9 @@ class TreeSegmenterUI:
             self.out_varprof_stats,
         ], layout=W.Layout(width="100%"))
         card_varprof.add_class("treeui-card")
-        # Importância (vai p/ Diagnóstico) e export SQL (vai p/ Exportar):
-        # definidos aqui porque as abas abaixo já os consomem.
-        imp_row = W.HBox(
-            [W.VBox([self.out_importance], layout=W.Layout(width="49%")),
-             W.VBox([self.out_importance_chart], layout=W.Layout(width="49%"))],
-            layout=W.Layout(width="100%", justify_content="space-between",
-                            align_items="flex-start"))
-        card_imp = W.VBox([
-            W.HTML("<div class='treeui-h'>Importância das variáveis (na árvore)</div>"),
-            W.HTML("<div class='treeui-legend'>Ganho de IV ponderado pela representatividade do nó, "
-                   "somado por variável que <b>entrou</b> na árvore.</div>"),
-            self.btn_importance, imp_row, self.out_importance_legend])
-        card_imp.add_class("treeui-card")
+        # o export SQL (vai p/ Exportar) é definido aqui porque a aba abaixo já
+        # o consome. A importância NÃO tem mais card próprio: ela vive dentro do
+        # card de avaliação do modelo (placar + importância, um clique só).
         card_sql = W.VBox([
             W.HTML("<div class='treeui-h'>Exportar como SQL (CASE WHEN)</div>"),
             W.HTML("<div class='treeui-legend'>Régua pronta para copiar e colar. Ajuste o nome da "
@@ -2113,9 +2109,9 @@ class TreeSegmenterUI:
                    "com fallback, o <code>ELSE</code> vira a folha escolhida em vez de NULL.</div>"),
             W.HBox([self.tx_sql_table, self.dd_fallback, self.btn_sql]),
             self.out_sql]); card_sql.add_class("treeui-card")
-        # importância abre a aba: é a leitura mais direta de "o que a árvore usou"
+        # a avaliação (placar + importância) abre a aba num bloco único.
         # (card_sib saiu daqui para a aba "Árvore interativa" — ver lá o porquê)
-        tab_diag = W.VBox([card_imp, sep_diag, card_score, sep_diag2,
+        tab_diag = W.VBox([card_score, sep_diag2,
                            card_metrics, card_table,
                            card_estab, card_varprof,
                            card_discrim, card_boot])
@@ -2399,11 +2395,42 @@ class TreeSegmenterUI:
                                  layout=W.Layout(width="100%"),
                                  style={"description_width": "62px"})
         self.btn_cv_sugcuts = W.Button(description="Sugerir", icon="magic",
+                                       button_style="warning",
                                        tooltip="Preencher com o binning ótimo desta folha",
                                        layout=W.Layout(width="auto"))
         self.btn_cv_sugcuts.on_click(self._on_cv_sugcuts)
         self.out_cv_cuts_hint = W.HTML()
-        self.out_cv_optbin_hint = W.HTML()    # limites de bin herdados de Construir
+        # limites de tamanho de bin do modo Ótimo — os MESMOS da Construir:
+        # widgets próprios (a visibilidade aqui segue o modo DO PAINEL, não o da
+        # Construir), mas com os VALORES ligados por W.link — mexeu num lado, o
+        # outro acompanha; um só lugar de verdade. Clonar os parâmetros do
+        # widget-fonte evita divergência de min/max/step.
+        def _cv_clone_cb(src):
+            cb = W.Checkbox(value=src.value, indent=False, description=src.description,
+                            layout=W.Layout(width="100%"))
+            W.link((src, "value"), (cb, "value"))
+            cb.observe(self._on_cv_optbin_toggle, names="value")
+            return cb
+
+        def _cv_clone_sl(src):
+            sl = W.FloatSlider(description=src.description, min=src.min, max=src.max,
+                               step=src.step, value=src.value,
+                               readout_format=src.readout_format,
+                               layout=W.Layout(width="100%"),
+                               style={"description_width": "72px"})
+            W.link((src, "value"), (sl, "value"))
+            return sl
+
+        self.cb_cv_minbin = _cv_clone_cb(self.cb_minbin)
+        self.sl_cv_minbin = _cv_clone_sl(self.sl_minbin)
+        self.cb_cv_maxbin = _cv_clone_cb(self.cb_maxbin)
+        self.sl_cv_maxbin = _cv_clone_sl(self.sl_maxbin)
+        self.cb_cv_mindiff = _cv_clone_cb(self.cb_mindiff)
+        self.sl_cv_mindiff = _cv_clone_sl(self.sl_mindiff)
+        self.box_cv_optbin = W.VBox([self.cb_cv_minbin, self.sl_cv_minbin,
+                                     self.cb_cv_maxbin, self.sl_cv_maxbin,
+                                     self.cb_cv_mindiff, self.sl_cv_mindiff],
+                                    layout=W.Layout(width="100%"))
         self.box_cv_cuts = W.VBox([W.HBox([self.tx_cv_cuts, self.btn_cv_sugcuts],
                                           layout=W.Layout(align_items="center", width="100%")),
                                    self.out_cv_cuts_hint])
@@ -2412,11 +2439,21 @@ class TreeSegmenterUI:
         # um segundo jeito de dizer a mesma coisa, e as duas telas divergiam
         self.cv_cat_box = W.VBox(layout=W.Layout(width="100%"))
         self.out_cv_preview = W.HTML()
+        # cores espelham a aba Construir: preview=info (azul), criar=success
+        # (verde) — quem alterna entre as duas telas lê a mesma paleta de ação
         self.btn_cv_preview = W.Button(description="Prever divisão", icon="eye",
+                                       button_style="info",
                                        layout=W.Layout(width="auto"))
         self.btn_cv_preview.on_click(self._on_cv_preview)
+        self.btn_cv_dist = W.Button(description="Distribuições", icon="bar-chart",
+                                    button_style="info", layout=W.Layout(width="auto"),
+                                    tooltip="Desenha, embaixo do mapa, a distribuição da "
+                                            "variável com os cortes propostos, as faixas com "
+                                            "representatividade × alvo e o alvo desta folha")
+        self.btn_cv_dist.on_click(self._on_cv_dist)
+        self.out_cv_dist = W.HTML()          # gráficos, na largura toda do card
         self.btn_cv_apply = W.Button(description="Criar segmentos", icon="scissors",
-                                     button_style="primary",
+                                     button_style="success",
                                      layout=W.Layout(flex="1 1 auto"))
         self.btn_cv_apply.on_click(self._on_cv_apply)
         self.box_cv_split = W.VBox([
@@ -2427,8 +2464,8 @@ class TreeSegmenterUI:
             W.HBox([self.tg_cv_mode],
                    layout=W.Layout(width="100%", justify_content="center")),
             self.sl_cv_bins, self.dd_cv_crit,
-            self.out_cv_optbin_hint, self.box_cv_cuts, self.cv_cat_box,
-            W.HBox([self.btn_cv_preview, self.btn_cv_apply],
+            self.box_cv_optbin, self.box_cv_cuts, self.cv_cat_box,
+            W.HBox([self.btn_cv_preview, self.btn_cv_dist, self.btn_cv_apply],
                    layout=W.Layout(align_items="center", width="100%", flex_flow="row wrap",
                                    justify_content="center")),
             self.out_cv_preview,
@@ -2439,20 +2476,25 @@ class TreeSegmenterUI:
                                  continuous_update=False, layout=W.Layout(width="100%"),
                                  style={"description_width": "62px"})
         self.tx_cv_name.observe(self._on_cv_name, names="value")
-        self.btn_cv_lock = W.Button(description="🔒 Fechar folha", layout=W.Layout(width="auto"))
+        self.btn_cv_lock = W.Button(description="🔒 Fechar folha", button_style="warning",
+                                    layout=W.Layout(width="auto"))
         self.btn_cv_lock.on_click(self._on_cv_lock)
         self.btn_cv_merge_l = W.Button(description="◀ Fundir", layout=W.Layout(width="auto"),
+                                       button_style="warning",
                                        tooltip="Fundir com a folha vizinha da esquerda")
         self.btn_cv_merge_l.on_click(self._on_cv_merge("left"))
         self.btn_cv_merge_r = W.Button(description="Fundir ▶", layout=W.Layout(width="auto"),
+                                       button_style="warning",
                                        tooltip="Fundir com a folha vizinha da direita")
         self.btn_cv_merge_r.on_click(self._on_cv_merge("right"))
         self.btn_cv_collapse = W.Button(description="Recolher para o pai",
+                                        button_style="danger",
                                         layout=W.Layout(width="auto"),
                                         tooltip="Desfaz o corte deste ramo: os filhos somem "
                                                 "e ele volta a ser folha")
         self.btn_cv_collapse.on_click(self._on_cv_collapse)
         self.btn_cv_missing = W.Button(description="Alocar faltantes aqui",
+                                       button_style="warning",
                                        layout=W.Layout(width="auto"),
                                        tooltip="Junta o nó de faltantes (NaN) deste split DENTRO "
                                                "desta folha — a regra vira 'faixa OU faltante'")
@@ -2469,9 +2511,11 @@ class TreeSegmenterUI:
         self.tx_cv_move = W.FloatText(description="novo corte", layout=W.Layout(width="100%"),
                                       style={"description_width": "62px"})
         self.btn_cv_move_prev = W.Button(description="Prever corte", icon="eye",
+                                         button_style="info",
                                          layout=W.Layout(width="auto"))
         self.btn_cv_move_prev.on_click(self._on_cv_move_preview)
         self.btn_cv_move = W.Button(description="Mover corte", icon="arrows-h",
+                                    button_style="warning",
                                     layout=W.Layout(width="auto"))
         self.btn_cv_move.on_click(self._on_cv_move)
         self.out_cv_move = W.HTML()
@@ -2526,21 +2570,47 @@ class TreeSegmenterUI:
         # da aba Construir (segunda view do mesmo modelo) — mexer num lado
         # mexe no outro, um único lugar de verdade.
         self.btn_cv_autofit = W.Button(description="Auto-fit", icon="magic",
+                                       button_style="info",
                                        layout=W.Layout(width="auto"),
                                        tooltip="Cresce a árvore gulosa por IV. Com uma FOLHA "
                                                "selecionada no mapa, cresce só aquele ramo; "
                                                "na raiz, reconstrói tudo")
         self.btn_cv_autofit.on_click(self._on_cv_modal_open("fit"))
         self.btn_cv_automerge = W.Button(description="Auto-fundir", icon="compress",
+                                         button_style="warning",
                                          layout=W.Layout(width="auto"),
                                          tooltip="Funde folhas-irmãs com risco estatisticamente "
                                                  "indistinguível (p > α) ou com Δ abaixo do mínimo")
         self.btn_cv_automerge.on_click(self._on_cv_modal_open("merge"))
         self.btn_cv_prune = W.Button(description="Podar", icon="scissors",
+                                     button_style="danger",
                                      layout=W.Layout(width="auto"),
                                      tooltip="Funde as folhas pouco representativas ou com Δ "
                                              "pequeno em relação à irmã")
         self.btn_cv_prune.on_click(self._on_cv_modal_open("prune"))
+        # "PSI por folha": alterna a linha de baixo dos cartões entre a
+        # volumetria e o PSI por amostra de validação (OOT e ESTABILIDADE,
+        # quando existirem), colorido pelo semáforo — a bolinha só diz "pior
+        # caso"; ligado, o mapa mostra os NÚMEROS.
+        self.tg_cv_psi = W.ToggleButton(
+            value=False, description="PSI por folha", icon="heartbeat",
+            tooltip="Mostra nos cartões o PSI de cada folha por amostra de "
+                    "validação (OOT e ESTABILIDADE, quando existirem) no lugar "
+                    "da volumetria",
+            layout=W.Layout(width="auto"))
+        self.tg_cv_psi.observe(self._on_cv_psi_toggle, names="value")
+        if self.sample_col is None or not self._nonref:
+            self.tg_cv_psi.layout.display = "none"   # sem amostras não há PSI
+        # "IV das variáveis": abre a janelinha (larga) com o IV, o PSI e o
+        # veredito de USO de cada variável NA FOLHA em foco — a decisão de
+        # "qual variável cortar" sem sair do mapa
+        self.btn_cv_iv = W.Button(description="IV das variáveis", icon="list-ol",
+                                  button_style="info",
+                                  layout=W.Layout(width="auto"),
+                                  tooltip="Information Value, PSI e recomendação de uso de "
+                                          "cada variável na folha em foco")
+        self.btn_cv_iv.on_click(self._on_cv_modal_open("iv"))
+        self.out_cv_iv = W.HTML()             # corpo da janelinha de IV
         # -- a janelinha em si: título + nota de alvo + corpo (controles) + ações
         self.out_cv_modal_head = W.HTML()
         self.box_cv_modal_body = W.VBox(layout=W.Layout(width="100%"))
@@ -2596,7 +2666,9 @@ class TreeSegmenterUI:
                    "ficam pequenos, então aproxime de volta para ler.</div>"),
             W.HBox([self.btn_cv_undo, self.btn_cv_redo,
                     W.HTML("<div class='treeui-vsep'></div>"),
+                    self.btn_cv_iv,
                     self.btn_cv_autofit, self.btn_cv_automerge, self.btn_cv_prune,
+                    self.tg_cv_psi,
                     W.HTML("<div class='treeui-vsep'></div>"),
                     self.dd_cv_goto, self.btn_cv_fit,
                     W.HTML("<div class='treeui-vsep'></div>"),
@@ -2607,6 +2679,7 @@ class TreeSegmenterUI:
                                    flex_flow="row wrap")),
             W.HBox([_palco_cv, painel_cv],
                    layout=W.Layout(width="100%", align_items="stretch")),
+            self.out_cv_dist,
         ])
         card_cv.add_class("treeui-card")
         card_cv.add_class("treeui-card-mapa")
@@ -5700,9 +5773,15 @@ class TreeSegmenterUI:
                 self._log(f"Erro no placar: {type(e).__name__}: {e}"); return
             self._log("Placar de saúde do modelo calculado.")
             self.out_diag.value = html
+        # o mesmo clique traz a importância das variáveis — placar e
+        # importância são um bloco só na aba Diagnóstico
+        self._on_importance(None)
 
     def _on_diag_hide(self, _):
         self.out_diag.value = ""    # oculta/limpa a avaliação já renderizada
+        self.out_importance.value = ""
+        self.out_importance_chart.value = ""
+        self.out_importance_legend.value = ""
 
     def _diag_scorecard_html(self):
         """Placar de 4 vereditos (Discriminação · Estabilidade · Calibração ·
@@ -5938,7 +6017,7 @@ class TreeSegmenterUI:
     # ==================================================================
     # Discriminação (ROC · KS) e qualidade dos segmentos
     # ==================================================================
-    def _fig_html(self, fig, border=False, full_width=False, tight=True):
+    def _fig_html(self, fig, border=False, full_width=False, tight=True, cap=False):
         """Converte uma figura matplotlib em <img> base64 (string HTML).
 
         ``full_width=True`` faz a imagem ESTICAR até a largura do container
@@ -5962,7 +6041,12 @@ class TreeSegmenterUI:
         # RAM cresce sem limite numa sessão interativa (dezenas de plots por ação).
         import matplotlib.pyplot as _plt
         _plt.close(fig)
-        style = ("width:100%;height:auto" if full_width else "max-width:100%;height:auto")
+        # cap: tamanho NATURAL do PNG, encolhendo apenas se faltar espaço —
+        # para figuras cuja largura depende dos dados (1 variável = figura
+        # pequena), onde o full_width viraria um zoom gigante
+        style = ("max-width:100%;width:auto;height:auto" if cap
+                 else "width:100%;height:auto" if full_width
+                 else "max-width:100%;height:auto")
         if border:
             style += ";border:1px solid var(--line);border-radius:6px"
         return f"<img src='data:image/png;base64,{b64}' style='{style}'/>"
@@ -6197,6 +6281,13 @@ class TreeSegmenterUI:
     def _on_varprofile(self, _):
         # grade por variável da árvore: % missing por safra (0–100%) · dispersão p5·média·p95
         # (num.) / proporção das categorias (cat.), com faixas de troca de amostra.
+        # 2º clique RECOLHE o perfil já desenhado (toggle): o card é alto e não
+        # havia como fechá-lo sem re-rodar a célula.
+        if "<img" in self.out_varprof_missing.value or "<img" in self.out_varprof_stats.value:
+            self.out_varprof_missing.value = ""
+            self.out_varprof_stats.value = ""
+            self._log("Perfil das variáveis recolhido — clique de novo para desenhar.")
+            return
         tcol = (self.tx_sib_time.value or "").strip() or self.date_col
         if not tcol or tcol not in self.df.columns:
             self.out_varprof_missing.value = ("<div class='treeui-legend'>Informe a coluna de "
@@ -6216,12 +6307,12 @@ class TreeSegmenterUI:
                         msg="gerando o perfil das variáveis…"):
             try:
                 self.out_varprof_missing.value = self._fig_html(
-                    self.seg.plot_variables_missing_by_safra(time_col=tcol), full_width=True)
+                    self.seg.plot_variables_missing_by_safra(time_col=tcol), cap=True)
             except Exception as e:
                 self.out_varprof_missing.value = _err("% missing", e)
             try:
                 self.out_varprof_stats.value = self._fig_html(
-                    self.seg.plot_variables_stats_by_safra(time_col=tcol), full_width=True)
+                    self.seg.plot_variables_stats_by_safra(time_col=tcol), cap=True)
             except Exception as e:
                 self.out_varprof_stats.value = _err("dispersão", e)
 
@@ -6734,22 +6825,29 @@ class TreeSegmenterUI:
                 if sid in self.locked else "")
         # semáforo de PSI da folha (pior amostra não-referência): com ele o mapa
         # vira um heatmap de estabilidade — a cor do ALVO já está no número, a
-        # do PSI fica neste ponto. Detalhe por amostra no title (hover).
+        # do PSI fica neste ponto. Detalhe por amostra no title (hover); com o
+        # toggle "PSI por folha" ligado, os NÚMEROS trocam de lugar com a
+        # volumetria na linha de baixo do cartão, coloridos pelo semáforo.
         psi_dot = ""
         if s["is_leaf"] and self.sample_col is not None and self._nonref:
-            partes, pior = [], None
+            cores = {"green": "var(--ok-tx)", "yellow": "var(--warn-tx)",
+                     "red": "var(--bad-tx)"}
+            partes, spans, pior = [], [], None
             for a in self._nonref:
                 p = self._leaf_psi(sid, a)
                 if pd.isna(p):
                     continue
                 ab = "ESTAB" if a == "ESTABILIDADE" else a
                 partes.append(f"PSI {ab} {p:.1%}")
+                spans.append(f"<span style='color:{cores[self._psi_class(p)]};"
+                             f"font-weight:600'>{ab} {p:.1%}</span>")
                 pior = p if pior is None else max(pior, p)
             if pior is not None:
-                cor_psi = {"green": "var(--ok-tx)", "yellow": "var(--warn-tx)",
-                           "red": "var(--bad-tx)"}[self._psi_class(pior)]
+                cor_psi = cores[self._psi_class(pior)]
                 psi_dot = (f"<span class='pdot' style='background:{cor_psi}' "
                            f"title=\"{_esc(' · '.join(partes))}\"></span>")
+                if getattr(self, "tg_cv_psi", None) is not None and self.tg_cv_psi.value:
+                    sub = "PSI " + " · ".join(spans)
         return (f"<div class='t'><span class='lb' title=\"{_esc(rot)}\">{_esc(rot)}</span>"
                 f"{psi_dot}{lock}</div>"
                 f"<div class='m'><span class='v' style='color:{cor}'>{v_txt}</span>"
@@ -6949,17 +7047,35 @@ class TreeSegmenterUI:
             f"<div style='font-size:10.5px;color:var(--sub-ink);margin-top:3px'>"
             f"{_esc(caminho if not is_root else 'toda a base')}</div>")
 
-        # ---- métricas do nó
+        # ---- métricas do nó: alvo POR AMOSTRA com alvo (DES, OOT, …) e
+        # representatividade DENTRO de cada amostra (DES/OOT/ESTAB) — a leitura
+        # de inspeção da folha: o alvo segura fora do desenvolvimento? a folha
+        # mantém o mesmo peso nas outras amostras?
         v_txt = "—" if pd.isna(v) else f"{v * 100:.2f}%"
         if pd.isna(v) or pd.isna(v_raiz) or v_raiz == 0:
             delta = "—"
         else:
             d = (v - v_raiz) * 100
             delta = f"{d:+.2f} p.p."
-        tiles = [("população", f"{n:,}".replace(",", ".")),
-                 ("% carteira", f"{rep:.1f}%"),
-                 (self._risk_label + (f" ({ref})" if ref else ""), v_txt),
-                 ("vs. carteira", delta)]
+        tiles = [("população", f"{n:,}".replace(",", "."))]
+        if self.sample_col is not None and self._sample_masks:
+            for a in [self.ref_sample] + list(self._tree_nonref):   # amostras COM alvo
+                va = self._node_value(sid, a)
+                tiles.append((f"{self._risk_label} {a}",
+                              "—" if pd.isna(va) else f"{va * 100:.2f}%"))
+            tiles.append(("vs. carteira", delta))
+            m = s["mask"]
+            for a in [self.ref_sample] + list(self._nonref):        # todas (c/ ESTAB)
+                sm = self._sample_masks.get(a)
+                n_am = int(sm.sum()) if sm is not None else 0
+                if not n_am:
+                    continue
+                ab = "ESTAB" if a == "ESTABILIDADE" else a
+                tiles.append((f"repr. {ab}",
+                              f"{100 * int((m & sm).sum()) / n_am:.1f}%"))
+        else:
+            tiles += [("% carteira", f"{rep:.1f}%"),
+                      (self._risk_label, v_txt), ("vs. carteira", delta)]
         self.out_cv_stats.value = "<div class='treeui-metrics'>" + "".join(
             f"<div class='treeui-metric'><div class='k'>{_esc(k)}</div>"
             f"<div class='v'>{_esc(val)}</div></div>" for k, val in tiles) + "</div>"
@@ -6994,6 +7110,7 @@ class TreeSegmenterUI:
         self.tx_cv_name.disabled = not is_leaf
         self._sync_cv_actions()
         self.out_cv_preview.value = ""      # o preview era de outro nó
+        self.out_cv_dist.value = ""         # idem para as distribuições
 
     def _sync_cv_actions(self):
         """Habilita cada ação do nó em foco conforme o que é válido ali.
@@ -7073,18 +7190,26 @@ class TreeSegmenterUI:
         self.out_cv_cuts_hint.value = (
             "<div style='font-size:10.5px;color:var(--sub-ink);margin:2px 0 0 4px'>"
             "numérica — um corte por vírgula; cada corte fecha à direita (≤).</div>")
-        # o binning ótimo daqui honra os limites de tamanho de bin marcados em
-        # Construir; sem dizer isso, faixas "faltando" pareceriam bug
-        limites = self._optbin_extra()
-        rot = {"min_bin_size": "mín. por faixa", "max_bin_size": "máx. por faixa",
-               "min_mean_diff": "Δ mínimo entre faixas"}
-        self.out_cv_optbin_hint.value = (
-            "" if (manual or not limites) else
-            "<div style='font-size:10.5px;color:var(--sub-ink);margin:2px 0 4px 4px'>"
-            "limites herdados da aba Construir: "
-            + " · ".join(f"{rot[k]} <b>{v:g}</b>" for k, v in limites.items()) + "</div>")
+        self._sync_cv_optbin_visibility()
         if manual and cat:
             self._rebuild_cv_cat_box()
+
+    def _sync_cv_optbin_visibility(self):
+        """Limites de tamanho de bin no painel: o bloco aparece só no modo Ótimo
+        e cada slider só com o checkbox marcado — mesma regra da Construir,
+        dirigida pelo modo DO PAINEL (os valores já são um só, via W.link)."""
+        otimo = self.tg_cv_mode.value == "Ótimo"
+        self.box_cv_optbin.layout.display = "" if otimo else "none"
+        self.sl_cv_minbin.layout.display = "" if self.cb_cv_minbin.value else "none"
+        self.sl_cv_maxbin.layout.display = "" if self.cb_cv_maxbin.value else "none"
+        self.sl_cv_mindiff.layout.display = "" if self.cb_cv_mindiff.value else "none"
+
+    def _on_cv_optbin_toggle(self, _):
+        """Marcar/desmarcar um limite muda o binning proposto — o preview e as
+        distribuições antigos não valem mais."""
+        self.out_cv_preview.value = ""
+        self.out_cv_dist.value = ""
+        self._sync_cv_optbin_visibility()
 
     def _rebuild_cv_cat_box(self):
         """Um seletor de grupo por categoria presente na folha, ordenadas pelo
@@ -7143,12 +7268,14 @@ class TreeSegmenterUI:
         if self._cv_syncing:
             return
         self.out_cv_preview.value = ""
+        self.out_cv_dist.value = ""
         self._sync_cv_mode()
 
     def _on_cv_feature(self, _):
         if self._cv_syncing:
             return
         self.out_cv_preview.value = ""
+        self.out_cv_dist.value = ""
         self._sync_cv_mode()          # o tipo da variável muda o campo de cortes
 
     def _on_cv_sug(self, i):
@@ -7581,6 +7708,32 @@ class TreeSegmenterUI:
         ipywidgets) — não há cópia de configuração para divergir. Nada roda até
         o Aplicar; Cancelar fecha sem tocar na árvore."""
         def _abrir(_):
+            if kind == "iv":
+                # kind INFORMATIVO: janela larga, sem Aplicar (não há ação), o
+                # Cancelar vira Fechar. A tabela é a decisão de "qual variável
+                # cortar" — IV, PSI por amostra e o veredito de uso, NA FOLHA.
+                sid = self._cv_node() or "root"
+                rot = ("a árvore toda (raiz)" if sid == "root"
+                       else _esc(self._leaf_label(sid)))
+                self.out_cv_modal_head.value = (
+                    "<div style='font-size:13px;font-weight:600;color:var(--strong-ink);"
+                    "margin-bottom:3px'>Information Value · qual variável segmentar</div>"
+                    f"<div class='treeui-legend' style='margin:0 0 8px'>IV, PSI por amostra "
+                    f"de validação e a recomendação de uso de cada variável em <b>{rot}</b>. "
+                    "PSI calculado nos mesmos bins do IV (DES × amostra).</div>")
+                with self._busy(self.btn_cv_iv, msg="calculando o IV…"):
+                    self.out_cv_iv.value = self._cv_iv_table_html(sid)
+                self.box_cv_modal_body.children = (self.out_cv_iv,)
+                self.btn_cv_modal_ok.layout.display = "none"
+                self.btn_cv_modal_cancel.description = "Fechar"
+                self.box_cv_modal.layout.width = "840px"
+                self._cv_modal_kind = kind
+                self.box_cv_modal.layout.display = ""
+                return
+            # kinds de AÇÃO: moldura padrão (estreita, Aplicar/Cancelar)
+            self.btn_cv_modal_ok.layout.display = ""
+            self.btn_cv_modal_cancel.description = "Cancelar"
+            self.box_cv_modal.layout.width = "360px"
             titulos = {"fit": "Auto-fit — crescer a árvore",
                        "merge": "Auto-fundir — juntar folhas indistinguíveis",
                        "prune": "Podar — remover folhas pouco representativas"}
@@ -7639,6 +7792,115 @@ class TreeSegmenterUI:
         """Estado dos botões desfazer/refazer da barra do mapa."""
         self.btn_cv_undo.disabled = not self._undo
         self.btn_cv_redo.disabled = not self._redo
+
+    def _on_cv_psi_toggle(self, _):
+        """Alterna a linha de baixo dos cartões entre volumetria e PSI por
+        amostra. Só redesenha os cartões — o pan/zoom fica onde o usuário
+        deixou (o front não recebe fit/center token)."""
+        self._refresh_canvas()
+
+    def _cv_iv_table_html(self, sid):
+        """Tabela da janelinha de IV: variável, faixas, IV, força, PSI por
+        amostra e o VEREDITO de uso — derivado das classificações que o próprio
+        segmentador calcula (força do IV e classe do pior PSI), não de limiares
+        reinventados aqui. Memoizada por (folha, versão da árvore): o
+        variable_iv com PSI é caro."""
+        sid = sid if sid in self.seg.segments else "root"
+        key = (sid, self.seg._tree_version)
+        cache = getattr(self, "_cv_iv_cache", None)
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        iv = self.seg.variable_iv(sid, features=list(self.features), with_psi=True)
+        # "psi_classificacao" também começa com "psi_" mas é TEXTO (o veredito),
+        # não o PSI de uma amostra — fora da lista numérica
+        amostras = [c for c in iv.columns
+                    if c.startswith("psi_") and c != "psi_classificacao"]
+        cor = {"ok": "var(--ok-tx)", "warn": "var(--warn-tx)", "bad": "var(--bad-tx)"}
+
+        def uso(r):
+            forca = str(r.get("forca", "—"))
+            est = str(r.get("psi_classificacao", "estável"))
+            if forca == "suspeito":
+                return "verificar vazamento", "bad"
+            if forca not in ("forte", "médio"):
+                return "evitar — fraca", "bad"
+            if est == "instável":
+                return "evitar — instável", "bad"
+            if est == "atenção":
+                return "usar com cautela", "warn"
+            return "recomendada", "ok"
+
+        th = ("padding:5px 10px;font-size:10px;text-transform:uppercase;"
+              "letter-spacing:.05em;color:var(--tbl-head-ink);text-align:left;"
+              "border-bottom:2px solid var(--tbl-head-line);white-space:nowrap")
+        td = "padding:5px 10px;font-size:11.5px;border-bottom:1px solid var(--tbl-line)"
+        cab = ["variável", "faixas", "IV", "força"]
+        cab += ["PSI " + ("ESTAB" if c[4:] == "ESTABILIDADE" else c[4:]) for c in amostras]
+        cab += (["PSI pior"] if "pior_psi" in iv.columns else []) + ["uso"]
+        linhas = []
+        for _, r in iv.iterrows():
+            rot = self.seg.feature_labels.get(r["variavel"], r["variavel"])
+            veredito, classe = uso(r)
+            cels = [f"<td style='{td};font-weight:600'>{_esc(rot)}</td>",
+                    f"<td style='{td}'>{int(r['n_bins'])}</td>",
+                    "<td style='%s'>%s</td>" % (td, "—" if pd.isna(r["iv"])
+                                                else f"{r['iv']:.4f}"),
+                    f"<td style='{td}'>{_esc(r.get('forca', '—'))}</td>"]
+            for c in amostras + (["pior_psi"] if "pior_psi" in iv.columns else []):
+                v = r.get(c)
+                cels.append("<td style='%s'>%s</td>" % (td, "—" if pd.isna(v)
+                                                       else f"{v:.4f}"))
+            cels.append(f"<td style='{td};color:{cor[classe]};font-weight:700'>"
+                        f"{_esc(veredito)}</td>")
+            linhas.append("<tr>" + "".join(cels) + "</tr>")
+        html = ("<div style='max-height:460px;overflow:auto'>"
+                "<table style='border-collapse:collapse;width:100%'>"
+                "<thead><tr>" + "".join(f"<th style='{th}'>{_esc(c)}</th>" for c in cab)
+                + "</tr></thead><tbody>" + "".join(linhas) + "</tbody></table></div>")
+        self._cv_iv_cache = (key, html)
+        return html
+
+    def _on_cv_dist(self, _):
+        """Distribuições da dupla folha × variável, embaixo do mapa: a variável
+        com os cortes propostos (numérica), as faixas propostas com a
+        representatividade e a linha do alvo, e o alvo DENTRO da folha."""
+        with self._busy(self.btn_cv_dist, msg="desenhando as distribuições…"):
+            ok, msg = self._cv_prepare()
+            if not ok:
+                self.out_cv_dist.value = (f"<div style='font-size:11.5px;"
+                                          f"color:var(--bad-tx)'>{_esc(msg)}</div>")
+                return
+            p = self._pending
+            sid, feat = p["only_segments"][0], p["feature"]
+            splits, mnb = p.get("splits"), p.get("max_n_bins", 4)
+            blocos = []
+
+            def add(titulo, fig_fn):
+                try:
+                    blocos.append((titulo, self._fig_html(fig_fn())))
+                except Exception as e:
+                    blocos.append((titulo, f"<div style='font-size:11px;color:var(--bad-tx)'>"
+                                           f"(não gerado: {type(e).__name__}: {e})</div>"))
+
+            if self._cv_kind(feat, sid) == "num":
+                add("Distribuição da variável · cortes propostos",
+                    lambda: self.seg.plot_feature_hist(
+                        feat, sid=sid, splits=splits, max_n_bins=max(mnb, 6),
+                        figsize=self._PREVIEW_FIGSIZE))
+            add("Faixas propostas · representatividade × alvo",
+                lambda: self.seg.plot_feature_value(
+                    feat, sid=sid, splits=splits, max_n_bins=mnb,
+                    figsize=self._PREVIEW_FIGSIZE))
+            plot_alvo = (self.seg.plot_leaf_target_hist if self._is_clf
+                         else self.seg.plot_leaf_value_hist)
+            add(f"Distribuição de {self._risk_label} na folha",
+                lambda: plot_alvo(sid))
+            self.out_cv_dist.value = (
+                "<div style='display:flex;flex-flow:row wrap;gap:16px;"
+                "align-items:flex-start'>" + "".join(
+                    f"<div style='flex:0 1 auto;min-width:0'>"
+                    f"<div class='treeui-h' style='margin:2px 0 4px'>{_esc(t)}</div>{h}</div>"
+                    for t, h in blocos) + "</div>")
 
     def _on_cv_goto(self, ch):
         """Atalho da barra: seleciona a folha (mesmo caminho do clique no nó) e
