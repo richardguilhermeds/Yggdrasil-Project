@@ -287,11 +287,46 @@ _CSS = """
 .satui.dark .satui-tabs .p-TabBar-tab.p-mod-current:hover,
 .satui.dark .satui-tabs .lm-TabBar-tab.lm-mod-current:hover {
   background:#8ACAFF !important; color:#11171C !important; border-color:#8ACAFF !important; }
-.satui.dark .widget-text input, .satui.dark .widget-dropdown select, .satui.dark textarea {
+.satui.dark .widget-text input, .satui.dark .widget-dropdown select, .satui.dark textarea,
+.satui.dark .widget-select select {
   background:#11171C !important; color:#E8ECF0 !important; border-color:#37444F !important; }
+.satui.dark .widget-select select option { background:#11171C; color:#E8ECF0; }
 .satui.dark .widget-label, .satui.dark .jupyter-widgets label { color:#D1D9E1 !important; }
+/* rótulos com <span> interno (checkbox) e readout de slider: o host pode pintar
+   o elemento INTERNO direto — aí a cor herdada do <label> perde para qualquer
+   regra que mire o span/readout, por menor que seja a especificidade dela */
+.satui.dark .widget-checkbox label, .satui.dark .widget-checkbox label span,
+.satui.dark .widget-label-basic, .satui.dark .widget-label-basic span {
+  color:#D1D9E1 !important; }
+.satui.dark .widget-readout { color:#E8ECF0 !important; }
 .satui.dark .jupyter-button:not(.mod-primary):not(.mod-success):not(.mod-info):not(.mod-warning):not(.mod-danger) { background:#37444F !important; color:#E8ECF0 !important; }
 .satui.dark .jupyter-button.mod-active { background:#4299E0 !important; color:#11171C !important; }
+
+/* ===== pacote de tema escuro (portado do TreeSegmenterUI/ModelSegmenterUI) =====
+   1) células de tabela e conteúdo de widget herdavam a cor do TEMA DO HOST
+      (o preto de .jp-RenderedHTMLCommon td e a cor do editor no
+      .widget-html-content) — regras com especificidade própria devolvem a
+      tinta aos tokens;
+   2) o widget de abas (barra e contents) herda fundo BRANCO do Jupyter —
+      faixa branca no escuro; transparente sempre, seletores DESCENDENTES
+      (o lumino mete wrappers) e os dois nomes de classe;
+   3) o HOSPEDEIRO pinta de branco o container do output (VS Code:
+      cell-output-ipywidget-background) — moldura branca em volta do painel
+      escuro; transparente SÓ quando o nosso dark está ligado (:has);
+   4) o print() do console vira <pre> com a cor do Jupyter, que não flipa. */
+.satui table tbody tr td, .satui table tbody tr th { color:var(--ink); }
+.satui .widget-html-content { color:var(--ink); }
+.satui-tabs, .satui-tabs .lm-TabBar, .satui-tabs .p-TabBar,
+.satui-tabs .widget-tab-contents,
+.satui-tabs .jupyter-widget-TabPanel-tabContents {
+  background:transparent !important; }
+.cell-output-ipywidget-background:has(.satui.dark),
+.jp-OutputArea-output:has(.satui.dark),
+.jp-Cell-outputArea:has(.satui.dark),
+.widget-subarea:has(.satui.dark) {
+  background:transparent !important; }
+.satui.dark pre { color:var(--ink) !important; background:transparent !important; }
+.satui.dark img { border-radius:6px; }
 </style>
 """
 
@@ -556,6 +591,10 @@ class SatelliteUI:
         self._scenario_probs_default = (0.5, 0.3, 0.2)
         self._keepalive = None
         self._suspend_ka = False
+        # figuras já desenhadas, por widget de saída — ver _fig_html/_on_dark:
+        # guardar a Figure permite repintar e re-rasterizar na troca de tema, em
+        # vez de deixar um PNG claro dentro do painel escuro
+        self._fig_slots: dict = {}
 
         self._build()
         self._refresh_bar()
@@ -705,24 +744,145 @@ class SatelliteUI:
     # ==================================================================
     # Utilitários de renderização (o padrão das UIs do credit_risk)
     # ==================================================================
-    def _fig_html(self, fig, border=False, tight=True, stretch=False):
-        """Converte uma figura matplotlib em ``<img>`` base64 (e fecha a figura)."""
+    _DARK_FIG = {"bg": "#1F272D", "ink": "#E8ECF0", "line": "#37444F"}
+
+    @staticmethod
+    def _tinta_escura(cor) -> bool:
+        """A cor é **tinta** (preto/navy dessaturado) e não cor de DADO?
+
+        Só as tintas viram claras no tema escuro: ``steelblue``, ``crimson`` e o
+        cinza ``#888888`` da paleta passam no teste de saturação/luminância e
+        seguem intactos — quem some no fundo escuro é o preto do matplotlib.
+        """
+        import matplotlib.colors as mcolors
+
+        try:
+            r, g, b = mcolors.to_rgb(cor)
+        except (ValueError, TypeError):
+            return False
+        sat = max(r, g, b) - min(r, g, b)
+        lum = 0.299 * r + 0.587 * g + 0.114 * b
+        return lum < 0.35 and sat < 0.25
+
+    @staticmethod
+    def _tinta_clara(cor) -> bool:
+        """A cor é o **branco separador** (borda de barra do histograma)?
+
+        No claro ele separa as barras; no escuro vira grade ofuscante — vira o
+        fundo do painel, que separa igual sem brilhar.
+        """
+        import matplotlib.colors as mcolors
+
+        try:
+            r, g, b, a = mcolors.to_rgba(cor)
+        except (ValueError, TypeError):
+            return False
+        return a > 0 and min(r, g, b) > 0.9 and (max(r, g, b) - min(r, g, b)) < 0.1
+
+    def _dark_fig(self, fig):
+        """Repinta uma figura matplotlib para o tema escuro — fundo, tinta,
+        eixos, grades, legenda e textos/linhas de TINTA; cores de DADO ficam
+        intactas. Portado do ModelSegmenterUI."""
+        bg, ink, line = (self._DARK_FIG[k] for k in ("bg", "ink", "line"))
+
+        fig.patch.set_facecolor(bg)
+        for ax in fig.get_axes():
+            ax.set_facecolor(bg)
+            for sp in ax.spines.values():
+                sp.set_color(line)
+            ax.tick_params(colors=ink, which="both")
+            ax.xaxis.label.set_color(ink)
+            ax.yaxis.label.set_color(ink)
+            ax.title.set_color(ink)
+            for gl in ax.get_xgridlines() + ax.get_ygridlines():
+                gl.set_color(line)
+            # curvas de tinta: a "ponderada" (preta) da projeção e as linhas de
+            # referência que o statsmodels/scipy desenham em preto
+            for ln in ax.get_lines():
+                if self._tinta_escura(ln.get_color()):
+                    ln.set_color(ink)
+            for pt in ax.patches:
+                if self._tinta_clara(pt.get_edgecolor()):
+                    pt.set_edgecolor(bg)
+            leg = ax.get_legend()
+            if leg is not None:
+                leg.get_frame().set_facecolor(bg)
+                leg.get_frame().set_edgecolor(line)
+                for t in leg.get_texts():
+                    if self._tinta_escura(t.get_color()):
+                        t.set_color(ink)
+            for t in ax.texts:
+                if self._tinta_escura(t.get_color()):
+                    t.set_color(ink)
+        # suptitles vivem em fig.texts, não em ax.texts — sem este loop o
+        # título grande fica preto (ilegível) sobre o fundo escuro
+        for t in fig.texts:
+            if self._tinta_escura(t.get_color()):
+                t.set_color(ink)
+        return fig
+
+    def _fig_png(self, fig, border=False, tight=True, stretch=False) -> str:
+        """Rasteriza a figura como ``<img>`` base64 no estado em que ela está."""
         import base64
         import io as _io
 
-        import matplotlib.pyplot as plt
-
         buf = _io.BytesIO()
-        save_kw = {"format": "png", "dpi": min(int(fig.get_dpi()), 110)}
+        save_kw = {"format": "png", "dpi": min(int(fig.get_dpi()), 110),
+                   "facecolor": fig.get_facecolor()}
         if tight:
             save_kw["bbox_inches"] = "tight"
         fig.savefig(buf, **save_kw)
-        plt.close(fig)
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         style = "width:100%;height:auto" if stretch else "max-width:100%;height:auto"
         if border:
             style += ";border:1px solid var(--line);border-radius:6px"
         return f"<img src='data:image/png;base64,{b64}' style='{style}'/>"
+
+    def _fig_html(self, fig, border=False, tight=True, stretch=False, slot=None):
+        """Converte uma figura matplotlib em ``<img>`` base64 (e fecha a figura).
+
+        O PNG rasteriza no tema vigente **na hora do desenho**. Passando o widget
+        de saída em ``slot``, os dois PNGs (claro e escuro) ficam guardados junto
+        com a ``Figure`` — ``_on_dark`` troca o ``<img>`` na hora, sem refazer o
+        cálculo que gerou o gráfico. ``plt.close`` só tira a figura do registro do
+        pyplot; ela segue rasterizável pela referência que guardamos.
+        """
+        import matplotlib.pyplot as plt
+
+        kw = {"border": border, "tight": tight, "stretch": stretch}
+        claro = self._fig_png(fig, **kw)
+        escuro = self._fig_png(self._dark_fig(fig), **kw) if self._dark_on() else None
+        plt.close(fig)
+        if slot is None:
+            return escuro or claro
+        self._fig_slots[id(slot)] = {"w": slot, "fig": fig, "kw": kw,
+                                     "claro": claro, "escuro": escuro}
+        return escuro or claro
+
+    def _dark_on(self) -> bool:
+        """O tema escuro está ligado? (o toggle só existe depois do ``_build``)"""
+        cb = getattr(self, "cb_dark", None)
+        return bool(cb is not None and cb.value)
+
+    def _repinta_figuras(self, dark: bool) -> None:
+        """Troca o ``<img>`` de cada gráfico já desenhado para o tema pedido.
+
+        No caminho claro→escuro a figura ainda está no estado claro: repinta e
+        rasteriza uma vez, guardando o resultado. Voltar ao claro é só reexibir o
+        PNG que ficou guardado — o repinte do matplotlib não tem inverso.
+        """
+        for chave, slot in list(self._fig_slots.items()):
+            # o widget pode ter sido limpo ou trocado por um aviso desde o
+            # desenho — aí o gráfico guardado não é mais dele
+            if slot["w"].value not in (slot["claro"], slot["escuro"]):
+                del self._fig_slots[chave]
+                continue
+            try:
+                if dark and slot["escuro"] is None:
+                    slot["escuro"] = self._fig_png(self._dark_fig(slot["fig"]), **slot["kw"])
+                slot["w"].value = slot["escuro"] if dark else slot["claro"]
+            except Exception as exc:  # noqa: BLE001 - cosmético, nunca fatal
+                self._log(f"[tema] gráfico não repintado ({type(exc).__name__}): {exc}")
 
     # -- colorações semânticas reutilizáveis (passe em ``color_map``) ----
     @staticmethod
@@ -1496,7 +1656,8 @@ class SatelliteUI:
         ax.set_ylabel(self._param_label())
         ax.grid(alpha=0.25)
         fig.tight_layout()
-        self.out_serie_nivel.value = self._fig_html(fig, stretch=True)
+        self.out_serie_nivel.value = self._fig_html(fig, stretch=True,
+                                                    slot=self.out_serie_nivel)
 
         link = self.dd_link_serie.value
         try:
@@ -1510,7 +1671,8 @@ class SatelliteUI:
         ax2.set_ylabel(f"{link}({self._param_label()})")
         ax2.grid(alpha=0.25)
         fig2.tight_layout()
-        self.out_serie_link.value = self._fig_html(fig2, stretch=True)
+        self.out_serie_link.value = self._fig_html(fig2, stretch=True,
+                                                   slot=self.out_serie_link)
 
     def _on_macro_plot(self, b):
         if self.macro is None:
@@ -1538,7 +1700,8 @@ class SatelliteUI:
                 axes[i].grid(alpha=0.25)
             axes[0].set_title("Variáveis macro", fontsize=11)
             fig.tight_layout()
-            self.out_macro_plot.value = self._fig_html(fig, stretch=True)
+            self.out_macro_plot.value = self._fig_html(fig, stretch=True,
+                                                       slot=self.out_macro_plot)
             self._log(f"[série] macros desenhadas: {', '.join(cols)}.")
 
     # ------------------------------------------------------------------ estacionariedade
@@ -1813,7 +1976,8 @@ class SatelliteUI:
         if self.cb_fit_plot.value:
             try:
                 fig = _E.report.plot_fit(fit, self.series)
-                self.out_fit_plot.value = self._fig_html(fig, stretch=True)
+                self.out_fit_plot.value = self._fig_html(fig, stretch=True,
+                                                         slot=self.out_fit_plot)
             except Exception as exc:  # noqa: BLE001
                 self.out_fit_plot.value = (
                     f"<div class='satui-legend'>Gráfico indisponível: {exc}</div>")
@@ -3012,13 +3176,15 @@ class SatelliteUI:
         if self.cb_diag_plots.value:
             try:
                 self.out_diag_plot_fit.value = self._fig_html(
-                    _E.report.plot_fit(self.fit_, self.series), stretch=True)
+                    _E.report.plot_fit(self.fit_, self.series), stretch=True,
+                    slot=self.out_diag_plot_fit)
             except Exception as exc:  # noqa: BLE001
                 self.out_diag_plot_fit.value = (
                     f"<div class='satui-legend'>Gráfico de ajuste indisponível: {exc}</div>")
             try:
                 self.out_diag_plot_resid.value = self._fig_html(
-                    _E.report.plot_residual_diagnostics(self.fit_), stretch=True)
+                    _E.report.plot_residual_diagnostics(self.fit_), stretch=True,
+                    slot=self.out_diag_plot_resid)
             except Exception as exc:  # noqa: BLE001
                 self.out_diag_plot_resid.value = (
                     f"<div class='satui-legend'>Painel de resíduos indisponível: {exc}</div>")
@@ -3707,7 +3873,7 @@ class SatelliteUI:
         axes[0].set_title("Trajetórias macro — observado × cenários", fontsize=11)
         axes[0].legend(loc="best", fontsize=8, ncol=min(4, len(ss) + 1))
         fig.tight_layout()
-        return self._fig_html(fig, stretch=True)
+        return self._fig_html(fig, stretch=True, slot=self.out_scen_plot)
 
     # ------------------------------------------------------------------ projeção
     def _on_project(self, b):
@@ -3795,7 +3961,8 @@ class SatelliteUI:
         self.out_proj_tiles.value = self._metric_tiles(tiles)
         if self.cb_proj_plot.value:
             try:
-                self.out_proj_plot.value = self._fig_html(self._fig_projecao(), stretch=True)
+                self.out_proj_plot.value = self._fig_html(self._fig_projecao(), stretch=True,
+                                                          slot=self.out_proj_plot)
             except Exception as exc:  # noqa: BLE001
                 self.out_proj_plot.value = (
                     f"<div class='satui-legend'>Gráfico indisponível: {exc}</div>")
@@ -4417,7 +4584,7 @@ class SatelliteUI:
         ax.legend(loc="best", fontsize=8, ncol=2)
         ax.grid(alpha=0.25)
         fig.tight_layout()
-        self.out_bt_plot.value = self._fig_html(fig, stretch=True)
+        self.out_bt_plot.value = self._fig_html(fig, stretch=True, slot=self.out_bt_plot)
 
     # ------------------------------------------------------------------ invalidação
     def _clear_backtest_outputs(self):
@@ -5391,12 +5558,16 @@ class SatelliteUI:
                   f"{len(self.series)} períodos).")
 
     def _on_dark(self, change):
-        if change["new"]:
+        dark = bool(change["new"])
+        if dark:
             self.panel.add_class("dark")
             self.cb_dark.description = "☀ Tema claro"
         else:
             self.panel.remove_class("dark")
             self.cb_dark.description = "🌙 Tema escuro"
+        # os PNGs de matplotlib rasterizam no tema vigente na hora do desenho —
+        # os já desenhados não flipam sozinhos; aqui trocamos o <img> de cada um
+        self._repinta_figuras(dark)
 
     def _desliga_keepalive(self, msg):
         """Volta o botão para "desligado" **sem** reentrar no observer, e explica."""

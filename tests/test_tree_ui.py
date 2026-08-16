@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import re
 
 import numpy as np
 import pandas as pd
@@ -1836,6 +1837,98 @@ def test_ui_tema_escuro_repinta_figuras_e_rampas(task):
     with contextlib.redirect_stdout(io.StringIO()):
         ui.cb_dark.value = False                       # e o aviso do toggle
     assert any("tema" in l.lower() for l in ui._log_lines)
+
+
+#: a tag que o _fig_png emite — o repinte de tema troca uma pela outra
+_IMG = re.compile(r"<img src='data:image/png;base64,[^']+' style='[^']*'/>")
+
+
+def _imgs(w, acc=None):
+    """Todas as tags <img> emitidas pelo _fig_html sob um widget."""
+    import ipywidgets as W
+    acc = [] if acc is None else acc
+    if isinstance(w, W.HTML):
+        acc.extend(_IMG.findall(w.value or ""))
+    for f in getattr(w, "children", ()) or ():
+        _imgs(f, acc)
+    return acc
+
+
+def _ui_com_graficos(task):
+    """UI com um split feito e as figuras da aba de variáveis + validação na tela."""
+    ui = _build(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.dd_feature.value = "score"
+        ui._on_preview(None)
+        ui._on_split(None)
+        ui._refresh()
+        ui.tabs.selected_index = ui._iv_tab_index
+        ui._on_var_analyze(None)
+        ui._do_validate()          # cards: 2+ figuras dentro de UMA string
+    return ui
+
+
+def test_tema_escuro_repinta_os_graficos_ja_desenhados(task):
+    """Trocar o tema troca a tag <img> de tudo que já está na tela — inclusive
+    das figuras que viajam DENTRO de um HTML composto (cards da validação) — e
+    voltar ao claro devolve os PNGs originais."""
+    ui = _ui_com_graficos(task)
+    claro = _imgs(ui.panel)
+    assert len(claro) >= 3, f"poucas figuras na tela: {len(claro)}"
+    n_comp = len(_IMG.findall(ui.out_validate.value))
+    assert n_comp >= 1, "os cards da validação não trouxeram figura"
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.cb_dark.value = True
+    escuro = _imgs(ui.panel)
+    assert len(escuro) == len(claro), "o repinte perdeu ou duplicou <img>"
+    assert all(a != b for a, b in zip(claro, escuro)), "alguma figura não repintou"
+    assert len(_IMG.findall(ui.out_validate.value)) == n_comp
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.cb_dark.value = False
+    assert _imgs(ui.panel) == claro
+
+
+def test_repinte_sincroniza_o_hash_and_skip_do_set_html(task):
+    """O card da folha escreve por ``_set_html`` (hash-and-skip) e memoiza o HTML
+    por (folha, versão da árvore). Se o repinte não atualizasse ``_last_html`` e o
+    cache, o desenho seguinte seria PULADO por ser "igual" — e a tela ficaria
+    presa na figura do tema anterior."""
+    ui = _ui_com_graficos(task)
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.cb_dark.value = True
+        # a aba "Construir" está oculta (o card só renderiza com o índice casado)
+        ui._build_tab_index = ui.tabs.selected_index
+        ui._refresh_leaf_hist()
+    hist_escuro = ui.out_leaf_hist.value
+    assert hist_escuro.startswith("<img"), hist_escuro[:120]
+    assert ui._last_html.get("leaf_hist") == hist_escuro
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.cb_dark.value = False
+    hist_claro = ui.out_leaf_hist.value
+    assert hist_claro != hist_escuro, "o card da folha não repintou"
+    assert ui._last_html.get("leaf_hist") == hist_claro, "_last_html dessincronizou"
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._refresh_leaf_hist()                  # cache hit + hash-and-skip
+    assert ui.out_leaf_hist.value == hist_claro, "o desenho seguinte regrediu de tema"
+
+
+def test_tema_claro_rasteriza_um_png_so(task):
+    """O PNG escuro é preguiçoso: no claro (o padrão) só o claro é gerado e a
+    figura fica pendente; o escuro sai sob demanda no toggle, e a fila de
+    pendentes é curta — a hitmap cresce com o nº de folhas."""
+    ui = _ui_com_graficos(task)
+    claro = _imgs(ui.panel)[0]
+    assert ui._fig_pend.get(claro) is not None       # figura guardada, PNG não
+    assert claro not in ui._fig_escuro
+    assert len(ui._fig_pend) <= ui._MAX_FIG_PEND
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.cb_dark.value = True
+    assert ui._fig_escuro.get(claro) in _imgs(ui.panel)
+    assert claro not in ui._fig_pend                 # pendência resolvida
 
 
 def test_ui_canvas_nao_carrega_nada_da_rede(task):

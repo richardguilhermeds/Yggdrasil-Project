@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import re
 
 import numpy as np
 import pandas as pd
@@ -857,6 +858,100 @@ def test_dark_fig_suptitle_e_keep_ink():
     ui._dark_fig(fig)
     assert fig.texts[0].get_color() == ui._DARK_FIG["ink"]
     assert t_keep.get_color() == "#111"
+
+
+#: a tag que o _fig_html emite — o repinte de tema troca uma pela outra
+_IMG = re.compile(r"<img src='data:image/png;base64,[^']+' style='[^']*'/>")
+
+
+def _imgs(w, acc=None):
+    """Todas as tags <img> emitidas pelo _fig_html sob um widget."""
+    import ipywidgets as W
+    acc = [] if acc is None else acc
+    if isinstance(w, W.HTML):
+        acc.extend(_IMG.findall(w.value or ""))
+    for f in getattr(w, "children", ()) or ():
+        _imgs(f, acc)
+    return acc
+
+
+def test_tema_escuro_repinta_os_graficos_ja_desenhados():
+    """Trocar o tema troca a tag <img> de tudo que já está na tela — e voltar ao
+    claro devolve o PNG original, sem refazer o cálculo que gerou os gráficos."""
+    ui = _build()
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.dd_var2.value = "score"
+        ui._on_analyze(None)
+        claro = [ui.out_an_distbad.value, ui.out_an_inv_safra.value]
+        assert all(v.startswith("<img") for v in claro)
+        n = len(_imgs(ui.panel))
+        assert n >= 5, n
+
+        ui.cb_dark.value = True
+        escuro = [ui.out_an_distbad.value, ui.out_an_inv_safra.value]
+        assert all(a != b for a, b in zip(claro, escuro)), "figuras não repintaram"
+        assert len(_imgs(ui.panel)) == n, "o repinte perdeu ou duplicou <img>"
+
+        ui.cb_dark.value = False
+        assert [ui.out_an_distbad.value, ui.out_an_inv_safra.value] == claro
+
+
+def test_cache_de_figura_respeita_o_tema_vigente():
+    """Os caches guardam HTML pronto: revisitar uma variável já vista depois de
+    trocar o tema tem de devolver o PNG do tema NOVO, não o de quando foi
+    desenhada (era o bug da prévia da aba Variáveis ficar branca no escuro)."""
+    ui = _build()
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.dd_var.value = "score"
+        ui._refresh_var_preview()
+        claro = ui.out_var_preview.value
+        assert claro.startswith("<img")
+
+        ui.cb_dark.value = True
+        escuro = ui.out_var_preview.value
+        assert escuro != claro, "a prévia não repintou no toggle"
+
+        ui.dd_var.value = "renda"; ui._refresh_var_preview()
+        ui.dd_var.value = "score"; ui._refresh_var_preview()   # volta pelo cache
+    assert ui.out_var_preview.value == escuro, "cache devolveu o PNG do tema anterior"
+
+
+def test_repinte_alcanca_figura_dentro_de_html_composto():
+    """Gráficos que viajam DENTRO de uma string maior (ROC lado a lado, forest do
+    bootstrap, funil da esteira) também trocam — o repinte é por tag, não por
+    widget de destino."""
+    ui = _build()
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui._build_selection_card()          # card opcional, montado fora do painel
+        ui.btn_sel_run.click()
+    composto = ui.out_sel_result.value
+    n = len(_IMG.findall(composto))
+    assert n >= 2, f"a esteira não produziu figuras suficientes: {n}"
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.cb_dark.value = True
+    novo = ui.out_sel_result.value
+    assert novo != composto
+    assert len(_IMG.findall(novo)) == n
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.cb_dark.value = False
+    assert ui.out_sel_result.value == composto
+
+
+def test_tema_claro_rasteriza_um_png_so():
+    """O PNG escuro é preguiçoso: no claro (o padrão) só o claro é gerado, e o
+    escuro sai sob demanda no toggle — rasterizar os dois sempre custaria ~70ms
+    por figura no caminho comum."""
+    ui = _build()
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.dd_var.value = "score"
+        ui._refresh_var_preview()
+    claro = ui.out_var_preview.value
+    assert ui._fig_pend.get(claro) is not None      # figura guardada, PNG não
+    assert claro not in ui._fig_escuro
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.cb_dark.value = True
+    assert ui._fig_escuro.get(claro) == ui.out_var_preview.value
+    assert claro not in ui._fig_pend                # pendência resolvida
 
 
 def test_heatmap_correlacao_anotacoes_por_celula():

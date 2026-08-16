@@ -39,6 +39,7 @@ depois de desfazer é preciso **re-treinar** para o modelo refletir a configura�
 """
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager, suppress
 
 import numpy as np
@@ -408,6 +409,11 @@ class ModelSegmenterUI:
         # (feature, amostra, coluna-de-safra, versão de bins): revisitar uma
         # variável já analisada não re-renderiza nem re-encoda os 4–8 PNGs.
         self._an_fig_cache: dict = {}
+        # contrapartida de cada <img> nos dois temas (ver _fig_html/_on_dark): o
+        # toggle troca a tag no lugar, sem refazer o cálculo que gerou a figura
+        self._fig_escuro: dict = {}      # <img> claro  -> <img> escuro
+        self._fig_claro: dict = {}       # <img> escuro -> <img> claro
+        self._fig_pend: dict = {}        # <img> claro  -> (Figure, kw) sem versão escura
         # ranking LAZY: variable_iv() de todas as candidatas é caro demais para
         # pagar antes do primeiro paint — só computa sob demanda (⟳ Recalcular
         # ou o primeiro fluxo que force, ex.: auto-selecionar / pós-load).
@@ -518,15 +524,15 @@ class ModelSegmenterUI:
                 t.set_color(ink)
         return fig
 
-    def _fig_html(self, fig, border=False, tight=True, stretch=False):
+    def _dark_on(self) -> bool:
+        """O tema escuro está ligado? (o toggle só existe depois do ``_build``)"""
+        cb = getattr(self, "cb_dark", None)
+        return bool(cb is not None and cb.value)
+
+    def _fig_png(self, fig, border=False, tight=True, stretch=False) -> str:
+        """Rasteriza a figura como ``<img>`` base64 no estado em que ela está."""
         import base64
         import io as _io
-        import matplotlib.pyplot as plt
-        # tema escuro ligado → repinta ANTES de rasterizar (o toggle é um
-        # checkbox do kernel; figuras já desenhadas seguem no tema antigo
-        # até o próximo clique — ver aviso no _on_dark)
-        if getattr(self, "cb_dark", None) is not None and self.cb_dark.value:
-            self._dark_fig(fig)
         buf = _io.BytesIO()
         # tight=False → o PNG sai exatamente em figsize×dpi (mesma figsize ⇒ mesmo
         # tamanho de imagem), garantindo gráficos lado a lado com a MESMA altura.
@@ -538,7 +544,6 @@ class ModelSegmenterUI:
         if tight:
             save_kw["bbox_inches"] = "tight"
         fig.savefig(buf, **save_kw)
-        plt.close(fig)
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         # stretch=True ⇒ a imagem preenche a largura da coluna (dashboards lado a
         # lado); senão fica no tamanho natural, limitada a 100% do contêiner.
@@ -546,6 +551,103 @@ class ModelSegmenterUI:
         if border:
             style += ";border:1px solid var(--line);border-radius:6px"
         return f"<img src='data:image/png;base64,{b64}' style='{style}'/>"
+
+    #: teto de figuras guardadas para o repinte (PNGs em base64 + Figure viva)
+    _MAX_FIG_PARES = 64
+
+    def _fig_html(self, fig, border=False, tight=True, stretch=False):
+        """Converte uma figura matplotlib em ``<img>`` base64 (e fecha a figura).
+
+        Guarda a figura junto do ``<img>`` emitido para que ``_on_dark`` possa
+        trocar a tag onde ela estiver — na tela, dentro de um HTML composto ou de
+        um dos caches de figura — sem refazer o cálculo que gerou o gráfico.
+        ``plt.close`` só tira a figura do registro do pyplot; ela segue
+        rasterizável pela referência guardada.
+
+        No tema claro (o padrão) rasteriza UM PNG: a versão escura só é gerada se
+        o tema mudar, e só para os gráficos que estiverem em uso. No escuro
+        rasteriza os dois — o repinte do matplotlib não tem inverso, então o PNG
+        claro precisa ficar pronto para a volta.
+        """
+        import matplotlib.pyplot as plt
+        kw = {"border": border, "tight": tight, "stretch": stretch}
+        claro = self._fig_png(fig, **kw)
+        if not self._dark_on():
+            plt.close(fig)
+            self._guarda_fig(claro, (fig, kw))
+            return claro
+        escuro = self._fig_png(self._dark_fig(fig), **kw)
+        plt.close(fig)
+        self._guarda_fig(claro, None, escuro)
+        return escuro
+
+    def _guarda_fig(self, claro, pendente, escuro=None):
+        """Registra o ``<img>`` claro com a versão escura — pronta ou pendente."""
+        if len(self._fig_escuro) + len(self._fig_pend) > self._MAX_FIG_PARES:
+            self._fig_escuro.clear(); self._fig_claro.clear(); self._fig_pend.clear()
+        if escuro is None:
+            self._fig_pend[claro] = pendente
+        else:
+            self._fig_pend.pop(claro, None)
+            self._fig_escuro[claro] = escuro
+            self._fig_claro[escuro] = claro
+
+    def _escurece(self, claro):
+        """Versão escura de um ``<img>`` claro, rasterizada sob demanda."""
+        pronto = self._fig_escuro.get(claro)
+        if pronto is not None:
+            return pronto
+        pendente = self._fig_pend.get(claro)
+        if pendente is None:
+            return None
+        fig, kw = pendente
+        escuro = self._fig_png(self._dark_fig(fig), **kw)
+        self._guarda_fig(claro, None, escuro)
+        return escuro
+
+    #: as tags <img> que o _fig_html emite (para trocá-las dentro do HTML)
+    _RE_IMG = re.compile(r"<img src='data:image/png;base64,[^']+' style='[^']*'/>")
+
+    def _repinta_figuras(self, dark: bool) -> None:
+        """Troca cada ``<img>`` já na tela (e nos caches) pela versão do tema.
+
+        Varre os widgets HTML do painel em vez de guardar um alvo por figura: há
+        gráficos que viajam dentro de um HTML composto (funil de seleção, forest
+        do bootstrap), e a troca por tag pega esses também.
+        """
+        import ipywidgets as _W
+
+        def alvo(img):
+            # claro→escuro pode rasterizar agora (só o que está em uso); a volta
+            # reexibe o PNG claro guardado, que o repinte não sabe desfazer
+            return self._escurece(img) if dark else self._fig_claro.get(img)
+
+        def troca(html):
+            if not html or "data:image/png;base64," not in html:
+                return html
+            return self._RE_IMG.sub(lambda m: alvo(m.group(0)) or m.group(0), html)
+
+        def anda(w):
+            if isinstance(w, _W.HTML):
+                novo = troca(w.value)
+                if novo != w.value:
+                    w.value = novo
+            for filho in getattr(w, "children", ()) or ():
+                anda(filho)
+
+        try:
+            # o card da esteira é montado sob demanda e vive FORA do painel
+            # (ver _build_selection_card) — precisa entrar na varredura à parte
+            for raiz in (self.panel, getattr(self, "_sel_card", None)):
+                if raiz is not None:
+                    anda(raiz)
+            # os caches guardam HTML pronto: sem isto, revisitar uma variável já
+            # analisada devolve o PNG do tema ANTERIOR
+            self._preview_cache = {k: troca(v) for k, v in self._preview_cache.items()}
+            self._an_fig_cache = {k: tuple(troca(v) for v in vs)
+                                  for k, vs in self._an_fig_cache.items()}
+        except Exception as exc:  # noqa: BLE001 - cosmético, nunca fatal
+            self._log(f"[tema] gráficos não repintados ({type(exc).__name__}): {exc}")
 
     _CAT_COLORS = {"manter": ("var(--ok-ink)", "var(--ok-bg)"),
                    "revisar": ("var(--warn-ink)", "var(--warn-bg)"),
@@ -3045,16 +3147,17 @@ class ModelSegmenterUI:
         self._log(f"[seleção] Excel salvo em '{path}'.")
 
     def _on_dark(self, change):
-        if change["new"]:
+        dark = bool(change["new"])
+        if dark:
             self.panel.add_class("dark")
             self.cb_dark.description = "☀ Tema claro"
         else:
             self.panel.remove_class("dark")
             self.cb_dark.description = "🌙 Tema escuro"
-        # os PNGs de matplotlib rasterizam no tema vigente NA HORA do
-        # clique — os já desenhados não flipam sozinhos
-        self._log("Tema trocado — gráficos já desenhados seguem no tema "
-                  "anterior; clique de novo nos botões para redesenhá-los.")
+        # os PNGs de matplotlib rasterizam no tema vigente NA HORA do clique —
+        # os já desenhados não flipam sozinhos; aqui trocamos a tag <img> de
+        # cada um (na tela e nos caches) pela versão do tema recém-escolhido
+        self._repinta_figuras(dark)
 
     def _on_keepalive(self, change):
         from ...utils.keepalive import ClusterKeepAlive

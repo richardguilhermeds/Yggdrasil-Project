@@ -1156,3 +1156,87 @@ def test_html_do_estudo_e_da_exportacao_usa_tokens_de_tema(tmp_path):
             continue
         achados = _HEX.findall(html)
         assert not achados, f"hex fixo no HTML gerado: {achados[:3]} em {html[:120]!r}"
+
+
+def test_css_tem_o_pacote_de_tema_escuro_das_demais_uis():
+    """As sobras brancas do escuro moram fora dos nossos tokens: o host pinta a
+    moldura do output, a barra de abas, o <pre> do console e as células de
+    tabela. Sem estas regras o painel escuro fica dentro de uma moldura branca."""
+    from yggdrasil.credit_risk.econometric import ui as mod
+
+    for regra in (".cell-output-ipywidget-background:has(.satui.dark)",
+                  ".widget-subarea:has(.satui.dark)",
+                  ".satui-tabs .jupyter-widget-TabPanel-tabContents",
+                  ".satui.dark pre",
+                  ".satui table tbody tr td",
+                  ".satui .widget-html-content",
+                  ".satui.dark .widget-select select",     # SelectMultiple das macros
+                  ".satui.dark .widget-checkbox label",
+                  ".satui.dark .widget-readout"):
+        assert regra in mod._CSS, f"regra ausente do tema escuro: {regra}"
+
+
+def test_dark_fig_repinta_tinta_e_preserva_cor_de_dado():
+    """O repinte troca fundo/tinta/grade, as curvas PRETAS (a 'ponderada' da
+    projeção) e a borda branca das barras do histograma — mas não encosta nas
+    cores de dado da paleta (steelblue, crimson, #888888)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    ui = _ui()
+    fig, ax = plt.subplots()
+    dado = ax.plot([0, 1], [0, 1], color="crimson")[0]       # cor de DADO
+    tinta = ax.plot([0, 1], [1, 0], color="black")[0]        # cor de TINTA
+    barra = ax.bar([0.5], [0.5], color="steelblue", edgecolor="white")[0]
+    ax.set_title("t")
+    fig.suptitle("s")
+    ui._dark_fig(fig)
+
+    assert ax.get_facecolor() != (1.0, 1.0, 1.0, 1.0)
+    assert ax.title.get_color() == "#E8ECF0"
+    assert fig.texts[0].get_color() == "#E8ECF0"            # suptitle vive em fig.texts
+    assert tinta.get_color() == "#E8ECF0"
+    assert dado.get_color() == "crimson"                    # dado intacto
+    assert not ui._tinta_clara(barra.get_edgecolor())       # branco virou grafite
+    assert not ui._tinta_escura("steelblue") and not ui._tinta_escura("#888888")
+    plt.close(fig)
+
+
+def test_tema_escuro_repinta_os_graficos_ja_desenhados():
+    """Trocar o tema troca o <img> dos gráficos que já estão na tela — e voltar
+    ao claro devolve o PNG original, sem refazer o cálculo que os gerou."""
+    ui = _ui()
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.btn_ref_study.click()
+        claro = ui.out_serie_nivel.value
+        assert claro.startswith("<img")
+
+        ui.cb_dark.value = True
+        escuro = ui.out_serie_nivel.value
+        assert escuro.startswith("<img") and escuro != claro
+
+        ui.cb_dark.value = False
+        assert ui.out_serie_nivel.value == claro
+
+        # desenhado JÁ no escuro: alterna nos dois sentidos do mesmo jeito
+        ui.cb_dark.value = True
+        ui.btn_macro_plot.click()
+        macro_escuro = ui.out_macro_plot.value
+        ui.cb_dark.value = False
+        assert ui.out_macro_plot.value.startswith("<img")
+        assert ui.out_macro_plot.value != macro_escuro
+    assert not any("não repintado" in linha for linha in ui._log_lines)
+
+
+def test_grafico_substituido_por_aviso_nao_ressuscita_na_troca_de_tema():
+    """Se o widget deixou de mostrar o nosso PNG (checkbox desligado, mensagem de
+    erro), a troca de tema não pode reescrever o gráfico velho por cima."""
+    ui = _ui()
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.btn_ref_study.click()
+        assert ui.out_serie_nivel.value.startswith("<img")
+        ui.out_serie_nivel.value = "<div>sem série</div>"
+        ui.cb_dark.value = True
+    assert ui.out_serie_nivel.value == "<div>sem série</div>"

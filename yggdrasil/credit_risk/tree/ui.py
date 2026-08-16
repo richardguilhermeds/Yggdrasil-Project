@@ -25,6 +25,7 @@ sobre o DataFrame e o alvo reais. Recursos:
 from __future__ import annotations
 
 import html as _html
+import re
 from contextlib import contextmanager
 
 import pandas as pd
@@ -1012,6 +1013,11 @@ class TreeSegmenterUI:
         # cache do IV por variável usado pelo "ordenar por IV" dos seletores,
         # por (sid, versão da árvore) — lazy: só calcula com o toggle ligado
         self._iv_sort_cache: dict = {}
+        # contrapartida de cada <img> nos dois temas (ver _fig_html/_on_dark): o
+        # toggle troca a tag no lugar, sem refazer o cálculo que gerou a figura
+        self._fig_escuro: dict = {}      # <img> claro  -> <img> escuro
+        self._fig_claro: dict = {}       # <img> escuro -> <img> claro
+        self._fig_pend: dict = {}        # <img> claro  -> (Figure, kw) sem versão escura
 
         self._build()
         self._on_mode_change(None)   # estado inicial de visibilidade dos controles
@@ -2831,7 +2837,9 @@ class TreeSegmenterUI:
         # para reexibi-la, basta devolvê-la a `children`/títulos e restaurar os
         # índices abaixo. Única capacidade que ela tinha e o mapa não tem: a
         # árvore em TEXTO (out_tree) — fallback offline sem anywidget.
-        _ = tab_build                     # vivo de propósito; ver comentário acima
+        # guardado (não descartado) para seguir vivo E para o repinte de tema
+        # alcançar os widgets dela — ver _repinta_figuras
+        self._tab_build = tab_build
         tabs = W.Tab(children=[tab_canvas, tab_var, tab_diag, tab_valid,
                                tab_avancado])
         for i, titulo in enumerate(["Árvore interativa", "Análise de variáveis",
@@ -2943,16 +2951,22 @@ class TreeSegmenterUI:
         return fig
 
     def _on_dark(self, change):
-        if change["new"]:
+        dark = bool(change["new"])
+        if dark:
             self.panel.add_class("dark")
             self.cb_dark.description = "☀ Tema claro"
         else:
             self.panel.remove_class("dark")
             self.cb_dark.description = "🌙 Tema escuro"
         # os PNGs de matplotlib são rasterizados no tema vigente NA HORA do
-        # clique — os já desenhados não flipam sozinhos
-        self._log("Tema trocado — gráficos já desenhados seguem no tema "
-                  "anterior; clique de novo nos botões para redesenhá-los.")
+        # clique — os já desenhados não flipam sozinhos; aqui trocamos a tag
+        # <img> de cada um (na tela e nos caches) pela versão do tema novo
+        self._repinta_figuras(dark)
+        # o que NÃO flipa: a rampa de cor das tabelas de realce (migração de
+        # folhas, heatmap de concentração) é CSS inline, calculado no tema de
+        # quando a tabela foi montada — só um novo render a atualiza
+        self._log("Tema trocado — os gráficos acompanham; tabelas com realce de "
+                  "cor só mudam no próximo render.")
 
     def _on_keepalive(self, change):
         from ...utils.keepalive import ClusterKeepAlive
@@ -6273,14 +6287,30 @@ class TreeSegmenterUI:
         conteúdo, ``bbox_inches=None``): duas figuras de MESMA altura de figsize saem
         com a MESMA altura na tela em colunas lado a lado (o ``bbox_inches='tight'``
         recorta cada figura ao seu conteúdo e distorce a razão de aspecto)."""
+        kw = {"border": border, "full_width": full_width, "tight": tight, "cap": cap}
+        claro = self._fig_png(fig, **kw)
+        # fecha a figura: sem isso o pyplot retém TODA figura gerada (Gcf.figs) e a
+        # RAM cresce sem limite numa sessão interativa (dezenas de plots por ação).
+        # Fechar NÃO impede rasterizar de novo pela referência que guardamos.
+        import matplotlib.pyplot as _plt
+        if not self._dark_on():
+            _plt.close(fig)
+            self._guarda_fig(claro, (fig, kw))
+            return claro
+        escuro = self._fig_png(self._dark_fig(fig), **kw)
+        _plt.close(fig)
+        self._guarda_fig(claro, None, escuro)
+        return escuro
+
+    def _dark_on(self) -> bool:
+        """O tema escuro está ligado? (o toggle só existe depois do ``_build``)"""
+        cb = getattr(self, "cb_dark", None)
+        return bool(cb is not None and cb.value)
+
+    def _fig_png(self, fig, border=False, full_width=False, tight=True, cap=False) -> str:
+        """Rasteriza a figura como ``<img>`` base64 no estado em que ela está."""
         import base64
         import io as _io
-        # tema escuro ligado → repinta fundo/tinta/grades ANTES de rasterizar
-        # (o toggle é um checkbox do kernel, então o Python sabe o tema; as
-        # cores DOS DADOS ficam intactas). Figuras já desenhadas seguem no
-        # tema antigo até o próximo clique — ver o aviso no _on_dark.
-        if getattr(self, "cb_dark", None) is not None and self.cb_dark.value:
-            self._dark_fig(fig)
         buf = _io.BytesIO()
         # dpi limitado a 110 nas prévias inline (export usa save_path nos plot_*):
         # corta o PNG/base64 ~40% sem perda visual perceptível, aliviando o comm.
@@ -6289,10 +6319,6 @@ class TreeSegmenterUI:
                     facecolor=fig.get_facecolor(),
                     bbox_inches="tight" if tight else None)
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-        # fecha a figura: sem isso o pyplot retém TODA figura gerada (Gcf.figs) e a
-        # RAM cresce sem limite numa sessão interativa (dezenas de plots por ação).
-        import matplotlib.pyplot as _plt
-        _plt.close(fig)
         # cap: tamanho NATURAL do PNG, encolhendo apenas se faltar espaço —
         # para figuras cuja largura depende dos dados (1 variável = figura
         # pequena), onde o full_width viraria um zoom gigante
@@ -6302,6 +6328,83 @@ class TreeSegmenterUI:
         if border:
             style += ";border:1px solid var(--line);border-radius:6px"
         return f"<img src='data:image/png;base64,{b64}' style='{style}'/>"
+
+    #: teto do que fica guardado para o repinte. As FIGURAS pendentes pesam (a
+    #: hitmap cresce com o nº de folhas), então a fila é curta e descarta as
+    #: mais ANTIGAS: só o que está na tela precisa flipar de tema.
+    _MAX_FIG_PEND = 24
+    _MAX_FIG_PARES = 64
+
+    def _guarda_fig(self, claro, pendente, escuro=None):
+        """Registra o ``<img>`` claro com a versão escura — pronta ou pendente."""
+        if escuro is None:
+            self._fig_pend[claro] = pendente
+            while len(self._fig_pend) > self._MAX_FIG_PEND:
+                self._fig_pend.pop(next(iter(self._fig_pend)))
+            return
+        self._fig_pend.pop(claro, None)
+        if len(self._fig_escuro) > self._MAX_FIG_PARES:      # backstop de memória
+            self._fig_escuro.clear(); self._fig_claro.clear()
+        self._fig_escuro[claro] = escuro
+        self._fig_claro[escuro] = claro
+
+    def _escurece(self, claro):
+        """Versão escura de um ``<img>`` claro, rasterizada sob demanda."""
+        pronto = self._fig_escuro.get(claro)
+        if pronto is not None:
+            return pronto
+        pendente = self._fig_pend.get(claro)
+        if pendente is None:
+            return None
+        fig, kw = pendente
+        escuro = self._fig_png(self._dark_fig(fig), **kw)
+        self._guarda_fig(claro, None, escuro)
+        return escuro
+
+    #: as tags <img> que o _fig_png emite (para trocá-las dentro do HTML)
+    _RE_IMG = re.compile(r"<img src='data:image/png;base64,[^']+' style='[^']*'/>")
+
+    def _repinta_figuras(self, dark: bool) -> None:
+        """Troca cada ``<img>`` já na tela (e nos caches) pela versão do tema.
+
+        Varre os widgets HTML do painel em vez de guardar um alvo por figura: há
+        gráficos que viajam dentro de um HTML composto, e a troca por tag pega
+        esses também. ``_last_html`` entra na varredura porque o ``_set_html`` é
+        hash-and-skip: sem atualizá-lo, o próximo desenho com o MESMO HTML seria
+        pulado e a tela ficaria presa na figura do tema anterior.
+        """
+        import ipywidgets as _W
+
+        def alvo(img):
+            # claro→escuro pode rasterizar agora (só o que está em uso); a volta
+            # reexibe o PNG claro guardado, que o repinte não sabe desfazer
+            return self._escurece(img) if dark else self._fig_claro.get(img)
+
+        def troca(html):
+            if not html or "data:image/png;base64," not in html:
+                return html
+            return self._RE_IMG.sub(lambda m: alvo(m.group(0)) or m.group(0), html)
+
+        def anda(w):
+            if isinstance(w, _W.HTML):
+                novo = troca(w.value)
+                if novo != w.value:
+                    w.value = novo
+            for filho in getattr(w, "children", ()) or ():
+                anda(filho)
+
+        try:
+            # a aba "Construir" está oculta mas seus widgets seguem vivos (o card
+            # da folha é um deles): sem passar por ela, o _last_html abaixo ficaria
+            # com um HTML que a tela não tem — e o hash-and-skip pularia o conserto
+            for raiz in (self.panel, getattr(self, "_tab_build", None)):
+                if raiz is not None:
+                    anda(raiz)
+            self._last_html = {k: troca(v) for k, v in self._last_html.items()}
+            self._leaf_hist_cache = {k: troca(v)
+                                     for k, v in self._leaf_hist_cache.items()}
+        except Exception as exc:  # noqa: BLE001 - cosmético, nunca fatal
+            self._log(f"[tema] gráficos não repintados ({type(exc).__name__}): {exc}")
 
     @staticmethod
     def _styler_html(styler, max_height=None):
