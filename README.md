@@ -20,7 +20,7 @@ O foco aplicado é o **crédito**, de forma ampla — cobrindo todo o ciclo: da 
 
 ## 📦 O que o pacote `yggdrasil` contempla hoje
 
-O código de produção vive em `yggdrasil/`, na raiz do repositório (layout *flat*): assim `import yggdrasil` funciona **sem `pip install`** — tanto no clone local (rodando da raiz) quanto no Databricks Repos, que adiciona a raiz do repo ao `sys.path`. São **sete módulos isolados** que não interferem uns nos outros: as esteiras de ML, EDA e seleção compartilham o contrato de dados `feat_*`/`dt_ref`/`amostra`/`target`; os de risco de crédito (segmentadores, capital e econométricos) têm contratos próprios.
+O código de produção vive em `yggdrasil/`, na raiz do repositório (layout *flat*): assim `import yggdrasil` funciona **sem `pip install`** — tanto no clone local (rodando da raiz) quanto no Databricks Repos, que adiciona a raiz do repo ao `sys.path`. São **oito módulos isolados** que não interferem uns nos outros: as esteiras de ML, EDA e seleção compartilham o contrato de dados `feat_*`/`dt_ref`/`amostra`/`target`; os de risco de crédito (segmentadores, capital, perda esperada e econométricos) têm contratos próprios.
 
 ### 1. 🚂 Esteira de ML governada (`yggdrasil`)
 Avaliação completa de um modelo já treinado, orquestrada por MLflow. A entrada é uma tabela com features `feat_*`, coluna de data (`dt_ref`), coluna de amostra (`amostra`) e a variável resposta (`target`), tudo configurável via `ColumnConfig`. As amostras `DES` e `OOT` recebem análise completa; `SIMUL` e `BACKTEST` são *scoring-only* (predição mais grupo homogêneo).
@@ -102,7 +102,33 @@ sim = carteira.simulate(n_scenarios=200_000, q=0.999, seed=42)   # v2 Monte Carl
 sim.economic_capital(); sim.allocate(metric="es")        # capital + alocação de Euler
 ```
 
-### 7. 📈 Modelos econométricos (satélite) das séries de risco (`yggdrasil.credit_risk.econometric`)
+### 7. 💧 Perda esperada: PD lifetime, ELBE e CCF (`yggdrasil.credit_risk.ecl`)
+Os **parâmetros de risco da perda esperada** e a conta que os junta na provisão de IFRS 9 / Resolução CMN 4.966/2021. É a outra metade da pergunta que os segmentadores respondem: eles *ordenam* o risco entre clientes em 12 meses; aqui se decide **quando** a perda acontece ao longo da vida do contrato, **quanto** ainda sobra a perder no que já quebrou e **sobre qual exposição** ela incide. Núcleo em pandas/numpy/scipy/sklearn — não exige o extra `[econometric]`.
+
+- **A curva (`PDCurve`)** — o objeto aceita e entrega as **quatro** representações (condicional/*hazard*, marginal, acumulada, sobrevivência) por identidades exatas, o que elimina a fonte nº 1 de erro de um período em projeto de ECL. Mais `forward(t0, t1)` (o insumo quantitativo do SICR), `truncate`/`extend` e persistência JSON.
+- **Cinco motores, uma fachada** — `LifetimePD(method=...)`: `constant` (só a PD de 12m vira curva), `vintage` (taxa marginal por idade, com a base em risco recontada), `km` (Kaplan-Meier com Greenwood e IC log-log), `hazard` (regressão de *hazard* em tempo discreto — curva **por contrato**, com covariáveis) e `markov` (cadeia sobre a matriz de transição — curva **por rating**, reusando `capital.migration`).
+- **As duas pontes** — `calibrate_to(pd_12m=...)` cola o **nível** da curva na PD do scorecard preservando o **formato** da maturação; `condition(z, rho)` desloca ao **ciclo** por Vasicek (`z > 0` = benigno), com `z` escalar, por horizonte (a projeção do satélite) ou com reversão à média.
+- **ELBE** — `elbe_table(...)` sai de duas colunas: a **exposição inicial** e as **LGD por mês em *default***. Devolve a curva de recuperação (encadeada pela marginal, para a coorte variável não distorcer a comparação), o horizonte de *workout*, `ELBE = (1 − r̄(T*))/(1 − r̄(t))`, a LGD *in default* e o desconto pela taxa efetiva.
+- **CCF/EAD** — `reference_dataset(...)` monta a base pelos três desenhos da literatura (coorte, horizonte fixo, horizonte variável), calcula as **quatro medidas ex-post** (CCF/LEQ, EADF, AUF, EAD direto), conta cada exclusão da higiene e expõe a **bimodalidade** em 0 e 1; `pooled_ccf`, `backtest_ead` (viés em moeda), `compare_measures`, `ccf_psi` e o `ccf_downturn` reexportado do capital.
+- **A montagem** — `ecl_table(...)`: `ECL = Σ PD_marginal · LGD · EAD · desconto`, com o estágio cortando o horizonte (1 → 12 meses, 2 → *lifetime*, 3 → ELBE) e `ecl_scenarios` ponderando o *forward-looking*. A regra de **SICR não está aqui** de propósito: é política da instituição, e o módulo recebe a coluna pronta.
+- **Governança** — gráficos (`report`) e MLflow (`log_lifetime_pd`/`log_elbe`/`log_ccf`/`log_ecl_run`) carregados sob demanda.
+
+```python
+from yggdrasil.credit_risk.ecl import ContractPanel, LifetimePD, elbe_table, apply_elbe, ecl_table
+
+painel = ContractPanel(df, origin_col="safra_origem", segment_col="produto", term_col="prazo")
+pd_lt  = LifetimePD(method="vintage", horizon=60).fit(painel, by="produto")
+pd_lt  = pd_lt.calibrate_to({"cartao": 0.078, "consignado": 0.021})   # nível do scorecard
+
+elbe = elbe_table(defaults, exposure_col="exposicao_inicial", lgd_prefix="lgd_m")
+carteira = apply_elbe(carteira, elbe, months_col="meses_em_default")
+
+res = ecl_table(carteira, model=pd_lt, lgd="lgd", ead="saldo", stage_col="estagio",
+                elbe="elbe", discount_rate="taxa_efetiva", age_col="idade", term_col="prazo")
+res.total, res.summary()
+```
+
+### 8. 📈 Modelos econométricos (satélite) das séries de risco (`yggdrasil.credit_risk.econometric`)
 Modelos **satélite / macro** que ligam as **séries temporais agregadas** dos parâmetros de risco (taxa de *default*, perda e conversão por segmento) às **variáveis macroeconômicas** (desemprego, renda, juros, câmbio, inadimplência) e **projetam por cenário**. É o **eixo temporal**, complementar ao eixo transversal dos segmentadores: o transversal *ordena* o risco entre clientes, o satélite *desloca o nível* da curva conforme o ciclo. As projeções alimentam o *forward-looking* do ECL, os testes de estresse, o **capital econômico** (a ligação fator-macro) e o planejamento. Baseado no guia de construção (ARDL, ARIMAX, fator Z de Vasicek, beta/fractional logit, VAR/VECM, painel), organizado da série ao relatório de governança. Requer o extra `[econometric]` (`statsmodels` + `arch`) e é **carregado sob demanda** — o resto de `credit_risk` não o exige.
 
 - **Séries + sintéticos**: `RiskSeries` (contrato com `kind` pd/lgd/ccf) e geradores de **DGP conhecido** (`simulate_pd/lgd/ccf_series`, `make_reference_study`) — a base dos testes de recuperação de parâmetros.
@@ -127,10 +153,10 @@ r.summary(); r.projection.mean_frame()             # ranking e projeção por ce
 
 | Pasta | Conteúdo |
 |---|---|
-| `yggdrasil/` | Código-fonte principal (os sete módulos acima), na raiz do repo (layout *flat*). |
+| `yggdrasil/` | Código-fonte principal (os oito módulos acima), na raiz do repo (layout *flat*). |
 | `tests/` | Testes automatizados (`pytest`): suíte parametrizada (classificação/regressão), incluindo UI, Spark, boosting, Optuna e econométricos (`statsmodels`/`arch`) — estes *gated* pela dependência. |
 | `notebooks/tutoriais/` | Tutoriais passo a passo (índice abaixo). A lógica de produção não vive aqui. |
-| `docs/` | Metodologia (o *porquê* dos métodos) e documentação dos segmentadores. |
+| `docs/` | Metodologia (o *porquê* dos métodos), documentação dos segmentadores e da perda esperada. |
 | `conf/` | Configuração por ambiente (dev/homolog/prod). Nunca versionar segredos. |
 | `dashboards/` | Acompanhamento de qualidade de dados, performance e drift. |
 | `jobs/` | Definições de jobs para orquestração dos pipelines. |
@@ -196,6 +222,10 @@ Todos centralizados em **[`notebooks/tutoriais/`](https://github.com/richardguil
 | 08 | [Capital econômico](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/08_tutorial_capital_economico.ipynb) | ASRF, Monte Carlo multifatorial e alocação de Euler sobre a carteira |
 | 09 | [Modelos econométricos satélite](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/09_tutorial_modelos_econometricos.ipynb) | Ligar PD/LGD/CCF ao macro (ARDL, fator Z) e projetar por cenários |
 | 11 | [Interface de séries temporais (`SatelliteUI`)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/11_tutorial_interface_series_temporais.ipynb) | 7 abas, da estacionariedade ao backtest de cobertura |
+| 12 | [Perda esperada ponta a ponta](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/12_tutorial_ecl.ipynb) | Os três parâmetros juntos: curva de PD, ELBE, CCF e a tabela de ECL com estágios e cenários |
+| 13 | [PD lifetime](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/13_tutorial_pd_lifetime.ipynb) | Aprofundamento: censura, as 4 representações da curva, os 5 motores, calibração de nível e condicionamento ao ciclo |
+| 14 | [ELBE](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/14_tutorial_elbe.ipynb) | Aprofundamento: por que a média direta da recuperação cai, horizonte de *workout*, desconto, add-on e LGD *in default* |
+| 15 | [CCF / EAD](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/15_tutorial_ccf.ipynb) | Aprofundamento: os 3 desenhos de base, as 4 medidas, higiene, bimodalidade, backtest de EAD e a ponte com o `ModelSegmenter` |
 
 > O **03** cobre a seleção inteira em **duas partes que rodam em sequência**: a Parte 1
 > (`yggdrasil.feature_selection`) é a peneira do **universo de features** — centenas de colunas agrupadas
@@ -205,10 +235,13 @@ Todos centralizados em **[`notebooks/tutoriais/`](https://github.com/richardguil
 > relatório que vai anexo à documentação. As partes são independentes: cada uma tem setup e base próprios.
 >
 > **Trilha sugerida:** `00` → `02` (conhecer a base) → `03` (selecionar) → `04`/`06` (modelar)
-> → `07` (rastrear). Os de risco de crédito (`08`, `09`, `11`) são independentes.
+> → `07` (rastrear). Os de risco de crédito (`08`, `09`, `11`) são independentes. Na perda
+> esperada, o `12` é a visão de conjunto e o `13`/`14`/`15` são os aprofundamentos por
+> parâmetro — comece pelo `12` se quiser o mapa, ou vá direto ao módulo que você precisa.
 
 > 📖 **Metodologia** (o *porquê* dos métodos, como KS, PSI/CSI, WoE/IV, ratings com fusão monotônica, SHAP e veredito de EDA): [`docs/metodologia.md`](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/docs/metodologia.md).
 > 🌳 **Árvore de segmentação unificada (classificação & regressão):** [`docs/credit-risk/tree-segmenter.md`](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/docs/credit-risk/tree-segmenter.md).
+> 💧 **PD lifetime, ELBE e CCF** (as quatro representações da curva, censura, coorte variável, desenhos de base de CCF e as referências da literatura): [`docs/credit-risk/ecl.md`](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/docs/credit-risk/ecl.md).
 
 ---
 

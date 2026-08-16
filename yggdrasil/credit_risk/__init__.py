@@ -16,6 +16,14 @@ Abriga:
   multifatorial, CreditRisk+, correlações, alocação de Euler/RAROC e validação
   (:class:`~yggdrasil.credit_risk.capital.Portfolio`,
   :class:`~yggdrasil.credit_risk.capital.Segment`).
+* :mod:`yggdrasil.credit_risk.ecl` — **parâmetros da perda esperada**: PD
+  *lifetime* (curva por safra, sobrevivência/*hazard* discreto ou cadeia de
+  Markov), **ELBE**/LGD *in default* dos contratos já problemáticos e **CCF/EAD**
+  dos rotativos, mais a montagem do ECL de IFRS 9 / Resolução CMN 4.966/2021
+  (:class:`~yggdrasil.credit_risk.ecl.LifetimePD`,
+  :func:`~yggdrasil.credit_risk.ecl.elbe_table`,
+  :func:`~yggdrasil.credit_risk.ecl.reference_dataset`,
+  :func:`~yggdrasil.credit_risk.ecl.ecl_table`).
 * :mod:`yggdrasil.credit_risk.econometric` — **modelos econométricos (satélite)**
   de PD, LGD e CCF: ligam as séries agregadas dos parâmetros de risco às variáveis
   macro (ARDL, ARIMA/ARIMAX, fator ``Z`` de Vasicek, beta/fractional logit,
@@ -25,11 +33,13 @@ Abriga:
 """
 from __future__ import annotations
 
-from . import capital
+from . import capital, ecl
+from .ecl import ContractPanel, LifetimePD
 from .model import ModelSegmenter
 from .tree import TreeSegmenter
 
-__all__ = ["TreeSegmenter", "ModelSegmenter", "capital", "tree", "model", "econometric"]
+__all__ = ["TreeSegmenter", "ModelSegmenter", "LifetimePD", "ContractPanel",
+           "capital", "ecl", "tree", "model", "econometric"]
 
 
 def __getattr__(name):

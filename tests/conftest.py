@@ -116,6 +116,102 @@ def scored_clf(df_clf, cfg):
     return pipe.run(df_clf, model=model, log_mlflow=False, log_shap=False)
 
 
+# ----------------------------------------------------------------------
+# Fixtures do subpacote de ECL (yggdrasil.credit_risk.ecl)
+# ----------------------------------------------------------------------
+def _painel_credito(n: int = 600, seed: int = 0) -> pd.DataFrame:
+    """Painel longo de contratos com **DGP conhecido** — a base dos testes de ECL.
+
+    Dois produtos com níveis de risco bem separados e **maturação** (o *hazard*
+    cresce com a idade), rating correlacionado ao risco, prazo remanescente e as
+    colunas de rotativo (sacado/limite) com aceleração do saque perto do
+    *default* — o que dá um CCF positivo e não degenerado.
+    """
+    rng = np.random.default_rng(seed)
+    base_h = {"cartao": 0.014, "consignado": 0.004}
+    linhas = []
+    for i in range(n):
+        produto = "cartao" if rng.uniform() < 0.5 else "consignado"
+        rating = str(rng.choice(["A", "B", "C"], p=[0.5, 0.3, 0.2]))
+        origem = pd.Timestamp("2020-01-01") + pd.DateOffset(months=int(rng.integers(0, 18)))
+        prazo = int(rng.integers(12, 49))
+        limite = float(rng.lognormal(8.5, 0.5))
+        sacado = limite * float(rng.beta(2.0, 3.0))
+        mult = {"A": 0.6, "B": 1.0, "C": 1.8}[rating]
+        for t in range(36):
+            h = base_h[produto] * mult * (1.0 + t / 20.0)
+            quebrou = int(rng.uniform() < min(h, 0.9))
+            linhas.append((f"C{i:05d}", origem + pd.DateOffset(months=t), origem, quebrou,
+                           produto, rating, max(prazo - t, 0), sacado, limite))
+            if quebrou:
+                break
+            # Uso do limite sobe devagar e acelera quando o risco corrente é alto.
+            passo = 1.0 + rng.normal(0.012 + 2.0 * h, 0.05)
+            sacado = float(np.clip(sacado * passo, 0.0, limite))
+    return pd.DataFrame(linhas, columns=[
+        "id_contrato", "dt_ref", "safra_origem", "default", "produto", "rating",
+        "prazo", "sacado", "limite",
+    ])
+
+
+@pytest.fixture
+def df_credito() -> pd.DataFrame:
+    """Painel longo de contratos (produto, rating, prazo, sacado/limite)."""
+    return _painel_credito()
+
+
+@pytest.fixture
+def painel(df_credito):
+    """O mesmo painel já embrulhado num ``ContractPanel``."""
+    from yggdrasil.credit_risk.ecl import ContractPanel
+
+    return ContractPanel(df_credito, origin_col="safra_origem", segment_col="produto",
+                         term_col="prazo")
+
+
+@pytest.fixture
+def carteira_viva(df_credito) -> pd.DataFrame:
+    """Última observação de cada contrato + saldo, LGD, taxa, estágio e ELBE."""
+    rng = np.random.default_rng(7)
+    d = df_credito.groupby("id_contrato").tail(1).copy()
+    d["idade"] = (pd.PeriodIndex(d["dt_ref"], freq="M").asi8
+                  - pd.PeriodIndex(d["safra_origem"], freq="M").asi8)
+    d["saldo"] = rng.lognormal(9.0, 0.5, len(d))
+    d["lgd"] = np.where(d["produto"] == "cartao", 0.75, 0.35)
+    d["taxa_efetiva"] = np.where(d["produto"] == "cartao", 2.5, 0.25)
+    d["estagio"] = rng.choice([1, 2, 3], len(d), p=[0.7, 0.2, 0.1])
+    d["elbe"] = 0.8
+    d["meses_em_default"] = rng.integers(0, 30, len(d))
+    return d.reset_index(drop=True)
+
+
+@pytest.fixture
+def df_defaults_lgd() -> pd.DataFrame:
+    """Contratos em *default* no formato **largo** (``exposicao_inicial`` + ``lgd_m*``).
+
+    Recuperação exponencial com assíntota por segmento e **censura à direita**
+    (os *defaults* recentes ainda não chegaram aos meses altos) — a situação em
+    que a coorte variável distorce a curva se não for encadeada.
+    """
+    rng = np.random.default_rng(11)
+    n, meses = 500, 37
+    segmento = np.where(rng.uniform(size=n) < 0.6, "cartao", "consignado")
+    ead0 = rng.lognormal(8.5, 0.6, n)
+    assintota = np.clip(np.where(segmento == "cartao", 0.25, 0.65)
+                        * rng.uniform(0.8, 1.2, n), 0.0, 0.95)
+    velocidade = np.where(segmento == "cartao", 0.10, 0.18)
+    t = np.arange(meses)
+    r = assintota[:, None] * (1.0 - np.exp(-velocidade[:, None] * t[None, :]))
+    observado = t[None, :] < rng.integers(3, meses + 1, n)[:, None]
+    r = np.where(observado, r, np.nan)
+
+    df = pd.DataFrame({"id_contrato": [f"D{i:04d}" for i in range(n)],
+                       "segmento": segmento, "exposicao_inicial": ead0})
+    for k in range(meses):
+        df[f"lgd_m{k}"] = 1.0 - r[:, k]
+    return df
+
+
 @pytest.fixture
 def df_eda() -> pd.DataFrame:
     """Dataset de EDA com features variadas: boa, fraca, categórica, constante,
