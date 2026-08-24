@@ -1,0 +1,199 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <style>
+
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; background: #FFFFFF; }
+    a { color: #2563EB; text-decoration: none; }
+    a:hover { color: #1D4ED8; }
+
+    .cena {
+      width: 1080px; height: 1080px; overflow: hidden;
+      background: #FFFFFF; color: #1E293B;
+      font-family: "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      font-size: 16px; line-height: 1.5;
+      display: flex; flex-direction: column;
+      padding: 60px 64px 54px;
+    }
+
+    .topo { display: flex; align-items: center; justify-content: space-between; gap: 24px;
+            padding-bottom: 16px; border-bottom: 1px solid #E7E9EE; }
+    .kicker { font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+              font-size: 15px; font-weight: 500; letter-spacing: 0.16em;
+              text-transform: uppercase; color: #6B7280; }
+    .passo { font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+             font-size: 15px; font-weight: 500; color: #94A3B8; letter-spacing: 0.08em; }
+
+    h1 { font-family: "Space Grotesk", "Helvetica Neue", Helvetica, Arial, sans-serif;
+         font-weight: 700; font-size: 54px; line-height: 1.03; letter-spacing: -0.022em;
+         margin: 26px 0 0; color: #1E293B; text-wrap: balance; }
+    .deck { font-size: 21px; line-height: 1.5; color: rgba(30,41,59,0.74);
+            margin: 15px 0 0; max-width: 880px; text-wrap: pretty; }
+
+    .formula { font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+               font-size: 19px; color: #1E293B; background: #FFFFFF;
+               border: 1px solid #CCCCCC; border-radius: 8px;
+               padding: 11px 16px; display: inline-flex; align-items: center; gap: 10px;
+               white-space: nowrap; }
+    .formula em { font-style: italic; color: #2563EB; font-weight: 500; }
+    .formula .sub { font-size: 15px; color: #6B7280; }
+
+    .grafico { margin-top: auto; }
+    .grafico svg { display: block; width: 100%; height: auto; }
+
+    .nota { border: 1px solid #CCCCCC; border-radius: 10px; background: #FFFFFF;
+            padding: 18px 22px; display: flex; gap: 16px; align-items: flex-start; }
+    .nota .marca { width: 4px; align-self: stretch; border-radius: 2px; background: #2563EB; flex: none; }
+    .nota p { margin: 0; font-size: 19px; line-height: 1.46; color: #1E293B; text-wrap: pretty; }
+    .nota strong { font-weight: 600; }
+
+    .legenda { display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: center;
+               font-size: 17px; color: #2D2D2D; }
+    .legenda .item { display: flex; align-items: center; gap: 9px; }
+    .legenda .chave { width: 22px; height: 22px; flex: none; }
+
+    /* chrome dos eixos — valores exatos do tema matplotlib do projeto */
+    .ax    { stroke: #CCCCCC; stroke-width: 0.8; fill: none; }
+    .grid  { stroke: #AAAAAA; stroke-width: 0.6; stroke-dasharray: 4 4; opacity: 0.35; fill: none; }
+    .campo { fill: #F9F9F9; }
+    .tick  { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; font-size: 15px;
+             fill: #444444; font-variant-numeric: tabular-nums; }
+    .axlab { font-family: "IBM Plex Sans", Helvetica, Arial, sans-serif; font-size: 16px;
+             fill: #2D2D2D; font-weight: 500; }
+    .marcador { font-family: "IBM Plex Sans", Helvetica, Arial, sans-serif; font-size: 17px;
+                fill: #1E293B; font-weight: 600; }
+    .mono { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; font-size: 16px;
+            fill: #1E293B; font-variant-numeric: tabular-nums; }
+    .ref   { stroke: #6B7280; stroke-width: 1.2; stroke-dasharray: 6 5; fill: none; }
+
+    .curva { fill: none; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+    .anel  { stroke: #F9F9F9; stroke-width: 2; }
+
+    /* respeita quem pediu menos movimento; o estado de repouso ja e o quadro final */
+    @media (prefers-reduced-motion: reduce) {
+      .cena *, .cena *::before, .cena *::after { animation: none !important; }
+    }
+    /* tweak "animar" desligado — mesmo caminho */
+    .anim-off *, .anim-off *::before, .anim-off *::after { animation: none !important; }
+
+    .deck em { font-style: italic; font-weight: 500; color: #1E293B; }
+    .cabeca { flex: none; }
+    .rodape { flex: none; margin-top: auto; display: flex; flex-direction: column; gap: 18px; }
+    .faixa { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; font-size: 14px;
+             letter-spacing: 0.1em; text-transform: uppercase; color: #94A3B8;
+             display: flex; gap: 24px; flex-wrap: wrap; }
+    .faixa span { white-space: nowrap; }
+    /* mono mantem o zero inconfundivel; a margem negativa fecha o vao da celula */
+    .formula sub, .formula sup { font-size: 0.7em; margin-left: -0.3em; }
+    .deck sub, .deck sup { font-size: 0.72em; }
+
+    .c-bom { stroke: #2563EB; stroke-dasharray: 808.6; stroke-dashoffset: 0;
+              animation: tracaB 9.5s linear infinite both; }
+    .c-mau { stroke: #EF4444; stroke-dasharray: 874.4; stroke-dashoffset: 0;
+              animation: tracaM 9.5s linear infinite both; }
+    .faixa-gap { fill: #6B7280; opacity: 0.12; clip-path: inset(0 0 0 0);
+                  animation: revela 9.5s linear infinite both; }
+    .tardio { opacity: 1; animation: tardio 9.5s linear infinite both; }
+    .mini { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; font-size: 15px;
+             fill: #6B7280; font-variant-numeric: tabular-nums; }
+    .hr { font-family: "Space Grotesk", Helvetica, Arial, sans-serif; font-size: 30px;
+           font-weight: 700; fill: #1E293B; }
+    .hr-txt { font-family: "IBM Plex Sans", Helvetica, Arial, sans-serif; font-size: 16px;
+               fill: #2D2D2D; }
+    .hr-sub { font-family: "IBM Plex Sans", Helvetica, Arial, sans-serif; font-size: 14px;
+               fill: #6B7280; }
+    @keyframes tracaB { 0% { stroke-dashoffset: 808.6; }
+                         50.5% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: 0; } }
+    @keyframes tracaM { 0% { stroke-dashoffset: 874.4; }
+                         50.5% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: 0; } }
+    @keyframes revela { 0% { clip-path: inset(0 100% 0 0); }
+                         50.5% { clip-path: inset(0 0 0 0); }
+                         100% { clip-path: inset(0 0 0 0); } }
+    @keyframes tardio { 0%, 50.5% { opacity: 0; }
+                         58.5% { opacity: 1; } 100% { opacity: 1; } }
+  </style>
+</helmet>
+<div class="cena {{modo}}">
+  <div class="cabeca">
+  <div class="topo">
+    <span class="kicker">Comparando grupos</span>
+    <span class="passo">cena 5 / 5</span>
+  </div>
+    <h1>Cox e os riscos proporcionais</h1>
+    <p class="deck">O modelo de Cox estima o <em>efeito</em> das covariáveis sobre o risco sem precisar assumir a forma de h<sub>0</sub>(t). O que sai dele é uma razão: quanto o risco de um grupo é maior que o do outro, a qualquer instante.</p>
+    <div class="chip-linha" style="display:flex; margin-top:24px">
+      <span class="formula"><em>h</em>(t | x) = <em>h</em><sub>0</sub>(t) · exp(β′x)<span class="sub">HR = exp(β)</span></span>
+    </div>
+  </div>
+  <div class="grafico">
+    <svg viewBox="0 0 952 400" role="img" aria-label="Duas curvas de sobrevivência que se afastam ao longo de 24 meses: rating A–B termina em 0,72 e rating D–E em 0,50, com razão de risco 2,1">
+      <rect class="campo" x="88" y="16" width="724" height="300" rx="3"/>
+<line class="grid" x1="88" y1="316" x2="812" y2="316"/>
+<line class="grid" x1="88" y1="241" x2="812" y2="241"/>
+<line class="grid" x1="88" y1="166" x2="812" y2="166"/>
+<line class="grid" x1="88" y1="91" x2="812" y2="91"/>
+<line class="grid" x1="88" y1="16" x2="812" y2="16"/>
+<line class="ax" x1="88" y1="316" x2="812" y2="316"/>
+<line class="ax" x1="88" y1="16" x2="88" y2="316"/>
+<text class="tick" x="88" y="342" text-anchor="middle">0</text>
+<text class="tick" x="269" y="342" text-anchor="middle">6</text>
+<text class="tick" x="450" y="342" text-anchor="middle">12</text>
+<text class="tick" x="631" y="342" text-anchor="middle">18</text>
+<text class="tick" x="812" y="342" text-anchor="middle">24</text>
+<text class="tick" x="76" y="321" text-anchor="end">0</text>
+<text class="tick" x="76" y="246" text-anchor="end">0,25</text>
+<text class="tick" x="76" y="171" text-anchor="end">0,50</text>
+<text class="tick" x="76" y="96" text-anchor="end">0,75</text>
+<text class="tick" x="76" y="21" text-anchor="end">1</text>
+<text class="axlab" x="812" y="372" text-anchor="end">tempo desde a originação (meses)</text>
+<text class="axlab" x="24" y="166" text-anchor="middle" transform="rotate(-90 24 166)">S(t)</text>
+      <polygon class="faixa-gap" points="88,16 148.3,16 148.3,19.6 208.7,19.6 208.7,25.6 269,25.6 269,33.7 329.3,33.7 329.3,43 389.7,43 389.7,52.6 450,52.6 450,61.9 510.3,61.9 510.3,70.6 570.7,70.6 570.7,78.4 631,78.4 631,85.3 691.3,85.3 691.3,91.3 751.7,91.3 751.7,96.4 812,96.4 812,100.6 812,100.6 812,166.4 812,166.4 812,160.2 751.7,160.2 751.7,152.5 691.3,152.5 691.3,143.2 631,143.2 631,132.2 570.7,132.2 570.7,119.3 510.3,119.3 510.3,104.3 450,104.3 450,87.7 389.7,87.7 389.7,69.9 329.3,69.9 329.3,52 269,52 269,35.8 208.7,35.8 208.7,23.5 148.3,23.5 148.3,16 88,16"/>
+      <polyline class="curva c-bom" points="88,16 148.3,16 148.3,19.6 208.7,19.6 208.7,25.6 269,25.6 269,33.7 329.3,33.7 329.3,43 389.7,43 389.7,52.6 450,52.6 450,61.9 510.3,61.9 510.3,70.6 570.7,70.6 570.7,78.4 631,78.4 631,85.3 691.3,85.3 691.3,91.3 751.7,91.3 751.7,96.4 812,96.4 812,100.6 812,100.6"/>
+      <polyline class="curva c-mau" points="88,16 148.3,16 148.3,23.5 208.7,23.5 208.7,35.8 269,35.8 269,52 329.3,52 329.3,69.9 389.7,69.9 389.7,87.7 450,87.7 450,104.3 510.3,104.3 510.3,119.3 570.7,119.3 570.7,132.2 631,132.2 631,143.2 691.3,143.2 691.3,152.5 751.7,152.5 751.7,160.2 812,160.2 812,166.4 812,166.4"/>
+      <g class="tardio">
+        <circle class="anel" cx="812" cy="100.6" r="5.5" fill="#2563EB"/>
+        <text class="marcador" x="826" y="98.6">Rating A–B</text>
+        <text class="mini" x="826" y="118.6">PD 24m = 28%</text>
+      </g>
+      <g class="tardio">
+        <circle class="anel" cx="812" cy="166.4" r="5.5" fill="#EF4444"/>
+        <text class="marcador" x="826" y="164.4">Rating D–E</text>
+        <text class="mini" x="826" y="184.4">PD 24m = 50%</text>
+      </g>
+      <g class="tardio">
+        <rect x="120" y="190" width="372" height="100" rx="10" fill="#FFFFFF" stroke="#CCCCCC"/>
+        <text class="hr" x="142" y="228">HR = 2,1</text>
+        <text class="hr-txt" x="142" y="254">risco instantâneo 2,1× maior, em qualquer t</text>
+        <text class="hr-sub" x="142" y="277">hipótese: essa razão é constante ao longo do tempo</text>
+      </g>
+    </svg>
+  </div>
+  <div class="rodape">
+    <div class="legenda">
+      <span class="item"><svg class="chave" viewBox="0 0 22 22" aria-hidden="true"><line x1="1" y1="11" x2="21" y2="11" stroke="#2563EB" stroke-width="3" stroke-linecap="round"/></svg> Rating A–B (menor risco)</span>
+      <span class="item"><svg class="chave" viewBox="0 0 22 22" aria-hidden="true"><line x1="1" y1="11" x2="21" y2="11" stroke="#EF4444" stroke-width="3" stroke-linecap="round"/></svg> Rating D–E (maior risco)</span>
+    </div>
+  <div class="nota">
+    <span class="marca"></span>
+    <p><strong>1 − S(t) é a PD acumulada até t.</strong> A curva não entrega só a PD de 12 meses: entrega a estrutura a termo inteira — que é exatamente o que a ECL lifetime pede.</p>
+  </div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{"$preview":{"width":1080,"height":1080},"animar":{"editor":"boolean","default":true}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { modo: (this.props.animar ?? true) ? 'anim-on' : 'anim-off' };
+  }
+}
+</script>
+</body>
+</html>

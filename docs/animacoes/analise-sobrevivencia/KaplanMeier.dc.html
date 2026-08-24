@@ -1,0 +1,210 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <style>
+
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; background: #FFFFFF; }
+    a { color: #2563EB; text-decoration: none; }
+    a:hover { color: #1D4ED8; }
+
+    .cena {
+      width: 1080px; height: 1080px; overflow: hidden;
+      background: #FFFFFF; color: #1E293B;
+      font-family: "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      font-size: 16px; line-height: 1.5;
+      display: flex; flex-direction: column;
+      padding: 60px 64px 54px;
+    }
+
+    .topo { display: flex; align-items: center; justify-content: space-between; gap: 24px;
+            padding-bottom: 16px; border-bottom: 1px solid #E7E9EE; }
+    .kicker { font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+              font-size: 15px; font-weight: 500; letter-spacing: 0.16em;
+              text-transform: uppercase; color: #6B7280; }
+    .passo { font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+             font-size: 15px; font-weight: 500; color: #94A3B8; letter-spacing: 0.08em; }
+
+    h1 { font-family: "Space Grotesk", "Helvetica Neue", Helvetica, Arial, sans-serif;
+         font-weight: 700; font-size: 54px; line-height: 1.03; letter-spacing: -0.022em;
+         margin: 26px 0 0; color: #1E293B; text-wrap: balance; }
+    .deck { font-size: 21px; line-height: 1.5; color: rgba(30,41,59,0.74);
+            margin: 15px 0 0; max-width: 880px; text-wrap: pretty; }
+
+    .formula { font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+               font-size: 19px; color: #1E293B; background: #FFFFFF;
+               border: 1px solid #CCCCCC; border-radius: 8px;
+               padding: 11px 16px; display: inline-flex; align-items: center; gap: 10px;
+               white-space: nowrap; }
+    .formula em { font-style: italic; color: #2563EB; font-weight: 500; }
+    .formula .sub { font-size: 15px; color: #6B7280; }
+
+    .grafico { margin-top: auto; }
+    .grafico svg { display: block; width: 100%; height: auto; }
+
+    .nota { border: 1px solid #CCCCCC; border-radius: 10px; background: #FFFFFF;
+            padding: 18px 22px; display: flex; gap: 16px; align-items: flex-start; }
+    .nota .marca { width: 4px; align-self: stretch; border-radius: 2px; background: #2563EB; flex: none; }
+    .nota p { margin: 0; font-size: 19px; line-height: 1.46; color: #1E293B; text-wrap: pretty; }
+    .nota strong { font-weight: 600; }
+
+    .legenda { display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: center;
+               font-size: 17px; color: #2D2D2D; }
+    .legenda .item { display: flex; align-items: center; gap: 9px; }
+    .legenda .chave { width: 22px; height: 22px; flex: none; }
+
+    /* chrome dos eixos — valores exatos do tema matplotlib do projeto */
+    .ax    { stroke: #CCCCCC; stroke-width: 0.8; fill: none; }
+    .grid  { stroke: #AAAAAA; stroke-width: 0.6; stroke-dasharray: 4 4; opacity: 0.35; fill: none; }
+    .campo { fill: #F9F9F9; }
+    .tick  { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; font-size: 15px;
+             fill: #444444; font-variant-numeric: tabular-nums; }
+    .axlab { font-family: "IBM Plex Sans", Helvetica, Arial, sans-serif; font-size: 16px;
+             fill: #2D2D2D; font-weight: 500; }
+    .marcador { font-family: "IBM Plex Sans", Helvetica, Arial, sans-serif; font-size: 17px;
+                fill: #1E293B; font-weight: 600; }
+    .mono { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; font-size: 16px;
+            fill: #1E293B; font-variant-numeric: tabular-nums; }
+    .ref   { stroke: #6B7280; stroke-width: 1.2; stroke-dasharray: 6 5; fill: none; }
+
+    .curva { fill: none; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+    .anel  { stroke: #F9F9F9; stroke-width: 2; }
+
+    /* respeita quem pediu menos movimento; o estado de repouso ja e o quadro final */
+    @media (prefers-reduced-motion: reduce) {
+      .cena *, .cena *::before, .cena *::after { animation: none !important; }
+    }
+    /* tweak "animar" desligado — mesmo caminho */
+    .anim-off *, .anim-off *::before, .anim-off *::after { animation: none !important; }
+
+    .deck em { font-style: italic; font-weight: 500; color: #1E293B; }
+    .cabeca { flex: none; }
+    .rodape { flex: none; margin-top: auto; display: flex; flex-direction: column; gap: 18px; }
+    .faixa { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; font-size: 14px;
+             letter-spacing: 0.1em; text-transform: uppercase; color: #94A3B8;
+             display: flex; gap: 24px; flex-wrap: wrap; }
+    .faixa span { white-space: nowrap; }
+    /* mono mantem o zero inconfundivel; a margem negativa fecha o vao da celula */
+    .formula sub, .formula sup { font-size: 0.7em; margin-left: -0.3em; }
+    .deck sub, .deck sup { font-size: 0.72em; }
+
+    .km { stroke: #2563EB; stroke-dasharray: 973; stroke-dashoffset: 0;
+           animation: desenha 10.0s linear infinite both; }
+    .cens { stroke: #2563EB; stroke-width: 2.5; stroke-linecap: round; opacity: 1;
+             animation: surge 10.0s linear infinite both; }
+    .chip { opacity: 1; animation: surge 10.0s linear infinite both; }
+    .chip-txt { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; font-size: 14px;
+                 fill: #1E293B; font-variant-numeric: tabular-nums; }
+    .ponta { opacity: 1; animation: surgeTarde 10.0s linear infinite both; }
+    @keyframes desenha { 0% { stroke-dashoffset: 973; }
+                          52% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: 0; } }
+    @keyframes surge { 0% { opacity: 0; } 4% { opacity: 1; } 100% { opacity: 1; } }
+    @keyframes surgeTarde { 0%, 52% { opacity: 0; }
+                             58% { opacity: 1; } 100% { opacity: 1; } }
+
+    .tabela { width: 100%; border-collapse: collapse; margin-top: 14px;
+               font-variant-numeric: tabular-nums; }
+    .tabela th { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+                  font-size: 13px; font-weight: 500; letter-spacing: 0.04em;
+                  color: #6B7280; text-align: right;
+                  padding: 0 0 9px; border-bottom: 1px solid #CCCCCC; white-space: nowrap; }
+    .tabela th:first-child, .tabela td:first-child { text-align: left; }
+    .tabela td { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+                  font-size: 19px; color: #1E293B; text-align: right;
+                  padding: 5px 0; border-bottom: 1px solid #E7E9EE; }
+    .tabela tbody tr { opacity: 1; animation: surge 10.0s linear infinite both; }
+    .tabela .destaque { font-weight: 500; }
+  </style>
+</helmet>
+<div class="cena {{modo}}">
+  <div class="cabeca">
+  <div class="topo">
+    <span class="kicker">O estimador</span>
+    <span class="passo">cena 3 / 5</span>
+  </div>
+    <h1>Kaplan-Meier, o produto-limite</h1>
+    <p class="deck">A curva não é ajustada: é <em>construída</em>. A cada tempo de evento ela é multiplicada pela fração de quem sobreviveu àquele instante.</p>
+    <div class="chip-linha" style="display:flex; margin-top:24px">
+      <span class="formula"><em>Ŝ</em>(t) = ∏ (1 − <em>d</em><sub>i</sub> / <em>n</em><sub>i</sub>)<span class="sub">para cada tempo de evento t<sub>i</sub> ≤ t</span></span>
+    </div>
+  </div>
+  <div class="grafico">
+    <svg viewBox="0 0 952 322" role="img" aria-label="Curva de Kaplan-Meier em degraus caindo de 1,000 a 0,360, com o fator de queda anotado em cada degrau">
+      <rect class="campo" x="88" y="14" width="822" height="236" rx="3"/>
+<line class="grid" x1="88" y1="250" x2="910" y2="250"/>
+<line class="grid" x1="88" y1="191" x2="910" y2="191"/>
+<line class="grid" x1="88" y1="132" x2="910" y2="132"/>
+<line class="grid" x1="88" y1="73" x2="910" y2="73"/>
+<line class="grid" x1="88" y1="14" x2="910" y2="14"/>
+<line class="ax" x1="88" y1="250" x2="910" y2="250"/>
+<line class="ax" x1="88" y1="14" x2="88" y2="250"/>
+<text class="tick" x="88" y="276" text-anchor="middle">0</text>
+<text class="tick" x="252.4" y="276" text-anchor="middle">3</text>
+<text class="tick" x="416.8" y="276" text-anchor="middle">6</text>
+<text class="tick" x="581.2" y="276" text-anchor="middle">9</text>
+<text class="tick" x="745.6" y="276" text-anchor="middle">12</text>
+<text class="tick" x="910" y="276" text-anchor="middle">15</text>
+<text class="tick" x="76" y="255" text-anchor="end">0</text>
+<text class="tick" x="76" y="196" text-anchor="end">0,25</text>
+<text class="tick" x="76" y="137" text-anchor="end">0,50</text>
+<text class="tick" x="76" y="78" text-anchor="end">0,75</text>
+<text class="tick" x="76" y="19" text-anchor="end">1</text>
+<text class="axlab" x="910" y="306" text-anchor="end">tempo (meses)</text>
+<text class="axlab" x="24" y="132" text-anchor="middle" transform="rotate(-90 24 132)">Ŝ(t)</text>
+      <polyline class="curva km" points="88,14 252.4,14 252.4,37.6 362,37.6 362,90.7 581.2,90.7 581.2,122.6 745.6,122.6 745.6,165 910,165"/>
+      <line class="cens" x1="307.2" y1="29.6" x2="307.2" y2="45.6" style="animation-delay: 1.39s"/>
+      <line class="cens" x1="471.6" y1="82.7" x2="471.6" y2="98.7" style="animation-delay: 2.43s"/>
+      <line class="cens" x1="690.8" y1="114.6" x2="690.8" y2="130.6" style="animation-delay: 3.81s"/>
+      <line class="cens" x1="855.2" y1="157" x2="855.2" y2="173" style="animation-delay: 4.85s"/>
+      <g class="chip" style="animation-delay: 1.19s">
+        <rect x="172.4" y="32" width="70" height="24" rx="6" fill="#FFFFFF" stroke="#CCCCCC" stroke-width="1"/>
+        <text class="chip-txt" x="207.4" y="48.5" text-anchor="middle">×0,900</text>
+      </g>
+      <g class="chip" style="animation-delay: 1.88s">
+        <rect x="282" y="55.6" width="70" height="24" rx="6" fill="#FFFFFF" stroke="#CCCCCC" stroke-width="1"/>
+        <text class="chip-txt" x="317" y="72.1" text-anchor="middle">×0,750</text>
+      </g>
+      <g class="chip" style="animation-delay: 3.27s">
+        <rect x="501.2" y="108.7" width="70" height="24" rx="6" fill="#FFFFFF" stroke="#CCCCCC" stroke-width="1"/>
+        <text class="chip-txt" x="536.2" y="125.2" text-anchor="middle">×0,800</text>
+      </g>
+      <g class="chip" style="animation-delay: 4.31s">
+        <rect x="665.6" y="140.6" width="70" height="24" rx="6" fill="#FFFFFF" stroke="#CCCCCC" stroke-width="1"/>
+        <text class="chip-txt" x="700.6" y="157.1" text-anchor="middle">×0,667</text>
+      </g>
+      <circle class="ponta anel" cx="910" cy="165" r="5.5" fill="#2563EB"/>
+    </svg>
+    <table class="tabela">
+      <thead><tr><th>t<sub>i</sub></th><th>n<sub>i</sub> sob risco</th><th>d<sub>i</sub> eventos</th><th>1 − d<sub>i</sub>/n<sub>i</sub></th><th>Ŝ(t<sub>i</sub>)</th></tr></thead>
+      <tbody>
+        <tr style="animation-delay: 1.04s"><td>3</td><td>10</td><td>1</td><td>0,900</td><td class="destaque">0,900</td></tr>
+        <tr style="animation-delay: 1.73s"><td>5</td><td>8</td><td>2</td><td>0,750</td><td class="destaque">0,675</td></tr>
+        <tr style="animation-delay: 3.12s"><td>9</td><td>5</td><td>1</td><td>0,800</td><td class="destaque">0,540</td></tr>
+        <tr style="animation-delay: 4.16s"><td>12</td><td>3</td><td>1</td><td>0,667</td><td class="destaque">0,360</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="rodape">
+  <div class="nota">
+    <span class="marca"></span>
+    <p>Em t = 5 dois contratos falham e a curva cai 25%. Em t = 7 um sai censurado: <strong>a curva não se mexe</strong>, mas o denominador do passo seguinte cai de 6 para 5.</p>
+  </div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{"$preview":{"width":1080,"height":1080},"animar":{"editor":"boolean","default":true}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { modo: (this.props.animar ?? true) ? 'anim-on' : 'anim-off' };
+  }
+}
+</script>
+</body>
+</html>

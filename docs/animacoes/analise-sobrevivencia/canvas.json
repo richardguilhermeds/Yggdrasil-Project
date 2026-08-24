@@ -1,0 +1,13 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html",        "x": 0,    "y": 0, "w": 1080, "h": 1080, "print": "fixed", "title": "1 · Análise de sobrevivência" },
+    { "file": "Censura.dc.html",     "x": 1200, "y": 0, "w": 1080, "h": 1080, "print": "fixed", "title": "2 · Censura à direita" },
+    { "file": "KaplanMeier.dc.html", "x": 2400, "y": 0, "w": 1080, "h": 1080, "print": "fixed", "title": "3 · Kaplan-Meier" },
+    { "file": "Risco.dc.html",       "x": 3600, "y": 0, "w": 1080, "h": 1080, "print": "fixed", "title": "4 · Risco instantâneo" },
+    { "file": "Cox.dc.html",         "x": 4800, "y": 0, "w": 1080, "h": 1080, "print": "fixed", "title": "5 · Cox" }
+  ],
+  "annotations": [
+    { "id": "roteiro", "x": -520, "y": 60, "w": 400, "text": "Roteiro em 5 cenas, da esquerda para a direita.\n\nCada quadro é uma cena que roda em loop.\n\nCores e chrome dos eixos seguem o tema visual do Yggdrasil-Project (skills viz e video-manim)." }
+  ],
+  "launch": { "view": "focused", "file": "Main.dc.html" }
+}

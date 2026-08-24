@@ -1,0 +1,291 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <style>
+
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; background: #FFFFFF; }
+    a { color: #2563EB; text-decoration: none; }
+    a:hover { color: #1D4ED8; }
+
+    .cena {
+      width: 1080px; height: 1080px; overflow: hidden;
+      background: #FFFFFF; color: #1E293B;
+      font-family: "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      font-size: 16px; line-height: 1.5;
+      display: flex; flex-direction: column;
+      padding: 60px 64px 54px;
+    }
+
+    .topo { display: flex; align-items: center; justify-content: space-between; gap: 24px;
+            padding-bottom: 16px; border-bottom: 1px solid #E7E9EE; }
+    .kicker { font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+              font-size: 15px; font-weight: 500; letter-spacing: 0.16em;
+              text-transform: uppercase; color: #6B7280; }
+    .passo { font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+             font-size: 15px; font-weight: 500; color: #94A3B8; letter-spacing: 0.08em; }
+
+    h1 { font-family: "Space Grotesk", "Helvetica Neue", Helvetica, Arial, sans-serif;
+         font-weight: 700; font-size: 54px; line-height: 1.03; letter-spacing: -0.022em;
+         margin: 26px 0 0; color: #1E293B; text-wrap: balance; }
+    .deck { font-size: 21px; line-height: 1.5; color: rgba(30,41,59,0.74);
+            margin: 15px 0 0; max-width: 880px; text-wrap: pretty; }
+
+    .formula { font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+               font-size: 19px; color: #1E293B; background: #FFFFFF;
+               border: 1px solid #CCCCCC; border-radius: 8px;
+               padding: 11px 16px; display: inline-flex; align-items: center; gap: 10px;
+               white-space: nowrap; }
+    .formula em { font-style: italic; color: #2563EB; font-weight: 500; }
+    .formula .sub { font-size: 15px; color: #6B7280; }
+
+    .grafico { margin-top: auto; }
+    .grafico svg { display: block; width: 100%; height: auto; }
+
+    .nota { border: 1px solid #CCCCCC; border-radius: 10px; background: #FFFFFF;
+            padding: 18px 22px; display: flex; gap: 16px; align-items: flex-start; }
+    .nota .marca { width: 4px; align-self: stretch; border-radius: 2px; background: #2563EB; flex: none; }
+    .nota p { margin: 0; font-size: 19px; line-height: 1.46; color: #1E293B; text-wrap: pretty; }
+    .nota strong { font-weight: 600; }
+
+    .legenda { display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: center;
+               font-size: 17px; color: #2D2D2D; }
+    .legenda .item { display: flex; align-items: center; gap: 9px; }
+    .legenda .chave { width: 22px; height: 22px; flex: none; }
+
+    /* chrome dos eixos — valores exatos do tema matplotlib do projeto */
+    .ax    { stroke: #CCCCCC; stroke-width: 0.8; fill: none; }
+    .grid  { stroke: #AAAAAA; stroke-width: 0.6; stroke-dasharray: 4 4; opacity: 0.35; fill: none; }
+    .campo { fill: #F9F9F9; }
+    .tick  { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; font-size: 15px;
+             fill: #444444; font-variant-numeric: tabular-nums; }
+    .axlab { font-family: "IBM Plex Sans", Helvetica, Arial, sans-serif; font-size: 16px;
+             fill: #2D2D2D; font-weight: 500; }
+    .marcador { font-family: "IBM Plex Sans", Helvetica, Arial, sans-serif; font-size: 17px;
+                fill: #1E293B; font-weight: 600; }
+    .mono { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; font-size: 16px;
+            fill: #1E293B; font-variant-numeric: tabular-nums; }
+    .ref   { stroke: #6B7280; stroke-width: 1.2; stroke-dasharray: 6 5; fill: none; }
+
+    .curva { fill: none; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+    .anel  { stroke: #F9F9F9; stroke-width: 2; }
+
+    /* respeita quem pediu menos movimento; o estado de repouso ja e o quadro final */
+    @media (prefers-reduced-motion: reduce) {
+      .cena *, .cena *::before, .cena *::after { animation: none !important; }
+    }
+    /* tweak "animar" desligado — mesmo caminho */
+    .anim-off *, .anim-off *::before, .anim-off *::after { animation: none !important; }
+
+    .deck em { font-style: italic; font-weight: 500; color: #1E293B; }
+    .cabeca { flex: none; }
+    .rodape { flex: none; margin-top: auto; display: flex; flex-direction: column; gap: 18px; }
+    .faixa { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; font-size: 14px;
+             letter-spacing: 0.1em; text-transform: uppercase; color: #94A3B8;
+             display: flex; gap: 24px; flex-wrap: wrap; }
+    .faixa span { white-space: nowrap; }
+    /* mono mantem o zero inconfundivel; a margem negativa fecha o vao da celula */
+    .formula sub, .formula sup { font-size: 0.7em; margin-left: -0.3em; }
+    .deck sub, .deck sup { font-size: 0.72em; }
+
+    .painel { font-family: "IBM Plex Sans", Helvetica, Arial, sans-serif; font-size: 16px;
+               font-weight: 600; fill: #2D2D2D; }
+    .nota-painel { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; font-size: 15px;
+                    fill: #6B7280; }
+    .nota-area { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; font-size: 14px;
+                  fill: #6B7280; }
+    .ch { stroke: #F59E0B; stroke-dasharray: 878.8; stroke-dashoffset: 0;
+           animation: tracaH 8.0s linear infinite both; }
+    .cs { stroke: #2563EB; stroke-dasharray: 828.5; stroke-dashoffset: 0;
+           animation: tracaS 8.0s linear infinite both; }
+    .area-h { fill: #F59E0B; opacity: 0.10; clip-path: inset(0 0 0 0);
+               animation: revela 8.0s linear infinite both; }
+    .tardio { opacity: 1; animation: tardio 8.0s linear infinite both; }
+    .sonda { opacity: 0; animation: sonda 8.0s linear infinite both; }
+    .haste { stroke: #94A3B8; stroke-width: 1.4; stroke-dasharray: 3 4;
+              transform: translateX(822px); animation: varre 8.0s linear infinite both; }
+    .pt-h { transform: translate(910px, 148.7px); animation: correH 8.0s linear infinite both; }
+    .pt-s { transform: translate(910px, 303.5px); animation: correS 8.0s linear infinite both; }
+
+    @keyframes tracaH { 0% { stroke-dashoffset: 878.8; }
+                         52.5% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: 0; } }
+    @keyframes tracaS { 0% { stroke-dashoffset: 828.5; }
+                         52.5% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: 0; } }
+    @keyframes revela { 0% { clip-path: inset(0 100% 0 0); }
+                         52.5% { clip-path: inset(0 0 0 0); }
+                         100% { clip-path: inset(0 0 0 0); } }
+    @keyframes varre { 0% { transform: translateX(0); }
+                        52.5%, 100% { transform: translateX(822px); } }
+    @keyframes sonda { 0% { opacity: 0; } 3% { opacity: 1; }
+                        52.5% { opacity: 1; }
+                        60.5% { opacity: 0; } 100% { opacity: 0; } }
+    @keyframes tardio { 0%, 52.5% { opacity: 0; }
+                         60.5% { opacity: 1; } 100% { opacity: 1; } }
+    @keyframes correH {
+      0% { transform: translate(88px, 176px); }
+      1.458% { transform: translate(110.8px, 162.4px); }
+      2.917% { transform: translate(133.7px, 148.7px); }
+      4.375% { transform: translate(156.5px, 130.3px); }
+      5.833% { transform: translate(179.3px, 111.8px); }
+      7.292% { transform: translate(202.2px, 94.5px); }
+      8.75% { transform: translate(225px, 77.2px); }
+      10.208% { transform: translate(247.8px, 64px); }
+      11.667% { transform: translate(270.7px, 50.9px); }
+      13.125% { transform: translate(293.5px, 44px); }
+      14.583% { transform: translate(316.3px, 37.1px); }
+      16.042% { transform: translate(339.2px, 34.8px); }
+      17.5% { transform: translate(362px, 37.1px); }
+      18.958% { transform: translate(384.8px, 44px); }
+      20.417% { transform: translate(407.7px, 50.9px); }
+      21.875% { transform: translate(430.5px, 60px); }
+      23.333% { transform: translate(453.3px, 69.2px); }
+      24.792% { transform: translate(476.2px, 78.3px); }
+      26.25% { transform: translate(499px, 87.5px); }
+      27.708% { transform: translate(521.8px, 95.2px); }
+      29.167% { transform: translate(544.7px, 102.9px); }
+      30.625% { transform: translate(567.5px, 108.1px); }
+      32.083% { transform: translate(590.3px, 113.4px); }
+      33.542% { transform: translate(613.2px, 118.7px); }
+      35% { transform: translate(636px, 124px); }
+      36.458% { transform: translate(658.8px, 127.1px); }
+      37.917% { transform: translate(681.7px, 130.1px); }
+      39.375% { transform: translate(704.5px, 133.2px); }
+      40.833% { transform: translate(727.3px, 136.2px); }
+      42.292% { transform: translate(750.2px, 138.2px); }
+      43.75% { transform: translate(773px, 140.2px); }
+      45.208% { transform: translate(795.8px, 142.2px); }
+      46.667% { transform: translate(818.7px, 144.2px); }
+      48.125% { transform: translate(841.5px, 145.4px); }
+      49.583% { transform: translate(864.3px, 146.5px); }
+      51.042% { transform: translate(887.2px, 147.6px); }
+      52.5% { transform: translate(910px, 148.7px); }
+      100% { transform: translate(910px, 148.7px); }
+    }
+    @keyframes correS {
+      0% { transform: translate(88px, 218px); }
+      1.458% { transform: translate(110.8px, 218.3px); }
+      2.917% { transform: translate(133.7px, 219.3px); }
+      4.375% { transform: translate(156.5px, 221px); }
+      5.833% { transform: translate(179.3px, 223.6px); }
+      7.292% { transform: translate(202.2px, 226.9px); }
+      8.75% { transform: translate(225px, 230.9px); }
+      10.208% { transform: translate(247.8px, 235.5px); }
+      11.667% { transform: translate(270.7px, 240.5px); }
+      13.125% { transform: translate(293.5px, 245.6px); }
+      14.583% { transform: translate(316.3px, 250.8px); }
+      16.042% { transform: translate(339.2px, 256px); }
+      17.5% { transform: translate(362px, 261px); }
+      18.958% { transform: translate(384.8px, 265.6px); }
+      20.417% { transform: translate(407.7px, 269.7px); }
+      21.875% { transform: translate(430.5px, 273.5px); }
+      23.333% { transform: translate(453.3px, 276.9px); }
+      24.792% { transform: translate(476.2px, 279.9px); }
+      26.25% { transform: translate(499px, 282.5px); }
+      27.708% { transform: translate(521.8px, 284.8px); }
+      29.167% { transform: translate(544.7px, 286.9px); }
+      30.625% { transform: translate(567.5px, 288.7px); }
+      32.083% { transform: translate(590.3px, 290.4px); }
+      33.542% { transform: translate(613.2px, 291.9px); }
+      35% { transform: translate(636px, 293.3px); }
+      36.458% { transform: translate(658.8px, 294.5px); }
+      37.917% { transform: translate(681.7px, 295.6px); }
+      39.375% { transform: translate(704.5px, 296.7px); }
+      40.833% { transform: translate(727.3px, 297.7px); }
+      42.292% { transform: translate(750.2px, 298.6px); }
+      43.75% { transform: translate(773px, 299.4px); }
+      45.208% { transform: translate(795.8px, 300.2px); }
+      46.667% { transform: translate(818.7px, 300.9px); }
+      48.125% { transform: translate(841.5px, 301.6px); }
+      49.583% { transform: translate(864.3px, 302.2px); }
+      51.042% { transform: translate(887.2px, 302.9px); }
+      52.5% { transform: translate(910px, 303.5px); }
+      100% { transform: translate(910px, 303.5px); }
+    }
+    .formula-dupla { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 24px; }
+  </style>
+</helmet>
+<div class="cena {{modo}}">
+  <div class="cabeca">
+  <div class="topo">
+    <span class="kicker">A taxa por trás da curva</span>
+    <span class="passo">cena 4 / 5</span>
+  </div>
+    <h1>Risco instantâneo, ou <em>hazard</em></h1>
+    <p class="deck">h(t) é a taxa de falha <em>entre quem chegou vivo até t</em>. O denominador são só os sobreviventes — por isso ela pode subir mesmo quando o número absoluto de eventos por mês já está caindo.</p>
+    <div class="formula-dupla">
+      <span class="formula"><em>h</em>(t) = P(evento em [t, t+Δt) | <em>T</em> ≥ t) / Δt<span class="sub">com Δt → 0</span></span>
+      <span class="formula"><em>S</em>(t) = exp(−∫₀<sup>t</sup> <em>h</em>(u) du)</span>
+    </div>
+  </div>
+  <div class="grafico">
+    <svg viewBox="0 0 952 442" role="img" aria-label="Dois painéis com o mesmo eixo de tempo: em cima a taxa de risco sobe até um pico no mês 11 e cede; embaixo a curva de sobrevivência cai mais rápido exatamente nesse pico">
+      <text class="painel" x="88" y="14">h(t) — taxa de risco instantânea (% ao mês)</text>
+      <rect class="campo" x="88" y="22" width="822" height="154" rx="3"/>
+      <line class="grid" x1="88" y1="176" x2="910" y2="176"/>
+      <text class="tick" x="76" y="181" text-anchor="end">0</text>
+      <line class="grid" x1="88" y1="111.8" x2="910" y2="111.8"/>
+      <text class="tick" x="76" y="116.8" text-anchor="end">2</text>
+      <line class="grid" x1="88" y1="47.7" x2="910" y2="47.7"/>
+      <text class="tick" x="76" y="52.7" text-anchor="end">4</text>
+      <line class="ax" x1="88" y1="176" x2="910" y2="176"/>
+      <line class="ax" x1="88" y1="22" x2="88" y2="176"/>
+      <polygon class="area-h" points="88,176 93.7,172.6 99.4,169.2 105.1,165.8 110.8,162.4 116.5,159 122.2,155.5 128,152.1 133.7,148.7 139.4,144.1 145.1,139.5 150.8,134.9 156.5,130.3 162.2,125.7 167.9,121.1 173.6,116.4 179.3,111.8 185,107.5 190.8,103.2 196.5,98.8 202.2,94.5 207.9,90.2 213.6,85.8 219.3,81.5 225,77.2 230.7,73.9 236.4,70.6 242.1,67.3 247.8,64 253.5,60.7 259.2,57.5 265,54.2 270.7,50.9 276.4,49.2 282.1,47.4 287.8,45.7 293.5,44 299.2,42.3 304.9,40.5 310.6,38.8 316.3,37.1 322,36.5 327.8,36 333.5,35.4 339.2,34.8 344.9,35.4 350.6,36 356.3,36.5 362,37.1 367.7,38.8 373.4,40.5 379.1,42.3 384.8,44 390.5,45.7 396.2,47.4 402,49.2 407.7,50.9 413.4,53.2 419.1,55.4 424.8,57.7 430.5,60 436.2,62.3 441.9,64.6 447.6,66.9 453.3,69.2 459,71.4 464.8,73.7 470.5,76 476.2,78.3 481.9,80.6 487.6,82.9 493.3,85.2 499,87.5 504.7,89.4 510.4,91.3 516.1,93.2 521.8,95.2 527.5,97.1 533.2,99 539,100.9 544.7,102.9 550.4,104.2 556.1,105.5 561.8,106.8 567.5,108.1 573.2,109.5 578.9,110.8 584.6,112.1 590.3,113.4 596,114.8 601.8,116.1 607.5,117.4 613.2,118.7 618.9,120.1 624.6,121.4 630.3,122.7 636,124 641.7,124.8 647.4,125.5 653.1,126.3 658.8,127.1 664.5,127.8 670.2,128.6 676,129.4 681.7,130.1 687.4,130.9 693.1,131.6 698.8,132.4 704.5,133.2 710.2,133.9 715.9,134.7 721.6,135.5 727.3,136.2 733,136.7 738.8,137.2 744.5,137.7 750.2,138.2 755.9,138.7 761.6,139.2 767.3,139.7 773,140.2 778.7,140.7 784.4,141.2 790.1,141.7 795.8,142.2 801.5,142.7 807.2,143.2 813,143.7 818.7,144.2 824.4,144.5 830.1,144.8 835.8,145.1 841.5,145.4 847.2,145.6 852.9,145.9 858.6,146.2 864.3,146.5 870,146.8 875.8,147 881.5,147.3 887.2,147.6 892.9,147.9 898.6,148.2 904.3,148.4 910,148.7 910,176 88,176"/>
+      <polyline class="curva ch" points="88,176 93.7,172.6 99.4,169.2 105.1,165.8 110.8,162.4 116.5,159 122.2,155.5 128,152.1 133.7,148.7 139.4,144.1 145.1,139.5 150.8,134.9 156.5,130.3 162.2,125.7 167.9,121.1 173.6,116.4 179.3,111.8 185,107.5 190.8,103.2 196.5,98.8 202.2,94.5 207.9,90.2 213.6,85.8 219.3,81.5 225,77.2 230.7,73.9 236.4,70.6 242.1,67.3 247.8,64 253.5,60.7 259.2,57.5 265,54.2 270.7,50.9 276.4,49.2 282.1,47.4 287.8,45.7 293.5,44 299.2,42.3 304.9,40.5 310.6,38.8 316.3,37.1 322,36.5 327.8,36 333.5,35.4 339.2,34.8 344.9,35.4 350.6,36 356.3,36.5 362,37.1 367.7,38.8 373.4,40.5 379.1,42.3 384.8,44 390.5,45.7 396.2,47.4 402,49.2 407.7,50.9 413.4,53.2 419.1,55.4 424.8,57.7 430.5,60 436.2,62.3 441.9,64.6 447.6,66.9 453.3,69.2 459,71.4 464.8,73.7 470.5,76 476.2,78.3 481.9,80.6 487.6,82.9 493.3,85.2 499,87.5 504.7,89.4 510.4,91.3 516.1,93.2 521.8,95.2 527.5,97.1 533.2,99 539,100.9 544.7,102.9 550.4,104.2 556.1,105.5 561.8,106.8 567.5,108.1 573.2,109.5 578.9,110.8 584.6,112.1 590.3,113.4 596,114.8 601.8,116.1 607.5,117.4 613.2,118.7 618.9,120.1 624.6,121.4 630.3,122.7 636,124 641.7,124.8 647.4,125.5 653.1,126.3 658.8,127.1 664.5,127.8 670.2,128.6 676,129.4 681.7,130.1 687.4,130.9 693.1,131.6 698.8,132.4 704.5,133.2 710.2,133.9 715.9,134.7 721.6,135.5 727.3,136.2 733,136.7 738.8,137.2 744.5,137.7 750.2,138.2 755.9,138.7 761.6,139.2 767.3,139.7 773,140.2 778.7,140.7 784.4,141.2 790.1,141.7 795.8,142.2 801.5,142.7 807.2,143.2 813,143.7 818.7,144.2 824.4,144.5 830.1,144.8 835.8,145.1 841.5,145.4 847.2,145.6 852.9,145.9 858.6,146.2 864.3,146.5 870,146.8 875.8,147 881.5,147.3 887.2,147.6 892.9,147.9 898.6,148.2 904.3,148.4 910,148.7"/>
+      <text class="painel" x="88" y="203">S(t) — proporção ainda sem evento</text>
+      <rect class="campo" x="88" y="218" width="822" height="154" rx="3"/>
+      <line class="grid" x1="88" y1="372" x2="910" y2="372"/>
+      <text class="tick" x="76" y="377" text-anchor="end">0</text>
+      <line class="grid" x1="88" y1="295" x2="910" y2="295"/>
+      <text class="tick" x="76" y="300" text-anchor="end">0,5</text>
+      <line class="grid" x1="88" y1="218" x2="910" y2="218"/>
+      <text class="tick" x="76" y="223" text-anchor="end">1</text>
+      <line class="ax" x1="88" y1="372" x2="910" y2="372"/>
+      <line class="ax" x1="88" y1="218" x2="88" y2="372"/>
+      <polyline class="curva cs" points="88,218 93.7,218 99.4,218.1 105.1,218.2 110.8,218.3 116.5,218.5 122.2,218.7 128,219 133.7,219.3 139.4,219.7 145.1,220.1 150.8,220.5 156.5,221 162.2,221.6 167.9,222.2 173.6,222.9 179.3,223.6 185,224.4 190.8,225.2 196.5,226 202.2,226.9 207.9,227.9 213.6,228.9 219.3,229.9 225,230.9 230.7,232 236.4,233.2 242.1,234.3 247.8,235.5 253.5,236.7 259.2,237.9 265,239.2 270.7,240.5 276.4,241.7 282.1,243 287.8,244.3 293.5,245.6 299.2,246.9 304.9,248.2 310.6,249.5 316.3,250.8 322,252.2 327.8,253.5 333.5,254.7 339.2,256 344.9,257.3 350.6,258.5 356.3,259.8 362,261 367.7,262.2 373.4,263.3 379.1,264.5 384.8,265.6 390.5,266.6 396.2,267.7 402,268.7 407.7,269.7 413.4,270.7 419.1,271.7 424.8,272.6 430.5,273.5 436.2,274.4 441.9,275.2 447.6,276.1 453.3,276.9 459,277.7 464.8,278.4 470.5,279.2 476.2,279.9 481.9,280.6 487.6,281.2 493.3,281.9 499,282.5 504.7,283.1 510.4,283.7 516.1,284.3 521.8,284.8 527.5,285.4 533.2,285.9 539,286.4 544.7,286.9 550.4,287.4 556.1,287.8 561.8,288.3 567.5,288.7 573.2,289.2 578.9,289.6 584.6,290 590.3,290.4 596,290.8 601.8,291.2 607.5,291.6 613.2,291.9 618.9,292.3 624.6,292.6 630.3,293 636,293.3 641.7,293.6 647.4,293.9 653.1,294.2 658.8,294.5 664.5,294.8 670.2,295.1 676,295.4 681.7,295.6 687.4,295.9 693.1,296.2 698.8,296.4 704.5,296.7 710.2,296.9 715.9,297.2 721.6,297.4 727.3,297.7 733,297.9 738.8,298.1 744.5,298.3 750.2,298.6 755.9,298.8 761.6,299 767.3,299.2 773,299.4 778.7,299.6 784.4,299.8 790.1,300 795.8,300.2 801.5,300.4 807.2,300.5 813,300.7 818.7,300.9 824.4,301.1 830.1,301.3 835.8,301.4 841.5,301.6 847.2,301.8 852.9,301.9 858.6,302.1 864.3,302.2 870,302.4 875.8,302.6 881.5,302.7 887.2,302.9 892.9,303 898.6,303.2 904.3,303.3 910,303.5"/>
+      <text class="tick" x="88" y="398" text-anchor="middle">0</text>
+      <text class="tick" x="225" y="398" text-anchor="middle">6</text>
+      <text class="tick" x="362" y="398" text-anchor="middle">12</text>
+      <text class="tick" x="499" y="398" text-anchor="middle">18</text>
+      <text class="tick" x="636" y="398" text-anchor="middle">24</text>
+      <text class="tick" x="773" y="398" text-anchor="middle">30</text>
+      <text class="tick" x="910" y="398" text-anchor="middle">36</text>
+      <text class="axlab" x="910" y="426" text-anchor="end">tempo desde a originação (meses)</text>
+      <g class="tardio">
+        <line class="ref" x1="339.2" y1="22" x2="339.2" y2="372"/>
+        <circle class="anel" cx="339.2" cy="34.8" r="5.5" fill="#F59E0B"/>
+        <circle class="anel" cx="339.2" cy="256" r="5.5" fill="#2563EB"/>
+        <text class="nota-painel" x="910" y="14" text-anchor="end">pico: 4,4% no mês 11</text>
+        <text class="nota-painel" x="910" y="203" text-anchor="end">é onde S(t) cai mais rápido</text>
+        <text class="nota-area" x="193" y="162">área sombreada = H(t), o risco acumulado</text>
+      </g>
+      <g class="sonda">
+        <line class="haste" x1="88" y1="22" x2="88" y2="372"/>
+        <circle class="pt-h anel" cx="0" cy="0" r="6" fill="#F59E0B"/>
+        <circle class="pt-s anel" cx="0" cy="0" r="6" fill="#2563EB"/>
+      </g>
+    </svg>
+  </div>
+  <div class="rodape">
+  <div class="nota">
+    <span class="marca"></span>
+    <p>Em crédito isso tem nome: <strong>curva de maturação</strong>. O risco sobe, atinge o pico por volta do mês 11 e depois cede — por isso safra nova e safra madura só se comparam pela mesma idade.</p>
+  </div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{"$preview":{"width":1080,"height":1080},"animar":{"editor":"boolean","default":true}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { modo: (this.props.animar ?? true) ? 'anim-on' : 'anim-off' };
+  }
+}
+</script>
+</body>
+</html>

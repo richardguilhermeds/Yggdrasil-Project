@@ -1,0 +1,189 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <style>
+
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; background: #FFFFFF; }
+    a { color: #2563EB; text-decoration: none; }
+    a:hover { color: #1D4ED8; }
+
+    .cena {
+      width: 1080px; height: 1080px; overflow: hidden;
+      background: #FFFFFF; color: #1E293B;
+      font-family: "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      font-size: 16px; line-height: 1.5;
+      display: flex; flex-direction: column;
+      padding: 60px 64px 54px;
+    }
+
+    .topo { display: flex; align-items: center; justify-content: space-between; gap: 24px;
+            padding-bottom: 16px; border-bottom: 1px solid #E7E9EE; }
+    .kicker { font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+              font-size: 15px; font-weight: 500; letter-spacing: 0.16em;
+              text-transform: uppercase; color: #6B7280; }
+    .passo { font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+             font-size: 15px; font-weight: 500; color: #94A3B8; letter-spacing: 0.08em; }
+
+    h1 { font-family: "Space Grotesk", "Helvetica Neue", Helvetica, Arial, sans-serif;
+         font-weight: 700; font-size: 54px; line-height: 1.03; letter-spacing: -0.022em;
+         margin: 26px 0 0; color: #1E293B; text-wrap: balance; }
+    .deck { font-size: 21px; line-height: 1.5; color: rgba(30,41,59,0.74);
+            margin: 15px 0 0; max-width: 880px; text-wrap: pretty; }
+
+    .formula { font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+               font-size: 19px; color: #1E293B; background: #FFFFFF;
+               border: 1px solid #CCCCCC; border-radius: 8px;
+               padding: 11px 16px; display: inline-flex; align-items: center; gap: 10px;
+               white-space: nowrap; }
+    .formula em { font-style: italic; color: #2563EB; font-weight: 500; }
+    .formula .sub { font-size: 15px; color: #6B7280; }
+
+    .grafico { margin-top: auto; }
+    .grafico svg { display: block; width: 100%; height: auto; }
+
+    .nota { border: 1px solid #CCCCCC; border-radius: 10px; background: #FFFFFF;
+            padding: 18px 22px; display: flex; gap: 16px; align-items: flex-start; }
+    .nota .marca { width: 4px; align-self: stretch; border-radius: 2px; background: #2563EB; flex: none; }
+    .nota p { margin: 0; font-size: 19px; line-height: 1.46; color: #1E293B; text-wrap: pretty; }
+    .nota strong { font-weight: 600; }
+
+    .legenda { display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: center;
+               font-size: 17px; color: #2D2D2D; }
+    .legenda .item { display: flex; align-items: center; gap: 9px; }
+    .legenda .chave { width: 22px; height: 22px; flex: none; }
+
+    /* chrome dos eixos — valores exatos do tema matplotlib do projeto */
+    .ax    { stroke: #CCCCCC; stroke-width: 0.8; fill: none; }
+    .grid  { stroke: #AAAAAA; stroke-width: 0.6; stroke-dasharray: 4 4; opacity: 0.35; fill: none; }
+    .campo { fill: #F9F9F9; }
+    .tick  { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; font-size: 15px;
+             fill: #444444; font-variant-numeric: tabular-nums; }
+    .axlab { font-family: "IBM Plex Sans", Helvetica, Arial, sans-serif; font-size: 16px;
+             fill: #2D2D2D; font-weight: 500; }
+    .marcador { font-family: "IBM Plex Sans", Helvetica, Arial, sans-serif; font-size: 17px;
+                fill: #1E293B; font-weight: 600; }
+    .mono { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; font-size: 16px;
+            fill: #1E293B; font-variant-numeric: tabular-nums; }
+    .ref   { stroke: #6B7280; stroke-width: 1.2; stroke-dasharray: 6 5; fill: none; }
+
+    .curva { fill: none; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+    .anel  { stroke: #F9F9F9; stroke-width: 2; }
+
+    /* respeita quem pediu menos movimento; o estado de repouso ja e o quadro final */
+    @media (prefers-reduced-motion: reduce) {
+      .cena *, .cena *::before, .cena *::after { animation: none !important; }
+    }
+    /* tweak "animar" desligado — mesmo caminho */
+    .anim-off *, .anim-off *::before, .anim-off *::after { animation: none !important; }
+
+    .deck em { font-style: italic; font-weight: 500; color: #1E293B; }
+    .cabeca { flex: none; }
+    .rodape { flex: none; margin-top: auto; display: flex; flex-direction: column; gap: 18px; }
+    .faixa { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; font-size: 14px;
+             letter-spacing: 0.1em; text-transform: uppercase; color: #94A3B8;
+             display: flex; gap: 24px; flex-wrap: wrap; }
+    .faixa span { white-space: nowrap; }
+    /* mono mantem o zero inconfundivel; a margem negativa fecha o vao da celula */
+    .formula sub, .formula sup { font-size: 0.7em; margin-left: -0.3em; }
+    .deck sub, .deck sup { font-size: 0.72em; }
+
+    .km { stroke: #2563EB; stroke-dasharray: 989.2; stroke-dashoffset: 0;
+           animation: desenha 9.0s linear infinite both; }
+    .cens { stroke: #2563EB; stroke-width: 2.5; stroke-linecap: round; opacity: 1;
+             animation: surge 9.0s linear infinite both; }
+    .ponta { opacity: 1; animation: surgeTarde 9.0s linear infinite both; }
+
+    @keyframes desenha { 0% { stroke-dashoffset: 989.2; }
+                          51.1% { stroke-dashoffset: 0; }
+                          100% { stroke-dashoffset: 0; } }
+    @keyframes surge { 0% { opacity: 0; } 5% { opacity: 1; } 100% { opacity: 1; } }
+    @keyframes surgeTarde { 0%, 51.1% { opacity: 0; }
+                             58.1% { opacity: 1; } 100% { opacity: 1; } }
+
+    .titulo-capa { font-size: 68px; }
+    .chip-linha { display: flex; gap: 14px; align-items: center; margin-top: 26px; }
+  </style>
+</helmet>
+<div class="cena {{modo}}">
+  <div class="cabeca">
+  <div class="topo">
+    <span class="kicker">Estatística aplicada a crédito</span>
+    <span class="passo">cena 1 / 5</span>
+  </div>
+    <h1 class="titulo-capa">Análise de sobrevivência</h1>
+    <p class="deck">A pergunta não é <em>se</em> o evento acontece, é <em>quando</em>. E o dado mais importante é o de quem, até agora, não teve evento nenhum.</p>
+    <div class="chip-linha">
+      <span class="formula"><em>S</em>(t) = P(<em>T</em> &gt; t)<span class="sub">probabilidade de passar de t sem evento</span></span>
+    </div>
+  </div>
+  <div class="grafico">
+    <svg viewBox="0 0 952 432" role="img" aria-label="Curva de sobrevivência de Kaplan-Meier caindo de 1,00 a 0,45 ao longo de 24 meses, com marcas de censura">
+      <rect class="campo" x="88" y="20" width="816" height="316" rx="3"/>
+<line class="grid" x1="88" y1="336" x2="904" y2="336"/>
+<line class="grid" x1="88" y1="257" x2="904" y2="257"/>
+<line class="grid" x1="88" y1="178" x2="904" y2="178"/>
+<line class="grid" x1="88" y1="99" x2="904" y2="99"/>
+<line class="grid" x1="88" y1="20" x2="904" y2="20"/>
+<line class="ax" x1="88" y1="336" x2="904" y2="336"/>
+<line class="ax" x1="88" y1="20" x2="88" y2="336"/>
+<text class="tick" x="88" y="362" text-anchor="middle">0</text>
+<text class="tick" x="224" y="362" text-anchor="middle">4</text>
+<text class="tick" x="360" y="362" text-anchor="middle">8</text>
+<text class="tick" x="496" y="362" text-anchor="middle">12</text>
+<text class="tick" x="632" y="362" text-anchor="middle">16</text>
+<text class="tick" x="768" y="362" text-anchor="middle">20</text>
+<text class="tick" x="904" y="362" text-anchor="middle">24</text>
+<text class="tick" x="76" y="341" text-anchor="end">0</text>
+<text class="tick" x="76" y="262" text-anchor="end">0,25</text>
+<text class="tick" x="76" y="183" text-anchor="end">0,50</text>
+<text class="tick" x="76" y="104" text-anchor="end">0,75</text>
+<text class="tick" x="76" y="25" text-anchor="end">1</text>
+<text class="axlab" x="904" y="392" text-anchor="end">tempo desde a originação (meses)</text>
+<text class="axlab" x="24" y="178" text-anchor="middle" transform="rotate(-90 24 178)">S(t)</text>
+      <polyline class="curva km" points="88,20 139,20 139,28.8 190,28.8 190,38.6 241,38.6 241,50 292,50 292,63.6 343,63.6 343,79.4 394,79.4 394,96.8 445,96.8 445,114.8 496,114.8 496,132.2 564,132.2 564,148.9 632,148.9 632,162.8 700,162.8 700,173.9 768,173.9 768,182.4 836,182.4 836,188.7 904,188.7 904,193.2 904,193.2"/>
+      <line class="cens" x1="162.8" y1="20.8" x2="162.8" y2="36.8" style="animation-delay: 0.42s"/>
+      <line class="cens" x1="264.8" y1="42" x2="264.8" y2="58" style="animation-delay: 1s"/>
+      <line class="cens" x1="370.2" y1="71.4" x2="370.2" y2="87.4" style="animation-delay: 1.59s"/>
+      <line class="cens" x1="468.8" y1="106.8" x2="468.8" y2="122.8" style="animation-delay: 2.15s"/>
+      <line class="cens" x1="530" y1="124.2" x2="530" y2="140.2" style="animation-delay: 2.49s"/>
+      <line class="cens" x1="598" y1="140.9" x2="598" y2="156.9" style="animation-delay: 2.88s"/>
+      <line class="cens" x1="672.8" y1="154.8" x2="672.8" y2="170.8" style="animation-delay: 3.3s"/>
+      <line class="cens" x1="734" y1="165.9" x2="734" y2="181.9" style="animation-delay: 3.64s"/>
+      <line class="cens" x1="802" y1="174.4" x2="802" y2="190.4" style="animation-delay: 4.02s"/>
+      <line class="cens" x1="870" y1="180.7" x2="870" y2="196.7" style="animation-delay: 4.41s"/>
+      <circle class="ponta anel" cx="904" cy="193.2" r="5.5" fill="#2563EB"/>
+      <text class="marcador ponta" x="894" y="227.2" text-anchor="end">S(24 m) = 0,45</text>
+    </svg>
+  </div>
+  <div class="rodape">
+    <div class="legenda">
+      <span class="item">
+        <svg class="chave" viewBox="0 0 22 22" aria-hidden="true"><line x1="11" y1="3" x2="11" y2="19" stroke="#2563EB" stroke-width="2.5" stroke-linecap="round"/><line x1="2" y1="11" x2="20" y2="11" stroke="#2563EB" stroke-width="2.5" opacity="0.35" stroke-linecap="round"/></svg>
+        marca de censura — saiu da observação sem ter tido o evento
+      </span>
+    </div>
+  <div class="nota">
+    <span class="marca"></span>
+    <p>A curva cai a cada evento observado e é <strong>atravessada, sem cair</strong>, por quem saiu antes do fim. Jogar essa gente fora é o erro que a análise de sobrevivência existe para evitar.</p>
+  </div>
+    <div class="faixa"><span>02 censura</span><span>03 Kaplan-Meier</span><span>04 risco</span><span>05 Cox</span></div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{"$preview":{"width":1080,"height":1080},"animar":{"editor":"boolean","default":true}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { modo: (this.props.animar ?? true) ? 'anim-on' : 'anim-off' };
+  }
+}
+</script>
+</body>
+</html>
