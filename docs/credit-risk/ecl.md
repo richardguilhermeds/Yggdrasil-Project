@@ -300,6 +300,10 @@ julgamento ou da projeção de um modelo satélite de `credit_risk.econometric`.
 
 ## 7. Governança
 
+> A **análise de sobrevivência** em cima destes motores (tabela de vida, log-rank, famílias
+> paramétricas com extrapolação da cauda, validação com C-index e riscos proporcionais, o estudo
+> declarativo e a interface `SurvivalUI`) está em [`survival.md`](survival.md).
+
 `report` (matplotlib) e `tracking` (MLflow) são carregados **sob demanda**; o
 núcleo roda com `numpy`/`pandas`/`scipy`/`scikit-learn` e **não** exige o extra
 `[econometric]`.
@@ -343,6 +347,7 @@ núcleo roda com `numpy`/`pandas`/`scipy`/`scikit-learn` e **não** exige o extr
 | 13 | [PD lifetime](../../notebooks/tutoriais/13_tutorial_pd_lifetime.ipynb) | censura, as 4 representações, os 5 motores, calibração e ciclo |
 | 14 | [ELBE](../../notebooks/tutoriais/14_tutorial_elbe.ipynb) | coorte variável, *workout*, desconto, add-on e LGD *in default* |
 | 15 | [CCF / EAD](../../notebooks/tutoriais/15_tutorial_ccf.ipynb) | desenhos de base, 4 medidas, higiene, bimodalidade e backtest |
+| 16 | [Interface de análise de sobrevivência](../../notebooks/tutoriais/16_tutorial_interface_sobrevivencia.ipynb) | a bancada em cima dos motores de PD lifetime: log-rank, cauda paramétrica, validação OOT e a `SurvivalUI` (ver [`survival.md`](survival.md)) |
 
 Comece pelo **12** para o mapa; vá direto ao **13**, **14** ou **15** para o módulo que
 você precisa.

@@ -24,6 +24,11 @@ Abriga:
   :func:`~yggdrasil.credit_risk.ecl.elbe_table`,
   :func:`~yggdrasil.credit_risk.ecl.reference_dataset`,
   :func:`~yggdrasil.credit_risk.ecl.ecl_table`).
+* :mod:`yggdrasil.credit_risk.survival` — **análise de sobrevivência para a PD
+  lifetime**: tabela de vida, log-rank, famílias paramétricas com extrapolação
+  da cauda, validação (backtest, C-index, calibração por decil, riscos
+  proporcionais), o estudo declarativo (:class:`~yggdrasil.credit_risk.survival.SurvivalConfig`)
+  e a interface interativa :class:`~yggdrasil.credit_risk.survival.SurvivalUI`.
 * :mod:`yggdrasil.credit_risk.econometric` — **modelos econométricos (satélite)**
   de PD, LGD e CCF: ligam as séries agregadas dos parâmetros de risco às variáveis
   macro (ARDL, ARIMA/ARIMAX, fator ``Z`` de Vasicek, beta/fractional logit,
@@ -33,13 +38,15 @@ Abriga:
 """
 from __future__ import annotations
 
-from . import capital, ecl
+from . import capital, ecl, survival
 from .ecl import ContractPanel, LifetimePD
 from .model import ModelSegmenter
+from .survival import SurvivalConfig, run_survival_study
 from .tree import TreeSegmenter
 
 __all__ = ["TreeSegmenter", "ModelSegmenter", "LifetimePD", "ContractPanel",
-           "capital", "ecl", "tree", "model", "econometric"]
+           "SurvivalConfig", "run_survival_study",
+           "capital", "ecl", "survival", "tree", "model", "econometric"]
 
 
 def __getattr__(name):
@@ -52,6 +59,10 @@ def __getattr__(name):
         from .model import ModelSegmenterUI
 
         return ModelSegmenterUI
+    if name == "SurvivalUI":
+        from .survival import SurvivalUI
+
+        return SurvivalUI
     # Modelos econométricos carregados sob demanda: só quem os usa precisa de
     # statsmodels/arch (extra 'econometric'); capital/segmentadores não os exigem.
     if name == "econometric":
@@ -62,4 +73,4 @@ def __getattr__(name):
 
 
 def __dir__():
-    return sorted(__all__ + ["TreeSegmenterUI", "ModelSegmenterUI"])
+    return sorted(__all__ + ["TreeSegmenterUI", "ModelSegmenterUI", "SurvivalUI"])

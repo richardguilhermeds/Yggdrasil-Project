@@ -20,7 +20,7 @@ O foco aplicado é o **crédito**, de forma ampla — cobrindo todo o ciclo: da 
 
 ## 📦 O que o pacote `yggdrasil` contempla hoje
 
-O código de produção vive em `yggdrasil/`, na raiz do repositório (layout *flat*): assim `import yggdrasil` funciona **sem `pip install`** — tanto no clone local (rodando da raiz) quanto no Databricks Repos, que adiciona a raiz do repo ao `sys.path`. São **oito módulos isolados** que não interferem uns nos outros: as esteiras de ML, EDA e seleção compartilham o contrato de dados `feat_*`/`dt_ref`/`amostra`/`target`; os de risco de crédito (segmentadores, capital, perda esperada e econométricos) têm contratos próprios.
+O código de produção vive em `yggdrasil/`, na raiz do repositório (layout *flat*): assim `import yggdrasil` funciona **sem `pip install`** — tanto no clone local (rodando da raiz) quanto no Databricks Repos, que adiciona a raiz do repo ao `sys.path`. São **nove módulos isolados** que não interferem uns nos outros: as esteiras de ML, EDA e seleção compartilham o contrato de dados `feat_*`/`dt_ref`/`amostra`/`target`; os de risco de crédito (segmentadores, capital, perda esperada, sobrevivência e econométricos) têm contratos próprios.
 
 ### 1. 🚂 Esteira de ML governada (`yggdrasil`)
 Avaliação completa de um modelo já treinado, orquestrada por MLflow. A entrada é uma tabela com features `feat_*`, coluna de data (`dt_ref`), coluna de amostra (`amostra`) e a variável resposta (`target`), tudo configurável via `ColumnConfig`. As amostras `DES` e `OOT` recebem análise completa; `SIMUL` e `BACKTEST` são *scoring-only* (predição mais grupo homogêneo).
@@ -147,16 +147,39 @@ r = run_study(cfg, est.pd.series, est.macro)       # seleção → ajuste → di
 r.summary(); r.projection.mean_frame()             # ranking e projeção por cenário (base/adverso/otimista)
 ```
 
+### 9. ⏳ Análise de sobrevivência para a PD lifetime (`yggdrasil.credit_risk.survival`)
+A **bancada de trabalho** em cima dos motores de estrutura a termo do `ecl`: as ferramentas que a análise de sobrevivência usa para **construir, escolher e defender** uma curva de PD *lifetime*, e a interface interativa `SurvivalUI` (7 abas, no mesmo desenho das demais UIs do `credit_risk`: cartões, console, tema claro/escuro, JSON de configuração, MLflow). O fluxo: **painel de contratos → curva (KM · hazard · paramétrica) → cauda → calibração e ciclo → validação → `LifetimePD` para o ECL**.
+
+- **Tabela de vida e log-rank** (`life_table`, `logrank_test`, `pairwise_logrank`): base em risco recontada por idade, censura, Kaplan-Meier com Greenwood, Nelson-Aalen, mediana e RMST; o teste de Mantel-Cox (e Wilcoxon) que decide se vale curva **por segmento**, com o par a par de Bonferroni para fundir grupos.
+- **Famílias paramétricas e a cauda** (`ParametricSurvival`, `fit_parametric`, `splice_curves`): exponencial, **Weibull**, log-normal, log-logística e Gompertz por máxima verossimilhança em tempo discreto (censura e truncagem à esquerda pela própria construção), ranking por AIC com a leitura do formato (maturação, corcova), e a **emenda** da curva empírica com a cauda paramétrica além da idade em que a base deixa de sustentar a taxa, casando o nível na junção.
+- **Validação** (`backtest_curve`, `discrimination_by_horizon`, `concordance_index`, `calibration_by_decile`, `ph_test`): prevista × KM observada com `z` de Greenwood por horizonte, AUC/Gini/KS do *default* em `h`, **C-index** de Harrell, decil com Hosmer-Lemeshow e o teste de **riscos proporcionais** por razão de verossimilhança; tudo num painel **fora do tempo** (`split_panel` por safra de originação, data de observação ou coluna).
+- **O estudo declarativo** (`SurvivalConfig`, `run_survival_study`): partição → curva → cauda → calibração/ciclo → validação numa passada, com a configuração em JSON viajando junto com a curva (o mesmo desenho de `StudyConfig`/`run_study` do econométrico).
+- **Painel de referência** (`make_reference_panel`): carteira sintética com maturação Weibull, covariáveis e censura informativa de processo gerador conhecido, para aprender a ferramenta e para os testes de recuperação de parâmetros.
+
+```python
+from yggdrasil.credit_risk.survival import SurvivalUI, SurvivalConfig, run_survival_study
+
+ui = SurvivalUI(df, origin_col="safra_origem", segment_col="produto", term_col="prazo",
+                features=["feat_score", "feat_ltv"], horizon=60)      # Painel · KM · Hazard · Paramétrico · Calibração & Ciclo · Validação · Exportar
+ui
+
+cfg = SurvivalConfig(origin_col="safra_origem", segment_col="produto", by="produto", method="km",
+                     tail="parametric", distribution="weibull", split="origin", split_value="2023-01-01",
+                     calibrate={"cartao": 0.078, "consignado": 0.021})
+res = run_survival_study(df, cfg)                 # partição → curva → cauda → calibração → validação OOT
+res.backtest; res.c_index; res.model.apply(carteira, age_col="idade", term_col="prazo")
+```
+
 ---
 
 ## 🗂️ Estrutura de pastas
 
 | Pasta | Conteúdo |
 |---|---|
-| `yggdrasil/` | Código-fonte principal (os oito módulos acima), na raiz do repo (layout *flat*). |
+| `yggdrasil/` | Código-fonte principal (os nove módulos acima), na raiz do repo (layout *flat*). |
 | `tests/` | Testes automatizados (`pytest`): suíte parametrizada (classificação/regressão), incluindo UI, Spark, boosting, Optuna e econométricos (`statsmodels`/`arch`) — estes *gated* pela dependência. |
 | `notebooks/tutoriais/` | Tutoriais passo a passo (índice abaixo). A lógica de produção não vive aqui. |
-| `docs/` | Metodologia (o *porquê* dos métodos), documentação dos segmentadores e da perda esperada. |
+| `docs/` | Metodologia (o *porquê* dos métodos), documentação dos segmentadores, da perda esperada e da análise de sobrevivência. |
 | `conf/` | Configuração por ambiente (dev/homolog/prod). Nunca versionar segredos. |
 | `dashboards/` | Acompanhamento de qualidade de dados, performance e drift. |
 | `jobs/` | Definições de jobs para orquestração dos pipelines. |
@@ -226,6 +249,7 @@ Todos centralizados em **[`notebooks/tutoriais/`](https://github.com/richardguil
 | 13 | [PD lifetime](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/13_tutorial_pd_lifetime.ipynb) | Aprofundamento: censura, as 4 representações da curva, os 5 motores, calibração de nível e condicionamento ao ciclo |
 | 14 | [ELBE](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/14_tutorial_elbe.ipynb) | Aprofundamento: por que a média direta da recuperação cai, horizonte de *workout*, desconto, add-on e LGD *in default* |
 | 15 | [CCF / EAD](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/15_tutorial_ccf.ipynb) | Aprofundamento: os 3 desenhos de base, as 4 medidas, higiene, bimodalidade, backtest de EAD e a ponte com o `ModelSegmenter` |
+| 16 | [Interface de análise de sobrevivência (`SurvivalUI`)](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/notebooks/tutoriais/16_tutorial_interface_sobrevivencia.ipynb) | As 7 abas da bancada de sobrevivência: tabela de vida e log-rank, hazard com covariáveis e riscos proporcionais, cauda paramétrica (Weibull, log-logística...), calibração e ciclo, validação OOT (backtest com `z`, C-index, decil) e o estudo declarativo em JSON |
 
 > O **03** cobre a seleção inteira em **duas partes que rodam em sequência**: a Parte 1
 > (`yggdrasil.feature_selection`) é a peneira do **universo de features** — centenas de colunas agrupadas
@@ -237,11 +261,13 @@ Todos centralizados em **[`notebooks/tutoriais/`](https://github.com/richardguil
 > **Trilha sugerida:** `00` → `02` (conhecer a base) → `03` (selecionar) → `04`/`06` (modelar)
 > → `07` (rastrear). Os de risco de crédito (`08`, `09`, `11`) são independentes. Na perda
 > esperada, o `12` é a visão de conjunto e o `13`/`14`/`15` são os aprofundamentos por
-> parâmetro — comece pelo `12` se quiser o mapa, ou vá direto ao módulo que você precisa.
+> parâmetro — comece pelo `12` se quiser o mapa, ou vá direto ao módulo que você precisa. O `16`
+> é a interface de sobrevivência que constrói e valida a curva de PD lifetime do `13`.
 
 > 📖 **Metodologia** (o *porquê* dos métodos, como KS, PSI/CSI, WoE/IV, ratings com fusão monotônica, SHAP e veredito de EDA): [`docs/metodologia.md`](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/docs/metodologia.md).
 > 🌳 **Árvore de segmentação unificada (classificação & regressão):** [`docs/credit-risk/tree-segmenter.md`](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/docs/credit-risk/tree-segmenter.md).
 > 💧 **PD lifetime, ELBE e CCF** (as quatro representações da curva, censura, coorte variável, desenhos de base de CCF e as referências da literatura): [`docs/credit-risk/ecl.md`](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/docs/credit-risk/ecl.md).
+> ⏳ **Análise de sobrevivência para a PD lifetime** (tabela de vida, log-rank, famílias paramétricas e a cauda, validação com C-index e riscos proporcionais, o estudo declarativo e a `SurvivalUI`): [`docs/credit-risk/survival.md`](https://github.com/richardguilhermeds/Yggdrasil-Project/blob/main/docs/credit-risk/survival.md).
 
 ---
 
