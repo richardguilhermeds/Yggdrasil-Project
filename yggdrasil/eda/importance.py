@@ -15,6 +15,7 @@ from sklearn.metrics import roc_auc_score
 
 from ..config import ColumnConfig
 from ..metrics import ks_statistic
+from ..utils.mlflow_guard import sem_autolog
 from .binning import binning_table
 from .config import EDAConfig
 from .dtypes import as_numeric, classify_features, has_target, infer_feature_kind
@@ -87,6 +88,7 @@ def mutual_information(df, cfg, eda_cfg=None, problem_type=None) -> pd.Series:
     return pd.Series(np.round(mi, 6), index=list(X.columns), name="mutual_info")
 
 
+@sem_autolog()
 def model_importance(df, cfg, eda_cfg=None, problem_type=None) -> pd.DataFrame:
     """Importância multivariada: surrogate RF (feature_importances_) + permutation."""
     eda_cfg = eda_cfg or EDAConfig()
@@ -151,6 +153,7 @@ def leakage_suspects(ranking: pd.DataFrame) -> List[str]:
     return ranking.loc[ranking["leakage_flag"], "feature"].tolist()
 
 
+@sem_autolog()
 def shap_surrogate_importance(df, cfg, eda_cfg=None, problem_type=None) -> pd.DataFrame:
     """(Opcional) Importância SHAP sobre o surrogate. Best-effort."""
     eda_cfg = eda_cfg or EDAConfig()

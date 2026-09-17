@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from ..config import ColumnConfig
+from ..utils.mlflow_guard import sem_autolog
 from .config import FeatureSelectionConfig
 
 
@@ -145,6 +146,7 @@ def maybe_sample(pdf: pd.DataFrame, cfg: FeatureSelectionConfig) -> pd.DataFrame
     return pdf
 
 
+@sem_autolog()
 def rf_importances(
     pdf: pd.DataFrame, features: List[str], target: str, problem_type: str,
     cfg: FeatureSelectionConfig,

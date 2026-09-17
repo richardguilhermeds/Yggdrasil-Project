@@ -22,6 +22,7 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 
+from ..utils.mlflow_guard import sem_autolog
 from .backend import is_pandas
 from .config import FeatureSelectionConfig
 from .importance import _impute_features, maybe_sample
@@ -68,6 +69,7 @@ def _sk_model(problem_type: str, cfg: FeatureSelectionConfig, seed: int):
                                  random_state=seed, n_jobs=-1)
 
 
+@sem_autolog()   # 1 RandomForest por iteração: sem run por trial
 def boruta_driver(
     X: pd.DataFrame, y: pd.Series, problem_type: str, cfg: FeatureSelectionConfig,
 ) -> pd.DataFrame:

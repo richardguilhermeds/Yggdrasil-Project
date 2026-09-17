@@ -41,6 +41,7 @@ from typing import List, Optional, Sequence, Tuple, Union
 import numpy as np
 import pandas as pd
 
+from ...utils.mlflow_guard import sem_autolog
 from .curves import PDCurve
 from .panel import ContractPanel
 
@@ -257,6 +258,7 @@ class DiscreteHazard:
         return np.hstack([base, Xa])
 
     # -- ajuste -----------------------------------------------------------
+    @sem_autolog()   # spline + logística do sklearn: sem run automático
     def fit(self, panel: ContractPanel, features: Optional[Sequence[str]] = None) -> "DiscreteHazard":
         """Ajusta o modelo sobre o painel pessoa-período.
 

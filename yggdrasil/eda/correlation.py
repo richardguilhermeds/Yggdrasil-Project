@@ -13,6 +13,7 @@ import pandas as pd
 from scipy.stats import chi2_contingency
 
 from ..config import ColumnConfig
+from ..utils.mlflow_guard import sem_autolog
 from .config import EDAConfig
 from .dtypes import as_numeric, categorical_features, classify_features, numeric_features
 
@@ -55,6 +56,7 @@ def cramers_v_matrix(df: pd.DataFrame, cfg: ColumnConfig, eda_cfg: Optional[EDAC
     return M.round(4)
 
 
+@sem_autolog()   # uma regressão por coluna: sem run por VIF
 def vif_table(df: pd.DataFrame, cfg: ColumnConfig, eda_cfg: Optional[EDAConfig] = None) -> pd.DataFrame:
     """VIF por feature numérica (1/(1-R²) regredindo cada uma nas demais)."""
     eda_cfg = eda_cfg or EDAConfig()

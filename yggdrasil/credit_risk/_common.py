@@ -19,6 +19,7 @@ import pandas as pd
 # limiares únicos do repositório (< PSI_STABLE estável · < PSI_SIGNIFICANT
 # atenção · acima instável) — import leve: monitoring.psi só usa numpy/pandas.
 from ..monitoring.psi import PSI_SIGNIFICANT, PSI_STABLE
+from ..utils.mlflow_guard import sem_autolog
 
 
 def fmt(x: float) -> str:
@@ -135,9 +136,14 @@ def fit_optbinning_splits(b, x, y) -> list:
 
     ``ValueError`` (problema inviável / sem corte) é o caminho esperado e fica
     silencioso. Qualquer outra exceção (ex.: incompatibilidade de versão de
-    dependência) é **avisada** em vez de mascarada como "sem corte válido"."""
+    dependência) é **avisada** em vez de mascarada como "sem corte válido".
+
+    O ajuste roda sob :func:`~yggdrasil.utils.mlflow_guard.sem_autolog`: o
+    pré-binning do optbinning é uma ``DecisionTree`` do sklearn, e com o
+    autologging do Databricks ligado cada variável binada abriria um run MLflow
+    (o ranking de 80 candidatas viraria 80 runs, e a UI só abriria no fim)."""
     try:
-        with warnings.catch_warnings():
+        with warnings.catch_warnings(), sem_autolog():
             warnings.simplefilter("ignore")
             with np.errstate(divide="ignore", invalid="ignore"):
                 b.fit(x, y)

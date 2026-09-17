@@ -433,6 +433,7 @@ class ModelSegmenterUI:
         self._an_opts_syncing: bool = False
         self._build()
         self._refresh_bar()
+        self._aviso_autolog()
         # ranking calculado JÁ na abertura: a aba Variáveis é a primeira coisa que
         # se olha, e um placeholder pedindo um clique atrasava a leitura. O custo
         # é o optbinning de cada candidata — some no tempo de montar a UI.
@@ -889,6 +890,24 @@ class ModelSegmenterUI:
         if max_height:
             html = f"<div style='max-height:{max_height};overflow:auto'>{html}</div>"
         return html
+
+    def _aviso_autolog(self):
+        """Diz no console que o autologging do ambiente foi neutralizado.
+
+        No Databricks (runtime ML) o autolog vem ligado e abre um run MLflow a
+        cada ``fit`` do sklearn — inclusive os de bastidor (uma árvore por
+        variável no pré-binning do optbinning, um pipeline por trial do Optuna,
+        um por passo do backward). O yggdrasil os suprime
+        (:func:`yggdrasil.utils.sem_autolog`); o registro continua explícito, em
+        'Validar & Exportar' ou em ``seg.log_to_mlflow(...)``."""
+        from ...utils.mlflow_guard import mlflow_autolog_status
+        st = mlflow_autolog_status()
+        if st["suprimido"] and st["integracoes"]:
+            self._log(f"[mlflow] autologging do ambiente ativo "
+                      f"({', '.join(st['integracoes'])}) — suprimido nos ajustes internos "
+                      "(binning, tuning, backward, ratings) para não abrir um run por fit. "
+                      "O registro do modelo segue explícito (aba Validar & Exportar). "
+                      "Para devolver: yggdrasil.utils.set_mlflow_autolog(True).")
 
     def _log(self, msg):
         # mantém só as últimas 40 linhas: reescreve a área (clear_output) em vez de

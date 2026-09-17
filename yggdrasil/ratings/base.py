@@ -21,6 +21,7 @@ import pandas as pd
 
 from ..config import ColumnConfig
 from ..utils import idx_para_letra
+from ..utils.mlflow_guard import sem_autolog
 from .monotonic import fundir_por_inversao
 
 
@@ -101,6 +102,7 @@ class RatingStrategy(ABC):
             return f"R{ordinal + 1:02d}"
         return idx_para_letra(ordinal)
 
+    @sem_autolog()   # a árvore/optbin do binner é sklearn: sem run por rating
     def fit(self, df: pd.DataFrame, cfg: ColumnConfig, problem_type: str = "regression"):
         self._problem_type = problem_type
         dev = df[df[cfg.sample_col] == cfg.dev_sample]

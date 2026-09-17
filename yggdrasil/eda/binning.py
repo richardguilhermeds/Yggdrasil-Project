@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from ..config import ColumnConfig
+from ..utils.mlflow_guard import sem_autolog
 from .config import EDAConfig
 from .dtypes import as_numeric, has_target, infer_feature_kind
 
@@ -21,6 +22,7 @@ MISSING = "MISSING"
 OUTROS = "OUTROS"
 
 
+@sem_autolog()   # árvore/optbinning por variável: sem run por bin
 def _numeric_edges(method, xnum, target, problem_type, n_bins):
     """Cortes para feature numérica conforme o método (com fallbacks)."""
     x = xnum.dropna()

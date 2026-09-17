@@ -41,6 +41,7 @@ from ...config import ColumnConfig
 from ...metrics import bootstrap_metric_ci, classification_metrics, regression_metrics
 from ...metrics.shift import HIGHER_IS_BETTER as _HIGHER_IS_BETTER
 from ...ratings import RATING_REGISTRY
+from ...utils.mlflow_guard import sem_autolog
 # helpers puros compartilhados com o TreeSegmenter (fonte única — sem drift)
 from .._common import (
     fmt as _fmt,
@@ -2745,6 +2746,7 @@ class ModelSegmenter:
         if pandas_out:      # dict por NOME exige que o estimador veja um DataFrame
             pipe.named_steps["pre"].set_output(transform="pandas")
 
+    @sem_autolog()
     def fit(self, algorithm=None, hyperparams=None, features=None, transform="raw",
             class_balance=False, monotone=None):
         """Treina um modelo na amostra de referência (DES) com as variáveis
@@ -2828,6 +2830,7 @@ class ModelSegmenter:
         self._shap_cache = {}
         return self
 
+    @sem_autolog()
     def fit_two_stage(self, threshold, clf_algorithm="logistica", reg_algorithm="linear",
                       clf_hyperparams=None, reg_hyperparams=None, features=None,
                       transform="raw"):
@@ -2948,6 +2951,7 @@ class ModelSegmenter:
             rows.append(row)
         return pd.DataFrame(rows)
 
+    @sem_autolog()
     def tune_optuna(self, algorithm=None, n_trials=30, transform="raw", features=None,
                     timeout=None, random_state=None, fit_best=True, verbose=False,
                     progress_callback=None, log_mlflow=False, mlflow_experiment=None,
@@ -3741,6 +3745,7 @@ class ModelSegmenter:
         return out
 
     @staticmethod
+    @sem_autolog()
     def _vif_values_sklearn(X) -> list:
         """Fallback do VIF sem ``statsmodels``: ``1/(1−R²)`` da regressão de cada
         coluna sobre as demais via ``sklearn.LinearRegression`` (com intercepto —
@@ -3873,6 +3878,7 @@ class ModelSegmenter:
         c = self._apply_calibration(r) if self.calibration_ is not None else r
         return y, r, np.asarray(c, dtype="float64")
 
+    @sem_autolog()
     def calibrate(self, method="intercept", sample=None, target_rate=None,
                   mode="aditivo"):
         """Ajusta uma camada de **calibração pós-treino** sobre o score CRU
@@ -4225,6 +4231,7 @@ class ModelSegmenter:
             out[f"{c}_significancia"] = "degradacao_real" if piora else "dentro_do_ruido"
         return out
 
+    @sem_autolog()
     def backward_elimination(self, sample=None, min_features=1, features=None, algorithm=None,
                              transform=None, hyperparams=None, n_repeats=3,
                              importance_sample_size=5000, random_state=None,
@@ -5914,6 +5921,7 @@ class ModelSegmenter:
             wf["_amostra"] = self.ref_sample
         return wf
 
+    @sem_autolog()
     def build_ratings(self, method="quantil", n_ratings=10, monotonic_fusion=True,
                       alpha=0.05, label_style=None, cuts=None, percentiles=None):
         """Segmenta o score em ratings ordenados. ``method`` ∈ {decis, quantil,
@@ -5986,6 +5994,7 @@ class ModelSegmenter:
             return float("nan")
         return float(classification_metrics(y[ok], sc[ok]).get("gini", np.nan))
 
+    @sem_autolog()
     def suggest_n_ratings(self, method="quantil", n_min=3, n_max=15,
                           monotonic_fusion=True, alpha=0.05, min_repr=0.02) -> dict:
         """Deixa o algoritmo escolher o nº de ratings. Testa de ``n_max`` a ``n_min``

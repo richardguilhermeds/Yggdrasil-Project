@@ -6,6 +6,7 @@ import logging
 from typing import Optional  # noqa: F401  (mantido p/ compat de imports externos)
 
 from .keepalive import ClusterKeepAlive, keep_cluster_alive, stop_keep_alive
+from .mlflow_guard import mlflow_autolog_status, sem_autolog, set_mlflow_autolog
 
 
 def idx_para_letra(idx: int) -> str:
@@ -37,4 +38,5 @@ def get_logger(name: str = "yggdrasil", level: int = logging.INFO) -> logging.Lo
 
 
 __all__ = ["idx_para_letra", "get_logger",
-           "ClusterKeepAlive", "keep_cluster_alive", "stop_keep_alive"]
+           "ClusterKeepAlive", "keep_cluster_alive", "stop_keep_alive",
+           "sem_autolog", "set_mlflow_autolog", "mlflow_autolog_status"]

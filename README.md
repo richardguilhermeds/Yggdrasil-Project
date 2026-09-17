@@ -179,6 +179,15 @@ pip install -e ".[pycaret]"      # opcional: treino automatizado via PyCaret
 
 > Localmente, o MLflow 3.x exige `MLFLOW_ALLOW_FILE_STORE=true` para usar o backend `./mlruns` (os notebooks já definem isso). No Databricks, use o tracking do workspace.
 
+> **Autologging do MLflow (Databricks).** Nos runtimes ML o autolog vem ligado e abre um run a cada
+> `fit` do `sklearn` — inclusive os de bastidor: o pré-binning do `optbinning` roda uma árvore por
+> variável, então abrir a `ModelSegmenterUI` com 80 candidatas virava 80 runs e a interface só
+> aparecia no fim. O pacote **suprime o autolog nos ajustes internos** (binning, tuning, backward,
+> VIF, ratings, seleção de variáveis); o registro segue **explícito** — `log_to_mlflow(...)`,
+> `tune_optuna(log_mlflow=True)`, `MLPipeline.run(...)`. Para devolver o autolog do ambiente:
+> `yggdrasil.utils.set_mlflow_autolog(True)` ou `YGGDRASIL_MLFLOW_AUTOLOG=1`; para ver o estado,
+> `yggdrasil.utils.mlflow_autolog_status()`.
+
 ## 🚀 Uso rápido
 
 ```python
