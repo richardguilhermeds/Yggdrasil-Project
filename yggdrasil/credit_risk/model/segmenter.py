@@ -339,8 +339,10 @@ def _pontos_dispersao(n: int, seed, *eixos) -> tuple:
     inteira. Acima disso, ``amostra`` é uma amostra UNIFORME fixa (``seed``),
     fiel à densidade por construção, e ``extremos`` são os
     :data:`_EXTREMOS_POR_PONTA` maiores e menores valores de cada eixo de
-    ``eixos`` (empates sorteados, para não depender da ordem das linhas), que
-    o gráfico desenha numa camada à parte, com legenda própria.
+    ``eixos`` (empates no corte sorteados, para não depender da ordem das
+    linhas; um empate maior que o necessário é massa, não extremo, e fica só
+    na amostra), que o gráfico desenha numa camada à parte, com legenda
+    própria (:func:`_legenda_nuvem`).
 
     Com milhões de pontos o ``scatter`` levava ~10 s por gráfico e cada Figure
     guardada pela UI (troca de tema) retinha ~50 MB; só a amostra, porém,
@@ -365,6 +367,12 @@ def _pontos_dispersao(n: int, seed, *eixos) -> tuple:
             corte = np.partition(w, len(w) - m)[len(w) - m]
             acima = np.flatnonzero(w > corte)
             iguais = np.flatnonzero(w == corte)
+            if len(iguais) > m:
+                # empate maciço no corte (grade de rating, zeros da LGD, modelo
+                # constante): é massa da distribuição, não extremo; a amostra
+                # uniforme já a mostra
+                extremos.append(finitos[acima])
+                continue
             sorteio = rng.choice(iguais, m - len(acima), replace=False)
             extremos.append(finitos[np.concatenate([acima, sorteio])])
     ext = np.unique(np.concatenate(extremos)) if extremos else np.array([], dtype=int)
@@ -386,6 +394,17 @@ def _desenha_nuvem(ax, x, y, amostra, extremos, n, **kw) -> bool:
                    edgecolors="none", zorder=kw.get("zorder", 1) + 0.5,
                    label=f"extremos: {_EXTREMOS_POR_PONTA} maiores e menores por eixo")
     return True
+
+
+def _legenda_nuvem(ax) -> None:
+    """Legenda da nuvem amostrada ABAIXO do eixo x, fora da área de dados: no
+    canto ela cobria justamente os resíduos extremos (em LGD/CCF os mais
+    negativos ficam no canto inferior direito). As chaves saem opacas; com o
+    alpha da nuvem (0,16) a da amostra ficava invisível."""
+    leg = ax.legend(fontsize=7.5, loc="upper center", bbox_to_anchor=(0.5, -0.16),
+                    ncol=3, frameon=False, handletextpad=0.3, columnspacing=1.2)
+    for h in (getattr(leg, "legend_handles", None) or getattr(leg, "legendHandles", [])):
+        h.set_alpha(1.0)
 
 
 def _is_stability_sample(name) -> bool:
@@ -5218,7 +5237,7 @@ class ModelSegmenter:
                         bbox=dict(boxstyle="round,pad=0.3", fc="white",
                                   ec="#c9d4df", alpha=0.85))
             if amostrada:
-                ax.legend(fontsize=7.5, loc="lower right", framealpha=0.85)
+                _legenda_nuvem(ax)
         lim = [min(ax.get_xlim()[0], ax.get_ylim()[0]), max(ax.get_xlim()[1], ax.get_ylim()[1])]
         ax.plot(lim, lim, color="#bbb", ls="--", lw=1)
         ax.set_xlabel("previsto"); ax.set_ylabel("observado")
@@ -5244,7 +5263,7 @@ class ModelSegmenter:
                                    color="#3b6ea5")
         ax.axhline(0, color="#d6453e", lw=1)
         if amostrada:
-            ax.legend(fontsize=7.5, loc="lower right", framealpha=0.85)
+            _legenda_nuvem(ax)
         ax.set_xlabel("previsto"); ax.set_ylabel("resíduo (obs − prev)")
         _pct_axis(ax, "both")                               # unidade do alvo, em %
         ax.set_title(f"Resíduos · {sample or self.ref_sample}", fontsize=11,

@@ -116,6 +116,11 @@ def test_nuvem_amostrada_com_extremos_em_camada_propria(monkeypatch):
         camadas = [c.get_offsets() for c in ax.collections if isinstance(c, PathCollection)]
         leg = ax.get_legend()
         rotulos = [t.get_text() for t in leg.get_texts()] if leg else []
+        if leg is not None:              # legenda fora da área de dados, chaves opacas
+            r = fig.canvas.get_renderer()
+            assert not leg.get_window_extent(r).overlaps(ax.get_window_extent(r))
+            chaves = getattr(leg, "legend_handles", None) or leg.legendHandles
+            assert all(h.get_alpha() == 1.0 for h in chaves)
         return camadas, ax.get_ylim(), [t.get_text() for t in ax.texts], rotulos
 
     n_des = int(seg._fit_mask().sum())
@@ -152,14 +157,26 @@ def test_nuvem_amostra_fiel_e_extremos_sorteados_nos_empates(monkeypatch):
     assert abs((y[amostra] > 0).mean() - (y > 0).mean()) < 0.05
     nao_curados = y[amostra][y[amostra] > 0]
     assert abs((nao_curados < np.median(y[y > 0])).mean() - 0.5) < 0.1
-    for eixo in (prev, y):                    # por valor: há empates no corte
-        np.testing.assert_array_equal(np.sort(eixo[ext])[-50:], np.sort(eixo)[-50:])
-        np.testing.assert_array_equal(np.sort(eixo[ext])[:50], np.sort(eixo)[:50])
-    # eixo empatado (duas grades), linhas ordenadas: sorteio entre os empates
+    for eixo in (prev, y):
+        for w in (eixo, -eixo):           # o que passa estritamente do corte entra
+            corte = np.sort(w)[-50]
+            assert set(np.flatnonzero(w > corte)) <= set(ext)
+    np.testing.assert_array_equal(np.sort(y[ext])[-50:], np.sort(y)[-50:])
+    # zeros da LGD (empate maciço no mínimo) não viram "extremos" em massa: só
+    # os que já são extremos do previsto (no máximo 2 × 50)
+    assert (y[ext] == 0).sum() <= 100
+    # empate maciço no extremo (duas grades de rating): é massa, não extremo
     grade = np.repeat([0.1, 0.9], n // 2)
     _a, ext_g = segmod._pontos_dispersao(n, 42, grade)
-    topo = ext_g[ext_g >= n // 2]
-    assert len(topo) == 50 and n // 2 + n // 8 < topo.mean() < n - n // 8
+    assert len(ext_g) == 0
+    # empate pequeno no corte, nas últimas linhas: sorteado, não "as últimas"
+    v = np.arange(n, dtype=float)
+    v[-40:] = n + 1.0                            # 40 empatados no topo
+    v[:30] = n + 2.0                             # 30 acima do corte
+    _a, ext_v = segmod._pontos_dispersao(n, 42, v)
+    topo = ext_v[v[ext_v] >= n + 1.0]
+    assert len(topo) == 50 and set(range(30)) <= set(topo)
+    assert set(topo[topo >= n - 40]) != set(range(n - 20, n))
 
 
 # ----------------------------------------------------------------------
