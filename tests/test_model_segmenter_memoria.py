@@ -169,6 +169,41 @@ def test_vif_nao_contaminado_por_dummies_completas():
                                rtol=1e-8)
 
 
+def test_vif_com_one_hot_completo_independe_dos_blocos(monkeypatch):
+    """One-hot completo (colinear com o intercepto) + numéricas, acumulado em
+    1, 4 ou 10 blocos: o VIF das numéricas tem de bater com a regressão direta
+    no desenho sem a dummy de referência. Com o corte padrão do lstsq o ruído
+    da colinearidade exata, que cresce com o nº de blocos, inflava esses VIFs
+    (ex.: 1,59 no lugar de 1,23; 7,30 no lugar de 3,19). Varredura de 40
+    bases da revisão pré-release, com a mesma sequência aleatória."""
+    rng = np.random.default_rng(7)
+    for _ in range(40):
+        n = int(rng.choice([20000, 100000]))
+        p = int(rng.integers(1, 4))
+        L = int(rng.integers(2, 8))
+        c = rng.integers(0, L, n)
+        num = rng.normal(size=(n, p)) @ (np.eye(p) + 0.6 * rng.normal(size=(p, p)))
+        num[:, 0] += 0.5 * c
+        completo = np.column_stack([num, np.eye(L)[c]])
+        ref = ModelSegmenter._vif_values_sklearn(
+            np.column_stack([num, np.eye(L)[c][:, 1:]]))[:p]
+        for bloco in (250_000, n // 4 + 1, n // 10 + 1):
+            monkeypatch.setattr(ModelSegmenter, "_CHUNK_ROWS", bloco)
+            v = ModelSegmenter._vif_values(completo)
+            np.testing.assert_allclose(v[:p], ref, rtol=1e-6)
+            assert all(np.isinf(x) for x in v[p:])
+
+
+def test_vif_ignora_linhas_nao_finitas():
+    rng = np.random.default_rng(3)
+    X = rng.normal(500, 3, size=(3000, 3))
+    X[10, 1] = np.inf
+    X[20, 2] = np.nan
+    ok = np.isfinite(X).all(axis=1)
+    np.testing.assert_allclose(ModelSegmenter._vif_values(X),
+                               ModelSegmenter._vif_values_sklearn(X[ok]), rtol=1e-8)
+
+
 def test_vif_colunas_quase_duplicadas_de_credito():
     """Saldo e saldo + encargos (correlação ~1 − 1e-10) não podem esconder a
     colinearidade de encargos_mes: o VIF segue o da regressão direta (~50),
@@ -249,41 +284,39 @@ def test_bootstrap_multimetrica_com_callable_e_r2():
 # ----------------------------------------------------------------------
 # Salvaguardas: Decimal do Spark e one-hot denso que não cabe na RAM
 # ----------------------------------------------------------------------
-def test_decimal_do_spark_vira_numerica():
+def test_decimal_do_spark_avisa_e_nao_converte():
+    """Decimal (DecimalType do toPandas) em candidata: aviso explícito com o
+    cast a fazer na origem, e nenhuma conversão implícita (treino, escoragem
+    distribuída e modelos salvos continuam vendo o mesmo tipo)."""
     df = _base("classification")
     df["valor"] = [decimal.Decimal(f"{v:.2f}") for v in df["x3"] * 1000]
     df.loc[df.index[:5], "valor"] = None
-    seg = _seg(df, "classification")
-    assert seg.df["valor"].dtype == np.float64
-    assert seg._detect_kind("valor") == "num"
-    assert seg.df["valor"].isna().sum() == 5
-    assert df["valor"].dtype == object              # DataFrame do usuário intacto
-    seg.fit("logistica", features=["x0", "valor"])  # sem one-hot de milhares de níveis
-    assert seg.model_coefficients().shape[0] == 2
+    with pytest.warns(UserWarning, match=r"DecimalType.*\['valor'\].*cast\('double'\)"):
+        seg = _seg(df, "classification")
+    assert seg.decimal_cols_ == ["valor"]
+    assert seg.df["valor"].dtype == object
+    assert seg._detect_kind("valor") == "cat"
+    seg.fit("logistica", features=["x0", "x1"])      # demais variáveis seguem normais
+    assert seg.score_.notna().all()
 
 
-def test_decimal_so_no_alvo_e_nas_candidatas():
-    """Chave (DecimalType(20,0) acima de 2**53), amostra Decimal e colunas fora
-    do modelo saem intactas; a contagem escala 0 vira int64 e o alvo Decimal,
-    float64."""
+def test_aviso_de_decimal_so_no_alvo_e_nas_candidatas(recwarn):
+    """Chave, amostra e colunas fora do modelo não entram no aviso; nada é
+    convertido, então a exportação (assign) devolve as chaves intactas."""
     D = decimal.Decimal
     df = _base("regression")
     n = len(df)
-    df["contrato"] = [D(10 ** 19 + i) for i in range(n)]            # chave > 2**53
-    df["parcelas"] = [D(int(v)) for v in np.arange(n) % 48]         # escala 0
-    df["target"] = [D(f"{v:.6f}") for v in df["target"]]            # LGD decimal(10,6)
-    df["lote"] = [D(i % 7) for i in range(n)]                       # fora do modelo
+    df["contrato"] = [D(10 ** 19 + i) for i in range(n)]
+    df["parcelas"] = [D(int(v)) for v in np.arange(n) % 48]
+    df["lote"] = [D(i % 7) for i in range(n)]
     df["amostra"] = [D(1) if a == "DES" else D(2) for a in df["amostra"]]
     seg = ModelSegmenter(df, target="target", task_type="regression",
                          sample_col="amostra", ref_sample=D(1), verbose=False,
-                         features=["x0", "x2", "parcelas", "contrato"])
-    assert seg.df["target"].dtype == np.float64
-    assert seg.df["parcelas"].dtype == np.int64
-    assert seg.df["contrato"].dtype == object                        # não converte
-    assert seg.df["contrato"].nunique() == n
-    assert seg.df["lote"].dtype == object and seg.df["amostra"].dtype == object
-    assert set(seg._samples()) == {D(1), D(2)}
-    seg.fit("linear", features=["x0", "x2", "parcelas"])
+                         features=["x0", "x2", "parcelas"])
+    assert seg.decimal_cols_ == ["parcelas"]
+    avisos = [str(w.message) for w in recwarn.list if "DecimalType" in str(w.message)]
+    assert len(avisos) == 1 and "contrato" not in avisos[0] and "lote" not in avisos[0]
+    seg.fit("linear", features=["x0", "x2"])
     out = seg.assign()
     assert out["contrato"].tolist() == df["contrato"].tolist()
     assert list(seg.metrics()["amostra"]) == [D(1), D(2)]
@@ -291,17 +324,18 @@ def test_decimal_so_no_alvo_e_nas_candidatas():
 
 def test_colunas_com_nome_duplicado_nao_quebram_a_construcao():
     """``join`` + ``toPandas()`` no Spark deixa nomes repetidos: o segmenter
-    continua sendo construído (e a Decimal repetida é convertida nas duas)."""
+    continua sendo construído (a detecção de Decimal percorre por posição)."""
     df = _base("classification")
     extra = pd.DataFrame({"cat": df["cat"],
                           "v": [decimal.Decimal("1.5")] * len(df)}, index=df.index)
     extra2 = pd.DataFrame({"v": [decimal.Decimal("2.5")] * len(df)}, index=df.index)
     df = pd.concat([df, extra, extra2], axis=1)
     assert list(df.columns).count("cat") == 2 and list(df.columns).count("v") == 2
-    seg = ModelSegmenter(df, target="target", task_type="classification",
-                         sample_col="amostra", ref_sample="DES", verbose=False,
-                         features=["x0", "x1", "v"])
-    assert (seg.df.dtypes[seg.df.columns == "v"] == np.float64).all()
+    with pytest.warns(UserWarning, match="DecimalType"):
+        seg = ModelSegmenter(df, target="target", task_type="classification",
+                             sample_col="amostra", ref_sample="DES", verbose=False,
+                             features=["x0", "x1", "v"])
+    assert seg.decimal_cols_ == ["v"]
     seg.fit("logistica", features=["x0", "x1"])
     assert seg.score_.notna().all()
 
@@ -311,6 +345,7 @@ def test_texto_nao_e_convertido():
     seg = _seg(df, "classification")
     assert not pd.api.types.is_numeric_dtype(seg.df["cat"])   # object ou str (pandas 3)
     assert seg._detect_kind("cat") == "cat"
+    assert seg.decimal_cols_ == []
 
 
 def test_one_hot_que_nao_cabe_levanta_memory_error(monkeypatch):
@@ -350,11 +385,10 @@ def test_folga_do_cgroup_v1_e_v2(tmp_path):
 
 
 @pytest.mark.parametrize("transform", ["raw", "woe"])
-def test_modelo_salvo_antes_da_conversao_carrega_igual(tmp_path, transform):
-    """JSON sem ``decimal_to_numeric`` (salvo pela versão anterior, que tratava
-    Decimal como categórica): o load não converte e o score volta idêntico.
-    JSON novo: a mesma decisão de conversão é repetida no load."""
-    import json
+def test_modelo_com_decimal_salvo_carrega_e_escora_igual(tmp_path, transform):
+    """Sem conversão implícita, um modelo treinado com Decimal (categórica)
+    volta idêntico do save/load, com o df cru ou com o df do próprio
+    segmenter, e predict sobre a base crua bate com o score_."""
     rng = np.random.default_rng(5)
     n = 4000
     taxas = np.array([decimal.Decimal(v) for v in ("0.05", "0.10", "0.25", "0.50")],
@@ -362,28 +396,25 @@ def test_modelo_salvo_antes_da_conversao_carrega_igual(tmp_path, transform):
     df = pd.DataFrame({"x": rng.normal(size=n), "taxa": taxas[rng.integers(0, 4, n)]})
     df["target"] = (rng.random(n) < 0.3).astype(int)
     df["amostra"] = np.where(rng.random(n) < 0.7, "DES", "OOT")
+    with pytest.warns(UserWarning, match="DecimalType"):
+        seg = _seg(df, "classification")
+    seg.fit("logistica", transform=transform)
+    caminho = str(tmp_path / "m.json")
+    seg.save(caminho)
+    for base in (df, seg.df, None):
+        with pytest.warns(UserWarning, match="DecimalType"):
+            volta = _seg(df, "classification").load(caminho, base)
+        np.testing.assert_allclose(volta.score_.to_numpy(), seg.score_.to_numpy(),
+                                   atol=1e-12)
+    np.testing.assert_allclose(seg.predict(df)["score"].to_numpy() / 1000,
+                               seg.score_.to_numpy(), atol=1e-12)
 
-    legado = _seg(df, "classification", decimal_to_numeric=False)   # como a 0.0.12
-    assert legado.df["taxa"].dtype == object and legado.decimal_cols_ == []
-    legado.fit("logistica", transform=transform)
-    caminho = str(tmp_path / "legado.json")
-    legado.save(caminho)
-    cfg = json.loads(open(caminho).read())
-    cfg.pop("decimal_to_numeric")                  # JSON da versão anterior
-    open(caminho, "w").write(json.dumps(cfg))
-    volta = _seg(df, "classification").load(caminho, df)
-    assert volta.df["taxa"].dtype == object
-    np.testing.assert_allclose(volta.score_.to_numpy(), legado.score_.to_numpy(),
-                               atol=1e-12)
-    np.testing.assert_allclose(volta.predict(df)["score"].to_numpy() / 1000,
-                               volta.score_.to_numpy(), atol=1e-12)
 
-    novo = _seg(df, "classification")
-    assert novo.decimal_cols_ == ["taxa"]
-    novo.fit("logistica", transform=transform)
-    caminho2 = str(tmp_path / "novo.json")
-    novo.save(caminho2)
-    volta2 = _seg(df, "classification", decimal_to_numeric=False).load(caminho2, df)
-    assert volta2.df["taxa"].dtype == np.float64 and volta2.decimal_cols_ == ["taxa"]
-    np.testing.assert_allclose(volta2.score_.to_numpy(), novo.score_.to_numpy(),
-                               atol=1e-12)
+def test_trava_de_memoria_aponta_decimal(monkeypatch):
+    df = _base("classification")
+    df["valor"] = [decimal.Decimal(f"{v:.3f}") for v in df["x3"]]
+    with pytest.warns(UserWarning, match="DecimalType"):
+        seg = _seg(df, "classification")
+    monkeypatch.setattr(segmod, "_available_memory_bytes", lambda: 5 * 1024 ** 2)
+    with pytest.raises(MemoryError, match=r"valor \([0-9.,]+ níveis, Decimal: converta"):
+        seg.fit("logistica")

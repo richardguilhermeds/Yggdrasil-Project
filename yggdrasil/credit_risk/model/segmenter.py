@@ -536,49 +536,26 @@ def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None,
     raise ValueError(algorithm)  # pragma: no cover
 
 
-def _decimal_columns_to_numeric(df: pd.DataFrame, cols) -> list:
-    """Converte para numérico, no lugar, as colunas ``object`` de ``cols`` cujos
-    valores são ``decimal.Decimal``, que é como o ``toPandas()`` do Spark
-    entrega ``DecimalType``. Sem isso a coluna numérica é lida como CATEGÓRICA:
-    o optbinning agrupa centenas de milhares de "categorias" e o one-hot denso
-    do ``fit`` pede linhas × valores distintos × 8 bytes, o que derruba o
-    driver.
-
-    Só as colunas pedidas (alvo e variáveis candidatas): chaves, amostra e
-    safra ficam exatamente como vieram, porque ``assign`` exporta ``self.df``.
-    Escala 0 (``DecimalType(p, 0)``) vira int64, ou float64 se houver nulos; a
-    coluna fica como está se algum valor passar de 2**53 em módulo (o float64
-    perderia dígitos). Escala positiva vira float64. Devolve os nomes
-    convertidos."""
+def _decimal_columns(df: pd.DataFrame, cols) -> list:
+    """Colunas de ``cols`` (por posição: nomes podem se repetir) cujo 1º valor
+    não nulo é ``decimal.Decimal``, que é como o ``toPandas()`` do Spark entrega
+    ``DecimalType``. Só detecta: a conversão fica com quem monta a base, no
+    Spark (``.cast("double")``), para valer igual no treino e na escoragem
+    distribuída, que recebe os ``Decimal`` crus."""
     import decimal
 
     alvo = set(cols)
-    convertidas = []
-    for j in range(df.shape[1]):            # por posição: nomes podem se repetir
+    achadas = []
+    for j in range(df.shape[1]):
         if df.columns[j] not in alvo:
             continue
         col = df.iloc[:, j]
         if col.dtype != object:
             continue
         validos = np.flatnonzero(col.notna().to_numpy())
-        if not len(validos):
-            continue
-        primeiro = col.iloc[int(validos[0])]
-        if not isinstance(primeiro, decimal.Decimal):
-            continue
-        try:
-            f = col.astype("float64")
-        except (TypeError, ValueError, decimal.InvalidOperation):   # Decimal + texto
-            continue
-        if primeiro.as_tuple().exponent >= 0:               # escala 0: inteiros
-            finitos = f.to_numpy()[np.isfinite(f.to_numpy())]
-            if finitos.size and float(np.abs(finitos).max()) > 2.0 ** 53:
-                continue                                    # float64 perderia dígitos
-            if len(validos) == len(col) and finitos.size == len(col):
-                f = f.astype("int64")
-        df.isetitem(j, f)
-        convertidas.append(df.columns[j])
-    return convertidas
+        if len(validos) and isinstance(col.iloc[int(validos[0])], decimal.Decimal):
+            achadas.append(df.columns[j])
+    return list(dict.fromkeys(achadas))
 
 
 def _cgroup_free_bytes(raiz: str = "/sys/fs/cgroup") -> int | None:
@@ -812,13 +789,6 @@ class ModelSegmenter:
         Restringe as variáveis candidatas (default: todas que não são alvo/amostra/data).
     date_col:
         Coluna de data/safra (fora da modelagem; usada nas análises temporais).
-    decimal_to_numeric:
-        Colunas ``decimal.Decimal`` (``DecimalType`` do ``toPandas()``) no alvo
-        e nas candidatas viram numéricas na construção (``True``, padrão). Uma
-        lista converte exatamente essas colunas; ``False`` não converte nada.
-        As convertidas ficam em ``decimal_cols_`` e são persistidas no
-        :meth:`to_dict`; um JSON salvo antes desta opção carrega com ``False``,
-        preservando o tratamento (categórico) com que o modelo foi treinado.
     """
 
     #: Linhas por bloco nas passagens em lote sobre a base (escoragem, VIF,
@@ -840,7 +810,6 @@ class ModelSegmenter:
         verbose: bool = True,
         score_scale: float = 1000.0,
         random_state: int | None = 42,
-        decimal_to_numeric: bool | list = True,
     ):
         if task_type not in ("classification", "regression"):
             raise ValueError("task_type deve ser 'classification' ou 'regression'.")
@@ -848,17 +817,22 @@ class ModelSegmenter:
             raise ValueError(f"Alvo '{target}' não está no DataFrame.")
 
         self.df = df.copy()
-        # Decimal (DecimalType do Spark) → numérico só no alvo e nas candidatas
-        if decimal_to_numeric is True:
-            conv = ([target, *features] if features is not None else
-                    [c for c in self.df.columns if c not in (sample_col, date_col)])
-        else:
-            conv = list(decimal_to_numeric or [])
-        convertidas = _decimal_columns_to_numeric(self.df, conv) if conv else []
-        self.decimal_cols_: list = list(dict.fromkeys(convertidas))
-        if convertidas and verbose:
-            print(f"[init] colunas Decimal (DecimalType do Spark) convertidas para "
-                  f"numérico: {convertidas}")
+        # Decimal (DecimalType do toPandas) no alvo/candidatas é lido como
+        # CATEGÓRICO: cada valor distinto vira um nível do one-hot denso (é o
+        # que derruba o driver em base grande). Avisa em vez de converter: a
+        # conversão implícita aqui não chegaria à escoragem (Spark/predict
+        # recebem os Decimal crus) nem aos modelos já salvos.
+        conv = ([target, *features] if features is not None else
+                [c for c in self.df.columns if c not in (sample_col, date_col)])
+        self.decimal_cols_: list = _decimal_columns(self.df, conv)
+        if self.decimal_cols_:
+            warnings.warn(
+                f"Colunas com decimal.Decimal (DecimalType do Spark): "
+                f"{self.decimal_cols_}. Elas serão tratadas como CATEGÓRICAS (um "
+                "nível por valor distinto no one-hot). Se forem numéricas, "
+                "converta na origem, ex.: sdf.withColumn(c, F.col(c).cast('double')) "
+                "antes do toPandas(), para treino e escoragem receberem o mesmo tipo.",
+                stacklevel=2)
         # caches de performance (memoização): binning ótimo por variável (caro —
         # solver CP-SAT do optbinning) e máscara de linhas por amostra. O cache de
         # bins é invalidado SÓ NA VARIÁVEL editada em set/clear_manual_bins e nas
@@ -2828,7 +2802,10 @@ class ModelSegmenter:
         if estimado <= livre:
             return
         top = sorted(niveis.items(), key=lambda kv: -kv[1])[:5]
-        lista = ", ".join(f"{self.label(f)} ({n:,} níveis)" for f, n in top)
+        dec = set(getattr(self, "decimal_cols_", []))
+        lista = ", ".join(f"{self.label(f)} ({n:,} níveis"
+                          f"{', Decimal: converta para float' if f in dec else ''})"
+                          for f, n in top)
         raise MemoryError(
             f"O one-hot denso das categóricas pediria ~{estimado / 1024 ** 3:.1f} GB "
             f"({len(X):,} linhas × {largura:,} colunas, 2 cópias) e há "
@@ -3965,13 +3942,13 @@ class ModelSegmenter:
         de X: colunas quase duplicadas (saldo e saldo + encargos, correlação
         1 − 1e-10) seguem distinguíveis da colinearidade exata, como no OLS do
         statsmodels. ``x₀`` é a média do 1º bloco (condiciona colunas de média
-        alta frente ao intercepto). Linhas com NaN saem. Devolve
+        alta frente ao intercepto). Linhas com NaN ou ±inf saem. Devolve
         ``(n, R, constante)``, com ``constante[j]`` = coluna sem variação;
         ``(0, None, None)`` sem linhas."""
         n, desloc, R, mn, mx = 0, None, None, None, None
         for B in blocks:
             B = np.asarray(B, dtype="float64")
-            B = B[~np.isnan(B).any(axis=1)]
+            B = B[np.isfinite(B).all(axis=1)]
             if not len(B):
                 continue
             if desloc is None:
@@ -4001,14 +3978,23 @@ class ModelSegmenter:
         do ``statsmodels.variance_inflation_factor``/:meth:`_vif_values_sklearn`
         sem voltar às n linhas. ``VIF = SQT/SQR``, com a SQT centrada vinda da
         regressão só no intercepto. Coluna constante → NaN (e fica fora dos
-        regressores); R² ≥ 1−1e-12 → inf."""
+        regressores); R² ≥ 1−1e-12 → inf.
+
+        Os regressores entram com norma unitária e corte relativo 1e-10 no
+        ``lstsq``: numa colinearidade EXATA (one-hot completo + intercepto) o
+        valor singular que sobra é ruído (~1e-13, maior quanto mais blocos o
+        QR acumulou) e, sem o corte, vira uma direção espúria que absorve parte
+        do resíduo e infla o VIF dos termos comuns. Quase duplicatas reais
+        (correlação 1 − 1e-10 ⇒ valor singular ~1e-5) ficam bem acima do corte."""
         k = R.shape[1] - 1
         if k == 1:
             return [1.0]
 
         def _sqr(cols, y):
             A = R[:, cols]
-            coef = np.linalg.lstsq(A, y, rcond=None)[0]
+            normas = np.linalg.norm(A, axis=0)
+            A = A / np.where(normas > 0, normas, 1.0)
+            coef = np.linalg.lstsq(A, y, rcond=1e-10)[0]
             res = y - A @ coef
             return float(res @ res)
 
@@ -8409,10 +8395,6 @@ class ModelSegmenter:
             # parâmetros efetivos, para reproduzir a seleção. JSONs antigos não
             # têm a chave ⇒ None no from_dict.
             "selection_policy": self.selection_policy_,
-            # colunas Decimal convertidas para numérico na construção: o load
-            # repete exatamente essa decisão (JSONs antigos: sem a chave ⇒
-            # nenhuma conversão, como foram treinados)
-            "decimal_to_numeric": list(getattr(self, "decimal_cols_", [])),
         }
 
     def save(self, path: str):
@@ -8437,8 +8419,7 @@ class ModelSegmenter:
                   problem_label=meta.get("problem_label"),
                   features=data.get("candidates"), date_col=meta.get("date_col"),
                   verbose=verbose, score_scale=meta.get("score_scale", 1000.0),
-                  random_state=meta.get("random_state", 42),
-                  decimal_to_numeric=data.get("decimal_to_numeric") or False)
+                  random_state=meta.get("random_state", 42))
         seg.included = set(data.get("included", seg.candidates))
         seg.var_meta = data.get("var_meta", seg.var_meta)
         seg.algorithm = data.get("algorithm")
