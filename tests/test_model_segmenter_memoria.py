@@ -94,31 +94,38 @@ def test_frame_por_colunas_igual_ao_recorte_completo():
     assert list(seg._frame("DES", cols=["target", "target"]).columns) == ["target"]
 
 
-def test_nuvem_de_pontos_amostrada_sem_mudar_a_cobertura(monkeypatch):
+def test_nuvem_de_pontos_amostrada_mantem_caudas_e_cobertura(monkeypatch):
+    """Acima do limite, a nuvem exibe a amostra MAIS as caudas: os resíduos
+    extremos (e os limites do eixo) continuam no gráfico, e a cobertura da
+    banda segue calculada em todas as observações."""
     import matplotlib
     matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
     from matplotlib.collections import PathCollection
 
-    seg = _seg(_base("regression"), "regression")
+    df = _base("regression", n=20_000)
+    des = np.flatnonzero(df["amostra"].eq("DES").to_numpy())
+    extremos = np.random.default_rng(1).choice(des, 25, replace=False)
+    df.loc[df.index[extremos], "target"] = np.linspace(4, 9, 25)
+    seg = _seg(df, "regression")
     seg.fit("linear")
 
-    def _pontos_e_textos(fig):
+    def _nuvem(fig):
         ax = fig.axes[0]
-        pts = sum(len(c.get_offsets()) for c in ax.collections
-                  if isinstance(c, PathCollection))
-        return pts, [t.get_text() for t in ax.texts]
+        pts = np.vstack([c.get_offsets() for c in ax.collections
+                         if isinstance(c, PathCollection)])
+        return pts, ax.get_ylim(), [t.get_text() for t in ax.texts]
 
     n_des = int(seg._fit_mask().sum())
-    cheio_cal = _pontos_e_textos(seg.plot_calibration())
-    cheio_res = _pontos_e_textos(seg.plot_residuals())
+    cheio_cal, cheio_res = _nuvem(seg.plot_calibration()), _nuvem(seg.plot_residuals())
     monkeypatch.setattr(segmod, "_MAX_PONTOS_DISPERSAO", 300)
-    amostra_cal = _pontos_e_textos(seg.plot_calibration())
-    amostra_res = _pontos_e_textos(seg.plot_residuals())
-    assert cheio_res[0] == n_des and amostra_res[0] == 300
-    # a curva de calibração é um plot (Line2D), não entra na contagem de pontos
-    assert amostra_cal[0] == 300 < cheio_cal[0]
-    assert amostra_cal[1] == cheio_cal[1]          # cobertura da banda: todas as obs.
-    import matplotlib.pyplot as plt
+    amos_cal, amos_res = _nuvem(seg.plot_calibration()), _nuvem(seg.plot_residuals())
+    assert len(cheio_res[0]) == n_des
+    assert 300 <= len(amos_res[0]) < 400 and 300 <= len(amos_cal[0]) < 400
+    assert (amos_res[0][:, 1] > 3).sum() == 25 == (cheio_res[0][:, 1] > 3).sum()
+    assert (amos_cal[0][:, 1] > 3).sum() == 25
+    np.testing.assert_allclose(amos_res[1], cheio_res[1])         # mesmo eixo y
+    assert amos_cal[2] == cheio_cal[2]          # cobertura da banda: todas as obs.
     plt.close("all")
 
 
@@ -418,3 +425,38 @@ def test_trava_de_memoria_aponta_decimal(monkeypatch):
     monkeypatch.setattr(segmod, "_available_memory_bytes", lambda: 5 * 1024 ** 2)
     with pytest.raises(MemoryError, match=r"valor \([0-9.,]+ níveis, Decimal: converta"):
         seg.fit("logistica")
+
+
+@pytest.mark.parametrize("dtype", ["Float64", "Int64"])
+def test_psi_com_dtype_nullable_e_faltante_so_no_oot(dtype):
+    """Coluna nullable sem faltante na DES e com <NA> no OOT: o PSI tem de sair
+    (e acusar a instabilidade), não NaN, senão a variável passa na seleção."""
+    rng = np.random.default_rng(11)
+    n = 6000
+    base = rng.normal(size=n) * (100 if dtype == "Int64" else 1)
+    df = pd.DataFrame({"renda": pd.array(np.round(base) if dtype == "Int64" else base,
+                                         dtype=dtype)})
+    df["target"] = (rng.random(n) < 1 / (1 + np.exp(-base / base.std()))).astype(int)
+    df["amostra"] = np.where(np.arange(n) < 4000, "DES", "OOT")
+    oot = np.flatnonzero(df["amostra"].eq("OOT").to_numpy())
+    df.loc[df.index[oot[: int(0.6 * len(oot))]], "renda"] = pd.NA
+    seg = _seg(df, "classification")
+    psi = seg._variable_psi("renda", ["OOT"])["OOT"]
+    assert np.isfinite(psi) and psi > 0.25
+    assert seg.variable_iv().set_index("variavel").loc["renda", "estabilidade"] != "—"
+
+
+def test_features_como_gerador():
+    df = _base("classification")
+    seg = _seg(df, "classification", features=(c for c in df.columns if c.startswith("x")))
+    assert seg.candidates == ["x0", "x1", "x2", "x3"]
+    seg.fit("logistica")
+    assert seg.model_features == ["x0", "x1", "x2", "x3"]
+
+
+def test_feature_repetida_mantem_o_erro_claro_do_sklearn():
+    df = _base("classification")
+    df = pd.concat([df, df[["cat"]]], axis=1)
+    seg = _seg(df, "classification")
+    with pytest.raises(ValueError, match="not unique"):
+        seg.fit("logistica", features=["x0", "x1", "cat"])

@@ -329,17 +329,33 @@ def _fit_labels_x(fig, ax, texts, pad_frac=0.04, passes=2):
 _MAX_PONTOS_DISPERSAO = 50_000
 
 
-def _pontos_dispersao(n: int, seed) -> np.ndarray | slice:
+def _pontos_dispersao(n: int, seed, *eixos) -> np.ndarray | slice:
     """Índices exibidos numa nuvem de pontos: todos até
-    :data:`_MAX_PONTOS_DISPERSAO`, senão uma amostra fixa (``seed``). Com
-    milhões de pontos o ``scatter`` levava ~10 s por gráfico e cada Figure
-    guardada pela UI (troca de tema) retinha ~50 MB. A nuvem amostrada é
-    visualmente a mesma; curvas, bandas e cobertura seguem calculadas em todas
-    as observações."""
+    :data:`_MAX_PONTOS_DISPERSAO`; acima disso, uma amostra fixa (``seed``)
+    MAIS, em cada eixo de ``eixos``, os pontos além das cercas de Tukey
+    (Q1 − 3·IQR, Q3 + 3·IQR) e o mínimo e o máximo. Com milhões de pontos o
+    ``scatter`` levava ~10 s por gráfico e cada Figure guardada pela UI (troca
+    de tema) retinha ~50 MB; só a amostra, porém, sumia com os resíduos
+    extremos (LGD acima de 100%, por exemplo), que são o que a validação
+    procura nesses gráficos. Em cauda pesada, os extremos também têm teto de
+    :data:`_MAX_PONTOS_DISPERSAO` por eixo (os mais distantes da mediana).
+    Curvas, bandas e cobertura seguem calculadas em todas as observações."""
     if n <= _MAX_PONTOS_DISPERSAO:
         return slice(None)
     rng = np.random.default_rng(seed)
-    return np.sort(rng.choice(n, _MAX_PONTOS_DISPERSAO, replace=False))
+    partes = [rng.choice(n, _MAX_PONTOS_DISPERSAO, replace=False)]
+    for v in eixos:
+        v = np.asarray(v, dtype="float64")
+        if not np.isfinite(v).any():
+            continue
+        q1, med, q3 = np.nanquantile(v, [0.25, 0.5, 0.75])
+        folga = 3.0 * (q3 - q1)
+        fora = np.flatnonzero((v < q1 - folga) | (v > q3 + folga))
+        if len(fora) > _MAX_PONTOS_DISPERSAO:
+            dist = np.abs(v[fora] - med)
+            fora = fora[np.argsort(dist)[-_MAX_PONTOS_DISPERSAO:]]
+        partes += [fora, np.array([np.nanargmin(v), np.nanargmax(v)])]
+    return np.unique(np.concatenate(partes))
 
 
 def _is_stability_sample(name) -> bool:
@@ -643,10 +659,14 @@ def _bin_masks(series: pd.Series, bins) -> list:
     """Máscaras (numpy) de todos os ``bins`` sobre ``series``, com UMA conversão
     para texto por chamada (grupos categóricos comparam como str) em vez de uma
     por bin: ``astype(str)`` numa coluna object de milhões de linhas custa mais
-    que a própria comparação. Mesmas máscaras de :func:`_bin_mask_series`."""
+    que a própria comparação. Mesmas máscaras de :func:`_bin_mask_series`, com
+    ``<NA>`` como fora do bin: em colunas nullable/pyarrow (``Float64``,
+    ``Int64``, ``float64[pyarrow]``) o ``between`` devolve NA nos faltantes, e
+    sem isso a soma das máscaras virava ``pd.NA`` (PSI NaN)."""
     texto = series.astype(str) if any(b["kind"] == "cat" for b in bins) else None
-    return [texto.isin(b["cats"]).to_numpy() if b["kind"] == "cat"
-            else _bin_mask_series(series, b).to_numpy() for b in bins]
+    return [(texto.isin(b["cats"]) if b["kind"] == "cat"
+             else _bin_mask_series(series, b)).to_numpy(dtype=bool, na_value=False)
+            for b in bins]
 
 
 class WoeBinEncoder(BaseEstimator, TransformerMixin):
@@ -813,6 +833,8 @@ class ModelSegmenter:
     ):
         if task_type not in ("classification", "regression"):
             raise ValueError("task_type deve ser 'classification' ou 'regression'.")
+        if features is not None:          # gerador/iterador: lido uma vez só
+            features = list(features)
         if target not in df.columns:
             raise ValueError(f"Alvo '{target}' não está no DataFrame.")
 
@@ -2791,8 +2813,8 @@ class ModelSegmenter:
         variáveis responsáveis. No-op quando não há categórica ou quando a
         memória livre não é mensurável."""
         cat = [f for f in features if self._detect_kind(f) == "cat"]
-        if not cat:
-            return
+        if not cat or any(isinstance(X[f], pd.DataFrame) for f in cat):
+            return      # nome repetido no df: o sklearn recusa com mensagem clara
         livre = _available_memory_bytes()
         if livre is None:
             return
@@ -5106,8 +5128,8 @@ class ModelSegmenter:
         de score 0–1000: a calibração é sobre o risco previsto casar com o realizado
         (mesma família de ``valor_previsto``/``backtest``). Distribuição e KS é que
         usam a escala de negócio (ranking). Na regressão, acima de 50 mil
-        observações a nuvem exibe uma amostra fixa; curva, banda e cobertura usam
-        todas (ver :func:`_pontos_dispersao`)."""
+        observações a nuvem exibe uma amostra fixa mais os pontos extremos;
+        curva, banda e cobertura usam todas (ver :func:`_pontos_dispersao`)."""
         y, sc = self._sample_scores(sample)                 # previsto/observado CRUS (alvo)
         fig, ax = _new_ax(figsize, dpi, ax)
         if y.size == 0:
@@ -5130,7 +5152,7 @@ class ModelSegmenter:
             # nuvem bruta + curva de calibração por faixa de previsto com BANDA de
             # 95% (média observada ± 1,96·desvio) e a cobertura: % das observações
             # que caem dentro da banda.
-            vis = _pontos_dispersao(len(sc), self.random_state)
+            vis = _pontos_dispersao(len(sc), self.random_state, sc, y)
             ax.scatter(sc[vis], y[vis], s=10, alpha=0.16, color="#9db8d2", edgecolors="none",
                        zorder=1)
             q = np.unique(np.quantile(sc, np.linspace(0, 1, n_bins + 1)))
@@ -5179,11 +5201,12 @@ class ModelSegmenter:
     def plot_residuals(self, sample=None, figsize=(6.6, 4.0), dpi=150, save_path=None, ax=None):
         """Regressão: resíduo (observado − previsto) vs. previsto, na **unidade do
         alvo** (alvo previsto), não na escala de score 0–1000. Acima de 50 mil
-        observações a nuvem exibe uma amostra fixa (ver :func:`_pontos_dispersao`)."""
+        observações a nuvem exibe uma amostra fixa mais os pontos extremos (ver
+        :func:`_pontos_dispersao`)."""
         y, sc = self._sample_scores(sample)                 # previsto/observado CRUS (alvo)
         fig, ax = _new_ax(figsize, dpi, ax)
         res = y - sc
-        vis = _pontos_dispersao(len(sc), self.random_state)
+        vis = _pontos_dispersao(len(sc), self.random_state, sc, res)
         ax.scatter(sc[vis], res[vis], s=10, alpha=0.35, color="#3b6ea5", edgecolors="none")
         ax.axhline(0, color="#d6453e", lw=1)
         ax.set_xlabel("previsto"); ax.set_ylabel("resíduo (obs − prev)")
