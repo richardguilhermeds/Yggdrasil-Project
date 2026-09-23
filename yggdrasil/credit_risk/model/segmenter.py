@@ -38,7 +38,7 @@ import numpy as np
 import pandas as pd
 
 from ...config import ColumnConfig
-from ...metrics import bootstrap_metric_ci, classification_metrics, regression_metrics
+from ...metrics import bootstrap_metrics_ci, classification_metrics, regression_metrics
 from ...metrics.shift import HIGHER_IS_BETTER as _HIGHER_IS_BETTER
 from ...ratings import RATING_REGISTRY
 # helpers puros compartilhados com o TreeSegmenter (fonte única — sem drift)
@@ -325,6 +325,23 @@ def _fit_labels_x(fig, ax, texts, pad_frac=0.04, passes=2):
         pass
 
 
+#: Pontos exibidos nas nuvens de dispersão (calibração/resíduos da regressão).
+_MAX_PONTOS_DISPERSAO = 50_000
+
+
+def _pontos_dispersao(n: int, seed) -> np.ndarray | slice:
+    """Índices exibidos numa nuvem de pontos: todos até
+    :data:`_MAX_PONTOS_DISPERSAO`, senão uma amostra fixa (``seed``). Com
+    milhões de pontos o ``scatter`` levava ~10 s por gráfico e cada Figure
+    guardada pela UI (troca de tema) retinha ~50 MB. A nuvem amostrada é
+    visualmente a mesma; curvas, bandas e cobertura seguem calculadas em todas
+    as observações."""
+    if n <= _MAX_PONTOS_DISPERSAO:
+        return slice(None)
+    rng = np.random.default_rng(seed)
+    return np.sort(rng.choice(n, _MAX_PONTOS_DISPERSAO, replace=False))
+
+
 def _is_stability_sample(name) -> bool:
     """Heurística: a *safra de estabilidade* é a amostra cujo nome remete a
     estabilidade (ex.: ``ESTABILIDADE``, ``ESTAB``) — convenção do repositório
@@ -441,6 +458,9 @@ def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None,
         return LogisticRegression(**hp)
     if algorithm == "linear":
         from sklearn.linear_model import LinearRegression
+        # o X que chega aqui é a matriz TEMPORÁRIA do pré-processador do pipeline:
+        # centralizar no lugar evita uma cópia do tamanho da matriz de desenho
+        hp.setdefault("copy_X", False)
         return LinearRegression(**hp)
     if algorithm == "random_forest":
         from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
@@ -516,6 +536,95 @@ def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None,
     raise ValueError(algorithm)  # pragma: no cover
 
 
+def _decimal_columns_to_float(df: pd.DataFrame) -> list:
+    """Converte para float64, no lugar, as colunas ``object`` cujos valores são
+    ``decimal.Decimal``, que é como o ``toPandas()`` do Spark entrega
+    ``DecimalType``. Sem isso a coluna numérica é lida como CATEGÓRICA: o
+    optbinning agrupa centenas de milhares de "categorias" e o one-hot denso do
+    ``fit`` pede linhas × valores distintos × 8 bytes, o que derruba o driver.
+    Devolve os nomes convertidos."""
+    import decimal
+
+    convertidas = []
+    for c in df.columns:
+        col = df[c]
+        if col.dtype != object:
+            continue
+        idx = col.first_valid_index()
+        if idx is None:
+            continue
+        primeiro = col.loc[idx]
+        if isinstance(primeiro, pd.Series):     # índice duplicado
+            primeiro = primeiro.iloc[0]
+        if not isinstance(primeiro, decimal.Decimal):
+            continue
+        try:
+            df[c] = col.astype("float64")
+        except (TypeError, ValueError):          # coluna mista (Decimal + texto)
+            continue
+        convertidas.append(c)
+    return convertidas
+
+
+def _cgroup_free_bytes(raiz: str = "/sys/fs/cgroup") -> int | None:
+    """Folga até o limite de memória do cgroup (container), descontando o cache
+    de arquivo reclamável (``inactive_file``), como faz o kubelet. ``None`` sem
+    limite configurado ou fora de Linux."""
+    for lim_p, uso_p, stat_p, chave in (
+            (f"{raiz}/memory.max", f"{raiz}/memory.current",
+             f"{raiz}/memory.stat", "inactive_file"),
+            (f"{raiz}/memory/memory.limit_in_bytes",
+             f"{raiz}/memory/memory.usage_in_bytes",
+             f"{raiz}/memory/memory.stat", "total_inactive_file")):
+        try:
+            with open(lim_p) as fh:
+                lim = fh.read().strip()
+            with open(uso_p) as fh:
+                uso = int(fh.read().strip())
+        except (OSError, ValueError):
+            continue
+        if lim == "max" or int(lim) >= 1 << 60:      # v2 "max" / v1 sem limite
+            return None
+        inativo = 0
+        try:
+            with open(stat_p) as fh:
+                for linha in fh:
+                    nome, _, valor = linha.partition(" ")
+                    if nome == chave:
+                        inativo = int(valor)
+                        break
+        except (OSError, ValueError):
+            pass
+        return max(int(lim) - (uso - inativo), 0)
+    return None
+
+
+def _available_memory_bytes() -> int | None:
+    """RAM disponível agora: ``MemAvailable`` do Linux (``psutil`` se houver),
+    limitada pela folga do cgroup quando o processo roda num container com
+    limite de memória. ``None`` quando não dá para medir (a checagem de
+    memória vira no-op)."""
+    livre = None
+    try:
+        with open("/proc/meminfo") as fh:
+            for linha in fh:
+                if linha.startswith("MemAvailable:"):
+                    livre = int(linha.split()[1]) * 1024
+                    break
+    except OSError:
+        pass
+    if livre is None:
+        try:
+            import psutil
+            livre = int(psutil.virtual_memory().available)
+        except Exception:  # noqa: BLE001 (sem psutil ou plataforma sem suporte)
+            livre = None
+    cg = _cgroup_free_bytes()
+    if cg is not None:
+        livre = cg if livre is None else min(livre, cg)
+    return livre
+
+
 def _make_ohe():
     """OneHotEncoder denso e robusto a versões do sklearn."""
     from sklearn.preprocessing import OneHotEncoder
@@ -534,6 +643,16 @@ def _bin_mask_series(series: pd.Series, b: dict) -> pd.Series:
     if b["kind"] == "num":
         return series.between(b["lo"], b["hi"], inclusive="right")
     return series.astype(str).isin(b["cats"])
+
+
+def _bin_masks(series: pd.Series, bins) -> list:
+    """Máscaras (numpy) de todos os ``bins`` sobre ``series``, com UMA conversão
+    para texto por chamada (grupos categóricos comparam como str) em vez de uma
+    por bin: ``astype(str)`` numa coluna object de milhões de linhas custa mais
+    que a própria comparação. Mesmas máscaras de :func:`_bin_mask_series`."""
+    texto = series.astype(str) if any(b["kind"] == "cat" for b in bins) else None
+    return [texto.isin(b["cats"]).to_numpy() if b["kind"] == "cat"
+            else _bin_mask_series(series, b).to_numpy() for b in bins]
 
 
 class WoeBinEncoder(BaseEstimator, TransformerMixin):
@@ -568,8 +687,9 @@ class WoeBinEncoder(BaseEstimator, TransformerMixin):
             col = X[f]
             vals = np.full(len(X), enc["fallback"], dtype="float64")
             assigned = np.zeros(len(X), dtype=bool)
-            for b, v in enc["bins"]:
-                m = _bin_mask_series(col, b).to_numpy() & ~assigned
+            mascaras = _bin_masks(col, [b for b, _v in enc["bins"]])
+            for (_b, v), m in zip(enc["bins"], mascaras):
+                m = m & ~assigned
                 vals[m] = v
                 assigned |= m
             out[:, j] = vals
@@ -653,6 +773,11 @@ def _scorer_broadcast_getter(spark, scorer):
 class ModelSegmenter:
     """Segmentador orientado a modelo (classificação **ou** regressão).
 
+    Notas de memória (bases grandes): o score da base inteira, o VIF e os
+    p-valores de Wald passam pela matriz de desenho em blocos de
+    :attr:`_CHUNK_ROWS` linhas; o ``fit`` recusa (``MemoryError``) uma matriz
+    one-hot densa que não caberia na RAM livre, em vez de derrubar o processo.
+
     Parameters
     ----------
     df:
@@ -671,6 +796,11 @@ class ModelSegmenter:
     date_col:
         Coluna de data/safra (fora da modelagem; usada nas análises temporais).
     """
+
+    #: Linhas por bloco nas passagens em lote sobre a base (escoragem, VIF,
+    #: p-valores): o pico da matriz de desenho densa fica em ~bloco × colunas em
+    #: vez de linhas × colunas. Bases menores que isso rodam num bloco só.
+    _CHUNK_ROWS = 250_000
 
     def __init__(
         self,
@@ -693,6 +823,10 @@ class ModelSegmenter:
             raise ValueError(f"Alvo '{target}' não está no DataFrame.")
 
         self.df = df.copy()
+        convertidas = _decimal_columns_to_float(self.df)
+        if convertidas and verbose:
+            print(f"[init] colunas Decimal convertidas para float64 (DecimalType do "
+                  f"Spark): {convertidas}")
         # caches de performance (memoização): binning ótimo por variável (caro —
         # solver CP-SAT do optbinning) e máscara de linhas por amostra. O cache de
         # bins é invalidado SÓ NA VARIÁVEL editada em set/clear_manual_bins e nas
@@ -845,18 +979,53 @@ class ModelSegmenter:
         nr = self._nonref_samples()
         return nr[0] if nr else self.ref_sample
 
-    def _frame(self, sample=None) -> pd.DataFrame:
+    def _frame(self, sample=None, cols=None) -> pd.DataFrame:
         """Recorte do df por amostra (default DES quando há sample_col).
 
         Memoiza a máscara booleana por amostra (a comparação numa coluna de objeto
         é cara e se repete centenas de vezes); devolve sempre uma cópia fresca
         ``df[mask]`` — segura contra mutação. Linhas e ``sample_col`` não mudam
-        após a construção, então a máscara nunca precisa ser invalidada."""
+        após a construção, então a máscara nunca precisa ser invalidada.
+
+        ``cols`` restringe a cópia às colunas pedidas. Em base grande a cópia da
+        amostra INTEIRA (todas as colunas, inclusive as de texto) a cada
+        variável binada dominava tempo e memória de variable_iv/fit; os
+        caminhos quentes pedem só o que leem (variável + alvo)."""
+        if cols is not None:
+            cols = list(dict.fromkeys(cols))     # dedup (variável == alvo, etc.)
         if self.sample_col is None:
-            return self.df
+            return self.df if cols is None else self.df[cols]
         if sample is None:
             sample = self.ref_sample
-        return self.df[self._frame_mask(sample)]
+        mask = self._frame_mask(sample)
+        return self.df[mask] if cols is None else self.df.loc[mask, cols]
+
+    def _fit_mask(self, sample=None) -> np.ndarray:
+        """Máscara (numpy) das linhas da amostra (default: referência) com alvo
+        observado: a base de ajuste de fit/tuning/p-valores/VIF, sem copiar o
+        recorte inteiro só para filtrar ``target.notna()``."""
+        ok = self.df[self.target].notna().to_numpy()
+        if self.sample_col is None:
+            return ok
+        return self._frame_mask(sample) & ok
+
+    def _row_blocks(self, mask, cols, size=None):
+        """Gera ``df.loc[mask, cols]`` em blocos de ``size`` linhas (default
+        :attr:`_CHUNK_ROWS`), sem materializar o recorte inteiro. Base das
+        passagens em lote (escoragem, VIF, p-valores de Wald)."""
+        size = int(size or self._CHUNK_ROWS)
+        cols = list(cols)
+        pos = np.flatnonzero(mask)
+        try:
+            cidx = self.df.columns.get_indexer(cols)
+            unicas = bool((cidx >= 0).all())
+        except Exception:  # noqa: BLE001 (colunas duplicadas no df)
+            unicas = False
+        for i in range(0, len(pos), size):
+            if unicas:
+                yield self.df.iloc[pos[i:i + size], cidx]
+            else:
+                yield self.df.iloc[pos[i:i + size]][cols]
 
     def _frame_mask(self, sample=None):
         """Máscara booleana (numpy) das linhas da amostra, memoizada (invariante
@@ -936,7 +1105,7 @@ class ModelSegmenter:
             raise ImportError("optbinning não instalado. Rode: pip install optbinning")
         if splits is None:
             splits = self.var_meta.get(feature, {}).get("splits")
-        fit = self._frame(sample)
+        fit = self._frame(sample, cols=[feature, self.target])
         kind = self._detect_kind(feature, fit)
 
         if kind == "num":
@@ -1019,7 +1188,7 @@ class ModelSegmenter:
         ``iv_parcial`` (escala WoE/IV de Siddiqi). Na **regressão**, ``iv_parcial``
         é o desvio absoluto ponderado do alvo. IV total em ``.attrs['iv']``."""
         bins, kind = self._resolve_bins(feature, max_n_bins, min_bin_size, splits, sample)
-        sub = self._frame(sample)
+        sub = self._frame(sample, cols=[feature, self.target])
         n_tot = max(len(sub), 1)
         risco_label = "event_rate" if self.task_type == "classification" else "alvo_medio"
         if not bins:
@@ -1035,8 +1204,7 @@ class ModelSegmenter:
         n_base = float(np.sum(~np.isnan(y_all)))
 
         rows, iv_total, is_na = [], 0.0, []
-        for b in bins:
-            m = self._mask_in(sub, feature, b).to_numpy()
+        for b, m in zip(bins, _bin_masks(sub[feature], bins)):
             yi = y_all[m]
             yi_ok = yi[~np.isnan(yi)]
             n_i = int(m.sum())
@@ -1166,23 +1334,22 @@ class ModelSegmenter:
         out = {a: np.nan for a in samples}
         if not bins:
             return out
-        ref = self._frame(self.ref_sample)
+        ref = self._frame(self.ref_sample, cols=[feature])
         n_ref = max(len(ref), 1)
-        ref_pct = [max(int(self._mask_in(ref, feature, b).sum()) / n_ref, eps) for b in bins]
+        ref_pct = [max(int(m.sum()) / n_ref, eps) for m in _bin_masks(ref[feature], bins)]
         for a in samples:
-            cur = self._frame(a)
+            cur = self._frame(a, cols=[feature])
             n_cur = len(cur)
             if n_cur == 0:
                 continue
-            cur_pct = [int(self._mask_in(cur, feature, b).sum()) / n_cur
-                       for b in bins]
+            cur_pct = [int(m.sum()) / n_cur for m in _bin_masks(cur[feature], bins)]
             out[a] = round(_psi_from_shares(ref_pct, cur_pct, eps), 4)
         return out
 
     def variable_summary(self, feature, sample=None) -> dict:
         """Resumo de uma variável: %missing, estatísticas/top-categorias, IV,
         força, tendência e PSI por amostra."""
-        sub = self._frame(sample)
+        sub = self._frame(sample, cols=[feature])
         col = sub[feature]
         kind = self._detect_kind(feature, sub)
         n = int(len(col)); n_miss = int(col.isna().sum())
@@ -1298,7 +1465,7 @@ class ModelSegmenter:
         bins, _kind = self._resolve_bins(feature, max_n_bins, min_bin_size)
         if not bins:
             return pd.DataFrame(columns=["safra", "n", "psi", "classificacao"])
-        ref = self._frame(self.ref_sample)
+        ref = self._frame(self.ref_sample, cols=[feature])
         n_ref = max(len(ref), 1)
         ref_pct = [max(int(self._mask_in(ref, feature, b).sum()) / n_ref, eps) for b in bins]
         safra = pd.to_datetime(self.df[time_col], errors="coerce").dt.to_period("M")
@@ -1322,7 +1489,7 @@ class ModelSegmenter:
         ``ordered`` (bins na ordem de risco DES), ``labels``, ``samples`` (xs +
         series por bin) e ``safras`` (xs + series por bin)."""
         labels = [self._bin_label(feature, b) for b in bins]
-        ref = self._frame(self.ref_sample)
+        ref = self._frame(self.ref_sample, cols=[feature, self.target])
         ref_risco = [self._risco(ref.loc[self._mask_in(ref, feature, b), self.target])
                      for b in bins]
         order = sorted(range(len(bins)),
@@ -1444,7 +1611,7 @@ class ModelSegmenter:
         vt = self.variable_table(feature, sample, max_n_bins, min_bin_size)
         fig, ax = _new_ax(figsize, dpi, ax)
         if vt.empty:
-            sub = self._frame(sample)
+            sub = self._frame(sample, cols=[feature])
             # categórica com 1 categoria / poucos dados ⇒ vt vazio. NÃO coagir para
             # float (quebra em strings); ramificar por tipo, como plot_*_badrate.
             if self._detect_kind(feature, sub) == "num":
@@ -1711,7 +1878,7 @@ class ModelSegmenter:
         manuais; este não.)"""
         if OptimalBinning is None:
             raise ImportError("optbinning não instalado. Rode: pip install optbinning")
-        fit = self._frame(sample)
+        fit = self._frame(sample, cols=[feature, self.target])
         if self._detect_kind(feature, fit) != "num":
             return []
         x = fit[feature].to_numpy(dtype="float64")
@@ -1746,7 +1913,7 @@ class ModelSegmenter:
         (só variáveis NUMÉRICAS): % de cada faixa gerada pelo binning ótimo por
         safra, uma linha por faixa. Sempre usa o optbinning (ignora bins manuais),
         para acompanhar a estabilidade das faixas do algoritmo no tempo."""
-        if self._detect_kind(feature, self._frame(sample)) != "num":
+        if self._detect_kind(feature) != "num":
             fig, ax = _new_ax((figsize[0], 3.6), dpi, ax)
             ax.text(0.5, 0.5, "apenas para variáveis numéricas", ha="center",
                     va="center", transform=ax.transAxes, color="#889"); ax.axis("off")
@@ -1772,7 +1939,7 @@ class ModelSegmenter:
         **distribuição** é observada sobre **toda a população** (todas as amostras/safras).
         Com ``all_samples=False``, faixas e distribuição usam a amostra ``sample``."""
         import matplotlib.colors as mcolors
-        if self._detect_kind(feature, self.df if all_samples else self._frame(sample)) != "num":
+        if self._detect_kind(feature) != "num":
             fig, ax = _new_ax(figsize, dpi, ax)
             ax.text(0.5, 0.5, "apenas para variáveis numéricas", ha="center",
                     va="center", transform=ax.transAxes, color="#889"); ax.axis("off")
@@ -2434,7 +2601,7 @@ class ModelSegmenter:
         for f in base:                       # dedup preservando a ordem
             if f in self.df.columns and f not in vistos:
                 feats.append(f); vistos.add(f)
-        sub = self._frame(sample)
+        sub = self._frame(sample, cols=feats)
         num = [f for f in feats if self._detect_kind(f, sub) == "num"]
         cat = [f for f in feats if self._detect_kind(f, sub) == "cat"]
         corr_num = (sub[num].corr(method="spearman") if len(num) >= 2
@@ -2564,15 +2731,14 @@ class ModelSegmenter:
         (classificação) ou **risco médio do bin** (regressão). Reaproveita os bins
         manuais/ótimos da análise univariada (:meth:`_resolve_bins`). Usado pela
         transformação WoE que alimenta o modelo."""
-        ref = self._frame(self.ref_sample)
+        ref = self._frame(self.ref_sample, cols=[feature, self.target])
         bins, kind = self._resolve_bins(feature, sample=self.ref_sample)
         y_all = ref[self.target].to_numpy(dtype="float64")
         enc_bins = []
         if self.task_type == "classification":
             n_evt_tot = float(np.nansum(y_all == 1))
             n_non_tot = float(np.nansum(y_all == 0))
-            for b in bins:
-                m = self._mask_in(ref, feature, b).to_numpy()
+            for b, m in zip(bins, _bin_masks(ref[feature], bins)):
                 yi = y_all[m]; yi = yi[~np.isnan(yi)]
                 d_evt = float((yi == 1).sum()) / max(n_evt_tot, _EPS)
                 d_non = float((yi == 0).sum()) / max(n_non_tot, _EPS)
@@ -2580,8 +2746,7 @@ class ModelSegmenter:
             fallback = 0.0   # WoE neutro p/ valores fora dos bins vistos na referência
         else:
             mean_global = self._risco(y_all)
-            for b in bins:
-                m = self._mask_in(ref, feature, b).to_numpy()
+            for b, m in zip(bins, _bin_masks(ref[feature], bins)):
                 r = self._risco(y_all[m])
                 enc_bins.append((b, float(r) if np.isfinite(r) else mean_global))
             fallback = float(mean_global) if np.isfinite(mean_global) else 0.0
@@ -2607,6 +2772,37 @@ class ModelSegmenter:
                                  ("ohe", _make_ohe())])
             transformers.append(("cat", cat_pipe, cat))
         return ColumnTransformer(transformers, remainder="drop")
+
+    def _check_design_memory(self, X, features) -> None:
+        """Pré-checagem do one-hot DENSO do ``transform='raw'``.
+
+        A matriz de desenho tem linhas × (numéricas + Σ níveis das categóricas)
+        × 8 bytes, e o ``ColumnTransformer`` a materializa duas vezes (bloco
+        one-hot + ``hstack``). Uma categórica de alta cardinalidade (ID, código,
+        número lido como texto) faz isso passar da RAM, e o OOM killer derruba o
+        driver no meio do fit, sem traceback. Aqui a conta é feita antes e,
+        quando não cabe na memória livre, levanta ``MemoryError`` nomeando as
+        variáveis responsáveis. No-op quando não há categórica ou quando a
+        memória livre não é mensurável."""
+        cat = [f for f in features if self._detect_kind(f) == "cat"]
+        if not cat:
+            return
+        livre = _available_memory_bytes()
+        if livre is None:
+            return
+        niveis = {f: int(X[f].nunique(dropna=True)) for f in cat}
+        largura = (len(features) - len(cat)) + sum(niveis.values())
+        estimado = 2 * len(X) * largura * 8
+        if estimado <= livre:
+            return
+        top = sorted(niveis.items(), key=lambda kv: -kv[1])[:5]
+        lista = ", ".join(f"{self.label(f)} ({n:,} níveis)" for f, n in top)
+        raise MemoryError(
+            f"O one-hot denso das categóricas pediria ~{estimado / 1024 ** 3:.1f} GB "
+            f"({len(X):,} linhas × {largura:,} colunas, 2 cópias) e há "
+            f"~{livre / 1024 ** 3:.1f} GB livres. Maiores cardinalidades: {lista}. "
+            "Exclua IDs/códigos, converta números lidos como texto para numérico "
+            "ou use transform='woe', que agrupa as categorias nos bins.")
 
     def _build_pipeline(self, features, algorithm, hyperparams, transform="raw", task=None,
                         class_counts=None):
@@ -2793,6 +2989,11 @@ class ModelSegmenter:
             feats = list(self.candidates)
         # restrições de monotonicidade (opcional): direções por variável numérica
         mono_dirs = self._resolve_monotone(monotone, feats, algorithm, transform)
+        m_fit = self._fit_mask()
+        X = self.df.loc[m_fit, feats]
+        y = self.df.loc[m_fit, self.target]
+        if transform == "raw":                 # antes de tocar no estado: recusa limpa
+            self._check_design_memory(X, feats)
         self.model_features = feats
         self.algorithm = algorithm
         self.hyperparams = dict(hp)
@@ -2803,10 +3004,6 @@ class ModelSegmenter:
         self.two_stage = False                 # fit "normal" desliga o modo hurdle
         self.two_stage_threshold = None
 
-        fit_df = self._frame(self.ref_sample)
-        fit_df = fit_df[fit_df[self.target].notna()]
-        X = fit_df[feats]
-        y = fit_df[self.target]
         if self.task_type == "classification":
             y = y.astype(int)
         counts = None
@@ -2857,10 +3054,10 @@ class ModelSegmenter:
             feats = list(self.candidates)
         t = float(threshold)
 
-        fit_df = self._frame(self.ref_sample)
-        fit_df = fit_df[fit_df[self.target].notna()]
-        X = fit_df[feats]
-        y = fit_df[self.target].astype(float)
+        m_fit = self._fit_mask()
+        X = self.df.loc[m_fit, feats]
+        y = self.df.loc[m_fit, self.target].astype(float)
+        self._check_design_memory(X, feats)
         ybin = (y >= t).astype(int)
         if ybin.nunique() < 2:
             lado = "≥" if int(ybin.iloc[0]) == 1 else "<"
@@ -3056,8 +3253,11 @@ class ModelSegmenter:
         if lam < 0:
             raise ValueError("stability_penalty (λ) deve ser ≥ 0.")
 
-        tr = self._frame(self.ref_sample)
-        tr = tr[tr[self.target].notna()]
+        cols_tune = list(dict.fromkeys(
+            [*feats, self.target] + ([self.date_col] if self.date_col else [])))
+        tr = self.df.loc[self._fit_mask(), cols_tune]
+        if transform == "raw":
+            self._check_design_memory(tr, feats)
         # fold_data: lista de (Xtr, ytr, Xva, yva) — 1 tupla na validação única;
         # k folds (ou k−1 temporais) com cv. O objetivo do trial é a média.
         fold_data = []
@@ -3093,8 +3293,7 @@ class ModelSegmenter:
             va = None
             oot = self._oot_sample()
             if oot and oot != self.ref_sample:
-                vf = self._frame(oot)
-                vf = vf[vf[self.target].notna()]
+                vf = self.df.loc[self._fit_mask(oot), cols_tune]
                 if len(vf) >= 50:
                     va = vf
             used_oot = va is not None          # o OOT de fato virou a validação?
@@ -3620,15 +3819,19 @@ class ModelSegmenter:
         EP da diagonal de inv(Xᵀ W X), W = p(1−p). Aproximação (a logística do
         sklearn é regularizada); serve como indicação de significância."""
         from scipy.stats import norm
-        fit_df = self._frame(self.ref_sample)
-        fit_df = fit_df[fit_df[self.target].notna()]
-        Xd = pre.transform(fit_df[self.model_features]) if pre is not None \
-            else fit_df[self.model_features].to_numpy(dtype="float64")
-        Xd = Xd.toarray() if hasattr(Xd, "toarray") else np.asarray(Xd, dtype="float64")
-        p = np.clip(est.predict_proba(Xd)[:, 1], 1e-6, 1 - 1e-6)
-        w = p * (1 - p)
-        Xf = np.column_stack([np.ones(len(Xd)), Xd])          # intercepto + design
-        H = Xf.T @ (Xf * w[:, None])
+        H = None
+        # Xᵀ W X acumulada em blocos de linhas: a matriz de desenho densa da
+        # referência inteira (e as duas cópias com intercepto/peso) não chega a
+        # existir de uma vez.
+        for bloco in self._row_blocks(self._fit_mask(), self.model_features):
+            Xd = self._design_block(pre, bloco)
+            p = np.clip(est.predict_proba(Xd)[:, 1], 1e-6, 1 - 1e-6)
+            w = p * (1 - p)
+            Xf = np.column_stack([np.ones(len(Xd)), Xd])      # intercepto + design
+            Hb = Xf.T @ (Xf * w[:, None])
+            H = Hb if H is None else H + Hb
+        if H is None:                                         # referência sem alvo
+            return [float("nan")] * len(names)
         cov = np.linalg.pinv(H)
         se = np.sqrt(np.clip(np.diag(cov), 0.0, None))
         beta = np.concatenate([np.ravel(est.intercept_), np.ravel(est.coef_)])
@@ -3688,23 +3891,23 @@ class ModelSegmenter:
         ``VIF = 1/(1−R²)`` da regressão de cada termo sobre os demais (com
         intercepto). Regra de bolso: < 5 ok · 5–10 atenção · > 10 alto.
 
-        Usa ``statsmodels`` quando disponível (dependência **opcional** — a
-        mesma do pacote econométrico); sem ele, cai para o cálculo equivalente
-        via ``sklearn.LinearRegression``. Devolve ``termo, vif, avaliacao``
+        Calculado em forma fechada a partir da matriz de correlação dos termos
+        (ver :meth:`_vif_from_gram`), acumulada em blocos de linhas: mesmos
+        valores do ``statsmodels``/``LinearRegression`` sem rodar uma regressão
+        sobre a base inteira por termo. Devolve ``termo, vif, avaliacao``
         ordenado do maior para o menor VIF (``inf`` = colinearidade perfeita)."""
         if self.model is None:
             raise RuntimeError("Ajuste o modelo antes (fit / set_model).")
         pre = (self.model.named_steps.get("pre")
                if hasattr(self.model, "named_steps") else None)
-        fit_df = self._frame(self.ref_sample)
-        fit_df = fit_df[fit_df[self.target].notna()]
-        Xd = pre.transform(fit_df[self.model_features]) if pre is not None \
-            else fit_df[self.model_features].to_numpy(dtype="float64")
-        Xd = Xd.toarray() if hasattr(Xd, "toarray") else np.asarray(Xd, dtype="float64")
+        n, media, G = self._centered_gram(
+            self._design_block(pre, bloco)
+            for bloco in self._row_blocks(self._fit_mask(), self.model_features))
         names = self._design_feature_names(pre, use_labels=use_labels)
-        if len(names) != Xd.shape[1]:                    # robustez a divergências
-            names = [f"x{i}" for i in range(Xd.shape[1])]
-        vifs = self._vif_values(Xd)
+        if G is not None and len(names) != G.shape[0]:   # robustez a divergências
+            names = [f"x{i}" for i in range(G.shape[0])]
+        vifs = (self._vif_from_gram(n, media, G) if G is not None and n >= 2
+                else [float("nan")] * len(names))
         out = pd.DataFrame({
             "termo": names,
             "vif": [round(v, 3) if np.isfinite(v) else v for v in vifs]})
@@ -3715,30 +3918,87 @@ class ModelSegmenter:
                 .reset_index(drop=True))
 
     @staticmethod
+    def _design_block(pre, X) -> np.ndarray:
+        """Bloco denso (float64) da matriz de desenho para as linhas cruas ``X``."""
+        Xd = pre.transform(X) if pre is not None else X.to_numpy(dtype="float64")
+        return Xd.toarray() if hasattr(Xd, "toarray") else np.asarray(Xd, dtype="float64")
+
+    @staticmethod
+    def _centered_gram(blocks) -> tuple:
+        """Soma de quadrados centrada ``Σ (x−x̄)(x−x̄)ᵀ`` (k×k) acumulada bloco a
+        bloco: uma passada, memória O(k²). Linhas com NaN saem (modelo externo
+        sem imputação). Os blocos são deslocados pela média do 1º bloco antes de
+        acumular, o que evita o cancelamento de ``XᵀX − n·x̄x̄ᵀ`` em colunas de
+        média alta. Devolve ``(n, média, G)``; ``(0, None, None)`` sem linhas."""
+        n, desloc, soma, G = 0, None, None, None
+        for B in blocks:
+            B = np.asarray(B, dtype="float64")
+            B = B[~np.isnan(B).any(axis=1)]
+            if not len(B):
+                continue
+            if desloc is None:
+                desloc = B.mean(axis=0)
+                soma = np.zeros(B.shape[1])
+                G = np.zeros((B.shape[1], B.shape[1]))
+            D = B - desloc
+            soma += D.sum(axis=0)
+            G += D.T @ D
+            n += len(B)
+        if n == 0:
+            return 0, None, None
+        d = soma / n
+        return n, desloc + d, G - n * np.outer(d, d)
+
+    @staticmethod
+    def _vif_from_gram(n, media, G) -> list:
+        """VIF de cada coluna a partir da soma de quadrados centrada.
+
+        Com R a correlação entre as colunas, ``R²ᵢ = rᵢᵀ R₋ᵢ⁺ rᵢ`` é o R²
+        (centrado, com intercepto) da regressão da coluna i nas demais: o mesmo
+        número de ``statsmodels.variance_inflation_factor`` e de
+        :meth:`_vif_values_sklearn`, mas sobre uma matriz k×k em vez de k
+        regressões nas n linhas. Coluna constante → NaN; R² ≥ 1−1e-12 → inf."""
+        k = G.shape[0]
+        if k == 1:
+            return [1.0]
+        var = np.diag(G) / n
+        tol = (1e-12 * np.maximum(1.0, np.abs(media))) ** 2
+        vivas = np.flatnonzero(var > tol)
+        out = [float("nan")] * k
+        if not len(vivas):
+            return out
+        sd = np.sqrt(np.diag(G)[vivas])
+        R = G[np.ix_(vivas, vivas)] / np.outer(sd, sd)
+        todas = np.arange(len(vivas))
+        for p, i in enumerate(vivas):
+            outras = todas[todas != p]
+            if not len(outras):             # demais constantes: nada a explicar
+                out[i] = 1.0
+                continue
+            r = R[outras, p]
+            # corte relativo 1e-10: em correlação, autovalor abaixo disso é a
+            # direção degenerada (dummies completas + intercepto) e não sinal;
+            # o corte padrão (~k·eps) deixava esse "zero" numérico passar
+            r2 = float(r @ np.linalg.pinv(R[np.ix_(outras, outras)], 1e-10,
+                                          hermitian=True) @ r)
+            out[i] = float("inf") if r2 >= 1.0 - 1e-12 else 1.0 / (1.0 - r2)
+        return out
+
+    @staticmethod
     def _vif_values(X) -> list:
-        """VIF por coluna de ``X``: tenta ``statsmodels`` (import lazy — lib
-        opcional); ausente, usa :meth:`_vif_values_sklearn` (mesmos valores)."""
+        """VIF por coluna de ``X`` (ver :meth:`_vif_from_gram`)."""
         X = np.asarray(X, dtype="float64")
-        X = X[~np.isnan(X).any(axis=1)]                  # modelo externo sem imputação
-        n, k = X.shape
-        if k == 0 or n < 2:
+        n_linhas, k = X.shape
+        if k == 0:
+            return []
+        passo = ModelSegmenter._CHUNK_ROWS
+        n, media, G = ModelSegmenter._centered_gram(
+            X[i:i + passo] for i in range(0, n_linhas, passo))
+        if n < 2:
             return []
         if k == 1:
             return [1.0]
-        try:
-            from statsmodels.stats.outliers_influence import variance_inflation_factor
-        except ImportError:
-            return ModelSegmenter._vif_values_sklearn(X)
-        Xc = np.column_stack([np.ones(n), X])            # intercepto (VIF clássico)
-        out = []
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")              # colinear perfeito → divisão por 0
-            for i in range(k):
-                try:
-                    out.append(float(variance_inflation_factor(Xc, i + 1)))
-                except Exception:                        # noqa: BLE001 — termo degenerado
-                    out.append(float("nan"))
-        return out
+        return ModelSegmenter._vif_from_gram(n, media, G)
 
     @staticmethod
     def _vif_values_sklearn(X) -> list:
@@ -3810,9 +4070,19 @@ class ModelSegmenter:
             raise KeyError(
                 f"Colunas ausentes para escorar: {faltando}. O modelo espera "
                 f"{list(self.model_features)}.")
-        X = df[self.model_features]
-        return pd.Series(self._predict_score_array(self.model, X), index=df.index,
-                         name="score", dtype="float64")
+        n, passo = len(df), int(self._CHUNK_ROWS)
+        if n <= passo:
+            X = df[self.model_features]
+            return pd.Series(self._predict_score_array(self.model, X), index=df.index,
+                             name="score", dtype="float64")
+        # escoragem em blocos: o pré-processador densifica o one-hot, então
+        # escorar a base inteira de uma vez criava linhas × colunas-do-desenho
+        # float64 (mais as cópias internas) só para produzir um vetor.
+        out = np.empty(n, dtype="float64")
+        for i in range(0, n, passo):
+            X = df.iloc[i:i + passo][self.model_features]
+            out[i:i + passo] = self._predict_score_array(self.model, X)
+        return pd.Series(out, index=df.index, name="score", dtype="float64")
 
     # ------------------------------------------------------------------
     # CALIBRAÇÃO pós-treino: camada sobre o score CRU (antes de score_scale)
@@ -4166,9 +4436,12 @@ class ModelSegmenter:
             y, sc = y[ok], sc[ok]
             if y.size == 0:
                 continue
-            for mname in metrics:
-                ci = bootstrap_metric_ci(y, sc, metric=(_rmse if mname == "rmse" else mname),
-                                         n_boot=int(n_boot), alpha=alpha, seed=seed)
+            # uma reamostragem por amostra para todas as métricas (mesma seed ⇒
+            # mesmas réplicas que o cálculo métrica a métrica de antes)
+            cis = bootstrap_metrics_ci(
+                y, sc, metrics=[_rmse if m == "rmse" else m for m in metrics],
+                n_boot=int(n_boot), alpha=alpha, seed=seed)
+            for mname, ci in zip(metrics, cis):
                 rows.append({"metrica": mname, "amostra": a, "n": int(y.size),
                              "valor": ci["valor"], "ic_low": ci["ic_low"],
                              "ic_high": ci["ic_high"], "se": ci["se"]})
@@ -4265,8 +4538,9 @@ class ModelSegmenter:
         is_clf = self.task_type == "classification"
 
         eval_sample = sample or self._oot_sample()
-        tr = self._frame(self.ref_sample); tr = tr[tr[self.target].notna()]
-        ev = self._frame(eval_sample); ev = ev[ev[self.target].notna()]
+        cols_be = list(dict.fromkeys([*feats, self.target]))
+        tr = self.df.loc[self._fit_mask(), cols_be]
+        ev = self.df.loc[self._fit_mask(eval_sample), cols_be]
         if len(ev) < 20:                          # avaliação insuficiente → usa a própria DES
             ev, eval_sample = tr, self.ref_sample
         ytr = tr[self.target].astype(int) if is_clf else tr[self.target].astype("float64")
@@ -4556,8 +4830,8 @@ class ModelSegmenter:
     def _sample_scores(self, sample=None):
         if sample is None:
             sample = self.ref_sample
-        mask = (pd.Series(True, index=self.df.index) if self.sample_col is None
-                else self.df[self.sample_col] == sample)
+        mask = (np.ones(len(self.df), dtype=bool) if self.sample_col is None
+                else self._frame_mask(sample))
         y = self.df.loc[mask, self.target].to_numpy(dtype="float64")
         sc = self.score_[mask].to_numpy(dtype="float64")
         ok = ~np.isnan(y) & ~np.isnan(sc)
@@ -4801,7 +5075,9 @@ class ModelSegmenter:
         Eixos na **unidade do alvo** (valor previsto vs. observado), NÃO na escala
         de score 0–1000: a calibração é sobre o risco previsto casar com o realizado
         (mesma família de ``valor_previsto``/``backtest``). Distribuição e KS é que
-        usam a escala de negócio (ranking)."""
+        usam a escala de negócio (ranking). Na regressão, acima de 50 mil
+        observações a nuvem exibe uma amostra fixa; curva, banda e cobertura usam
+        todas (ver :func:`_pontos_dispersao`)."""
         y, sc = self._sample_scores(sample)                 # previsto/observado CRUS (alvo)
         fig, ax = _new_ax(figsize, dpi, ax)
         if y.size == 0:
@@ -4824,7 +5100,8 @@ class ModelSegmenter:
             # nuvem bruta + curva de calibração por faixa de previsto com BANDA de
             # 95% (média observada ± 1,96·desvio) e a cobertura: % das observações
             # que caem dentro da banda.
-            ax.scatter(sc, y, s=10, alpha=0.16, color="#9db8d2", edgecolors="none",
+            vis = _pontos_dispersao(len(sc), self.random_state)
+            ax.scatter(sc[vis], y[vis], s=10, alpha=0.16, color="#9db8d2", edgecolors="none",
                        zorder=1)
             q = np.unique(np.quantile(sc, np.linspace(0, 1, n_bins + 1)))
             cov_txt = None
@@ -4871,11 +5148,13 @@ class ModelSegmenter:
 
     def plot_residuals(self, sample=None, figsize=(6.6, 4.0), dpi=150, save_path=None, ax=None):
         """Regressão: resíduo (observado − previsto) vs. previsto, na **unidade do
-        alvo** (alvo previsto), não na escala de score 0–1000."""
+        alvo** (alvo previsto), não na escala de score 0–1000. Acima de 50 mil
+        observações a nuvem exibe uma amostra fixa (ver :func:`_pontos_dispersao`)."""
         y, sc = self._sample_scores(sample)                 # previsto/observado CRUS (alvo)
         fig, ax = _new_ax(figsize, dpi, ax)
         res = y - sc
-        ax.scatter(sc, res, s=10, alpha=0.35, color="#3b6ea5", edgecolors="none")
+        vis = _pontos_dispersao(len(sc), self.random_state)
+        ax.scatter(sc[vis], res[vis], s=10, alpha=0.35, color="#3b6ea5", edgecolors="none")
         ax.axhline(0, color="#d6453e", lw=1)
         ax.set_xlabel("previsto"); ax.set_ylabel("resíduo (obs − prev)")
         _pct_axis(ax, "both")                               # unidade do alvo, em %
@@ -5519,11 +5798,17 @@ class ModelSegmenter:
     def _shap_inputs(self, sample=None, sample_size=2000):
         """(estimador, X_transformado_df, nomes) — para SHAP. Em pipelines,
         transforma com o pré-processador e usa o estimador final."""
-        sub = self._frame(sample)
-        est, Xt = self._shap_transform(sub[self.model_features])
+        mask = (np.ones(len(self.df), dtype=bool) if self.sample_col is None
+                else self._frame_mask(sample))
+        pos = pd.Series(np.flatnonzero(mask), index=self.df.index[mask])
+        # sorteia as POSIÇÕES (mesmo tamanho e seed ⇒ mesmas linhas que sortear
+        # o recorte transformado) e só então copia e transforma essas linhas: a
+        # referência inteira não é copiada nem densificada para usar 2 mil.
+        if sample_size and len(pos) > sample_size:
+            pos = pos.sample(sample_size, random_state=self.random_state)
+        sub = self.df.iloc[pos.to_numpy()][list(self.model_features)]
+        est, Xt = self._shap_transform(sub)
         names = list(Xt.columns)
-        if sample_size and len(Xt) > sample_size:
-            Xt = Xt.sample(sample_size, random_state=self.random_state)
         return est, Xt, names
 
     def shap_values(self, sample=None, sample_size=2000):
@@ -7291,8 +7576,7 @@ class ModelSegmenter:
         if self.model is None:
             raise RuntimeError("Ajuste/defina o modelo antes (fit / set_model).")
         X = self._apply_derived(X)        # recria variáveis derivadas a partir da origem
-        sc = pd.Series(self._predict_score_array(self.model, X[self.model_features]),
-                       index=X.index, dtype="float64")           # predição CRUA
+        sc = self._compute_score(X)                              # predição CRUA (em blocos)
         # o negócio recebe o score na escala 0–score_scale (0–1000); os ratings,
         # porém, seguem a estratégia salva na escala CRUA (bins definidos no fit).
         out = pd.DataFrame({col_score: sc * self.score_scale}, index=X.index)
@@ -7318,8 +7602,8 @@ class ModelSegmenter:
         col = pd.Series(col)
         labels = pd.Series([pd.NA] * len(col), index=col.index, dtype="object")
         assigned = np.zeros(len(col), dtype=bool)
-        for b in bins:
-            m = _bin_mask_series(col, b).to_numpy() & ~assigned
+        for b, m in zip(bins, _bin_masks(col, bins)):
+            m = m & ~assigned
             labels.iloc[m] = self._bin_label(feature, b)
             assigned |= m
         miss = (~assigned) & col.notna().to_numpy()
@@ -7817,13 +8101,22 @@ class ModelSegmenter:
             y, sc = y[ok], sc[ok]
             if y.size == 0:
                 continue
-            for m in metrics:
-                try:
-                    ci = bootstrap_metric_ci(y, sc, metric=(_rmse if m == "rmse" else m),
-                                             n_boot=int(n_boot), alpha=alpha, seed=seed)
+            fns = [_rmse if m == "rmse" else m for m in metrics]
+            try:
+                cis = bootstrap_metrics_ci(y, sc, metrics=fns, n_boot=int(n_boot),
+                                           alpha=alpha, seed=seed)
+            except Exception:               # alguma métrica não computável: uma a uma
+                cis = []
+                for fn in fns:
+                    try:
+                        cis.append(bootstrap_metrics_ci(y, sc, metrics=[fn],
+                                                        n_boot=int(n_boot),
+                                                        alpha=alpha, seed=seed)[0])
+                    except Exception:
+                        cis.append(None)
+            for m, ci in zip(metrics, cis):
+                if ci is not None:
                     out[(m, a)] = (float(ci["ic_low"]), float(ci["ic_high"]))
-                except Exception:           # métrica não computável na amostra
-                    continue
         return out
 
     def compare_to(self, baseline, n_boot: int = 200, alpha: float = 0.05,

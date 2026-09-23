@@ -13,7 +13,7 @@ se um *shift* DES→OOT está dentro do ruído ou é degradação real.
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Optional, Union
+from typing import Callable, Dict, List, Optional, Sequence, Union
 
 import numpy as np
 
@@ -52,6 +52,118 @@ def _avaliar_metrica(
     )
 
 
+def _roc_por_contagem(y_true: np.ndarray, y_score: np.ndarray) -> Callable:
+    """ROC de réplicas bootstrap a partir das CONTAGENS de cada linha.
+
+    Ordena o score uma única vez; cada réplica vira um vetor de multiplicidades
+    (quantas vezes cada linha foi sorteada) e a curva sai de somas acumuladas
+    nessa ordem fixa, em O(n). O ``roc_curve`` por réplica reordenava as n
+    linhas (mais o ``np.unique`` das checagens) a cada réplica e dominava o custo
+    em base grande. Os pontos são os mesmos do ``roc_curve`` sobre
+    ``(y[idx], score[idx])`` (empates agrupados por valor distinto de score);
+    os pontos intermediários colineares que o sklearn descarta não mudam a
+    área nem o máximo de TPR − FPR. Devolve ``pack(contagens) -> (auc, gini,
+    ks)`` ou ``None`` quando a réplica não tem as duas classes."""
+    ordem = np.argsort(-y_score, kind="mergesort")
+    s = y_score[ordem]
+    fins = np.r_[np.flatnonzero(np.diff(s)), s.size - 1]
+    positivo = y_true[ordem] == 1
+
+    def pack(contagens: np.ndarray):
+        c = contagens[ordem]
+        tps = np.cumsum(np.where(positivo, c, 0))[fins]
+        fps = np.cumsum(c)[fins] - tps
+        if tps[-1] == 0 or fps[-1] == 0:
+            return None
+        tpr = np.r_[0.0, tps / tps[-1]]
+        fpr = np.r_[0.0, fps / fps[-1]]
+        auc = float(np.sum(np.diff(fpr) * (tpr[1:] + tpr[:-1]) / 2.0))
+        ks = float(np.max(tpr - fpr))
+        return auc, 2 * auc - 1, ks
+
+    return pack
+
+
+def bootstrap_metrics_ci(
+    y_true,
+    y_score,
+    metrics: Sequence[Union[str, Callable]] = ("auc",),
+    n_boot: int = 200,
+    alpha: float = 0.05,
+    stratified: bool = True,
+    seed: Optional[int] = None,
+) -> List[Dict[str, float]]:
+    """IC bootstrap de VÁRIAS métricas sobre as MESMAS réplicas.
+
+    Mesma reamostragem de :func:`bootstrap_metric_ci` (mesma ``seed`` ⇒ mesmos
+    índices), avaliando todas as ``metrics`` em cada réplica: AUC, Gini e KS
+    saem de uma única curva ROC por réplica, calculada por contagem
+    (:func:`_roc_por_contagem`). Devolve uma lista alinhada a ``metrics``, cada
+    item no formato ``{'valor', 'ic_low', 'ic_high', 'se'}``."""
+    metrics = list(metrics)
+    y_true = np.asarray(y_true, dtype=float)
+    y_score = np.asarray(y_score, dtype=float)
+    n = len(y_true)
+    vazio = {"valor": float("nan"), "ic_low": float("nan"),
+             "ic_high": float("nan"), "se": float("nan")}
+    if n == 0 or n_boot <= 0:
+        return [dict(vazio) for _ in metrics]
+
+    # ponto na amostra completa pelo caminho de referência (valida os nomes)
+    valores = [_avaliar_metrica(m, y_true, y_score) for m in metrics]
+
+    # Estratifica apenas em alvo binário {0,1} com as duas classes presentes.
+    classes = np.unique(y_true)
+    binario = classes.size == 2 and set(classes) <= {0.0, 1.0}
+    estratificar = stratified and binario
+    if estratificar:
+        idx_pos = np.flatnonzero(y_true == 1)
+        idx_neg = np.flatnonzero(y_true == 0)
+
+    usa_contagem = [isinstance(m, str) and m in _METRICAS_CLF for m in metrics]
+    pack = (_roc_por_contagem(y_true, y_score)
+            if any(usa_contagem) and binario and np.isfinite(y_score).all()
+            else None)
+    rng = np.random.default_rng(seed)
+    replicas = np.empty((n_boot, len(metrics)), dtype=float)
+    for b in range(n_boot):
+        if estratificar:
+            idx = np.concatenate([
+                rng.choice(idx_pos, size=idx_pos.size, replace=True),
+                rng.choice(idx_neg, size=idx_neg.size, replace=True),
+            ])
+        else:
+            idx = rng.integers(0, n, size=n)
+        roc = None
+        if pack is not None:
+            roc = pack(np.bincount(idx, minlength=n))
+        yb = sb = None
+        for j, m in enumerate(metrics):
+            if pack is not None and usa_contagem[j]:
+                replicas[b, j] = (float("nan") if roc is None
+                                  else roc[_METRICAS_CLF.index(m)])
+                continue
+            if yb is None:
+                yb, sb = y_true[idx], y_score[idx]
+            replicas[b, j] = _avaliar_metrica(m, yb, sb)
+
+    def _r(v: float) -> float:
+        return round(float(v), 6) if np.isfinite(v) else float("nan")
+
+    out = []
+    for j, valor in enumerate(valores):
+        validas = replicas[:, j][np.isfinite(replicas[:, j])]
+        if validas.size == 0:
+            ic_low = ic_high = se = float("nan")
+        else:
+            ic_low = float(np.percentile(validas, 100 * alpha / 2))
+            ic_high = float(np.percentile(validas, 100 * (1 - alpha / 2)))
+            se = float(np.std(validas, ddof=1)) if validas.size > 1 else float("nan")
+        out.append({"valor": _r(valor), "ic_low": _r(ic_low),
+                    "ic_high": _r(ic_high), "se": _r(se)})
+    return out
+
+
 def bootstrap_metric_ci(
     y_true,
     y_score,
@@ -88,47 +200,8 @@ def bootstrap_metric_ci(
         amostra completa, limites percentis do IC e erro-padrão bootstrap
         (desvio das réplicas). Réplicas não computáveis (ex.: métrica NaN)
         são descartadas; sem réplica válida, IC e ``se`` saem ``NaN``.
+        Para várias métricas sobre as mesmas réplicas, use
+        :func:`bootstrap_metrics_ci`.
     """
-    y_true = np.asarray(y_true, dtype=float)
-    y_score = np.asarray(y_score, dtype=float)
-    n = len(y_true)
-    if n == 0 or n_boot <= 0:
-        return {"valor": float("nan"), "ic_low": float("nan"),
-                "ic_high": float("nan"), "se": float("nan")}
-
-    valor = _avaliar_metrica(metric, y_true, y_score)
-
-    # Estratifica apenas em alvo binário {0,1} com as duas classes presentes.
-    classes = np.unique(y_true)
-    estratificar = (
-        stratified and classes.size == 2 and set(classes) <= {0.0, 1.0}
-    )
-    if estratificar:
-        idx_pos = np.flatnonzero(y_true == 1)
-        idx_neg = np.flatnonzero(y_true == 0)
-
-    rng = np.random.default_rng(seed)
-    replicas = np.empty(n_boot, dtype=float)
-    for b in range(n_boot):
-        if estratificar:
-            idx = np.concatenate([
-                rng.choice(idx_pos, size=idx_pos.size, replace=True),
-                rng.choice(idx_neg, size=idx_neg.size, replace=True),
-            ])
-        else:
-            idx = rng.integers(0, n, size=n)
-        replicas[b] = _avaliar_metrica(metric, y_true[idx], y_score[idx])
-
-    validas = replicas[np.isfinite(replicas)]
-    if validas.size == 0:
-        ic_low = ic_high = se = float("nan")
-    else:
-        ic_low = float(np.percentile(validas, 100 * alpha / 2))
-        ic_high = float(np.percentile(validas, 100 * (1 - alpha / 2)))
-        se = float(np.std(validas, ddof=1)) if validas.size > 1 else float("nan")
-
-    def _r(v: float) -> float:
-        return round(float(v), 6) if np.isfinite(v) else float("nan")
-
-    return {"valor": _r(valor), "ic_low": _r(ic_low),
-            "ic_high": _r(ic_high), "se": _r(se)}
+    return bootstrap_metrics_ci(y_true, y_score, metrics=(metric,), n_boot=n_boot,
+                                alpha=alpha, stratified=stratified, seed=seed)[0]

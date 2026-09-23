@@ -20,7 +20,7 @@ from .classification import HIGHER_IS_BETTER as _HIB_CLASSIFICATION
 from .classification import classification_metrics, ks_optimal_cutoff
 from .regression import HIGHER_IS_BETTER as _HIB_REGRESSION
 from .regression import regression_metrics
-from .uncertainty import bootstrap_metric_ci
+from .uncertainty import bootstrap_metric_ci, bootstrap_metrics_ci
 
 # Direção "boa" de cada métrica (classificação + regressão): ``True`` = maior é
 # melhor (AUC, KS, R²...), ``False`` = menor é melhor (RMSE, Brier...) e
@@ -92,11 +92,12 @@ def metric_by_sample(
             sub[cfg.target_col], sub[cfg.score_col], problem_type, cutoff=cutoff
         )
         if with_ci:
-            for m in _CI_METRICS.get(problem_type, ()):
-                ci = bootstrap_metric_ci(
-                    sub[cfg.target_col], sub[cfg.score_col], metric=m,
-                    n_boot=n_boot, alpha=alpha, seed=seed,
-                )
+            ms = _CI_METRICS.get(problem_type, ())
+            cis = bootstrap_metrics_ci(
+                sub[cfg.target_col], sub[cfg.score_col], metrics=ms,
+                n_boot=n_boot, alpha=alpha, seed=seed,
+            )
+            for m, ci in zip(ms, cis):
                 resultado[amostra][f"{m}_ic_low"] = ci["ic_low"]
                 resultado[amostra][f"{m}_ic_high"] = ci["ic_high"]
                 resultado[amostra][f"{m}_se"] = ci["se"]

@@ -21,7 +21,7 @@ from .shift import (
     sample_shifts,
     shift_significance,
 )
-from .uncertainty import bootstrap_metric_ci
+from .uncertainty import bootstrap_metric_ci, bootstrap_metrics_ci
 
 __all__ = [
     "classification_metrics",
@@ -39,6 +39,7 @@ __all__ = [
     "sample_shifts",
     "shift_significance",
     "bootstrap_metric_ci",
+    "bootstrap_metrics_ci",
     "binomial_ci",
     "calibration_in_the_large",
     "calibration_slope_intercept",
