@@ -129,6 +129,27 @@ def test_nuvem_de_pontos_amostrada_mantem_caudas_e_cobertura(monkeypatch):
     plt.close("all")
 
 
+def test_nuvem_de_lgd_inflada_em_zero_nao_vira_bloco(monkeypatch):
+    """LGD inflada em zero: IQR 0 no eixo observado, e as cercas de Tukey
+    marcariam todo o grupo não curado. A nuvem amostrada tem de manter a
+    proporção de não curados e a forma da distribuição deles (sem bloco denso
+    artificial), além do mínimo e do máximo."""
+    monkeypatch.setattr(segmod, "_MAX_PONTOS_DISPERSAO", 2000)
+    rng = np.random.default_rng(3)
+    n = 200_000
+    y = np.where(rng.random(n) < 0.8, 0.0, rng.beta(2, 2, n))
+    prev = np.clip(0.2 + 0.1 * rng.normal(size=n), 0, 1)
+    for eixos in ((prev, y), (prev, y - prev)):
+        vis = segmod._pontos_dispersao(n, 42, *eixos)
+        yv = y[vis]
+        assert len(vis) <= 2000 + 2 * (2 * 100 + 2)      # amostra + 0,05% por ponta
+        assert abs((yv > 0).mean() - (y > 0).mean()) < 0.05
+        nao_curados = yv[yv > 0]
+        assert abs((nao_curados < np.median(y[y > 0])).mean() - 0.5) < 0.1
+        for eixo in eixos:
+            assert eixo.argmax() in vis and eixo.argmin() in vis
+
+
 # ----------------------------------------------------------------------
 # VIF em forma fechada
 # ----------------------------------------------------------------------
