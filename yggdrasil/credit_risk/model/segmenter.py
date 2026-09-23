@@ -536,46 +536,64 @@ def _build_estimator(algorithm: str, task_type: str, hyperparams: dict | None,
     raise ValueError(algorithm)  # pragma: no cover
 
 
-def _decimal_columns_to_float(df: pd.DataFrame) -> list:
-    """Converte para float64, no lugar, as colunas ``object`` cujos valores são
-    ``decimal.Decimal``, que é como o ``toPandas()`` do Spark entrega
-    ``DecimalType``. Sem isso a coluna numérica é lida como CATEGÓRICA: o
-    optbinning agrupa centenas de milhares de "categorias" e o one-hot denso do
-    ``fit`` pede linhas × valores distintos × 8 bytes, o que derruba o driver.
-    Devolve os nomes convertidos."""
+def _decimal_columns_to_numeric(df: pd.DataFrame, cols) -> list:
+    """Converte para numérico, no lugar, as colunas ``object`` de ``cols`` cujos
+    valores são ``decimal.Decimal``, que é como o ``toPandas()`` do Spark
+    entrega ``DecimalType``. Sem isso a coluna numérica é lida como CATEGÓRICA:
+    o optbinning agrupa centenas de milhares de "categorias" e o one-hot denso
+    do ``fit`` pede linhas × valores distintos × 8 bytes, o que derruba o
+    driver.
+
+    Só as colunas pedidas (alvo e variáveis candidatas): chaves, amostra e
+    safra ficam exatamente como vieram, porque ``assign`` exporta ``self.df``.
+    Escala 0 (``DecimalType(p, 0)``) vira int64, ou float64 se houver nulos; a
+    coluna fica como está se algum valor passar de 2**53 em módulo (o float64
+    perderia dígitos). Escala positiva vira float64. Devolve os nomes
+    convertidos."""
     import decimal
 
+    alvo = set(cols)
     convertidas = []
-    for c in df.columns:
-        col = df[c]
+    for j in range(df.shape[1]):            # por posição: nomes podem se repetir
+        if df.columns[j] not in alvo:
+            continue
+        col = df.iloc[:, j]
         if col.dtype != object:
             continue
-        idx = col.first_valid_index()
-        if idx is None:
+        validos = np.flatnonzero(col.notna().to_numpy())
+        if not len(validos):
             continue
-        primeiro = col.loc[idx]
-        if isinstance(primeiro, pd.Series):     # índice duplicado
-            primeiro = primeiro.iloc[0]
+        primeiro = col.iloc[int(validos[0])]
         if not isinstance(primeiro, decimal.Decimal):
             continue
         try:
-            df[c] = col.astype("float64")
-        except (TypeError, ValueError):          # coluna mista (Decimal + texto)
+            f = col.astype("float64")
+        except (TypeError, ValueError, decimal.InvalidOperation):   # Decimal + texto
             continue
-        convertidas.append(c)
+        if primeiro.as_tuple().exponent >= 0:               # escala 0: inteiros
+            finitos = f.to_numpy()[np.isfinite(f.to_numpy())]
+            if finitos.size and float(np.abs(finitos).max()) > 2.0 ** 53:
+                continue                                    # float64 perderia dígitos
+            if len(validos) == len(col) and finitos.size == len(col):
+                f = f.astype("int64")
+        df.isetitem(j, f)
+        convertidas.append(df.columns[j])
     return convertidas
 
 
 def _cgroup_free_bytes(raiz: str = "/sys/fs/cgroup") -> int | None:
-    """Folga até o limite de memória do cgroup (container), descontando o cache
-    de arquivo reclamável (``inactive_file``), como faz o kubelet. ``None`` sem
-    limite configurado ou fora de Linux."""
-    for lim_p, uso_p, stat_p, chave in (
+    """Folga até o limite de memória do cgroup (container), descontando todo o
+    cache de arquivo (``active_file`` + ``inactive_file``), que o kernel
+    recupera antes de matar o processo: a conta erra para o lado de deixar o
+    fit rodar, não de recusá-lo. ``None`` sem limite configurado ou fora de
+    Linux."""
+    for lim_p, uso_p, stat_p, chaves in (
             (f"{raiz}/memory.max", f"{raiz}/memory.current",
-             f"{raiz}/memory.stat", "inactive_file"),
+             f"{raiz}/memory.stat", ("active_file", "inactive_file")),
             (f"{raiz}/memory/memory.limit_in_bytes",
              f"{raiz}/memory/memory.usage_in_bytes",
-             f"{raiz}/memory/memory.stat", "total_inactive_file")):
+             f"{raiz}/memory/memory.stat",
+             ("total_active_file", "total_inactive_file"))):
         try:
             with open(lim_p) as fh:
                 lim = fh.read().strip()
@@ -585,17 +603,16 @@ def _cgroup_free_bytes(raiz: str = "/sys/fs/cgroup") -> int | None:
             continue
         if lim == "max" or int(lim) >= 1 << 60:      # v2 "max" / v1 sem limite
             return None
-        inativo = 0
+        cache = 0
         try:
             with open(stat_p) as fh:
                 for linha in fh:
                     nome, _, valor = linha.partition(" ")
-                    if nome == chave:
-                        inativo = int(valor)
-                        break
+                    if nome in chaves:
+                        cache += int(valor)
         except (OSError, ValueError):
             pass
-        return max(int(lim) - (uso - inativo), 0)
+        return max(int(lim) - (uso - cache), 0)
     return None
 
 
@@ -795,6 +812,13 @@ class ModelSegmenter:
         Restringe as variáveis candidatas (default: todas que não são alvo/amostra/data).
     date_col:
         Coluna de data/safra (fora da modelagem; usada nas análises temporais).
+    decimal_to_numeric:
+        Colunas ``decimal.Decimal`` (``DecimalType`` do ``toPandas()``) no alvo
+        e nas candidatas viram numéricas na construção (``True``, padrão). Uma
+        lista converte exatamente essas colunas; ``False`` não converte nada.
+        As convertidas ficam em ``decimal_cols_`` e são persistidas no
+        :meth:`to_dict`; um JSON salvo antes desta opção carrega com ``False``,
+        preservando o tratamento (categórico) com que o modelo foi treinado.
     """
 
     #: Linhas por bloco nas passagens em lote sobre a base (escoragem, VIF,
@@ -816,6 +840,7 @@ class ModelSegmenter:
         verbose: bool = True,
         score_scale: float = 1000.0,
         random_state: int | None = 42,
+        decimal_to_numeric: bool | list = True,
     ):
         if task_type not in ("classification", "regression"):
             raise ValueError("task_type deve ser 'classification' ou 'regression'.")
@@ -823,10 +848,17 @@ class ModelSegmenter:
             raise ValueError(f"Alvo '{target}' não está no DataFrame.")
 
         self.df = df.copy()
-        convertidas = _decimal_columns_to_float(self.df)
+        # Decimal (DecimalType do Spark) → numérico só no alvo e nas candidatas
+        if decimal_to_numeric is True:
+            conv = ([target, *features] if features is not None else
+                    [c for c in self.df.columns if c not in (sample_col, date_col)])
+        else:
+            conv = list(decimal_to_numeric or [])
+        convertidas = _decimal_columns_to_numeric(self.df, conv) if conv else []
+        self.decimal_cols_: list = list(dict.fromkeys(convertidas))
         if convertidas and verbose:
-            print(f"[init] colunas Decimal convertidas para float64 (DecimalType do "
-                  f"Spark): {convertidas}")
+            print(f"[init] colunas Decimal (DecimalType do Spark) convertidas para "
+                  f"numérico: {convertidas}")
         # caches de performance (memoização): binning ótimo por variável (caro —
         # solver CP-SAT do optbinning) e máscara de linhas por amostra. O cache de
         # bins é invalidado SÓ NA VARIÁVEL editada em set/clear_manual_bins e nas
@@ -3891,22 +3923,24 @@ class ModelSegmenter:
         ``VIF = 1/(1−R²)`` da regressão de cada termo sobre os demais (com
         intercepto). Regra de bolso: < 5 ok · 5–10 atenção · > 10 alto.
 
-        Calculado em forma fechada a partir da matriz de correlação dos termos
-        (ver :meth:`_vif_from_gram`), acumulada em blocos de linhas: mesmos
-        valores do ``statsmodels``/``LinearRegression`` sem rodar uma regressão
-        sobre a base inteira por termo. Devolve ``termo, vif, avaliacao``
-        ordenado do maior para o menor VIF (``inf`` = colinearidade perfeita)."""
+        Calculado a partir do fator R de um QR da matriz de desenho acumulado em
+        blocos de linhas (ver :meth:`_qr_acumulado`): os mesmos valores do
+        ``statsmodels``/``LinearRegression`` sem rodar uma regressão sobre a base
+        inteira por termo. Devolve ``termo, vif, avaliacao`` ordenado do maior
+        para o menor VIF (``inf`` = colinearidade perfeita; termo constante sai
+        ``NaN``)."""
         if self.model is None:
             raise RuntimeError("Ajuste o modelo antes (fit / set_model).")
         pre = (self.model.named_steps.get("pre")
                if hasattr(self.model, "named_steps") else None)
-        n, media, G = self._centered_gram(
+        n, R, constante = self._qr_acumulado(
             self._design_block(pre, bloco)
             for bloco in self._row_blocks(self._fit_mask(), self.model_features))
         names = self._design_feature_names(pre, use_labels=use_labels)
-        if G is not None and len(names) != G.shape[0]:   # robustez a divergências
-            names = [f"x{i}" for i in range(G.shape[0])]
-        vifs = (self._vif_from_gram(n, media, G) if G is not None and n >= 2
+        k = R.shape[1] - 1 if R is not None else len(names)
+        if len(names) != k:                              # robustez a divergências
+            names = [f"x{i}" for i in range(k)]
+        vifs = (self._vif_from_qr(R, constante) if R is not None and n >= 2
                 else [float("nan")] * len(names))
         out = pd.DataFrame({
             "termo": names,
@@ -3924,13 +3958,17 @@ class ModelSegmenter:
         return Xd.toarray() if hasattr(Xd, "toarray") else np.asarray(Xd, dtype="float64")
 
     @staticmethod
-    def _centered_gram(blocks) -> tuple:
-        """Soma de quadrados centrada ``Σ (x−x̄)(x−x̄)ᵀ`` (k×k) acumulada bloco a
-        bloco: uma passada, memória O(k²). Linhas com NaN saem (modelo externo
-        sem imputação). Os blocos são deslocados pela média do 1º bloco antes de
-        acumular, o que evita o cancelamento de ``XᵀX − n·x̄x̄ᵀ`` em colunas de
-        média alta. Devolve ``(n, média, G)``; ``(0, None, None)`` sem linhas."""
-        n, desloc, soma, G = 0, None, None, None
+    def _qr_acumulado(blocks) -> tuple:
+        """Fator R de ``[1, X − x₀]`` por QR em blocos de linhas (TSQR):
+        ``R ← qr([R; bloco]).R``. Uma passada e memória O(bloco × k). Ao
+        contrário de ``XᵀX``, o QR não eleva ao quadrado o número de condição
+        de X: colunas quase duplicadas (saldo e saldo + encargos, correlação
+        1 − 1e-10) seguem distinguíveis da colinearidade exata, como no OLS do
+        statsmodels. ``x₀`` é a média do 1º bloco (condiciona colunas de média
+        alta frente ao intercepto). Linhas com NaN saem. Devolve
+        ``(n, R, constante)``, com ``constante[j]`` = coluna sem variação;
+        ``(0, None, None)`` sem linhas."""
+        n, desloc, R, mn, mx = 0, None, None, None, None
         for B in blocks:
             B = np.asarray(B, dtype="float64")
             B = B[~np.isnan(B).any(axis=1)]
@@ -3938,67 +3976,73 @@ class ModelSegmenter:
                 continue
             if desloc is None:
                 desloc = B.mean(axis=0)
-                soma = np.zeros(B.shape[1])
-                G = np.zeros((B.shape[1], B.shape[1]))
-            D = B - desloc
-            soma += D.sum(axis=0)
-            G += D.T @ D
+                mn, mx = B.min(axis=0), B.max(axis=0)
+            else:
+                mn, mx = np.minimum(mn, B.min(axis=0)), np.maximum(mx, B.max(axis=0))
+            topo = 0 if R is None else R.shape[0]
+            A = np.empty((topo + len(B), B.shape[1] + 1))
+            if topo:
+                A[:topo] = R
+            A[topo:, 0] = 1.0
+            A[topo:, 1:] = B - desloc
+            R = np.linalg.qr(A, mode="r")
             n += len(B)
         if n == 0:
             return 0, None, None
-        d = soma / n
-        return n, desloc + d, G - n * np.outer(d, d)
+        return n, R, mn == mx
 
     @staticmethod
-    def _vif_from_gram(n, media, G) -> list:
-        """VIF de cada coluna a partir da soma de quadrados centrada.
+    def _vif_from_qr(R, constante) -> list:
+        """VIF de cada coluna a partir do fator R de ``[1, X]``.
 
-        Com R a correlação entre as colunas, ``R²ᵢ = rᵢᵀ R₋ᵢ⁺ rᵢ`` é o R²
-        (centrado, com intercepto) da regressão da coluna i nas demais: o mesmo
-        número de ``statsmodels.variance_inflation_factor`` e de
-        :meth:`_vif_values_sklearn`, mas sobre uma matriz k×k em vez de k
-        regressões nas n linhas. Coluna constante → NaN; R² ≥ 1−1e-12 → inf."""
-        k = G.shape[0]
+        Como ``[1, X] = QR`` com Q ortonormal, a soma de quadrados dos resíduos
+        da regressão da coluna i nas demais (com intercepto) é a mesma do
+        mínimos quadrados sobre as colunas de R, uma matriz (k+1) × k: é o OLS
+        do ``statsmodels.variance_inflation_factor``/:meth:`_vif_values_sklearn`
+        sem voltar às n linhas. ``VIF = SQT/SQR``, com a SQT centrada vinda da
+        regressão só no intercepto. Coluna constante → NaN (e fica fora dos
+        regressores); R² ≥ 1−1e-12 → inf."""
+        k = R.shape[1] - 1
         if k == 1:
             return [1.0]
-        var = np.diag(G) / n
-        tol = (1e-12 * np.maximum(1.0, np.abs(media))) ** 2
-        vivas = np.flatnonzero(var > tol)
-        out = [float("nan")] * k
-        if not len(vivas):
-            return out
-        sd = np.sqrt(np.diag(G)[vivas])
-        R = G[np.ix_(vivas, vivas)] / np.outer(sd, sd)
-        todas = np.arange(len(vivas))
-        for p, i in enumerate(vivas):
-            outras = todas[todas != p]
-            if not len(outras):             # demais constantes: nada a explicar
-                out[i] = 1.0
+
+        def _sqr(cols, y):
+            A = R[:, cols]
+            coef = np.linalg.lstsq(A, y, rcond=None)[0]
+            res = y - A @ coef
+            return float(res @ res)
+
+        vivas = [j for j in range(k) if not constante[j]]
+        out = []
+        for i in range(k):
+            if constante[i]:
+                out.append(float("nan"))
                 continue
-            r = R[outras, p]
-            # corte relativo 1e-10: em correlação, autovalor abaixo disso é a
-            # direção degenerada (dummies completas + intercepto) e não sinal;
-            # o corte padrão (~k·eps) deixava esse "zero" numérico passar
-            r2 = float(r @ np.linalg.pinv(R[np.ix_(outras, outras)], 1e-10,
-                                          hermitian=True) @ r)
-            out[i] = float("inf") if r2 >= 1.0 - 1e-12 else 1.0 / (1.0 - r2)
+            y = R[:, i + 1]
+            sqt = _sqr([0], y)
+            sqr = _sqr([0] + [j + 1 for j in vivas if j != i], y)
+            r2 = 1.0 - sqr / sqt if sqt > 0 else float("nan")
+            if not np.isfinite(r2):
+                out.append(float("nan"))
+            else:
+                out.append(float("inf") if r2 >= 1.0 - 1e-12 else 1.0 / (1.0 - r2))
         return out
 
     @staticmethod
     def _vif_values(X) -> list:
-        """VIF por coluna de ``X`` (ver :meth:`_vif_from_gram`)."""
+        """VIF por coluna de ``X`` (ver :meth:`_vif_from_qr`)."""
         X = np.asarray(X, dtype="float64")
         n_linhas, k = X.shape
         if k == 0:
             return []
         passo = ModelSegmenter._CHUNK_ROWS
-        n, media, G = ModelSegmenter._centered_gram(
+        n, R, constante = ModelSegmenter._qr_acumulado(
             X[i:i + passo] for i in range(0, n_linhas, passo))
         if n < 2:
             return []
         if k == 1:
             return [1.0]
-        return ModelSegmenter._vif_from_gram(n, media, G)
+        return ModelSegmenter._vif_from_qr(R, constante)
 
     @staticmethod
     def _vif_values_sklearn(X) -> list:
@@ -8365,6 +8409,10 @@ class ModelSegmenter:
             # parâmetros efetivos, para reproduzir a seleção. JSONs antigos não
             # têm a chave ⇒ None no from_dict.
             "selection_policy": self.selection_policy_,
+            # colunas Decimal convertidas para numérico na construção: o load
+            # repete exatamente essa decisão (JSONs antigos: sem a chave ⇒
+            # nenhuma conversão, como foram treinados)
+            "decimal_to_numeric": list(getattr(self, "decimal_cols_", [])),
         }
 
     def save(self, path: str):
@@ -8389,7 +8437,8 @@ class ModelSegmenter:
                   problem_label=meta.get("problem_label"),
                   features=data.get("candidates"), date_col=meta.get("date_col"),
                   verbose=verbose, score_scale=meta.get("score_scale", 1000.0),
-                  random_state=meta.get("random_state", 42))
+                  random_state=meta.get("random_state", 42),
+                  decimal_to_numeric=data.get("decimal_to_numeric") or False)
         seg.included = set(data.get("included", seg.candidates))
         seg.var_meta = data.get("var_meta", seg.var_meta)
         seg.algorithm = data.get("algorithm")

@@ -169,6 +169,33 @@ def test_vif_nao_contaminado_por_dummies_completas():
                                rtol=1e-8)
 
 
+def test_vif_colunas_quase_duplicadas_de_credito():
+    """Saldo e saldo + encargos (correlação ~1 − 1e-10) não podem esconder a
+    colinearidade de encargos_mes: o VIF segue o da regressão direta (~50),
+    não 1,0. É o caso em que uma solução via XᵀX perde a precisão."""
+    rng = np.random.default_rng(0)
+    n = 5000
+    saldo = rng.lognormal(13, 1, n)
+    encargos = rng.gamma(2.0, 5.0, n)
+    X = np.column_stack([saldo, saldo + encargos, encargos + rng.normal(0, 1.0, n),
+                         rng.normal(40, 10, n)])
+    v = ModelSegmenter._vif_values(X)
+    ref = ModelSegmenter._vif_values_sklearn(X)
+    assert v[2] > 10                                   # encargos_mes: "alto"
+    np.testing.assert_allclose(v[2:], ref[2:], rtol=1e-6)
+    assert v[0] > 1e8 and v[1] > 1e8                   # o par quase duplicado
+    # a mesma leitura pelo caminho completo do segmenter, em blocos pequenos
+    df = pd.DataFrame(X, columns=["saldo", "saldo_total", "encargos_mes", "idade"])
+    df["target"] = (rng.random(n) < 0.2).astype(int)
+    df["amostra"] = "DES"
+    seg = _seg(df, "classification")
+    seg._CHUNK_ROWS = 700
+    seg.fit("logistica", features=["saldo", "saldo_total", "encargos_mes", "idade"])
+    vt = seg.vif_table(use_labels=False).set_index("termo")
+    assert vt.loc["encargos_mes", "avaliacao"] == "alto"
+    assert vt.loc["idade", "avaliacao"] == "ok"
+
+
 # ----------------------------------------------------------------------
 # Bootstrap: réplicas compartilhadas e ROC por contagem
 # ----------------------------------------------------------------------
@@ -235,10 +262,54 @@ def test_decimal_do_spark_vira_numerica():
     assert seg.model_coefficients().shape[0] == 2
 
 
+def test_decimal_so_no_alvo_e_nas_candidatas():
+    """Chave (DecimalType(20,0) acima de 2**53), amostra Decimal e colunas fora
+    do modelo saem intactas; a contagem escala 0 vira int64 e o alvo Decimal,
+    float64."""
+    D = decimal.Decimal
+    df = _base("regression")
+    n = len(df)
+    df["contrato"] = [D(10 ** 19 + i) for i in range(n)]            # chave > 2**53
+    df["parcelas"] = [D(int(v)) for v in np.arange(n) % 48]         # escala 0
+    df["target"] = [D(f"{v:.6f}") for v in df["target"]]            # LGD decimal(10,6)
+    df["lote"] = [D(i % 7) for i in range(n)]                       # fora do modelo
+    df["amostra"] = [D(1) if a == "DES" else D(2) for a in df["amostra"]]
+    seg = ModelSegmenter(df, target="target", task_type="regression",
+                         sample_col="amostra", ref_sample=D(1), verbose=False,
+                         features=["x0", "x2", "parcelas", "contrato"])
+    assert seg.df["target"].dtype == np.float64
+    assert seg.df["parcelas"].dtype == np.int64
+    assert seg.df["contrato"].dtype == object                        # não converte
+    assert seg.df["contrato"].nunique() == n
+    assert seg.df["lote"].dtype == object and seg.df["amostra"].dtype == object
+    assert set(seg._samples()) == {D(1), D(2)}
+    seg.fit("linear", features=["x0", "x2", "parcelas"])
+    out = seg.assign()
+    assert out["contrato"].tolist() == df["contrato"].tolist()
+    assert list(seg.metrics()["amostra"]) == [D(1), D(2)]
+
+
+def test_colunas_com_nome_duplicado_nao_quebram_a_construcao():
+    """``join`` + ``toPandas()`` no Spark deixa nomes repetidos: o segmenter
+    continua sendo construído (e a Decimal repetida é convertida nas duas)."""
+    df = _base("classification")
+    extra = pd.DataFrame({"cat": df["cat"],
+                          "v": [decimal.Decimal("1.5")] * len(df)}, index=df.index)
+    extra2 = pd.DataFrame({"v": [decimal.Decimal("2.5")] * len(df)}, index=df.index)
+    df = pd.concat([df, extra, extra2], axis=1)
+    assert list(df.columns).count("cat") == 2 and list(df.columns).count("v") == 2
+    seg = ModelSegmenter(df, target="target", task_type="classification",
+                         sample_col="amostra", ref_sample="DES", verbose=False,
+                         features=["x0", "x1", "v"])
+    assert (seg.df.dtypes[seg.df.columns == "v"] == np.float64).all()
+    seg.fit("logistica", features=["x0", "x1"])
+    assert seg.score_.notna().all()
+
+
 def test_texto_nao_e_convertido():
     df = _base("classification")
     seg = _seg(df, "classification")
-    assert seg.df["cat"].dtype == object
+    assert not pd.api.types.is_numeric_dtype(seg.df["cat"])   # object ou str (pandas 3)
     assert seg._detect_kind("cat") == "cat"
 
 
@@ -263,14 +334,56 @@ def test_folga_do_cgroup_v1_e_v2(tmp_path):
     v2.mkdir()
     (v2 / "memory.max").write_text(f"{8 * gb}\n")
     (v2 / "memory.current").write_text(f"{6 * gb}\n")
-    (v2 / "memory.stat").write_text(f"anon {5 * gb}\ninactive_file {1 * gb}\n")
-    assert segmod._cgroup_free_bytes(str(v2)) == 3 * gb      # 8 − (6 − 1)
+    (v2 / "memory.stat").write_text(
+        f"anon {3 * gb}\nactive_file {2 * gb}\ninactive_file {1 * gb}\n")
+    assert segmod._cgroup_free_bytes(str(v2)) == 5 * gb      # 8 − (6 − 2 − 1)
     (v2 / "memory.max").write_text("max\n")
     assert segmod._cgroup_free_bytes(str(v2)) is None        # sem limite
     v1 = tmp_path / "v1" / "memory"
     v1.mkdir(parents=True)
     (v1 / "memory.limit_in_bytes").write_text(f"{4 * gb}\n")
     (v1 / "memory.usage_in_bytes").write_text(f"{3 * gb}\n")
-    (v1 / "memory.stat").write_text(f"total_inactive_file {gb // 2}\n")
-    assert segmod._cgroup_free_bytes(str(tmp_path / "v1")) == gb + gb // 2
+    (v1 / "memory.stat").write_text(
+        f"total_active_file {gb // 2}\ntotal_inactive_file {gb // 2}\n")
+    assert segmod._cgroup_free_bytes(str(tmp_path / "v1")) == 2 * gb
     assert segmod._cgroup_free_bytes(str(tmp_path / "nada")) is None
+
+
+@pytest.mark.parametrize("transform", ["raw", "woe"])
+def test_modelo_salvo_antes_da_conversao_carrega_igual(tmp_path, transform):
+    """JSON sem ``decimal_to_numeric`` (salvo pela versão anterior, que tratava
+    Decimal como categórica): o load não converte e o score volta idêntico.
+    JSON novo: a mesma decisão de conversão é repetida no load."""
+    import json
+    rng = np.random.default_rng(5)
+    n = 4000
+    taxas = np.array([decimal.Decimal(v) for v in ("0.05", "0.10", "0.25", "0.50")],
+                     dtype=object)
+    df = pd.DataFrame({"x": rng.normal(size=n), "taxa": taxas[rng.integers(0, 4, n)]})
+    df["target"] = (rng.random(n) < 0.3).astype(int)
+    df["amostra"] = np.where(rng.random(n) < 0.7, "DES", "OOT")
+
+    legado = _seg(df, "classification", decimal_to_numeric=False)   # como a 0.0.12
+    assert legado.df["taxa"].dtype == object and legado.decimal_cols_ == []
+    legado.fit("logistica", transform=transform)
+    caminho = str(tmp_path / "legado.json")
+    legado.save(caminho)
+    cfg = json.loads(open(caminho).read())
+    cfg.pop("decimal_to_numeric")                  # JSON da versão anterior
+    open(caminho, "w").write(json.dumps(cfg))
+    volta = _seg(df, "classification").load(caminho, df)
+    assert volta.df["taxa"].dtype == object
+    np.testing.assert_allclose(volta.score_.to_numpy(), legado.score_.to_numpy(),
+                               atol=1e-12)
+    np.testing.assert_allclose(volta.predict(df)["score"].to_numpy() / 1000,
+                               volta.score_.to_numpy(), atol=1e-12)
+
+    novo = _seg(df, "classification")
+    assert novo.decimal_cols_ == ["taxa"]
+    novo.fit("logistica", transform=transform)
+    caminho2 = str(tmp_path / "novo.json")
+    novo.save(caminho2)
+    volta2 = _seg(df, "classification", decimal_to_numeric=False).load(caminho2, df)
+    assert volta2.df["taxa"].dtype == np.float64 and volta2.decimal_cols_ == ["taxa"]
+    np.testing.assert_allclose(volta2.score_.to_numpy(), novo.score_.to_numpy(),
+                               atol=1e-12)
