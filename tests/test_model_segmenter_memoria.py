@@ -94,10 +94,11 @@ def test_frame_por_colunas_igual_ao_recorte_completo():
     assert list(seg._frame("DES", cols=["target", "target"]).columns) == ["target"]
 
 
-def test_nuvem_de_pontos_amostrada_mantem_caudas_e_cobertura(monkeypatch):
-    """Acima do limite, a nuvem exibe a amostra MAIS as caudas: os resíduos
-    extremos (e os limites do eixo) continuam no gráfico, e a cobertura da
-    banda segue calculada em todas as observações."""
+def test_nuvem_amostrada_com_extremos_em_camada_propria(monkeypatch):
+    """Acima do limite: amostra UNIFORME do tamanho do limite + camada de
+    extremos rotulada. Os resíduos extremos (e os limites do eixo) continuam
+    no gráfico, a cobertura da banda segue calculada em todas as observações
+    e a legenda diz o que é amostra e o que é extremo."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -112,42 +113,53 @@ def test_nuvem_de_pontos_amostrada_mantem_caudas_e_cobertura(monkeypatch):
 
     def _nuvem(fig):
         ax = fig.axes[0]
-        pts = np.vstack([c.get_offsets() for c in ax.collections
-                         if isinstance(c, PathCollection)])
-        return pts, ax.get_ylim(), [t.get_text() for t in ax.texts]
+        camadas = [c.get_offsets() for c in ax.collections if isinstance(c, PathCollection)]
+        leg = ax.get_legend()
+        rotulos = [t.get_text() for t in leg.get_texts()] if leg else []
+        return camadas, ax.get_ylim(), [t.get_text() for t in ax.texts], rotulos
 
     n_des = int(seg._fit_mask().sum())
     cheio_cal, cheio_res = _nuvem(seg.plot_calibration()), _nuvem(seg.plot_residuals())
     monkeypatch.setattr(segmod, "_MAX_PONTOS_DISPERSAO", 300)
+    monkeypatch.setattr(segmod, "_EXTREMOS_POR_PONTA", 40)
     amos_cal, amos_res = _nuvem(seg.plot_calibration()), _nuvem(seg.plot_residuals())
-    assert len(cheio_res[0]) == n_des
-    assert 300 <= len(amos_res[0]) < 400 and 300 <= len(amos_cal[0]) < 400
-    assert (amos_res[0][:, 1] > 3).sum() == 25 == (cheio_res[0][:, 1] > 3).sum()
-    assert (amos_cal[0][:, 1] > 3).sum() == 25
+    assert [len(c) for c in cheio_res[0]] == [n_des] and not cheio_res[3]
+    for amos in (amos_cal, amos_res):
+        amostra, ext = amos[0]
+        assert len(amostra) == 300 and 40 <= len(ext) <= 4 * 40
+        assert (np.vstack(amos[0])[:, 1] > 3).sum() >= 25       # outliers visíveis
+        assert any("amostra uniforme: 300 de" in r for r in amos[3])
+        assert any("extremos" in r for r in amos[3])
     np.testing.assert_allclose(amos_res[1], cheio_res[1])         # mesmo eixo y
     assert amos_cal[2] == cheio_cal[2]          # cobertura da banda: todas as obs.
     plt.close("all")
 
 
-def test_nuvem_de_lgd_inflada_em_zero_nao_vira_bloco(monkeypatch):
-    """LGD inflada em zero: IQR 0 no eixo observado, e as cercas de Tukey
-    marcariam todo o grupo não curado. A nuvem amostrada tem de manter a
-    proporção de não curados e a forma da distribuição deles (sem bloco denso
-    artificial), além do mínimo e do máximo."""
+def test_nuvem_amostra_fiel_e_extremos_sorteados_nos_empates(monkeypatch):
+    """LGD inflada em zero: a camada de amostra é uniforme (proporção e forma
+    dos não curados preservadas) e a de extremos só traz os m maiores/menores
+    de cada eixo. Em eixo todo empatado (grades de rating ordenadas por
+    safra), os extremos sorteiam entre os empates em vez de pegar as últimas
+    linhas."""
     monkeypatch.setattr(segmod, "_MAX_PONTOS_DISPERSAO", 2000)
+    monkeypatch.setattr(segmod, "_EXTREMOS_POR_PONTA", 50)
     rng = np.random.default_rng(3)
     n = 200_000
     y = np.where(rng.random(n) < 0.8, 0.0, rng.beta(2, 2, n))
     prev = np.clip(0.2 + 0.1 * rng.normal(size=n), 0, 1)
-    for eixos in ((prev, y), (prev, y - prev)):
-        vis = segmod._pontos_dispersao(n, 42, *eixos)
-        yv = y[vis]
-        assert len(vis) <= 2000 + 2 * (2 * 100 + 2)      # amostra + 0,05% por ponta
-        assert abs((yv > 0).mean() - (y > 0).mean()) < 0.05
-        nao_curados = yv[yv > 0]
-        assert abs((nao_curados < np.median(y[y > 0])).mean() - 0.5) < 0.1
-        for eixo in eixos:
-            assert eixo.argmax() in vis and eixo.argmin() in vis
+    amostra, ext = segmod._pontos_dispersao(n, 42, prev, y)
+    assert len(amostra) == 2000 and len(ext) <= 4 * 50
+    assert abs((y[amostra] > 0).mean() - (y > 0).mean()) < 0.05
+    nao_curados = y[amostra][y[amostra] > 0]
+    assert abs((nao_curados < np.median(y[y > 0])).mean() - 0.5) < 0.1
+    for eixo in (prev, y):                    # por valor: há empates no corte
+        np.testing.assert_array_equal(np.sort(eixo[ext])[-50:], np.sort(eixo)[-50:])
+        np.testing.assert_array_equal(np.sort(eixo[ext])[:50], np.sort(eixo)[:50])
+    # eixo empatado (duas grades), linhas ordenadas: sorteio entre os empates
+    grade = np.repeat([0.1, 0.9], n // 2)
+    _a, ext_g = segmod._pontos_dispersao(n, 42, grade)
+    topo = ext_g[ext_g >= n // 2]
+    assert len(topo) == 50 and n // 2 + n // 8 < topo.mean() < n - n // 8
 
 
 # ----------------------------------------------------------------------

@@ -327,44 +327,65 @@ def _fit_labels_x(fig, ax, texts, pad_frac=0.04, passes=2):
 
 #: Pontos exibidos nas nuvens de dispersão (calibração/resíduos da regressão).
 _MAX_PONTOS_DISPERSAO = 50_000
+#: Pontos mais extremos desenhados em destaque, por ponta e por eixo, quando a
+#: nuvem é amostrada.
+_EXTREMOS_POR_PONTA = 500
 
 
-def _pontos_dispersao(n: int, seed, *eixos) -> np.ndarray | slice:
-    """Índices exibidos numa nuvem de pontos: todos até
-    :data:`_MAX_PONTOS_DISPERSAO`; acima disso, uma amostra fixa (``seed``)
-    MAIS os extremos de cada eixo de ``eixos`` e o seu mínimo e máximo. Com
-    milhões de pontos o ``scatter`` levava ~10 s por gráfico e cada Figure
+def _pontos_dispersao(n: int, seed, *eixos) -> tuple:
+    """Pontos de uma nuvem de dispersão em duas camadas: ``(amostra, extremos)``.
+
+    Até :data:`_MAX_PONTOS_DISPERSAO` pontos: ``(slice(None), [])``, a nuvem
+    inteira. Acima disso, ``amostra`` é uma amostra UNIFORME fixa (``seed``),
+    fiel à densidade por construção, e ``extremos`` são os
+    :data:`_EXTREMOS_POR_PONTA` maiores e menores valores de cada eixo de
+    ``eixos`` (empates sorteados, para não depender da ordem das linhas), que
+    o gráfico desenha numa camada à parte, com legenda própria.
+
+    Com milhões de pontos o ``scatter`` levava ~10 s por gráfico e cada Figure
     guardada pela UI (troca de tema) retinha ~50 MB; só a amostra, porém,
     sumia com os resíduos extremos (LGD acima de 100%, por exemplo), que são o
-    que a validação procura nesses gráficos.
-
-    Extremos = pontos além das cercas de Tukey (Q1 − 3·IQR, Q3 + 3·IQR) quando
-    são poucos (≤ 1% de n). Se as cercas marcam mais que isso, a "cauda" é um
-    modo inteiro (LGD inflada em zero: IQR 0 e todo o grupo não curado fora
-    da cerca), e desenhá-lo por inteiro criaria um bloco denso que não existe
-    nos dados; aí entram só os 0,05% mais extremos de cada ponta. Curvas,
+    que a validação procura. Misturar os extremos à amostra na mesma camada
+    cria degraus de densidade (blocos e vazios que não existem nos dados); em
+    camada separada o extremo aparece sem se passar por densidade. Curvas,
     bandas e cobertura seguem calculadas em todas as observações."""
     if n <= _MAX_PONTOS_DISPERSAO:
-        return slice(None)
+        return slice(None), np.array([], dtype=int)
     rng = np.random.default_rng(seed)
-    partes = [rng.choice(n, _MAX_PONTOS_DISPERSAO, replace=False)]
-    teto = min(int(0.01 * n), _MAX_PONTOS_DISPERSAO)
+    amostra = np.sort(rng.choice(n, _MAX_PONTOS_DISPERSAO, replace=False))
+    extremos = []
     for v in eixos:
         v = np.asarray(v, dtype="float64")
         finitos = np.flatnonzero(np.isfinite(v))
-        if not len(finitos):
+        m = min(_EXTREMOS_POR_PONTA, len(finitos))
+        if not m:
             continue
         vf = v[finitos]
-        q1, q3 = np.quantile(vf, [0.25, 0.75])
-        folga = 3.0 * (q3 - q1)
-        fora = np.flatnonzero((vf < q1 - folga) | (vf > q3 + folga))
-        if len(fora) > teto:
-            k = int(min(max(1, np.ceil(0.0005 * len(vf))), len(vf) // 2,
-                        _MAX_PONTOS_DISPERSAO // 2))
-            fora = np.concatenate([np.argpartition(vf, k - 1)[:k],
-                                   np.argpartition(vf, len(vf) - k)[-k:]])
-        partes += [finitos[fora], finitos[[np.argmin(vf), np.argmax(vf)]]]
-    return np.unique(np.concatenate(partes))
+        for w in (vf, -vf):                      # maiores e menores
+            corte = np.partition(w, len(w) - m)[len(w) - m]
+            acima = np.flatnonzero(w > corte)
+            iguais = np.flatnonzero(w == corte)
+            sorteio = rng.choice(iguais, m - len(acima), replace=False)
+            extremos.append(finitos[np.concatenate([acima, sorteio])])
+    ext = np.unique(np.concatenate(extremos)) if extremos else np.array([], dtype=int)
+    return amostra, ext
+
+
+def _desenha_nuvem(ax, x, y, amostra, extremos, n, **kw) -> bool:
+    """Desenha a nuvem de :func:`_pontos_dispersao`: a amostra com o estilo de
+    ``kw`` e, quando amostrada, os extremos em destaque, ambos rotulados para
+    a legenda (que o gráfico monta no fim). Devolve se a nuvem foi amostrada."""
+    if isinstance(amostra, slice):             # nuvem inteira, sem amostragem
+        ax.scatter(x[amostra], y[amostra], edgecolors="none", **kw)
+        return False
+    fmt = lambda v: f"{v:,}".replace(",", ".")  # noqa: E731
+    ax.scatter(x[amostra], y[amostra], edgecolors="none",
+               label=f"amostra uniforme: {fmt(len(amostra))} de {fmt(n)}", **kw)
+    if len(extremos):
+        ax.scatter(x[extremos], y[extremos], s=12, alpha=0.75, color="#e08a2b",
+                   edgecolors="none", zorder=kw.get("zorder", 1) + 0.5,
+                   label=f"extremos: {_EXTREMOS_POR_PONTA} maiores e menores por eixo")
+    return True
 
 
 def _is_stability_sample(name) -> bool:
@@ -5137,8 +5158,9 @@ class ModelSegmenter:
         de score 0–1000: a calibração é sobre o risco previsto casar com o realizado
         (mesma família de ``valor_previsto``/``backtest``). Distribuição e KS é que
         usam a escala de negócio (ranking). Na regressão, acima de 50 mil
-        observações a nuvem exibe uma amostra fixa mais os pontos extremos;
-        curva, banda e cobertura usam todas (ver :func:`_pontos_dispersao`)."""
+        observações a nuvem exibe uma amostra uniforme e, em destaque, os
+        pontos extremos; curva, banda e cobertura usam todas (ver
+        :func:`_pontos_dispersao`)."""
         y, sc = self._sample_scores(sample)                 # previsto/observado CRUS (alvo)
         fig, ax = _new_ax(figsize, dpi, ax)
         if y.size == 0:
@@ -5161,9 +5183,9 @@ class ModelSegmenter:
             # nuvem bruta + curva de calibração por faixa de previsto com BANDA de
             # 95% (média observada ± 1,96·desvio) e a cobertura: % das observações
             # que caem dentro da banda.
-            vis = _pontos_dispersao(len(sc), self.random_state, sc, y)
-            ax.scatter(sc[vis], y[vis], s=10, alpha=0.16, color="#9db8d2", edgecolors="none",
-                       zorder=1)
+            vis, ext = _pontos_dispersao(len(sc), self.random_state, sc, y)
+            amostrada = _desenha_nuvem(ax, sc, y, vis, ext, len(sc), s=10, alpha=0.16,
+                                       color="#9db8d2", zorder=1)
             q = np.unique(np.quantile(sc, np.linspace(0, 1, n_bins + 1)))
             cov_txt = None
             if len(q) >= 2:
@@ -5195,6 +5217,8 @@ class ModelSegmenter:
                         va="top", fontsize=8.5, color="#15324a",
                         bbox=dict(boxstyle="round,pad=0.3", fc="white",
                                   ec="#c9d4df", alpha=0.85))
+            if amostrada:
+                ax.legend(fontsize=7.5, loc="lower right", framealpha=0.85)
         lim = [min(ax.get_xlim()[0], ax.get_ylim()[0]), max(ax.get_xlim()[1], ax.get_ylim()[1])]
         ax.plot(lim, lim, color="#bbb", ls="--", lw=1)
         ax.set_xlabel("previsto"); ax.set_ylabel("observado")
@@ -5210,14 +5234,17 @@ class ModelSegmenter:
     def plot_residuals(self, sample=None, figsize=(6.6, 4.0), dpi=150, save_path=None, ax=None):
         """Regressão: resíduo (observado − previsto) vs. previsto, na **unidade do
         alvo** (alvo previsto), não na escala de score 0–1000. Acima de 50 mil
-        observações a nuvem exibe uma amostra fixa mais os pontos extremos (ver
-        :func:`_pontos_dispersao`)."""
+        observações a nuvem exibe uma amostra uniforme e, em destaque, os pontos
+        extremos (ver :func:`_pontos_dispersao`)."""
         y, sc = self._sample_scores(sample)                 # previsto/observado CRUS (alvo)
         fig, ax = _new_ax(figsize, dpi, ax)
         res = y - sc
-        vis = _pontos_dispersao(len(sc), self.random_state, sc, res)
-        ax.scatter(sc[vis], res[vis], s=10, alpha=0.35, color="#3b6ea5", edgecolors="none")
+        vis, ext = _pontos_dispersao(len(sc), self.random_state, sc, res)
+        amostrada = _desenha_nuvem(ax, sc, res, vis, ext, len(sc), s=10, alpha=0.35,
+                                   color="#3b6ea5")
         ax.axhline(0, color="#d6453e", lw=1)
+        if amostrada:
+            ax.legend(fontsize=7.5, loc="lower right", framealpha=0.85)
         ax.set_xlabel("previsto"); ax.set_ylabel("resíduo (obs − prev)")
         _pct_axis(ax, "both")                               # unidade do alvo, em %
         ax.set_title(f"Resíduos · {sample or self.ref_sample}", fontsize=11,
