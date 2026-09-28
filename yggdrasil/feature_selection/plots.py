@@ -49,7 +49,7 @@ def plot_book_selection(book_table: pd.DataFrame, book_name: str, top_k: int = 1
         return fig
 
     d = book_table.copy()
-    sel = d["selecionada"].fillna(False) if "selecionada" in d.columns else pd.Series(False, index=d.index)
+    sel = d["selecionada"].eq(True) if "selecionada" in d.columns else pd.Series(False, index=d.index)
     val = d["score"].astype(float) if "score" in d.columns else pd.Series(np.nan, index=d.index)
     # ordena por selecionada e score; mantém top_k mais relevantes
     d = d.assign(_sel=sel.values, _val=val.fillna(-np.inf).values)
@@ -86,7 +86,7 @@ def plot_book_overview(selection_table: pd.DataFrame):
         _empty(ax, "sem dados de seleção")
         return fig
 
-    sel = selection_table["selecionada"].fillna(False)
+    sel = selection_table["selecionada"].eq(True)
     g = selection_table.assign(_sel=sel.values).groupby("book")["_sel"].agg(["sum", "count"])
     g["desc"] = g["count"] - g["sum"]
     x = range(len(g))
@@ -269,8 +269,8 @@ def _draw_decision_map(ax, selection_table: pd.DataFrame, problem_type=None, ann
     if d.empty:
         _empty(ax, "sem métricas numéricas para o mapa")
         return
-    sel = d["selecionada"].fillna(False).astype(bool)
-    leak = d["leakage_flag"].fillna(False).astype(bool) if "leakage_flag" in d else pd.Series(False, index=d.index)
+    sel = d["selecionada"].eq(True)
+    leak = d["leakage_flag"].eq(True) if "leakage_flag" in d else pd.Series(False, index=d.index)
     sz = _num(d, "score_consenso").fillna(0.3)
     sizes = 55 + 320 * np.clip(sz, 0, 1)
 
@@ -375,7 +375,7 @@ def _draw_book_power(ax, selection_table: pd.DataFrame, value="rf_importance"):
     if selection_table is None or selection_table.empty or "book" not in selection_table.columns:
         _empty(ax, "sem dados de seleção")
         return
-    d = selection_table[selection_table["selecionada"].fillna(False)].copy()
+    d = selection_table[selection_table["selecionada"].eq(True)].copy()
     if d.empty:
         _empty(ax, "nenhuma feature selecionada")
         return
@@ -432,7 +432,7 @@ def _redundancy_groups(d: pd.DataFrame, valcol: str, min_cluster_size: int, top_
     grouper = d.groupby(["book", "cluster"]) if has_book else d.groupby("cluster")
     grupos = []
     for key, g in grouper:
-        if len(g) < min_cluster_size or g["representante"].fillna(True).all():
+        if len(g) < min_cluster_size or g["representante"].ne(False).all():
             continue
         if has_book:
             bk, cl = key
@@ -535,8 +535,8 @@ def plot_power_quadrant_iv_ks(selection_table: pd.DataFrame, iv_min: float = 0.0
     ax.axhline(ks_min, color="#ccc", ls=":", lw=1)
     ax.text(xmax, ks_min, f"ks_min={ks_min:g} ", fontsize=7, color="#999", ha="right", va="bottom")
 
-    sel = d["selecionada"].fillna(False).astype(bool)
-    leak = d["leakage_flag"].fillna(False).astype(bool) if "leakage_flag" in d else pd.Series(False, index=d.index)
+    sel = d["selecionada"].eq(True)
+    leak = d["leakage_flag"].eq(True) if "leakage_flag" in d else pd.Series(False, index=d.index)
     ax.scatter(d.loc[sel & ~leak, "_iv"], d.loc[sel & ~leak, "_ks"], s=90, c=COR_PRIMARIA,
                alpha=0.8, edgecolor="white", label="selecionada", zorder=3)
     ax.scatter(d.loc[~sel & ~leak, "_iv"], d.loc[~sel & ~leak, "_ks"], s=70, c=COR_NEUTRA,
@@ -583,8 +583,8 @@ def plot_leakage_audit(selection_table: pd.DataFrame, problem_type=None,
         _empty(ax, "sem sinal univariado para auditar")
         return fig
     d = d.iloc[::-1]  # maior no topo
-    leak = d["leakage_flag"].fillna(False).astype(bool) if "leakage_flag" in d else pd.Series(False, index=d.index)
-    sel = d["selecionada"].fillna(False).astype(bool)
+    leak = d["leakage_flag"].eq(True) if "leakage_flag" in d else pd.Series(False, index=d.index)
+    sel = d["selecionada"].eq(True)
     cores = [COR_SECUNDARIA if lk else (COR_PRIMARIA if s else COR_NEUTRA)
              for lk, s in zip(leak, sel)]
     y = np.arange(len(d))
@@ -599,7 +599,7 @@ def plot_leakage_audit(selection_table: pd.DataFrame, problem_type=None,
     ax.set_yticks(y)
     ax.set_yticklabels([_short(f) for f in d["feature"]], fontsize=8)
     ax.set_xlabel(lab, fontsize=10)
-    n_leak = int((selection_table["leakage_flag"].fillna(False)).sum()) if "leakage_flag" in selection_table else 0
+    n_leak = int((selection_table["leakage_flag"].eq(True)).sum()) if "leakage_flag" in selection_table else 0
     ax.set_title(f"Auditoria de leakage · {n_leak} feature(s) flagrada(s)", fontsize=12, fontweight="bold")
     _style_ax(ax)
     return fig
@@ -619,7 +619,7 @@ def plot_survivor_scorecard(selection_table: pd.DataFrame, top_k: int = 20):
     if selection_table is None or selection_table.empty:
         _empty(ax, "sem dados de seleção")
         return fig
-    d = selection_table[selection_table["selecionada"].fillna(False)].copy()
+    d = selection_table[selection_table["selecionada"].eq(True)].copy()
     if d.empty:
         _empty(ax, "nenhuma feature selecionada")
         return fig

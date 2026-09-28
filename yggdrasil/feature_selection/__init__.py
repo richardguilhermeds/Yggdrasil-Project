@@ -30,12 +30,15 @@ from __future__ import annotations
 from .backend import backend_name, is_pandas
 from .books import Book, resolve_books
 from .config import FeatureSelectionConfig
+from .encoding import apply_encodings, fit_encodings
 from .selector import FeatureSelectionReport, run_feature_selection
 
 __all__ = [
     "run_feature_selection",
     "FeatureSelectionReport",
     "FeatureSelectionConfig",
+    "fit_encodings",
+    "apply_encodings",
     "resolve_books",
     "Book",
     "backend_name",

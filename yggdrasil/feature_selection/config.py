@@ -59,6 +59,13 @@ class FeatureSelectionConfig:
     # ── binning (IV/KS univariado em classificação) ─────────────────────
     n_bins: int = 10
 
+    # ── features não numéricas (ver :mod:`encoding`) ────────────────────
+    # False: texto/category/bool não são avaliados (motivo "não numérica").
+    # True: bool → 0/1 e texto/category → target encoding aprendido na base da seleção.
+    encode_categoricals: bool = False
+    encoding_min_share: float = 0.01   # categorias abaixo desse share viram OUTROS
+    encoding_max_categories: int = 1000  # acima disso a coluna não é codificada (ID?)
+
     # ── consenso ────────────────────────────────────────────────────────
     consensus_threshold: float = 0.50  # score_consenso >= isso (ou Boruta confirmada) => selecionar
     peso_importancia: float = 0.50     # peso do rank de importância no consenso
@@ -74,6 +81,10 @@ class FeatureSelectionConfig:
             raise ValueError("backend deve ser 'spark' ou 'driver'.")
         if not (0.0 <= self.var_p_low < self.var_p_high <= 1.0):
             raise ValueError("Exige 0 <= var_p_low < var_p_high <= 1.")
+        if not (0.0 <= self.encoding_min_share < 1.0):
+            raise ValueError("encoding_min_share deve estar em [0, 1).")
+        if self.encoding_max_categories < 1:
+            raise ValueError("encoding_max_categories deve ser >= 1.")
 
 
 __all__ = ["FeatureSelectionConfig"]

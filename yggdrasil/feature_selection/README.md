@@ -178,6 +178,33 @@ Para **cada book**, `_process_book` aplica esta ordem exata:
 
 **Redundância** (etapa 4): a distância usada é `1 - |corr|`; o corte é `1.0 - corr_high`. O **representante** de cada cluster é a feature de maior `importance` (aqui, o `score` da etapa 3). Features **não-numéricas** ficam fora da matriz e são tratadas como `representante=True`.
 
+**Andamento**: com `verbose=True` (padrão), `run_feature_selection` imprime cada etapa — quantas features entram e saem e o tempo gasto — por book, mais o ranking global, os gráficos e o total. As etapas lentas (importância e Boruta) são anunciadas antes de rodar. `verbose=False` silencia; o detalhe técnico continua no logger em nível `DEBUG`.
+
+```
+▸ Book 1/1 'todas' (6 feature(s))
+  [1/6] Missing: 6 → 5 (−1) · corte > 50% vazio (0.0s)
+  [2/6] Variância: 5 → 5 (0.0s)
+  [3/6] Importância: RandomForest + IV/KS/AUC em 5 feature(s)...
+  [3/6] Importância: calculada (1.3s)
+  [4/6] Redundância: 5 → 4 (−1) · corte |corr| > 0.8 (0.0s)
+  [5/6] Boruta: 4 feature(s), até 30 iterações...
+  [5/6] Boruta: 2 confirmada(s), 0 tentativa(s), 2 rejeitada(s) (5.9s)
+  [6/6] Consenso + leakage: 4 → 2 (−2) (0.0s)
+```
+
+**Features não numéricas** (texto, `category`, booleanas): IV, RandomForest, correlação e Boruta só usam colunas numéricas. Por padrão essas features passam só por missing/variância e saem com o motivo `não numérica (não avaliada)` — e um warning no log lista quais são. Com `FeatureSelectionConfig(encode_categoricals=True)`, antes do pipeline:
+
+- booleana → 0/1 (nulo segue nulo);
+- texto/`category` → **target encoding**: média do alvo por categoria (taxa de maus em classificação), aprendida na **mesma base da seleção** (a amostra de desenvolvimento, se existir). Nulo vira a categoria `(vazio)`; categorias com share `< encoding_min_share` são agrupadas em `OUTROS`; colunas com mais de `encoding_max_categories` categorias não são codificadas.
+
+O nome da coluna é mantido. A codificação fica em `report.encodings` (JSON-serializável; vai para o MLflow como `encodings.json`) e `report.apply_encodings(df)` a reaplica na OOT/escoragem — categoria nunca vista cai em `OUTROS`. Como o encoding é aprendido e avaliado na mesma base, IV/KS dessas features tendem a ser um pouco otimistas; o agrupamento em `OUTROS` contém isso.
+
+```python
+fs_cfg = FeatureSelectionConfig(encode_categoricals=True)
+report = run_feature_selection(df, cfg, fs_cfg)
+oot_cod = report.apply_encodings(df_oot)
+```
+
 A tabela do book é ordenada por `['selecionada', 'score']` (ambos descendente, `na_position='last'`) quando há coluna `score`.
 
 ---
@@ -269,6 +296,7 @@ score_consenso = sum(w*v) / sum(w)      # média ponderada; se W <= 0, score = N
 | `cfg` | `Optional[ColumnConfig]` | O `ColumnConfig` usado |
 | `overall_correlation` | `pd.DataFrame` | Correlação (Spearman) das selecionadas — **cross-book**; vazia se < 2 numéricas |
 | `fs_cfg` | `Optional[FeatureSelectionConfig]` | A config de seleção usada (limiares p/ as análises pós-seleção) |
+| `encodings` | `Dict[str, dict]` | Codificação aprendida p/ as não numéricas (`encode_categoricals=True`); `report.apply_encodings(df)` reaplica em outra base |
 
 **Colunas da `selection_table`** (ordem canônica `_COLS`):
 
@@ -276,10 +304,10 @@ score_consenso = sum(w*v) / sum(w)      # média ponderada; se W <= 0, score = N
 book, feature, pct_missing, p_low, p_high, top1_share, sem_variancia, near_constante,
 rf_importance, iv, ks, auc, gini, corr_target, score, leakage_flag, cluster,
 representante, redundante_com, boruta_hits, boruta_decisao, score_consenso,
-selecionada, motivo
+selecionada, motivo, encoding
 ```
 
-`pct_missing` e `score_consenso` são arredondados a 4 casas (ou `NaN`).
+`pct_missing` e `score_consenso` são arredondados a 4 casas (ou `NaN`). `encoding` é `target_encoding`, `bool_0_1` ou `NaN` (feature já numérica).
 
 **Métodos:**
 
@@ -370,6 +398,9 @@ report.panels["corr::externo"]                  # heatmap de correlação do boo
 | `sample_size` | `0` | `>0` amostra N linhas p/ as etapas de modelo (0 = full) |
 | `approx_rel_error` | `0.01` | Erro relativo do `approxQuantile` (0 = exato, caro) |
 | `n_bins` | `10` | Nº de bins p/ IV/KS univariado em classificação |
+| `encode_categoricals` | `False` | `True`: bool → 0/1 e texto/`category` → target encoding antes da seleção (ver seção 6) |
+| `encoding_min_share` | `0.01` | Categorias com share abaixo disso são agrupadas em `OUTROS` |
+| `encoding_max_categories` | `1000` | Acima disso a coluna não é codificada (ID/CPF/CEP) |
 | `consensus_threshold` | `0.50` | `score_consenso >=` isso (ou Boruta confirmada) ⇒ selecionar |
 | `peso_importancia` | `0.50` | Peso do rank de importância no consenso |
 | `peso_boruta` | `0.35` | Peso da taxa de hits do Boruta no consenso |

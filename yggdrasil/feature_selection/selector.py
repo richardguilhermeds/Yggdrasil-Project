@@ -22,6 +22,7 @@ no pipeline de modelo.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -35,6 +36,7 @@ from .backend import backend_name, is_pandas
 from .books import BooksSpec, Book, resolve_books
 from .boruta import boruta_select
 from .config import FeatureSelectionConfig
+from .encoding import apply_encodings, fit_encodings
 from .importance import importance_indicators
 from .spark_stats import (
     _require_functions,
@@ -53,8 +55,48 @@ _COLS = [
     "sem_variancia", "near_constante", "rf_importance", "iv", "ks", "auc", "gini",
     "corr_target", "score", "leakage_flag", "cluster", "representante",
     "redundante_com", "boruta_hits", "boruta_decisao", "score_consenso",
-    "selecionada", "motivo",
+    "selecionada", "motivo", "encoding",
 ]
+
+MOTIVO_NAO_NUMERICA = "não numérica (não avaliada)"
+
+
+class _Progresso:
+    """Prints de andamento da seleção (``verbose=True``).
+
+    ``print`` e não ``logging``: no Databricks/Jupyter o logger costuma não aparecer
+    na célula; ``flush`` faz cada linha surgir ao vivo, não só no fim.
+    """
+
+    N_ETAPAS = 6
+
+    def __init__(self, ativo: bool):
+        self.ativo = ativo
+        self.t0 = self.t = time.perf_counter()
+
+    def msg(self, texto: str) -> None:
+        if self.ativo:
+            print(texto, flush=True)
+
+    def marca(self) -> None:
+        self.t = time.perf_counter()
+
+    def inicio(self, i: int, nome: str, detalhe: str) -> None:
+        """Anuncia uma etapa lenta antes de rodar (senão a célula parece travada)."""
+        self.msg(f"  [{i}/{self.N_ETAPAS}] {nome}: {detalhe}...")
+
+    def etapa(self, i: int, nome: str, detalhe: str) -> None:
+        agora = time.perf_counter()
+        dt, self.t = agora - self.t, agora
+        self.msg(f"  [{i}/{self.N_ETAPAS}] {nome}: {detalhe} ({dt:.1f}s)")
+
+    @staticmethod
+    def funil(antes: int, depois: int) -> str:
+        cortadas = antes - depois
+        return f"{antes} → {depois}" + (f" (−{cortadas})" if cortadas else "")
+
+    def total(self) -> float:
+        return time.perf_counter() - self.t0
 
 
 def _infer_problem_type(sdf, cfg: ColumnConfig) -> str:
@@ -105,8 +147,11 @@ def _consensus(row: dict, fs_cfg: FeatureSelectionConfig) -> Tuple[float, bool, 
 
 def _process_book(
     base, book: Book, target: str, problem_type: str, fs_cfg: FeatureSelectionConfig,
+    prog: Optional[_Progresso] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Roda o pipeline de seleção num único book. Retorna (tabela, corr_spearman)."""
+    prog = prog or _Progresso(False)
+    prog.marca()
     feats = list(book.features)
     rec: Dict[str, dict] = {f: {"book": book.name, "feature": f} for f in feats}
 
@@ -118,6 +163,8 @@ def _process_book(
     for f in feats:
         if f not in vivos:
             rec[f].update(selecionada=False, motivo="alto missing")
+    prog.etapa(1, "Missing", f"{prog.funil(len(feats), len(vivos))} "
+                             f"· corte > {fs_cfg.missing_max:.0%} vazio")
 
     # 2) variância -------------------------------------------------------
     if vivos:
@@ -134,16 +181,23 @@ def _process_book(
                 rec[f].update(selecionada=False, motivo=motivo)
     else:
         vivos2 = []
+    prog.etapa(2, "Variância", prog.funil(len(vivos), len(vivos2)))
 
     # 3) importância -----------------------------------------------------
     score = pd.Series(dtype=float)
+    metricas = "RandomForest + IV/KS/AUC" if problem_type == "classification" else "RandomForest + correlação"
     if vivos2:
+        prog.inicio(3, "Importância", f"{metricas} em {len(vivos2)} feature(s)")
         imp = importance_indicators(base, vivos2, target, problem_type, fs_cfg).set_index("feature")
         for f in vivos2:
             for c in ("rf_importance", "iv", "ks", "auc", "gini", "corr_target", "score", "leakage_flag"):
                 if c in imp.columns:
                     rec[f][c] = imp.loc[f, c]
         score = imp["score"] if "score" in imp.columns else pd.Series(dtype=float)
+        n_leak = int(imp["leakage_flag"].eq(True).sum()) if "leakage_flag" in imp else 0
+        prog.etapa(3, "Importância", "calculada" + (f"; {n_leak} suspeita(s) de leakage" if n_leak else ""))
+    else:
+        prog.etapa(3, "Importância", "nada a avaliar")
 
     # 4) redundância -----------------------------------------------------
     corr_sp = pd.DataFrame()
@@ -169,15 +223,24 @@ def _process_book(
         vivos3 = reps
     else:
         vivos3 = []
+    prog.etapa(4, "Redundância", f"{prog.funil(len(vivos2), len(vivos3))} "
+                                 f"· corte |corr| > {fs_cfg.corr_high:g}")
 
     # 5) Boruta ----------------------------------------------------------
-    if fs_cfg.boruta_enable and vivos3 and numeric_columns(base, vivos3):
+    num_boruta = numeric_columns(base, vivos3) if vivos3 else []
+    if fs_cfg.boruta_enable and num_boruta:
+        prog.inicio(5, "Boruta", f"{len(num_boruta)} feature(s), até {fs_cfg.boruta_max_iter} iterações")
         bor = boruta_select(base, vivos3, target, problem_type, fs_cfg).set_index("feature")
         for f in vivos3:
             if f in bor.index:
                 rec[f].update(boruta_hits=int(bor.loc[f, "hits"]),
                               boruta_decisao=bor.loc[f, "decisao"],
                               boruta_hit_rate=float(bor.loc[f, "hit_rate"]))
+        dec = bor["decisao"].value_counts()
+        prog.etapa(5, "Boruta", ", ".join(f"{int(dec.get(k, 0))} {k}(s)"
+                                          for k in ("confirmada", "tentativa", "rejeitada")))
+    else:
+        prog.etapa(5, "Boruta", "desligado" if not fs_cfg.boruta_enable else "sem features numéricas")
 
     # 6) consenso (entre as representantes vivas) ------------------------
     if vivos3 and len(score):
@@ -185,10 +248,18 @@ def _process_book(
         imp_norm = viv_scores.rank(pct=True)  # normaliza importância dentro do book
         for f in vivos3:
             rec[f]["imp_norm"] = float(imp_norm.get(f, np.nan))
+    numericas = set(numeric_columns(base, vivos3)) if vivos3 else set()
     for f in vivos3:
+        if f not in numericas:
+            # Sem IV/RF/Boruta: não houve avaliação — dizer isso, e não "consenso baixo".
+            rec[f].update(score_consenso=np.nan, selecionada=False, motivo=MOTIVO_NAO_NUMERICA)
+            continue
         sc, sel, motivo = _consensus(rec[f], fs_cfg)
         rec[f].update(score_consenso=round(sc, 4) if np.isfinite(sc) else np.nan,
                       selecionada=bool(sel), motivo=motivo)
+    n_sel = sum(bool(rec[f].get("selecionada")) for f in feats)
+    prog.etapa(6, "Consenso + leakage", prog.funil(len(vivos3), n_sel))
+    prog.msg(f"  → book '{book.name}': {n_sel} de {len(feats)} feature(s) selecionada(s)")
 
     df = pd.DataFrame([rec[f] for f in feats])
     df = df.reindex(columns=_COLS)
@@ -213,6 +284,17 @@ class FeatureSelectionReport:
     # pós-seleção (a redundância do pipeline é por book; esta matriz pega o resto).
     overall_correlation: pd.DataFrame = field(default_factory=pd.DataFrame)
     fs_cfg: Optional[FeatureSelectionConfig] = None
+    # Codificação aprendida p/ as não numéricas (``encode_categoricals=True``):
+    # {feature: especificação}. Reaplique em outras bases com ``apply_encodings``.
+    encodings: Dict[str, dict] = field(default_factory=dict)
+
+    def apply_encodings(self, df):
+        """Aplica a mesma codificação da seleção a outra base (OOT, escoragem, treino).
+
+        Aceita pandas ou Spark; mantém os nomes das colunas. Categoria não vista na
+        seleção cai em ``OUTROS``.
+        """
+        return apply_encodings(df, self.encodings)
 
     def to_csv(self, path: str) -> str:
         self.selection_table.to_csv(path, index=False)
@@ -226,8 +308,8 @@ class FeatureSelectionReport:
         rows = []
         for name, t in self.book_tables.items():
             rows.append({"book": name, "n_features": len(t),
-                         "selecionadas": int(t["selecionada"].fillna(False).sum()),
-                         "descartadas": int((~t["selecionada"].fillna(False)).sum())})
+                         "selecionadas": int(t["selecionada"].eq(True).sum()),
+                         "descartadas": int((~t["selecionada"].eq(True)).sum())})
         return pd.DataFrame(rows)
 
 
@@ -240,6 +322,7 @@ def run_feature_selection(
     with_panels: bool = True,
     mlflow_experiment: Optional[str] = None,
     run_name: Optional[str] = None,
+    verbose: bool = True,
 ) -> FeatureSelectionReport:
     """Roda a seleção de features ponta a ponta sobre um DataFrame pandas ou Spark.
 
@@ -253,14 +336,18 @@ def run_feature_selection(
     books:
         Definição dos books (ver :func:`yggdrasil.feature_selection.resolve_books`).
         Padrão (None): auto-deriva pelo 1º segmento após o prefixo.
+    verbose:
+        Imprime o andamento de cada etapa (quantas features entram e saem e o tempo
+        gasto). ``False`` silencia.
     """
+    prog = _Progresso(verbose)
     local = is_pandas(sdf)
     F = None if local else _require_functions()
     cfg = cfg or ColumnConfig()
     fs_cfg = fs_cfg or FeatureSelectionConfig()
     if cfg.target_col not in sdf.columns:
         raise ValueError(f"Coluna de alvo '{cfg.target_col}' ausente no DataFrame.")
-    _logger.info("Seleção de features no backend '%s'.", backend_name(sdf))
+    _logger.debug("Seleção de features no backend '%s'.", backend_name(sdf))
 
     books_res = resolve_books(sdf, cfg, books)
     if problem_type is None:
@@ -273,28 +360,57 @@ def run_feature_selection(
                else sdf.where(F.col(cfg.sample_col) == cfg.dev_sample))
         if (not dev.empty) if local else bool(dev.head(1)):
             base = dev
-            _logger.info("Seleção restrita à amostra de desenvolvimento '%s'.", cfg.dev_sample)
+            _logger.debug("Seleção restrita à amostra de desenvolvimento '%s'.", cfg.dev_sample)
+
+    # Não numéricas: codifica (opt-in) na própria base da seleção, ou avisa que ficam de fora.
+    todas = list(dict.fromkeys(f for b in books_res for f in b.features))
+    amostra = f"amostra '{cfg.dev_sample}'" if base is not sdf else "base inteira"
+    tipo = {"classification": "classificação", "regression": "regressão"}.get(problem_type, problem_type)
+    prog.msg(f"Seleção de features · backend {backend_name(sdf)} · {tipo} · "
+             f"{len(books_res)} book(s), {len(todas)} feature(s) · {amostra}")
+    encodings: Dict[str, dict] = {}
+    if fs_cfg.encode_categoricals:
+        encodings = fit_encodings(base, todas, cfg.target_col, fs_cfg)
+        base = apply_encodings(base, encodings)
+        if encodings:
+            prog.msg(f"  Codificação: {len(encodings)} feature(s) não numérica(s) → "
+                     + ", ".join(f"{f} ({'0/1' if e['tipo'] == 'bool_0_1' else 'target encoding'})"
+                                 for f, e in encodings.items()))
+    nao_num = [f for f in todas if f not in set(numeric_columns(base, todas))]
+    if nao_num:
+        dica = ("" if fs_cfg.encode_categoricals
+                else " Use FeatureSelectionConfig(encode_categoricals=True) para codificá-las.")
+        _logger.warning("%d feature(s) não numérica(s) ficam fora da avaliação: %s.%s",
+                        len(nao_num), nao_num, dica)
+        prog.msg(f"  Atenção: {len(nao_num)} feature(s) não numérica(s) não serão avaliadas: "
+                 f"{nao_num}.{dica}")
     if not local:
         base = base.cache()
     try:
-        if not local:
-            base.count()
+        n_linhas = len(base) if local else base.count()
+        prog.msg(f"  {n_linhas:,} linha(s) na base da seleção".replace(",", "."))
         book_tables: Dict[str, pd.DataFrame] = {}
         corr_by_book: Dict[str, pd.DataFrame] = {}
-        for book in books_res:
-            _logger.info("Processando book '%s' (%d features)...", book.name, len(book))
-            tbl, corr_sp = _process_book(base, book, cfg.target_col, problem_type, fs_cfg)
+        for i, book in enumerate(books_res, 1):
+            _logger.debug("Processando book '%s' (%d features)...", book.name, len(book))
+            prog.msg(f"\n▸ Book {i}/{len(books_res)} '{book.name}' ({len(book)} feature(s))")
+            tbl, corr_sp = _process_book(base, book, cfg.target_col, problem_type, fs_cfg, prog)
             book_tables[book.name] = tbl
             corr_by_book[book.name] = corr_sp
 
+        tipos_enc = {f: e["tipo"] for f, e in encodings.items()}
+        for t in book_tables.values():
+            t["encoding"] = t["feature"].map(tipos_enc)
         selection_table = pd.concat(book_tables.values(), ignore_index=True) if book_tables else pd.DataFrame(columns=_COLS)
         selected_features = {
-            name: t.loc[t["selecionada"].fillna(False), "feature"].tolist()
+            name: t.loc[t["selecionada"].eq(True), "feature"].tolist()
             for name, t in book_tables.items()
         }
         selected_overall = [f for feats in selected_features.values() for f in feats]
 
         # Ranking GLOBAL: recalcula importância sobre todas as selecionadas juntas.
+        prog.msg(f"\n▸ Ranking global e correlação das {len(selected_overall)} selecionada(s)...")
+        prog.marca()
         if selected_overall and numeric_columns(base, selected_overall):
             overall = importance_indicators(base, selected_overall, cfg.target_col, problem_type, fs_cfg)
             book_de = selection_table.set_index("feature")["book"].to_dict()
@@ -307,12 +423,15 @@ def run_feature_selection(
             overall_corr = correlation_matrices(base, selected_overall, fs_cfg)["spearman"]
         else:
             overall_corr = pd.DataFrame()
+        prog.msg(f"  concluído ({time.perf_counter() - prog.t:.1f}s)")
     finally:
         if not local:
             base.unpersist()
 
     panels: Dict[str, object] = {}
     if with_panels:
+        prog.msg("▸ Gerando os gráficos (report.panels)...")
+        prog.marca()
         panels["overview"] = plots.plot_book_overview(selection_table)
         panels["overall_importance"] = plots.plot_overall_importance(overall, fs_cfg.top_k_overall)
 
@@ -341,15 +460,19 @@ def run_feature_selection(
             panels[f"book::{name}"] = plots.plot_book_selection(t, name, fs_cfg.top_k_book)
             if not corr_by_book[name].empty and len(corr_by_book[name]) >= 2:
                 panels[f"corr::{name}"] = plots.plot_corr_heatmap(corr_by_book[name], f"Correlação · {name}")
+        prog.msg(f"  {len(panels)} gráfico(s) ({time.perf_counter() - prog.t:.1f}s)")
 
     report = FeatureSelectionReport(
         selection_table=selection_table, book_tables=book_tables,
         selected_features=selected_features, selected_overall=selected_overall,
         overall_importance=overall, panels=panels, problem_type=problem_type, cfg=cfg,
-        overall_correlation=overall_corr, fs_cfg=fs_cfg,
+        overall_correlation=overall_corr, fs_cfg=fs_cfg, encodings=encodings,
     )
     if mlflow_experiment:
+        prog.msg(f"▸ Registrando no MLflow (experimento '{mlflow_experiment}')...")
         _log_mlflow(report, mlflow_experiment, run_name)
+    prog.msg(f"\n✓ Seleção concluída em {prog.total():.1f}s · {len(selected_overall)} de "
+             f"{len(todas)} feature(s) selecionada(s) → report.selected_overall")
     return report
 
 
@@ -396,6 +519,10 @@ def _log_mlflow(report: FeatureSelectionReport, experiment: str, run_name: Optio
     report.overall_importance.to_csv(os.path.join(tmp, "overall_importance.csv"), index=False)
     with open(os.path.join(tmp, "feature_selection.html"), "w", encoding="utf-8") as fh:
         fh.write(report.to_html(embed_panels=False))
+    if report.encodings:
+        import json
+        with open(os.path.join(tmp, "encodings.json"), "w", encoding="utf-8") as fh:
+            json.dump(report.encodings, fh, ensure_ascii=False, indent=2)
     pdir = os.path.join(tmp, "panels")
     os.makedirs(pdir, exist_ok=True)
     for c, fig in report.panels.items():
