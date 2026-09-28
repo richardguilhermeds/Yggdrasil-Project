@@ -132,6 +132,23 @@ _CSS = """
 .pill-yellow { background-color:var(--warn-bg); color:var(--warn-ink); }
 .pill-red    { background-color:var(--bad-bg); color:var(--bad-ink); }
 .mseg-legend { font-size:11px; color:var(--muted); margin:6px 0 2px; line-height:1.55; }
+/* aba Análise de variáveis: destaque de quem está no modelo. Faixa de status
+   + seções tingidas (verde = no modelo treinado · azul = selecionada, ainda fora
+   do modelo). Só longhands: var() em atalho não re-resolve no toggle de tema. */
+.mseg-an-status { margin:8px 0 4px 0; padding:8px 12px; border-radius:10px;
+  font-size:12.5px; line-height:1.5; border-left-width:4px; border-left-style:solid;
+  border-left-color:var(--line); background-color:var(--tile-bg); color:var(--muted); }
+.mseg-an-status b { font-weight:600; }
+.mseg-an-status.st-modelo { background-color:var(--ok-bg); border-left-color:var(--ok-ink);
+  color:var(--ok-ink); }
+.mseg-an-status.st-sel { background-color:var(--info-bg); border-left-color:var(--info-ink);
+  color:var(--info-ink); }
+.mseg-an-sec { border-radius:10px; padding:6px 8px; border-left-width:4px;
+  border-left-style:solid; border-left-color:transparent; box-sizing:border-box; }
+.mseg-var-modelo .mseg-an-sec { background-color:var(--ok-bg); border-left-color:var(--ok-ink); }
+.mseg-var-modelo .mseg-an-sec .mseg-h { color:var(--ok-ink); }
+.mseg-var-sel .mseg-an-sec { background-color:var(--info-bg); border-left-color:var(--info-ink); }
+.mseg-var-sel .mseg-an-sec .mseg-h { color:var(--info-ink); }
 /* caixa de tutorial (algoritmo/parâmetros) e legenda de categorias */
 .mseg-help { background-color:var(--help-bg); border-width:1px;border-style:solid;border-color:var(--help-line);
   border-left-width:3px;border-left-style:solid;border-left-color:var(--ac);
@@ -918,22 +935,20 @@ class ModelSegmenterUI:
         só com outro rótulo/posição."""
         atual = self.dd_var2.value
         cands = list(self.seg.candidates)
+        ivm = self._iv_por_variavel() if self.tg_an_iv.value else {}
         if self.tg_an_iv.value:
-            ivm = self._iv_por_variavel()
             def _chave(f):
                 v = ivm.get(f)
                 sem = v is None or pd.isna(v)
                 return (sem, -(0.0 if sem else float(v)))
             cands = sorted(cands, key=_chave)
-            opts = []
-            for f in cands:
-                v = ivm.get(f)
-                rot = self.seg.label(f)
-                if v is not None and not pd.isna(v):
-                    rot = f"{rot} (IV {float(v):.4f})"
-                opts.append((rot, f))
-        else:
-            opts = self._opts(cands)
+        opts = []
+        for f in cands:
+            v = ivm.get(f)
+            sufixo = f" (IV {float(v):.4f})" if v is not None and not pd.isna(v) else ""
+            opts.append((self._rotulo_an(f) + sufixo, f))
+        if [tuple(o) for o in self.dd_var2.options] == opts:
+            return                                  # nada mudou: não mexe no widget
         self._an_opts_syncing = True
         try:
             self.dd_var2.options = opts
@@ -941,6 +956,60 @@ class ModelSegmenterUI:
                 self.dd_var2.value = atual
         finally:
             self._an_opts_syncing = False
+
+    # ---- destaque das variáveis do modelo na aba Análise ----
+    _MARCA_AN = {"modelo": "✓ ", "sel": "● "}
+
+    def _status_var_modelo(self, feat):
+        """``"modelo"`` (no modelo treinado), ``"sel"`` (selecionada, fora do
+        modelo treinado) ou ``None`` (fora da seleção)."""
+        s = self.seg
+        if s.score_ is not None and feat in (s.model_features or []):
+            return "modelo"
+        if feat in s.included:
+            return "sel"
+        return None
+
+    def _rotulo_an(self, feat):
+        """Rótulo do seletor da aba Análise com a marca de status (✓/●).
+        Dropdown não aceita cor por opção — a marca é o que dá para ter ali."""
+        return self._MARCA_AN.get(self._status_var_modelo(feat), "") + self.seg.label(feat)
+
+    def _sync_an_destaque(self):
+        """Pinta a aba Análise conforme a variável em tela: faixa de status +
+        seções em verde (no modelo) ou azul (selecionada). Barato — só troca
+        classes CSS e um HTML curto, sem recalcular nada."""
+        tab = getattr(self, "_tab_an", None)
+        if tab is None or getattr(self, "dd_var2", None) is None:
+            return
+        feat = self.dd_var2.value
+        st = self._status_var_modelo(feat) if feat is not None else None
+        for cls in ("mseg-var-modelo", "mseg-var-sel"):
+            tab.remove_class(cls)
+        if st:
+            tab.add_class(f"mseg-var-{st}")
+        if feat is None:
+            self.out_an_status.value = ""
+            return
+        import html as _h
+        s = self.seg
+        nome = _h.escape(str(s.label(feat)))
+        n_mod = len(s.model_features or [])
+        if st == "modelo":
+            algo = _h.escape(str(getattr(s, "algorithm", "") or "modelo"))
+            txt = (f"✓ <b>{nome}</b> está no modelo treinado ({algo}, {n_mod} variáveis) — "
+                   "o que você vê abaixo é uma variável usada na escoragem.")
+            if feat not in s.included:
+                txt += " Ela foi excluída da seleção depois do treino: sai no próximo re-treino."
+        elif st == "sel":
+            txt = (f"● <b>{nome}</b> está selecionada, mas "
+                   + ("ainda não entrou no modelo treinado — entra no próximo re-treino."
+                      if s.score_ is not None else "o modelo ainda não foi treinado."))
+        else:
+            txt = (f"<b>{nome}</b> está fora do modelo — análise exploratória. "
+                   "Para usá-la, inclua na aba Variáveis.")
+        cls = {"modelo": " st-modelo", "sel": " st-sel"}.get(st, "")
+        self.out_an_status.value = f"<div class='mseg-an-status{cls}'>{txt}</div>"
 
     def _iv_por_variavel(self):
         """``{coluna: iv}`` a partir do ranking (memoizado no segmentador)."""
@@ -1550,9 +1619,13 @@ class ModelSegmenterUI:
         self.out_an_cards.layout = W.Layout(margin="20px 0 6px 0")
         # distribuição AO LADO da tabela por faixa + inversão entre amostras (chart menor)
         # grade 3x2 da "Análise de variáveis"
-        _col = lambda titulo, out: W.VBox(
-            [W.HTML(f"<div class='mseg-h'>{titulo}</div>"), out],
-            layout=W.Layout(width="49%"))
+        def _col(titulo, out, width="49%"):
+            # .mseg-an-sec: a seção ganha o tom verde/azul quando a variável
+            # analisada está no modelo (ver _sync_an_destaque)
+            box = W.VBox([W.HTML(f"<div class='mseg-h'>{titulo}</div>"), out],
+                         layout=W.Layout(width=width))
+            box.add_class("mseg-an-sec")
+            return box
         _row = lambda a, b: W.HBox(
             [a, b], layout=W.Layout(justify_content="space-between", align_items="flex-start"))
         # aba unificada (mesmas seções/ordem do TreeSegmenterUI):
@@ -1564,21 +1637,25 @@ class ModelSegmenterUI:
         row_comport = _row(_col(f"Comportamento · distribuição &amp; {_dist_h} por faixa",
                                 self.out_an_distbad),
                            _col("Resumo &amp; estabilidade", self.out_an_cards))
-        row_resumo = _col("Tabela por faixa", self.out_an_table)
+        row_resumo = _col("Tabela por faixa", self.out_an_table, width="100%")
         row2 = _row(_col("Inversão da ordem de risco · por amostra", self.out_an_inv_sample),
                     _col("Inversão da ordem de risco · por safra", self.out_an_inv_safra))
         row3 = _row(_col("Ao longo do tempo · percentis por safra", self.out_an_time),
                     _col("PSI da variável por safra vs DES", self.out_an_psi))
-        row_optbin = W.VBox(
-            [W.HTML("<div class='mseg-h'>Distribuição acumulada das faixas do optimal binning "
-                    "ao longo do tempo (numéricas)</div>"),
-             self.out_an_optbin_share], layout=W.Layout(width="100%"))
+        row_optbin = _col("Distribuição acumulada das faixas do optimal binning "
+                          "ao longo do tempo (numéricas)", self.out_an_optbin_share,
+                          width="100%")
+        # faixa de status logo abaixo do seletor: diz se a variável em tela está no
+        # modelo (verde), só selecionada (azul) ou fora (neutro)
+        self.out_an_status = W.HTML()
         tab_an = W.VBox([
             W.HBox([self.dd_var2, self.tg_an_iv, self.dd_sample2, self.tx_time2,
                     self.btn_analyze, self.cb_target01]),
+            self.out_an_status,
             bin_card,
             row_comport, row_resumo, row2, row3, row_optbin,
         ], layout=W.Layout(padding="2px"))
+        self._tab_an = tab_an
 
         # ---------- Aba 3: Modelo ----------
         self.dd_algo = W.Dropdown(options=algos, value=algos[0][1], description="Algoritmo:",
@@ -3209,6 +3286,11 @@ class ModelSegmenterUI:
             + pill_modelo
             + self._pill(f"ratings: {nrat}", "muted")
             + "</div>")
+        # a barra é refeita a cada treino/inclusão/exclusão — mesmo gatilho que
+        # muda quem está no modelo: atualiza marcas do seletor e o destaque da aba
+        if getattr(self, "_tab_an", None) is not None:
+            self._refresh_an_var_options()
+            self._sync_an_destaque()
 
     def _sync_sel(self):
         self.sel_included.value = tuple(f for f in self.seg.candidates if f in self.seg.included)
@@ -3618,6 +3700,7 @@ class ModelSegmenterUI:
         if (getattr(self, "dd_var2", None) is None or self.dd_var2.value is None
                 or not hasattr(self, "out_an_table")):
             return
+        self._sync_an_destaque()
         feat = self.dd_var2.value
         sample = None if self.dd_sample2.value == "(referência)" else self.dd_sample2.value
         tcol = self.tx_time2.value.strip() or None

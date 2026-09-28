@@ -129,6 +129,19 @@ _CSS = """
 .pill-yellow { background-color:var(--warn-bg); color:var(--warn-ink); }
 .pill-red    { background-color:var(--bad-bg); color:var(--bad-ink); }
 .treeui-legend { font-size:11px; color:var(--muted); margin:6px 0 2px; line-height:1.55; }
+/* aba Análise de variáveis: destaque quando a variável analisada é usada em
+   alguma quebra da árvore — faixa de status + cards em verde. Seletor com 3
+   classes (+ .treeui) p/ vencer o fundo do card também no .dark. Só longhands:
+   var() em atalho não re-resolve no toggle de tema. */
+.treeui-an-status { margin:8px 0 0 0; padding:8px 12px; border-radius:10px;
+  font-size:12.5px; line-height:1.5; border-left-width:4px; border-left-style:solid;
+  border-left-color:var(--line); color:var(--muted); }
+.treeui-an-status b { font-weight:600; }
+.treeui-an-status.st-modelo { background-color:var(--ok-bg); border-left-color:var(--ok-ink);
+  color:var(--ok-ink); }
+.treeui .treeui-var-modelo .treeui-card.treeui-an-sec { background-color:var(--ok-bg);
+  border-left-width:4px; border-left-color:var(--ok-ink); }
+.treeui .treeui-var-modelo .treeui-card.treeui-an-sec .treeui-h { color:var(--ok-ink); }
 .treeui-tree { line-height:1.55; }
 /* abas do workbench — estilo "segmented control" (pílulas) */
 .treeui-tabs { margin-top:10px; border:none !important; box-shadow:none !important; }
@@ -1459,7 +1472,7 @@ class TreeSegmenterUI:
         # Dropdown (não Combobox) pelo mesmo motivo do seletor da aba Construir:
         # a lista toda tem de abrir num clique — rótulos de exibição; mapa em
         # _var_by_label.
-        var_labels, self._var_by_label = self._feature_option_labels(by_iv=False)
+        var_labels, self._var_by_label = self._feature_option_labels(by_iv=False, marca=True)
         self.dd_var = W.Dropdown(description="Variável", options=var_labels,
                                  value=(var_labels[0] if var_labels else None),
                                  layout=full, style=dstyle)
@@ -2372,15 +2385,19 @@ class TreeSegmenterUI:
         self.dd_var_leaf.style.description_width = "46px"
         self.tx_var_time.layout = W.Layout(width="20%")
         self.btn_var_analyze.layout = W.Layout(width="auto")
+        # faixa de status: a variável EM TELA (a última analisada) é usada na árvore?
+        self.out_var_status = W.HTML()
         var_controls = W.VBox([
             W.HTML("<div class='treeui-h'>Análise de variáveis</div>"),
             W.HTML("<div class='treeui-legend'>Perfil de uma variável de entrada numa folha: "
                    "distribuição, %missing, média/mediana/desvio, faixa de percentis, PSI atual "
                    "e o comportamento por safra (percentis e PSI). Informe a <b>coluna de "
-                   "safra</b> (ex.: dt_ref) para as análises temporais.</div>"),
+                   "safra</b> (ex.: dt_ref) para as análises temporais. No seletor, "
+                   "<b>✓</b> marca as variáveis usadas nas quebras da árvore.</div>"),
             W.HBox([box_var, self.dd_var_leaf, self.tx_var_time, self.btn_var_analyze],
                    layout=W.Layout(align_items="flex-end", justify_content="space-between",
                                    width="100%")),
+            self.out_var_status,
         ])
         var_controls.add_class("treeui-card")
         # ---- topo: comportamento (distribuição & risco) AO LADO do resumo &
@@ -2426,8 +2443,12 @@ class TreeSegmenterUI:
                    "binning · por safra (numéricas)</div>"),
             self.out_var_optbin])
         card_var_optbin.add_class("treeui-card")
+        for _c in (card_var_dist, card_var_cards, card_inv_s, card_inv_t,
+                   card_var_time, card_var_psi, card_var_optbin):
+            _c.add_class("treeui-an-sec")        # ganham o verde (ver _sync_var_destaque)
         tab_var = W.VBox([var_controls, var_row_a, var_row_inv,
                           var_row_time, card_var_optbin])
+        self._tab_var = tab_var
 
         # ---- ABA AVANÇADO: auto-merge · poda · diff de versões · cenários ----
         card_diff = W.VBox([
@@ -4059,6 +4080,10 @@ class TreeSegmenterUI:
             self.out_sql.value = ("-- Árvore alterada — SQL desatualizado. Clique em "
                                   "'Gerar SQL (CASE WHEN)' para regenerar.")
         self._refresh_sec_chips()       # cabeçalhos das seções (memoizado)
+        # aba Análise: quebra nova/recolhida muda quem está na árvore — marcas do
+        # seletor e o destaque da variável em tela (custo ~zero: varre segmentos)
+        self._remarcar_var_options()
+        self._sync_var_destaque()
         # a mini-tabela de cenários compara com o estado ATUAL — acompanha as
         # mutações (custo ~zero: metrics/psi memoizados por versão da árvore) e
         # marca uma comparação já renderizada como desatualizada
@@ -4100,12 +4125,54 @@ class TreeSegmenterUI:
                 self._iv_sort_cache[key] = {}
         return self._iv_sort_cache[key]
 
-    def _feature_option_labels(self, by_iv=False, sid=None):
+    def _vars_na_arvore(self) -> dict:
+        """``{variável: nº de quebras}`` das variáveis usadas na árvore atual.
+
+        Uma quebra = um nó-pai dividido pela variável (as condições de cada
+        segmento guardam o caminho; a última é a da quebra que o criou)."""
+        pais: dict = {}
+        for s in self.seg.segments.values():
+            conds = s.get("conditions") or []
+            if conds and s.get("parent") is not None:
+                f = conds[-1].get("feature")
+                if f:
+                    pais.setdefault(f, set()).add(s["parent"])
+        return {f: len(p) for f, p in pais.items()}
+
+    def _sync_var_destaque(self):
+        """Faixa de status + cards em verde conforme a variável EM TELA (a última
+        analisada) seja usada na árvore. Segue a analisada, não o dropdown: a aba
+        só re-renderiza no botão, e o destaque tem de casar com os gráficos."""
+        tab = getattr(self, "_tab_var", None)
+        if tab is None:
+            return
+        feat = getattr(self, "_var_em_tela", None)
+        tab.remove_class("treeui-var-modelo")
+        if feat is None:
+            self.out_var_status.value = ""
+            return
+        n = self._vars_na_arvore().get(feat, 0)
+        nome = _html.escape(str(self.seg.feature_labels.get(feat, feat)))
+        if n:
+            tab.add_class("treeui-var-modelo")
+            txt = (f"✓ <b>{nome}</b> é usada na árvore ({n} quebra{'s' if n > 1 else ''}) — "
+                   "o que você vê abaixo é uma variável que define os segmentos.")
+            cls = " st-modelo"
+        else:
+            txt = (f"<b>{nome}</b> não é usada em nenhuma quebra da árvore — "
+                   "análise exploratória.")
+            cls = ""
+        self.out_var_status.value = f"<div class='treeui-an-status{cls}'>{txt}</div>"
+
+    def _feature_option_labels(self, by_iv=False, sid=None, marca=False):
         """(rótulos, mapa rótulo→coluna) das opções dos seletores de variável.
         ``by_iv=True`` reordena por IV (desc) na folha ``sid`` e anexa o IV
-        entre parênteses ao rótulo; IV indisponível (NaN) vai para o fim."""
+        entre parênteses ao rótulo; IV indisponível (NaN) vai para o fim.
+        ``marca=True`` prefixa ✓ nas variáveis usadas na árvore (seletor da
+        aba Análise — Dropdown não aceita cor por opção)."""
         feats = list(self.features)
         ivm = self._iv_map(sid) if by_iv else {}
+        usadas = self._vars_na_arvore() if marca else {}
         if by_iv:
             def chave(f):
                 v = ivm.get(f)
@@ -4114,7 +4181,7 @@ class TreeSegmenterUI:
             feats = sorted(feats, key=chave)
         labels, mapa = [], {}
         for f in feats:
-            lbl = str(self.seg.feature_labels.get(f, f))
+            lbl = ("✓ " if f in usadas else "") + str(self.seg.feature_labels.get(f, f))
             v = ivm.get(f)
             if by_iv and v is not None and not pd.isna(v):
                 lbl = f"{lbl} (IV {v:.4f})"
@@ -4180,10 +4247,36 @@ class TreeSegmenterUI:
         cur = self._sel_var(warn=False)
         by_iv = self.tg_var_iv.value
         labels, mapa = self._feature_option_labels(
-            by_iv=by_iv, sid=self.dd_var_leaf.value if by_iv else None)
+            by_iv=by_iv, sid=self.dd_var_leaf.value if by_iv else None, marca=True)
         self._var_by_label = mapa
         self.dd_var.options = tuple(labels)
         if cur is not None:                        # preserva a coluna, novo rótulo
+            inv = {f: l for l, f in mapa.items()}
+            if cur in inv and inv[cur] != self.dd_var.value:
+                self.dd_var.value = inv[cur]
+
+    def _remarcar_var_options(self):
+        """Atualiza só o prefixo ✓ do seletor da Análise após a árvore mudar —
+        mesma ordem e mesmo sufixo de IV, sem recalcular IV (com a ordenação
+        ligada, refazer as opções custaria um IV por variável a cada quebra)."""
+        if getattr(self, "dd_var", None) is None:
+            return
+        usadas = self._vars_na_arvore()
+        cur = self._sel_var(warn=False)
+        labels, mapa = [], {}
+        for lbl in self.dd_var.options:
+            f = self._var_by_label.get(lbl)
+            if f is None:
+                continue
+            base = lbl[2:] if lbl.startswith("✓ ") else lbl
+            novo = ("✓ " if f in usadas else "") + base
+            mapa[novo] = f
+            labels.append(novo)
+        if labels == list(self.dd_var.options):
+            return
+        self._var_by_label = mapa
+        self.dd_var.options = tuple(labels)
+        if cur is not None:
             inv = {f: l for l, f in mapa.items()}
             if cur in inv and inv[cur] != self.dd_var.value:
                 self.dd_var.value = inv[cur]
@@ -5640,6 +5733,8 @@ class TreeSegmenterUI:
                                  "fim": str(bs["safra"].iloc[-1])}
                 except Exception as e:
                     self._log(f"(percentis por safra: {type(e).__name__}: {e})")
+            self._var_em_tela = feat
+            self._sync_var_destaque()
             lbl = self.seg.feature_labels.get(feat, feat)
             self._log(f"Análise de '{lbl}' concluída"
                       + (f" · folha {self._leaf_label(sid)}" if sid not in (None, 'root') else "")
