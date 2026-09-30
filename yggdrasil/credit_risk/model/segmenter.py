@@ -1186,6 +1186,9 @@ class ModelSegmenter:
             return "(faltante)"
         if b["kind"] == "num":
             lbl = f"({_fmt(b['lo'])}, {_fmt(b['hi'])}]"
+        elif (len(b["cats"]) == 1
+              and self.var_meta.get(feature, {}).get("derived_from")):
+            lbl = str(b["cats"][0])        # derivada: a categoria JÁ é o rótulo da faixa
         else:
             lbl = "{" + ", ".join(map(str, b["cats"])) + "}"
         return lbl + (" + faltante" if b.get("include_na") else "")
@@ -4243,6 +4246,9 @@ class ModelSegmenter:
             f, faixa = nm.split("=", 1)
             lbl = self.feature_labels.get(f, f) if use_labels else f
             return f"{lbl} = {faixa}"
+        if dummy:                               # dummies agrupadas (SHAP): a variável
+            lbl = self.feature_labels.get(nm, nm) if use_labels else nm
+            return f"{lbl} (faixas)"
         # termos transformados vêm como 'WoE(feat)'/'bin(feat)'/'ord(feat)':
         # rotula o miolo
         wrap = None
@@ -6436,12 +6442,50 @@ class ModelSegmenter:
         + corte de nomes muito longos."""
         return [self._truncate_label(self._display_feature_name(c)) for c in cols]
 
+    def _shap_agrupa_dummies(self, sv, Xs):
+        """Junta as colunas de **dummies de scorecard** (``dum__var=faixa``) numa
+        coluna só por variável, para os gráficos SHAP tratarem a variável como UMA:
+        SHAP = soma das dummies; valor = posição da faixa por risco (0 = pior ...
+        maior = melhor; linha com todas as dummies em 0 = referência = 0). As
+        demais colunas passam intactas. Devolve ``(sv, Xs)`` novos."""
+        cols = [str(c) for c in Xs.columns]
+        grupos: dict = {}
+        for j, c in enumerate(cols):
+            if c.startswith("dum__") and "=" in c:
+                f, faixa = c[len("dum__"):].split("=", 1)
+                grupos.setdefault(f, []).append((j, faixa))
+        if not grupos:
+            return sv, Xs
+        sv = np.asarray(sv)
+        novas_sv, novas_x, nomes, usados = [], [], [], set()
+        for j, c in enumerate(cols):
+            if j in usados:
+                continue
+            f = (c[len("dum__"):].split("=", 1)[0]
+                 if c.startswith("dum__") and "=" in c else None)
+            if f is None or f not in grupos:
+                novas_sv.append(sv[:, j]); novas_x.append(Xs.iloc[:, j].to_numpy()); nomes.append(c)
+                continue
+            membros = grupos.pop(f)
+            idx = [m for m, _ in membros]
+            usados.update(idx)
+            ordem = {self._bin_label(f, b): o
+                     for b, _r, _n, o in self._faixas_por_risco(f)}
+            valor = np.zeros(len(Xs), dtype="float64")          # referência = pior = 0
+            for m, faixa in membros:
+                valor = np.where(Xs.iloc[:, m].to_numpy() > 0.5, ordem.get(faixa, 0), valor)
+            novas_sv.append(sv[:, idx].sum(axis=1)); novas_x.append(valor)
+            nomes.append(f"dum__{f}")
+        return (np.column_stack(novas_sv),
+                pd.DataFrame(np.column_stack(novas_x), columns=nomes, index=Xs.index))
+
     def plot_shap_beeswarm(self, sample=None, sample_size=2000, max_display=15):
         """Beeswarm SHAP do modelo (usa pyplot; devolve a figura). Usa o alias das
-        variáveis (``feature_labels``) e corta nomes longos no eixo Y."""
+        variáveis (``feature_labels``) e corta nomes longos no eixo Y. Dummies de
+        scorecard aparecem como UMA variável (ver :meth:`_shap_agrupa_dummies`)."""
         import matplotlib.pyplot as plt
         import shap
-        sv, Xs = self.shap_values(sample, sample_size)
+        sv, Xs = self._shap_agrupa_dummies(*self.shap_values(sample, sample_size))
         names = self._shap_feature_names(Xs.columns)     # alias + corte (não muta Xs/cache)
         plt.figure()
         shap.summary_plot(sv, Xs, feature_names=names, show=False, max_display=max_display)
@@ -6462,10 +6506,11 @@ class ModelSegmenter:
 
     def plot_shap_bar(self, sample=None, sample_size=2000, max_display=15):
         """Importância global SHAP (barras). Usa o alias das variáveis
-        (``feature_labels``) e corta nomes longos no eixo Y."""
+        (``feature_labels``) e corta nomes longos no eixo Y. Dummies de scorecard
+        aparecem como UMA variável."""
         import matplotlib.pyplot as plt
         import shap
-        sv, Xs = self.shap_values(sample, sample_size)
+        sv, Xs = self._shap_agrupa_dummies(*self.shap_values(sample, sample_size))
         names = self._shap_feature_names(Xs.columns)     # alias + corte (não muta Xs/cache)
         plt.figure()
         shap.summary_plot(sv, Xs, plot_type="bar", feature_names=names, show=False,
@@ -8281,6 +8326,156 @@ class ModelSegmenter:
             f"'{self._bin_label(col, b).replace(chr(39), chr(39) * 2)}'" for b in bins)
         return f"CASE {whens} WHEN {col} IS NOT NULL THEN '(outros)' ELSE NULL END"
 
+    # ---- fórmula da logística como SQL ----
+    def _sql_valor(self, f) -> str:
+        """Expressão SQL do valor CRU da variável ``f`` do modelo: a coluna, ou —
+        para variável derivada — a recriação a partir da coluna de origem."""
+        meta = self.var_meta.get(f, {})
+        src = meta.get("derived_from")
+        if not src:
+            return f
+        bins = meta.get("derived_bins") or []
+        is_bool = src in self.df.columns and pd.api.types.is_bool_dtype(self.df[src])
+        if meta.get("derived_dummy"):
+            return f"(CASE WHEN {self._sql_cond(src, bins[0], is_bool)} THEN 1 ELSE 0 END)"
+        return f"({self._sql_label_expr(src, bins, is_bool)})"
+
+    @staticmethod
+    def _sql_lit(v) -> str:
+        """Literal SQL de um valor Python (texto com aspas escapadas, bool, número)."""
+        if isinstance(v, (bool, np.bool_)):
+            return "TRUE" if v else "FALSE"
+        if isinstance(v, (int, float, np.integer, np.floating)):
+            return repr(float(v))
+        return "'" + str(v).replace("'", "''") + "'"
+
+    def _sql_termos_logit(self) -> dict:
+        """``{nome_da_coluna_do_desenho: expressão SQL}`` para cada coluna que o
+        pré-processador ajustado entrega ao estimador — mesma transformação do
+        pipeline (imputação, one-hot, WoE, dummies de scorecard, derivadas)."""
+        pre = self.model.named_steps.get("pre")
+        termos: dict = {}
+
+        def _cond(f, b):
+            col = self._sql_valor(f)
+            is_bool = (not self.var_meta.get(f, {}).get("derived_from")
+                       and pd.api.types.is_bool_dtype(self.df[f]))
+            return self._sql_cond(col, b, is_bool)
+
+        def _woe(enc_obj, prefixo):
+            for f in enc_obj.features or []:
+                enc = enc_obj.encodings[f]
+                whens = " ".join(f"WHEN {_cond(f, b)} THEN {float(v)!r}" for b, v in enc["bins"])
+                pref = (enc_obj.prefixes or {}).get(f, enc_obj.name_prefix)
+                termos[f"{prefixo}{pref}({f})"] = (
+                    f"(CASE {whens} ELSE {float(enc['fallback'])!r} END)")
+
+        def _dum(enc_obj, prefixo):
+            for f in enc_obj.features or []:
+                sp = enc_obj.specs[f]
+                for i, (b, lbl) in enumerate(zip(sp["bins"], sp["labels"])):
+                    if i != sp["ref"]:
+                        termos[f"{prefixo}{f}={lbl}"] = (
+                            f"(CASE WHEN {_cond(f, b)} THEN 1 ELSE 0 END)")
+
+        if isinstance(pre, WoeBinEncoder):
+            _woe(pre, "")
+            return termos
+        for nome, trans, cols in getattr(pre, "transformers_", []):
+            if nome == "num":
+                for col, med in zip(cols, trans.statistics_):
+                    if np.isfinite(med):
+                        termos[f"num__{col}"] = f"COALESCE({self._sql_valor(col)}, {float(med)!r})"
+            elif nome == "cat":
+                imp, ohe = trans.named_steps["imp"], trans.named_steps["ohe"]
+                todos = iter(ohe.get_feature_names_out(list(cols)))   # na ordem col × cat
+                for col, moda, cats in zip(cols, imp.statistics_, ohe.categories_):
+                    v = self._sql_valor(col)
+                    # None em coluna de texto NÃO é imputado (o SimpleImputer só vê
+                    # NaN): vira categoria própria → NULL casa com ela; sem essa
+                    # categoria, o NULL recebe a moda (como no treino)
+                    tem_none = any(c is None for c in cats)
+                    base = v if tem_none else f"COALESCE({v}, {self._sql_lit(moda)})"
+                    for c in cats:
+                        cond = f"{v} IS NULL" if c is None else f"{base} = {self._sql_lit(c)}"
+                        termos[f"cat__{next(todos)}"] = f"(CASE WHEN {cond} THEN 1 ELSE 0 END)"
+            elif nome == "woe":
+                _woe(trans, "woe__")
+            elif nome == "dum":
+                _dum(trans, "dum__")
+        return termos
+
+    def logit_sql(self, table: str = "minha_tabela", col_logit: str = "logit",
+                  col_prob: str = "probabilidade", col_score: str = "score") -> str:
+        """Gera SQL com a **fórmula da regressão logística** ajustada, sobre as
+        colunas CRUAS da tabela: o logito (``col_logit`` = intercepto + Σ coef ×
+        termo), a **probabilidade** (``1/(1+e^-z)``, com a camada de calibração
+        vigente, se houver) e o **score** na escala de negócio (probabilidade ×
+        ``score_scale`` — 0 a 1000 por padrão). Cada termo reproduz o
+        pré-processamento do pipeline: imputação (mediana/moda), one-hot, WoE da
+        faixa, dummies de scorecard e variáveis derivadas.
+
+        Só para ``algorithm='logistica'`` (classificação, sem Two-Stage)."""
+        if self.model is None or self.algorithm != "logistica" or self.two_stage:
+            raise ValueError("A fórmula em SQL exige um modelo de regressão logística "
+                             "treinado (algorithm='logistica').")
+        est = self.model.named_steps["est"]
+        pre = self.model.named_steps.get("pre")
+        nomes = list(pre.get_feature_names_out())
+        coef = np.ravel(np.asarray(est.coef_, dtype="float64"))
+        intercepto = float(np.ravel(np.asarray(est.intercept_))[0])
+        termos = self._sql_termos_logit()
+        faltam = [n for n in nomes if n not in termos]
+        if faltam:
+            raise ValueError(f"Termos sem tradução para SQL: {faltam[:5]}")
+        linhas = [f"    {intercepto!r}  -- intercepto"]
+        for nm, c in zip(nomes, coef):
+            linhas.append(f"    + ({float(c)!r}) * {termos[nm]}"
+                          f"  -- {self._display_feature_name(nm)}")
+        esc = float(self.score_scale)
+        cal = self.calibration_ or {}
+        metodo, par = cal.get("method"), cal.get("params") or {}
+        z = col_logit
+        if metodo == "intercept":
+            prob = f"1.0 / (1.0 + EXP(-({z} + {float(par['delta'])!r})))"
+        elif metodo == "platt":
+            prob = (f"1.0 / (1.0 + EXP(-({float(par['a'])!r} * {z} + "
+                    f"{float(par['b'])!r})))")
+        else:
+            prob = f"1.0 / (1.0 + EXP(-{z}))"
+        cab = [f"-- Fórmula da regressão logística gerada por ModelSegmenter · "
+               f"{len(nomes)} termos",
+               f"-- {col_logit} = intercepto + Σ coef × termo · {col_prob} = 1 / (1 + e^-"
+               f"{col_logit})" + (f" (calibração '{metodo}')" if metodo else ""),
+               f"-- {col_score} = {col_prob} × {_fmt(esc)} (escala de negócio, 0–{_fmt(esc)})",
+               "-- termos: imputação do treino (mediana/moda), one-hot, WoE da faixa e "
+               "dummies de scorecard sobre as colunas CRUAS"]
+        if metodo == "isotonic":
+            xs = [float(v) for v in par["x"]]
+            ys = [float(v) for v in par["y"]]
+            p0 = f"(1.0 / (1.0 + EXP(-{z})))"
+            partes = [f"WHEN {p0} <= {xs[0]!r} THEN {ys[0]!r}"]
+            for i in range(len(xs) - 1):
+                x0, x1, y0, y1 = xs[i], xs[i + 1], ys[i], ys[i + 1]
+                if x1 == x0:
+                    continue
+                partes.append(f"WHEN {p0} <= {x1!r} THEN {y0!r} + ({p0} - {x0!r}) * "
+                              f"{(y1 - y0) / (x1 - x0)!r}")
+            partes.append(f"ELSE {ys[-1]!r}")
+            prob = "CASE " + " ".join(partes) + " END"
+            cab.append("-- calibração isotônica: interpolação linear entre os degraus")
+        return "\n".join(cab + [
+            "WITH _ygg_logit AS (",
+            "  SELECT",
+            "    *,",
+            "\n".join(linhas) + f"\n    AS {col_logit}",
+            f"  FROM {table}",
+            "), _ygg_prob AS (",
+            f"  SELECT *, {prob} AS {col_prob} FROM _ygg_logit",
+            ")",
+            f"SELECT *, {col_prob} * {esc!r} AS {col_score}",
+            "FROM _ygg_prob;"])
+
     def _sql_case_labels(self, f, col, bins, alias, is_bool, comentario="") -> list:
         """``CASE`` do rótulo da faixa (mesma saída de :meth:`_labels_from_bins`)."""
         linhas = [f"  CASE  -- faixa de {self.label(f)}" + (f" ({comentario})" if comentario else "")]
@@ -8304,7 +8499,7 @@ class ModelSegmenter:
                 break
         return "\n".join(linhas)
 
-    def create_categorical(self, feature, new_name=None) -> str:
+    def create_categorical(self, feature, new_name=None, dummies=None) -> str:
         """Materializa a binagem atual de ``feature`` (faixas numéricas ou grupos
         categóricos — **manuais** quando definidos, senão o **ótimo**) como uma NOVA
         variável categórica no DataFrame, candidata ao modelo. É o equivalente a
@@ -8313,9 +8508,14 @@ class ModelSegmenter:
 
         A derivação fica registrada (origem + bins), então a variável é **recriada
         automaticamente** ao escorar uma base que tenha só as variáveis originais.
-        Devolve o nome da nova variável. Para as dummies de scorecard (uma coluna
-        0/1 por faixa, pior faixa como referência) use
-        :meth:`create_scorecard_dummies`."""
+        ``dummies`` (default: segue :meth:`scorecard_dummies` da variável): a nova
+        variável já nasce com **uma categoria por faixa** como bins manuais e com
+        as **dummies de scorecard** ligadas — UMA variável (uma linha no ranking,
+        IV/gráficos das faixas) que entra no modelo como 0/1 por faixa, com a
+        pior faixa de referência. Para materializar as dummies como colunas
+        separadas use :meth:`create_scorecard_dummies`.
+
+        Devolve o nome da nova variável."""
         if feature not in self.df.columns:
             raise ValueError(f"'{feature}' não está no DataFrame.")
         bins, kind = self._resolve_bins(feature, sample=self.ref_sample)
@@ -8329,8 +8529,27 @@ class ModelSegmenter:
         if name not in self.candidates:
             self.candidates.append(name)
         self.var_meta[name] = meta
-        self.feature_labels.setdefault(name, f"{self.label(feature)} (cat.)")
+        if dummies is None:
+            dummies = self.scorecard_dummies(feature)
+        # rótulo distinto por versão: o nome digitado vira o rótulo; nomes
+        # automáticos repetidos (<var>_cat_2, _3...) ganham "v2", "v3" — senão a
+        # aba Variáveis mostrava várias linhas iguais "var (dummies)"
+        tipo = "dummies" if dummies else "cat."
+        if new_name:
+            rotulo_nova = name
+        else:
+            base_auto = f"{feature}_cat"
+            versao = name[len(base_auto) + 1:] if name != base_auto else ""
+            rotulo_nova = (f"{self.label(feature)} ({tipo} v{versao})" if versao
+                           else f"{self.label(feature)} ({tipo})")
+        self.feature_labels[name] = rotulo_nova
         self._rank_version += 1   # nova candidata → o ranking de IV precisa recalcular
+        if dummies:
+            # uma categoria por faixa (lista, não texto: rótulos têm vírgula) e as
+            # dummies de scorecard ligadas na nova variável
+            rotulos = [self._bin_label(feature, b) for b in bins]
+            self.set_manual_bins(name, [[r] for r in rotulos])
+            self.set_scorecard_dummies(name)
         return name
 
     def create_scorecard_dummies(self, feature, prefix=None) -> list:

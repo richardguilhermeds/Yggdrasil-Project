@@ -200,15 +200,18 @@ def test_ui_checkbox_tabela_e_botao(ui):
     ui.cb_scorecard.value = True
     assert ui.seg.scorecard_dummies("score")
     assert "referência" in ui.out_faixas_table.value
-    assert ui.btn_create_cat.description == "Criar variáveis dummy"
+    assert ui.btn_create_cat.description == "Criar variável (dummies)"
+    assert "dummies (3 + ref.)" in ui.out_vars.value          # coluna 'codificacao'
 
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_create_cat(None)
-    assert {"score_d1", "score_d2", "score_d3"} <= set(ui.seg.candidates)
+    assert "score_cat" in ui.seg.candidates                     # UMA variável
+    assert not any(c.startswith("score_d") for c in ui.seg.candidates)
+    assert ui.seg.scorecard_dummies("score_cat")
 
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_undo(None)
-    assert "score_d1" not in ui.seg.candidates
+    assert "score_cat" not in ui.seg.candidates
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_undo(None)
     assert not ui.seg.scorecard_dummies("score") and not ui.cb_scorecard.value
@@ -226,3 +229,33 @@ def test_ui_treino_mostra_conferencia_de_sinal(ui):
         ui._on_fit(None)
     assert "Scorecard" in ui.out_fit_status.value
     assert "coeficiente negativo" in ui.out_fit_status.value
+
+
+# ───────────────────────── caminho 1: uma variável, dummies no modelo ─────────────────────────
+def test_variavel_original_fica_uma_linha_no_ranking():
+    seg = _seg_dummies()
+    rk = seg.variable_iv(["score", "garantia"], with_psi=False)
+    assert list(rk["variavel"]) == ["score", "garantia"] or set(rk["variavel"]) == {"score", "garantia"}
+    assert len(rk) == 2
+    assert int(rk.set_index("variavel").loc["score", "n_bins"]) == 4
+
+
+def test_create_categorical_com_dummies_gera_uma_variavel_ja_em_dummies():
+    seg = _seg_dummies()
+    nova = seg.create_categorical("score")                     # segue a opção da origem
+    assert nova == "score_cat" and seg.label(nova) == "score (dummies)"
+    assert seg.scorecard_dummies(nova)
+    assert len(seg.scorecard_table(nova)) == 4
+    _fit(seg, features=[nova], transform="raw")
+    coef = seg.model_coefficients(use_labels=False)
+    assert len(coef) == 3 and (coef["coef"] < 0).all()
+    assert seg.shap_importance_grouped().iloc[:, 0].tolist() == [nova]
+    X = _df(n=30, seed=4).drop(columns="target")                # só a coluna de origem
+    assert np.isfinite(seg.predict(X)["score"]).all()
+
+
+def test_create_categorical_sem_dummies_segue_categorica():
+    seg = _seg()
+    seg.set_manual_bins("score", "0.7, 1.0")
+    nova = seg.create_categorical("score")
+    assert seg.label(nova) == "score (cat.)" and not seg.scorecard_dummies(nova)

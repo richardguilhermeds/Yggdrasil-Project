@@ -2646,6 +2646,31 @@ class ModelSegmenterUI:
                    layout=W.Layout(flex_flow="row wrap", align_items="center")),
             self.out_catsql,
         ]); card_catsql.add_class("mseg-card")
+        # --- fórmula da logística como SQL: logito, probabilidade e score 0–1000 ---
+        self.tx_logit_table = W.Text(value="minha_tabela", description="tabela:",
+                                     style=_sql_sty, layout=W.Layout(width="30%"))
+        self.btn_logit_sql = W.Button(description="Gerar SQL da fórmula (score)",
+                                      button_style="primary", icon="calculator",
+                                      layout=W.Layout(width="auto"),
+                                      tooltip="Fórmula da logística sobre as colunas cruas: "
+                                              "logito, probabilidade e score 0–1000")
+        self.out_logit_sql = W.Textarea(layout=W.Layout(width="99%", height="280px"))
+        self.btn_logit_sql.on_click(self._on_logit_sql)
+        self.card_logit_sql = W.VBox([
+            W.HTML("<div class='mseg-h'>Exportar a fórmula da logística como SQL "
+                   "(score 0–1000 e probabilidade)</div>"),
+            W.HTML("<div class='mseg-legend'>A regressão logística treinada escrita em SQL "
+                   "sobre as colunas <b>cruas</b> da tabela: <code>logit</code> = intercepto + "
+                   "Σ coeficiente × termo, <code>probabilidade</code> = 1 / (1 + e<sup>−logit"
+                   "</sup>) (com a calibração vigente, se houver) e <code>score</code> = "
+                   "probabilidade × 1000. Cada termo reproduz o tratamento do treino — "
+                   "imputação, one-hot, WoE da faixa, dummies de scorecard e variáveis "
+                   "criadas na aba Análise.</div>"),
+            W.HBox([self.tx_logit_table, self.btn_logit_sql],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            self.out_logit_sql,
+        ], layout=W.Layout(display="none"))   # só aparece com a logística treinada
+        self.card_logit_sql.add_class("mseg-card")
         card_diff = W.VBox([
             W.HTML("<div class='mseg-h'>Comparar com modelo salvo (JSON)</div>"),
             W.HTML("<div class='mseg-legend'>Carrega outro modelo salvo por <b>Salvar</b> "
@@ -2665,6 +2690,7 @@ class ModelSegmenterUI:
             # Cards novos desta versão, ao FIM da aba (SQL da régua e diff de modelo).
             card_sql,
             card_catsql,
+            self.card_logit_sql,
             card_diff,
         ], layout=W.Layout(padding="2px"))
 
@@ -3406,6 +3432,9 @@ class ModelSegmenterUI:
         if getattr(self, "_tab_an", None) is not None:
             self._refresh_an_var_options()
             self._sync_an_destaque()
+        # card da fórmula da logística (Validar & Exportar): só com logística treinada
+        if getattr(self, "card_logit_sql", None) is not None:
+            self.card_logit_sql.layout.display = "" if self._logit_treinada() else "none"
 
     def _sync_sel(self):
         self.sel_included.value = tuple(f for f in self.seg.candidates if f in self.seg.included)
@@ -3429,8 +3458,12 @@ class ModelSegmenterUI:
         self._vars_ready = True
         try:
             rk = self.seg.variable_iv().drop(columns="n_inversoes", errors="ignore")
-            if "variavel" in rk.columns:                  # exibe o alias (feature_labels)
-                rk["variavel"] = rk["variavel"].map(self.seg.label)
+            if "variavel" in rk.columns:
+                # como a variável entra no modelo: dummies de scorecard (uma linha só
+                # aqui, expandida em 0/1 por faixa no treino) ou faixas manuais
+                pos = list(rk.columns).index("variavel") + 1
+                rk.insert(pos, "codificacao", rk["variavel"].map(self._codificacao_var))
+                rk["variavel"] = rk["variavel"].map(self.seg.label)   # exibe o alias
             for c in rk.columns:
                 if c.startswith("psi_") or c in ("iv", "pior_psi"):
                     rk[c] = rk[c].map(lambda v: "" if pd.isna(v) else f"{v:.4f}")
@@ -3450,6 +3483,23 @@ class ModelSegmenterUI:
         except Exception as e:
             self.out_vars.value = f"<i>falha ao calcular IV: {e}</i>"
         self._refresh_var_preview()
+
+    def _codificacao_var(self, feat) -> str:
+        """Rótulo da coluna 'codificacao' do ranking: ``dummies (k + ref.)`` para
+        as dummies de scorecard, ``faixas manuais`` com bins manuais, vazio no
+        binning ótimo."""
+        s = self.seg
+        if not s.manual_bins(feat):
+            return ""
+        if s.scorecard_dummies(feat):
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    k = len(s.scorecard_table(feat))
+                return f"dummies ({k - 1} + ref.)"
+            except Exception:                       # noqa: BLE001 — rótulo informativo
+                return "dummies"
+        return "faixas manuais"
 
     def _refresh_var_preview(self):
         """Prévia ao lado do ranking: a **estabilidade no tempo** da variável — risco
@@ -4059,10 +4109,11 @@ class ModelSegmenterUI:
             self._sc_syncing = False
         # com as dummies ligadas, o botão cria <var>_d1, <var>_d2... (0/1 por faixa)
         dummies = bool(tem_manual and self.seg.scorecard_dummies(feat))
-        self.btn_create_cat.description = ("Criar variáveis dummy" if dummies
+        self.btn_create_cat.description = ("Criar variável (dummies)" if dummies
                                            else "Criar variável categórica")
-        self.tx_new_cat.description = "Prefixo:" if dummies else "Nova variável:"
-        self.tx_new_cat.placeholder = ((feat if dummies else f"{feat}_cat")
+        # sugere o PRÓXIMO nome livre (<var>_cat, <var>_cat_2...): várias versões
+        # da mesma variável ficam distinguíveis na aba Variáveis
+        self.tx_new_cat.placeholder = (self.seg._nome_livre(f"{feat}_cat")
                                        if feat is not None else "nome (opcional)")
         self.out_bin_status.value = (
             self._pill("✎ bins manuais", "yellow") if tem_manual
@@ -4203,6 +4254,7 @@ class ModelSegmenterUI:
             estado = ("ligadas — referência = pior faixa" if change["new"] else "desligadas")
             self._log(f"[scorecard] '{self.seg.label(feat)}': dummies {estado}.")
             self._mark_dirty()
+            self._refresh_vars()                  # coluna 'codificacao' do ranking
         except Exception as e:
             self._log(f"[scorecard] erro: {e}")
         self._sync_scorecard(feat)
@@ -4305,21 +4357,21 @@ class ModelSegmenterUI:
         name = self.tx_new_cat.value.strip() or None
         try:
             dummies = bool(self.seg.manual_bins(feat) and self.seg.scorecard_dummies(feat))
-            with self._undoable("nova variável"):   # desfazer remove a(s) derivada(s)
-                if dummies:
-                    novas = self.seg.create_scorecard_dummies(feat, prefix=name)
-                else:
-                    novas = [self.seg.create_categorical(feat, new_name=name)]
+            with self._undoable("nova variável"):   # desfazer remove a derivada
+                # com dummies: UMA variável (uma categoria por faixa) que já entra
+                # no modelo como dummies — uma linha só no ranking
+                novas = [self.seg.create_categorical(feat, new_name=name, dummies=dummies)]
             self.tx_new_cat.value = ""
             self._refresh_candidates()
             self._refresh_vars()
             self._mark_dirty()
             self._refresh_bar()
+            self._sync_scorecard(feat)            # placeholder → próximo nome livre
             if dummies:
-                ref = self.seg.var_meta[novas[0]].get("dummy_ref", "—") if novas else "—"
-                self._log(f"[nova variável] {len(novas)} dummies criadas de "
-                          f"'{self.seg.label(feat)}': {', '.join(novas)} (referência = "
-                          f"{ref}) — já disponíveis na seleção e no modelo.")
+                k = len(self.seg.scorecard_table(novas[0]))
+                self._log(f"[nova variável] '{novas[0]}' criada de '{self.seg.label(feat)}' "
+                          f"({k} faixas) — entra no modelo como {k - 1} dummies (referência "
+                          "= pior faixa); uma linha só na aba Variáveis.")
             else:
                 ncat = int(self.seg.df[novas[0]].nunique(dropna=True))
                 self._log(f"[nova variável] '{novas[0]}' criada de '{self.seg.label(feat)}' "
@@ -5610,6 +5662,29 @@ class ModelSegmenterUI:
                 self._log("[SQL] régua gerada — selecione tudo na caixa e copie (Ctrl+C).")
             except Exception as e:
                 self.out_sql.value = f"-- Erro ao gerar SQL: {type(e).__name__}: {e}"
+                self._log(f"[SQL] erro: {type(e).__name__}: {e}")
+
+    def _logit_treinada(self) -> bool:
+        s = self.seg
+        return bool(s.model is not None and s.algorithm == "logistica"
+                    and not getattr(s, "two_stage", False))
+
+    def _on_logit_sql(self, _):
+        """Gera a fórmula da logística como SQL (logito, probabilidade, score)."""
+        if not self._logit_treinada():
+            self.out_logit_sql.value = ("-- Treine uma regressão logística antes (aba "
+                                        "Modelo → algoritmo 'logistica').")
+            return
+        tbl = (self.tx_logit_table.value or "minha_tabela").strip()
+        with self._busy(self.btn_logit_sql, msg="gerando a fórmula em SQL…"):
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    self.out_logit_sql.value = self.seg.logit_sql(table=tbl)
+                self._log("[SQL] fórmula da logística gerada (logit, probabilidade, score "
+                          "0–1000) — selecione tudo na caixa e copie (Ctrl+C).")
+            except Exception as e:
+                self.out_logit_sql.value = f"-- Erro ao gerar SQL: {type(e).__name__}: {e}"
                 self._log(f"[SQL] erro: {type(e).__name__}: {e}")
 
     def _on_catsql(self, _):
