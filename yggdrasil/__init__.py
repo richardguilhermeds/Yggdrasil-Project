@@ -19,7 +19,7 @@ from .config import ColumnConfig, feature_columns
 from .pipeline import MLPipeline, PipelineResult
 from .ratings import build_ratings
 
-__version__ = "0.0.15"
+__version__ = "0.0.16"
 
 __all__ = [
     "MLPipeline",
