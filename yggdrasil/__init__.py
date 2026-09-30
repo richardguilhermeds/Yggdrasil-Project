@@ -1,10 +1,10 @@
-"""Yggdrasil — ferramentas e esteiras de Machine Learning para projetos em dados.
+"""Yggdrasil â€” ferramentas e esteiras de Machine Learning para projetos em dados.
 
-Esteira governada de ML (estilo risco de crédito) com MLflow: métricas por
-amostra, grupos homogêneos (ratings), PSI ao longo do tempo, shifts DES/OOT,
-SHAP e relatórios por grupo.
+Esteira governada de ML (estilo risco de crÃ©dito) com MLflow: mÃ©tricas por
+amostra, grupos homogÃªneos (ratings), PSI ao longo do tempo, shifts DES/OOT,
+SHAP e relatÃ³rios por grupo.
 
-Uso rápido
+Uso rÃ¡pido
 ----------
 >>> from yggdrasil import MLPipeline, ColumnConfig
 >>> cfg = ColumnConfig()                      # feat_, dt_ref, amostra, target
@@ -19,7 +19,7 @@ from .config import ColumnConfig, feature_columns
 from .pipeline import MLPipeline, PipelineResult
 from .ratings import build_ratings
 
-__version__ = "0.0.19"
+__version__ = "0.0.20"
 
 __all__ = [
     "MLPipeline",

@@ -1,26 +1,26 @@
 [build-system]
-# Teto em <77: a partir do setuptools 77 (PEP 639) declarar a licença via
+# Teto em <77: a partir do setuptools 77 (PEP 639) declarar a licenÃ§a via
 # `license = "MIT"` (SPDX) + `license-files` passa a emitir `Metadata-Version: 2.4`
-# (License-Expression). pip/packaging antigos — comuns em runtimes Databricks e
-# imagens legadas — recusam a 2.4 ("unsupported metadata version"), quebrando o
-# `pip install git+…`. Com setuptools 61–76 a metadata fica em 2.1/2.2, instalável
-# tanto via Git quanto do PyPI. Reavaliar quando o piso de ambientes suportados já
+# (License-Expression). pip/packaging antigos â€” comuns em runtimes Databricks e
+# imagens legadas â€” recusam a 2.4 ("unsupported metadata version"), quebrando o
+# `pip install git+â€¦`. Com setuptools 61â€“76 a metadata fica em 2.1/2.2, instalÃ¡vel
+# tanto via Git quanto do PyPI. Reavaliar quando o piso de ambientes suportados jÃ¡
 # trouxer pip recente (>=24.2).
 requires = ["setuptools>=61.0,<77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-# Nome de DISTRIBUIÇÃO (o que vai depois de `pip install`). O nome "yggdrasil"
-# já está registrado no PyPI por outro projeto, por isso a distribuição usa
+# Nome de DISTRIBUIÃ‡ÃƒO (o que vai depois de `pip install`). O nome "yggdrasil"
+# jÃ¡ estÃ¡ registrado no PyPI por outro projeto, por isso a distribuiÃ§Ã£o usa
 # "yggdrasil-project". O nome de IMPORT continua `yggdrasil` (ver
-# [tool.setuptools.packages.find]), então o uso segue: `from yggdrasil import ...`.
+# [tool.setuptools.packages.find]), entÃ£o o uso segue: `from yggdrasil import ...`.
 name = "yggdrasil-project"
-version = "0.0.19"
-description = "Ferramentas e esteiras governadas de Machine Learning para ciência de dados e risco de crédito"
+version = "0.0.20"
+description = "Ferramentas e esteiras governadas de Machine Learning para ciÃªncia de dados e risco de crÃ©dito"
 readme = "README.md"
-# Formato clássico (Metadata 2.1/2.2) — ver o teto de setuptools em [build-system].
-# O formato SPDX (`license = "MIT"` + `license-files`) força Metadata 2.4 e quebra a
-# instalação em ambientes com pip antigo. O LICENSE continua embarcado no sdist/wheel
+# Formato clÃ¡ssico (Metadata 2.1/2.2) â€” ver o teto de setuptools em [build-system].
+# O formato SPDX (`license = "MIT"` + `license-files`) forÃ§a Metadata 2.4 e quebra a
+# instalaÃ§Ã£o em ambientes com pip antigo. O LICENSE continua embarcado no sdist/wheel
 # pelo glob default de `license_files` do setuptools.
 license = { text = "MIT" }
 authors = [{ name = "Richard Guilherme", email = "richard.guilherme.dev@gmail.com" }]
@@ -52,9 +52,9 @@ dependencies = [
     "numpy>=1.23",
     "pandas>=1.5",
     # Teto em <1.8: o optbinning (0.20.x) ainda chama check_array(force_all_finite=...),
-    # argumento que o scikit-learn removeu na 1.8. Sem o teto, uma instalação limpa puxa
-    # sklearn>=1.8 e o OptimalBinning.fit() passa a lançar TypeError silenciosamente
-    # (engolido em _fit_optbinning_splits -> "sem corte válido"), quebrando os
+    # argumento que o scikit-learn removeu na 1.8. Sem o teto, uma instalaÃ§Ã£o limpa puxa
+    # sklearn>=1.8 e o OptimalBinning.fit() passa a lanÃ§ar TypeError silenciosamente
+    # (engolido em _fit_optbinning_splits -> "sem corte vÃ¡lido"), quebrando os
     # segmentadores. Reavaliar quando o optbinning publicar suporte a sklearn>=1.8.
     "scikit-learn>=1.2,<1.8",
     "scipy>=1.9",
@@ -62,57 +62,57 @@ dependencies = [
     "shap>=0.44",
     "optbinning>=0.19",
     "matplotlib>=3.6",
-    # Motores de boosting incluídos por padrão (o ModelSegmenter os usa direto;
-    # RandomForest/ExtraTrees/GradientBoosting/HistGB já vêm via scikit-learn).
+    # Motores de boosting incluÃ­dos por padrÃ£o (o ModelSegmenter os usa direto;
+    # RandomForest/ExtraTrees/GradientBoosting/HistGB jÃ¡ vÃªm via scikit-learn).
     "lightgbm>=4.0",
     "xgboost>=2.0",
-    # Tuning bayesiano de hiperparâmetros (ModelSegmenter.tune_optuna) — agora
-    # parte do core: a UI do modelo traz o botão "Tunar com Optuna" por padrão e
-    # os trials são logáveis no MLflow.
+    # Tuning bayesiano de hiperparÃ¢metros (ModelSegmenter.tune_optuna) â€” agora
+    # parte do core: a UI do modelo traz o botÃ£o "Tunar com Optuna" por padrÃ£o e
+    # os trials sÃ£o logÃ¡veis no MLflow.
     "optuna>=3.0",
     # SEM ipywidgets/anywidget no core (extra [ui]): o anywidget exige
     # ipywidgets, e um `pip install --force-reinstall yggdrasil-project` num
-    # cluster Databricks subia o ipywidgets do kernel para 8.x — com o front-end
+    # cluster Databricks subia o ipywidgets do kernel para 8.x â€” com o front-end
     # do notebook na linha 7 toda UI quebrava com "Class HTMLStyleModel not found
-    # in module @jupyter-widgets/controls". O core não pode mexer no ipywidgets
-    # do ambiente; sem anywidget a árvore cai no PNG estático (já o padrão no
+    # in module @jupyter-widgets/controls". O core nÃ£o pode mexer no ipywidgets
+    # do ambiente; sem anywidget a Ã¡rvore cai no PNG estÃ¡tico (jÃ¡ o padrÃ£o no
     # Databricks).
 ]
 
 [project.optional-dependencies]
-# Modelos econométricos (satélite) das séries de risco — subpacote
-# yggdrasil.credit_risk.econometric. Motores de séries temporais e resposta
+# Modelos economÃ©tricos (satÃ©lite) das sÃ©ries de risco â€” subpacote
+# yggdrasil.credit_risk.econometric. Motores de sÃ©ries temporais e resposta
 # limitada (ARDL, SARIMAX, VECM/Johansen, beta regression, ADF/KPSS/Ljung-Box)
 # sobre statsmodels + arch. O restante de credit_risk (capital, segmentadores)
-# NÃO exige estes pacotes: o subpacote é carregado sob demanda.
+# NÃƒO exige estes pacotes: o subpacote Ã© carregado sob demanda.
 econometric = ["statsmodels>=0.14", "arch>=6.0"]
-# Treino automatizado opcional (motor PyCaret). Pesado e com pins próprios —
+# Treino automatizado opcional (motor PyCaret). Pesado e com pins prÃ³prios â€”
 # instale apenas se for usar o PyCaretTrainer.
 pycaret = ["pycaret>=3.0"]
-# Interface interativa dos segmentadores (ipywidgets) —
-# usada dentro do Jupyter/Databricks. O núcleo funciona sem ela.
-# anywidget: preview CLICÁVEL da árvore na TreeSegmenterUI (selecionar/fundir/
-# recolher direto na imagem). Entrega o JS pelo próprio comm do widget, por
-# isso funciona também no Databricks (runtimes recentes); sem ele a UI cai no
-# PNG estático. ipywidgets 7.6+ OU 8.x: o código das UIs roda nas duas linhas, e
+# Interface interativa dos segmentadores (ipywidgets) â€”
+# usada dentro do Jupyter/Databricks. O nÃºcleo funciona sem ela.
+# anywidget: preview CLICÃVEL da Ã¡rvore na TreeSegmenterUI (selecionar/fundir/
+# recolher direto na imagem). Entrega o JS pelo prÃ³prio comm do widget, por
+# isso funciona tambÃ©m no Databricks (runtimes recentes); sem ele a UI cai no
+# PNG estÃ¡tico. ipywidgets 7.6+ OU 8.x: o cÃ³digo das UIs roda nas duas linhas, e
 # o kernel precisa casar com o front-end do notebook (Databricks antigo = 7.x;
-# forçar >=8 ali quebra a UI com "HTMLStyleModel not found").
+# forÃ§ar >=8 ali quebra a UI com "HTMLStyleModel not found").
 ui = ["ipywidgets>=7.6,<9", "ipython>=7.0", "anywidget>=0.9"]
-# Geração/aplicação da régua em PySpark (no Databricks o pyspark já vem
-# no cluster; instale só fora dele).
+# GeraÃ§Ã£o/aplicaÃ§Ã£o da rÃ©gua em PySpark (no Databricks o pyspark jÃ¡ vem
+# no cluster; instale sÃ³ fora dele).
 spark = ["pyspark>=3.4"]
-# Boosting: LightGBM e XGBoost já vêm no core (acima). CatBoost segue opcional.
-# (RandomForest/ExtraTrees/GradientBoosting/HistGB vêm via scikit-learn.) Os
-# extras lgbm/xgboost ficam por compatibilidade — no-op se já instalados.
+# Boosting: LightGBM e XGBoost jÃ¡ vÃªm no core (acima). CatBoost segue opcional.
+# (RandomForest/ExtraTrees/GradientBoosting/HistGB vÃªm via scikit-learn.) Os
+# extras lgbm/xgboost ficam por compatibilidade â€” no-op se jÃ¡ instalados.
 lgbm = ["lightgbm>=4.0"]
 xgboost = ["xgboost>=2.0"]
 catboost = ["catboost>=1.2"]
-# Atalho dos motores de boosting (CatBoost é o único não incluído no core).
+# Atalho dos motores de boosting (CatBoost Ã© o Ãºnico nÃ£o incluÃ­do no core).
 boosting = ["lightgbm>=4.0", "xgboost>=2.0", "catboost>=1.2"]
-# Optuna já vem no core (acima). O extra fica por compatibilidade — no-op se já
+# Optuna jÃ¡ vem no core (acima). O extra fica por compatibilidade â€” no-op se jÃ¡
 # instalado.
 optuna = ["optuna>=3.0"]
-# Ferramentas de desenvolvimento, testes e execução de notebooks.
+# Ferramentas de desenvolvimento, testes e execuÃ§Ã£o de notebooks.
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
@@ -125,10 +125,10 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-# Layout flat: o pacote `yggdrasil` vive na RAIZ do repo (não em src/), para que
-# `import yggdrasil` funcione sem instalar — direto no Databricks Repos (que põe a
+# Layout flat: o pacote `yggdrasil` vive na RAIZ do repo (nÃ£o em src/), para que
+# `import yggdrasil` funcione sem instalar â€” direto no Databricks Repos (que pÃµe a
 # raiz do repo no sys.path) e rodando da raiz localmente. O empacotamento continua
-# igual: só os pacotes `yggdrasil*` entram no wheel/sdist.
+# igual: sÃ³ os pacotes `yggdrasil*` entram no wheel/sdist.
 where = ["."]
 include = ["yggdrasil*"]
 exclude = ["tests*", "notebooks*", "docs*"]
