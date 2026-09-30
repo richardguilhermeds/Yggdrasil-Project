@@ -1951,11 +1951,11 @@ class ModelSegmenter:
         if tab.empty:
             return pd.DataFrame(columns=["safra"])
         pct = tab.div(tab.sum(axis=1), axis=0) * 100
-        order = [c for c in keep if c in pct.columns]
-        if "outras" in pct.columns:
-            order.append("outras")
-        if "(faltante)" in pct.columns:
-            order.append("(faltante)")
+        # "outras"/"(faltante)" vão ao fim UMA vez só — uma variável criada a partir
+        # de faixas já traz "(faltante)" como categoria literal; repetir o rótulo
+        # duplicava a coluna e quebrava o gráfico de share (stackplot 2-D)
+        order = [c for c in keep if c in pct.columns and c not in ("outras", "(faltante)")]
+        order += [c for c in ("outras", "(faltante)") if c in pct.columns]
         pct = pct[order].round(1).sort_index()
         pct.index.name = "safra"
         return pct.reset_index()
@@ -2452,6 +2452,25 @@ class ModelSegmenter:
             feature, time_col, sample, max_n_bins, min_bin_size, figsize, dpi,
             save_path, ax, bins=bins, titulo=titulo, legend_title="faixa (optbin)")
 
+    def _faixas_categoricas_ordenadas(self, feature, sample, max_n_bins, min_bin_size):
+        """Faixas/grupos de uma variável CATEGÓRICA para o gráfico acumulado. Numa
+        variável criada a partir das faixas de outra (``derived_bins``), segue a ordem
+        das faixas de origem (menor → maior, ``(faltante)`` no fim) em vez da ordem de
+        risco; nas demais, a ordem de :meth:`_resolve_bins`."""
+        bins, _kind = self._resolve_bins(feature, max_n_bins, min_bin_size, None, sample)
+        bins = list(bins or [])
+        meta = self.var_meta.get(feature) or {}
+        src, dbins = meta.get("derived_from"), meta.get("derived_bins")
+        if src and dbins:
+            pos = {self._bin_label(src, b): i for i, b in enumerate(dbins)}
+            fim = len(pos) + 1
+
+            def chave(b):
+                cats = [str(c) for c in b.get("cats", [])] if b.get("kind") == "cat" else []
+                return min((pos.get(c, fim) for c in cats), default=fim + 1)
+            bins.sort(key=chave)
+        return bins
+
     def plot_variable_optbin_cumshare_timeseries(self, feature, time_col=None, sample=None,
                                                  max_n_bins=5, min_bin_size=0.05,
                                                  figsize=(11.5, 4.2), dpi=150,
@@ -2467,17 +2486,18 @@ class ModelSegmenter:
         **distribuição** é observada sobre **toda a população** (todas as amostras/safras).
         Com ``all_samples=False``, faixas e distribuição usam a amostra ``sample``."""
         import matplotlib.colors as mcolors
-        if self._detect_kind(feature) != "num":
-            fig, ax = _new_ax(figsize, dpi, ax)
-            ax.text(0.5, 0.5, "apenas para variáveis numéricas", ha="center",
-                    va="center", transform=ax.transAxes, color="#889"); ax.axis("off")
-            fig.tight_layout(); return fig
         # Estabilidade: as faixas do optbin são um YARDSTICK. Quando o gráfico cobre
         # toda a população (all_samples), elas são FIXADAS na referência (DES) e só a
         # DISTRIBUIÇÃO (abaixo) varre todas as safras/amostras; fora disso, faixas e
         # distribuição saem da mesma amostra.
-        bins = self._optbin_numeric_bins(
-            feature, self.ref_sample if all_samples else sample, max_n_bins, min_bin_size)
+        ref = self.ref_sample if all_samples else sample
+        categorica = self._detect_kind(feature) == "cat"
+        if categorica:
+            # categórica (ex.: variável criada a partir das faixas de outra, com a
+            # faixa "(faltante)"): empilha as próprias faixas/grupos da análise
+            bins = self._faixas_categoricas_ordenadas(feature, ref, max_n_bins, min_bin_size)
+        else:
+            bins = self._optbin_numeric_bins(feature, ref, max_n_bins, min_bin_size)
         sh = self.variable_faixa_share_by_safra(feature, time_col, sample, max_n_bins,
                                                 min_bin_size, bins=bins, all_samples=all_samples)
         fig, ax = _new_ax(figsize, dpi, ax)
@@ -2508,11 +2528,12 @@ class ModelSegmenter:
         # legenda no canto superior esquerdo, logo abaixo do título (dentro do gráfico);
         # caixa branca semiopaca p/ ficar legível sobre a área empilhada.
         leg = ax.legend(fontsize=8, loc="upper left", framealpha=0.92,
-                        title="faixa (optbin)", labelspacing=0.3, borderpad=0.5)
+                        title="faixa" if categorica else "faixa (optbin)",
+                        labelspacing=0.3, borderpad=0.5)
         leg.get_frame().set_edgecolor("#cccccc")
-        ax.set_title(f"'{self.label(feature)}' — distribuição acumulada das faixas do "
-                     f"optimal binning ao longo do tempo", fontsize=11,
-                     fontweight="bold", color="#15324a")
+        ax.set_title(f"'{self.label(feature)}' — distribuição acumulada das faixas"
+                     f"{'' if categorica else ' do optimal binning'} ao longo do tempo",
+                     fontsize=11, fontweight="bold", color="#15324a")
         ax.grid(alpha=0.12, axis="y")
         fig.tight_layout()
         if save_path:

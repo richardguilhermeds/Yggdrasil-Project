@@ -1742,10 +1742,10 @@ class ModelSegmenterUI:
         row_resumo = _col("Tabela por faixa", self.out_an_table, width="100%")
         row2 = _row(_col("Inversão da ordem de risco · por amostra", self.out_an_inv_sample),
                     _col("Inversão da ordem de risco · por safra", self.out_an_inv_safra))
-        row3 = _row(_col("Ao longo do tempo · percentis por safra", self.out_an_time),
+        row3 = _row(_col("Ao longo do tempo · percentis (numéricas) · share (categóricas)", self.out_an_time),
                     _col("PSI da variável por safra vs DES", self.out_an_psi))
-        row_optbin = _col("Distribuição acumulada das faixas do optimal binning "
-                          "ao longo do tempo (numéricas)", self.out_an_optbin_share,
+        row_optbin = _col("Distribuição acumulada das faixas ao longo do tempo "
+                          "(numéricas: optimal binning · categóricas: faixas da variável)", self.out_an_optbin_share,
                           width="100%")
         # faixa de status logo abaixo do seletor: diz se a variável em tela está no
         # modelo (verde), só selecionada (azul) ou fora (neutro)
