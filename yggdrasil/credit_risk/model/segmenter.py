@@ -705,28 +705,105 @@ def _bin_mask_series(series: pd.Series, b: dict) -> pd.Series:
     if b["kind"] == "num":
         m = series.between(b["lo"], b["hi"], inclusive="right")
     else:
-        m = series.astype(str).isin(b["cats"])
+        m = pd.Series(_cat_group_masks(series, [b["cats"]])[0], index=series.index)
     return (m | series.isna()) if b.get("include_na") else m
 
 
+def _cat_group_masks(series: pd.Series, grupos) -> list:
+    """Máscaras (numpy bool) de grupos categóricos — mesma regra de
+    ``series.astype(str).isin(grupo)`` (compara como TEXTO; faltante nunca casa),
+    mas via ``pd.factorize``: o ``str()`` roda só nos valores DISTINTOS, não em
+    cada linha. Em coluna de texto com milhões de linhas o ``astype(str)`` por
+    linha era o custo dominante de tabela/IV/PSI/WoE das categóricas."""
+    codes, uniq = pd.factorize(series, use_na_sentinel=True)     # NA → -1
+    ustr = np.array([str(u) for u in uniq], dtype=object)
+    validos = codes >= 0
+    out = []
+    for cats in grupos:
+        sel = np.isin(ustr, np.asarray(list(cats), dtype=object))
+        out.append(np.where(validos, sel[np.where(validos, codes, 0)], False)
+                   if len(ustr) else np.zeros(len(codes), dtype=bool))
+    return out
+
+
 def _bin_masks(series: pd.Series, bins) -> list:
-    """Máscaras (numpy) de todos os ``bins`` sobre ``series``, com UMA conversão
-    para texto por chamada (grupos categóricos comparam como str) em vez de uma
-    por bin: ``astype(str)`` numa coluna object de milhões de linhas custa mais
-    que a própria comparação. Mesmas máscaras de :func:`_bin_mask_series`, com
-    ``<NA>`` como fora do bin: em colunas nullable/pyarrow (``Float64``,
-    ``Int64``, ``float64[pyarrow]``) o ``between`` devolve NA nos faltantes, e
-    sem isso a soma das máscaras virava ``pd.NA`` (PSI NaN)."""
-    texto = series.astype(str) if any(b["kind"] == "cat" for b in bins) else None
-    na = series.isna() if any(b.get("include_na") for b in bins) else None
+    """Máscaras (numpy) de todos os ``bins`` sobre ``series``, com UMA
+    fatoração por chamada para os grupos categóricos (ver
+    :func:`_cat_group_masks`) em vez de uma por bin. Mesmas máscaras de
+    :func:`_bin_mask_series`, com ``<NA>`` como fora do bin: em colunas
+    nullable/pyarrow (``Float64``, ``Int64``, ``float64[pyarrow]``) o ``between``
+    devolve NA nos faltantes, e sem isso a soma das máscaras virava ``pd.NA``
+    (PSI NaN)."""
+    cat_idx = [i for i, b in enumerate(bins) if b["kind"] == "cat"]
+    cat_m = (dict(zip(cat_idx, _cat_group_masks(series, [bins[i]["cats"] for i in cat_idx])))
+             if cat_idx else {})
+    na = (series.isna().to_numpy(dtype=bool, na_value=True)
+          if any(b.get("include_na") for b in bins) else None)
+    # numéricas: a coluna vira float64 UMA vez e cada faixa é comparação numpy
+    # (NaN nunca casa com (lo, hi]) — antes, um between() do pandas por faixa
+    x = None
+    if any(b["kind"] == "num" for b in bins):
+        try:
+            x = series.to_numpy(dtype="float64", na_value=np.nan)
+        except (TypeError, ValueError):
+            x = None
+    out = []
+    for i, b in enumerate(bins):
+        if b["kind"] == "cat":
+            m = cat_m[i]
+            out.append((m | na) if b.get("include_na") else m)
+        elif b["kind"] == "num" and x is not None:
+            with np.errstate(invalid="ignore"):
+                m = (x > b["lo"]) & (x <= b["hi"])
+            out.append((m | na) if b.get("include_na") else m)
+        else:
+            out.append(_bin_mask_series(series, b).to_numpy(dtype=bool, na_value=False))
+    return out
 
-    def _um(b):
-        if b["kind"] != "cat":
-            return _bin_mask_series(series, b)
-        m = texto.isin(b["cats"])
-        return (m | na) if b.get("include_na") else m
 
-    return [_um(b).to_numpy(dtype=bool, na_value=False) for b in bins]
+def _bin_codes(series: pd.Series, bins) -> np.ndarray:
+    """Índice da faixa de cada linha (``-1`` = fora de todas), na regra da 1ª faixa
+    que casa — a mesma de :class:`WoeBinEncoder`. Base das contagens vetorizadas
+    por safra/amostra (``np.bincount``) no lugar de uma máscara por faixa × safra."""
+    rapido = _bin_codes_numericos(series, bins)
+    if rapido is not None:
+        return rapido
+    codes = np.full(len(series), -1, dtype=np.int32)
+    for i, m in enumerate(_bin_masks(series, bins)):
+        codes[m & (codes < 0)] = i
+    return codes
+
+
+def _bin_codes_numericos(series: pd.Series, bins):
+    """Caminho rápido de :func:`_bin_codes` para faixas NUMÉRICAS contíguas
+    ``(-inf, c1], (c1, c2], ..., (ck, inf]`` (+ faixa de faltante e/ou
+    ``include_na``): uma única busca binária (``np.searchsorted``) sobre os cortes
+    no lugar de uma máscara booleana por faixa. ``None`` quando as faixas não têm
+    esse formato (grupos categóricos, faixas manuais com buraco) — aí vale o
+    caminho geral, com o mesmo resultado."""
+    num = [(i, b) for i, b in enumerate(bins) if b["kind"] == "num"]
+    outros = [(i, b) for i, b in enumerate(bins) if b["kind"] != "num"]
+    if not num or any(b["kind"] != "na" for _i, b in outros):
+        return None
+    if [i for i, _b in num] != list(range(len(num))):     # num primeiro, em ordem
+        return None
+    los = [b["lo"] for _i, b in num]
+    his = [b["hi"] for _i, b in num]
+    if los[0] != -np.inf or his[-1] != np.inf or any(
+            los[k] != his[k - 1] for k in range(1, len(num))):
+        return None
+    try:
+        x = series.to_numpy(dtype="float64", na_value=np.nan)
+    except (TypeError, ValueError):
+        return None
+    codes = np.searchsorted(np.asarray(his[:-1], dtype="float64"), x,
+                            side="left").astype(np.int32)   # x <= hi_k ⇒ faixa k
+    nan = np.isnan(x)
+    alvo_na = next((i for i, b in num if b.get("include_na")), None)
+    if alvo_na is None:
+        alvo_na = next((i for i, _b in outros), -1)          # faixa "(faltante)" ou fora
+    codes[nan] = alvo_na
+    return codes
 
 
 class WoeBinEncoder(BaseEstimator, TransformerMixin):
@@ -765,15 +842,11 @@ class WoeBinEncoder(BaseEstimator, TransformerMixin):
         out = np.empty((len(X), len(feats)), dtype="float64")
         for j, f in enumerate(feats):
             enc = self.encodings[f]
-            col = X[f]
-            vals = np.full(len(X), enc["fallback"], dtype="float64")
-            assigned = np.zeros(len(X), dtype=bool)
-            mascaras = _bin_masks(col, [b for b, _v in enc["bins"]])
-            for (_b, v), m in zip(enc["bins"], mascaras):
-                m = m & ~assigned
-                vals[m] = v
-                assigned |= m
-            out[:, j] = vals
+            # índice da faixa (1ª que casa) numa passada + consulta do valor
+            codes = _bin_codes(X[f], [b for b, _v in enc["bins"]])
+            tabela = np.asarray([float(v) for _b, v in enc["bins"]] + [enc["fallback"]],
+                                dtype="float64")
+            out[:, j] = tabela[np.where(codes >= 0, codes, len(tabela) - 1)]
         return out
 
 
@@ -805,12 +878,10 @@ class ScorecardDummyEncoder(BaseEstimator, TransformerMixin):
         cols = []
         for f in self.features or []:
             sp = self.specs[f]
-            feito = np.zeros(len(X), dtype=bool)
-            for i, m in enumerate(_bin_masks(X[f], sp["bins"])):
-                m = m & ~feito                       # 1ª faixa que casa (como no WoE)
-                feito |= m
+            codes = _bin_codes(X[f], sp["bins"])     # 1ª faixa que casa (como no WoE)
+            for i in range(len(sp["bins"])):
                 if i != sp["ref"]:
-                    cols.append(m.astype("float64"))
+                    cols.append((codes == i).astype("float64"))
         return (np.column_stack(cols) if cols
                 else np.empty((len(X), 0), dtype="float64"))
 
@@ -1172,6 +1243,54 @@ class ModelSegmenter:
             self._mask_cache[sample] = mask
         return mask
 
+    # ---- caches por linha p/ as análises por safra/amostra (vetorizadas) ----
+    def _rows_mask(self, sample=None, all_rows=False) -> np.ndarray:
+        """Máscara das linhas de ``sample`` (referência por padrão); ``all_rows``
+        ou sem ``sample_col`` ⇒ todas — mesmo recorte de :meth:`_frame`."""
+        if all_rows or self.sample_col is None:
+            return np.ones(len(self.df), dtype=bool)
+        return self._frame_mask(sample)
+
+    def _safra_codes(self, time_col):
+        """``(codigos, rotulos)``: índice da safra mensal de cada linha do ``df``
+        (``-1`` = data não parseável) e os rótulos ``'AAAA-MM'`` em ordem.
+        Memoizado por coluna — o ``to_datetime``/``to_period`` em milhões de
+        linhas era refeito em cada gráfico por safra."""
+        cache = self.__dict__.setdefault("_safra_cache", {})
+        hit = cache.get(time_col)
+        if hit is None:
+            per = pd.to_datetime(self.df[time_col], errors="coerce").dt.to_period("M")
+            codes, uniq = pd.factorize(per, sort=True, use_na_sentinel=True)
+            hit = (np.asarray(codes, dtype=np.int32), [str(u) for u in uniq])
+            cache[time_col] = hit
+        return hit
+
+    def _feature_bin_codes(self, feature, bins) -> np.ndarray:
+        """:func:`_bin_codes` da variável no ``df`` inteiro, memoizado por
+        (variável, faixas) — as análises da aba reusam o mesmo vetor."""
+        cache = self.__dict__.setdefault("_bincode_cache", {})
+        key = (feature, repr(bins))
+        hit = cache.get(key)
+        if hit is None:
+            if len(cache) > 16:
+                cache.clear()
+            hit = _bin_codes(self.df[feature], bins)
+            cache[key] = hit
+        return hit
+
+    def _risco_por_grupo(self, bin_codes, grupo_codes, n_grupos, n_bins, linhas):
+        """Risco (média do alvo, NaN-safe — igual a :meth:`_risco`) por grupo ×
+        faixa numa passada: matriz ``(n_grupos, n_bins)``, NaN onde não há alvo."""
+        y = self.df[self.target].to_numpy(dtype="float64")
+        ok = linhas & (bin_codes >= 0) & (grupo_codes >= 0) & ~np.isnan(y)
+        idx = grupo_codes[ok].astype(np.int64) * n_bins + bin_codes[ok]
+        tam = n_grupos * n_bins
+        soma = np.bincount(idx, weights=y[ok], minlength=tam)
+        cont = np.bincount(idx, minlength=tam)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            r = np.where(cont > 0, soma / np.maximum(cont, 1), np.nan)
+        return r.reshape(n_grupos, n_bins)
+
     def label(self, feature) -> str:
         return self.feature_labels.get(feature, feature)
 
@@ -1260,7 +1379,7 @@ class ModelSegmenter:
                 ok = ~np.isnan(y)
                 x, y = x[ok], y[ok]
                 x_obs = x[~np.isnan(x)]
-                if len(y) < 4 or x_obs.size == 0 or np.unique(x_obs).size < 2:
+                if len(y) < 4 or x_obs.size == 0 or x_obs.min() == x_obs.max():
                     cortes = []
                 else:
                     if self.task_type == "classification":
@@ -1290,7 +1409,7 @@ class ModelSegmenter:
             f2 = fit[fit[feature].notna() & fit[self.target].notna()]
             xs = f2[feature].astype(str).to_numpy()
             ys = f2[self.target].to_numpy(dtype="float64")
-            if len(ys) < 4 or np.unique(xs).size < 2:
+            if len(ys) < 4 or not (xs != xs[0]).any():
                 grupos = []
             else:
                 if self.task_type == "classification":
@@ -1328,14 +1447,20 @@ class ModelSegmenter:
         um grupo por nível) e os faltantes seguem em faixa própria."""
         col = fit[feature]
         obs = col.dropna()
+        # rejeição rápida: >2 níveis já nas primeiras linhas ⇒ não é binária
+        # (evita varrer/converter milhões de valores em cada variável contínua)
+        if pd.unique(obs.iloc[:10_000]).size > 2:
+            return None
         if kind == "num":
-            vals = np.unique(obs.to_numpy(dtype="float64"))
+            vals = np.sort(pd.unique(obs.to_numpy(dtype="float64")))
             if vals.size != 2:
                 return None
             bins = [{"kind": "num", "lo": -np.inf, "hi": float(vals.mean())},
                     {"kind": "num", "lo": float(vals.mean()), "hi": np.inf}]
         else:
-            niveis = sorted({str(v) for v in obs} - {"nan", "NaN", "<NA>", "None"})
+            if obs.nunique() > 2:                          # hash, sem str() por linha
+                return None
+            niveis = sorted({str(v) for v in pd.unique(obs)} - {"nan", "NaN", "<NA>", "None"})
             if len(niveis) != 2:
                 return None
             bins = [{"kind": "cat", "cats": [v]} for v in niveis]
@@ -1510,8 +1635,21 @@ class ModelSegmenter:
         if hit is not None:
             return hit
         nonref = self._nonref_samples() if (with_psi and self.sample_col) else []
+        # cache POR VARIÁVEL (assinatura = bins manuais, destino dos faltantes e
+        # derivação): mudar os bins de UMA variável invalidava o ranking inteiro
+        # (_rank_version) e re-calculava IV/PSI de todas — agora só a dela
+        row_cache = self.__dict__.setdefault("_iv_row_cache", {})
         rows = []
         for feat in features:
+            meta = self.var_meta.get(feat, {})
+            rkey = (feat, sample, max_n_bins, min_bin_size, with_psi, tuple(nonref),
+                    self._splits_key(meta.get("splits")), repr(meta.get("na_destino")),
+                    repr(meta.get("derived_bins")), meta.get("derived_from"),
+                    feat in self.df.columns)
+            hit_row = row_cache.get(rkey)
+            if hit_row is not None:
+                rows.append(dict(hit_row))
+                continue
             iv, nb, kind, trend, n_inv = np.nan, 0, "—", "—", 0
             psi_vals = {a: np.nan for a in nonref}
             try:
@@ -1542,6 +1680,9 @@ class ModelSegmenter:
                 pior = max(validos) if validos else np.nan
                 row["pior_psi"] = round(float(pior), 4) if np.isfinite(pior) else np.nan
                 row["estabilidade"] = _classifica_psi(pior)
+            if len(row_cache) > 4096:          # backstop de memória
+                row_cache.clear()
+            row_cache[rkey] = dict(row)
             rows.append(row)
         base = (pd.DataFrame(rows)
                 .sort_values("iv", ascending=False, na_position="last")
@@ -1624,26 +1765,30 @@ class ModelSegmenter:
         time_col = time_col or self.date_col
         if time_col is None:
             raise ValueError("Informe time_col ou configure date_col.")
-        sub = self.df if all_samples else self._frame(sample)
-        safra = pd.to_datetime(sub[time_col], errors="coerce").dt.to_period("M")
+        # agregação agrupada numa passada (sem recortar a base por safra)
+        cod, rot = self._safra_codes(time_col)
+        linhas = self._rows_mask(sample, all_rows=all_samples) & (cod >= 0)
+        x = pd.to_numeric(self.df[feature], errors="coerce").to_numpy(dtype="float64")[linhas]
+        k = cod[linhas]
+        tab = pd.DataFrame({"k": k, "x": x})
+        g = tab.groupby("k")["x"]
+        agg = g.agg(["size", "count", "min", "mean", "max"])
+        p5, p95 = g.quantile(0.05), g.quantile(0.95)
         rows = []
-        for per, g in sub.groupby(safra):
-            if pd.isna(per):        # data não parseável (NaT) — não vira safra "NaT"
-                continue
-            col = g[feature]
-            x = col.to_numpy(dtype="float64"); x = x[~np.isnan(x)]
-            n = int(len(col)); n_miss = int(col.isna().sum())
-            row = {"safra": str(per), "n": n,
-                   "pct_missing": round(100 * n_miss / n, 1) if n else float("nan")}
-            if x.size:
-                row.update(min=round(float(np.min(x)), 3),
-                           p5=round(float(np.percentile(x, 5)), 3),
-                           media=round(float(np.mean(x)), 3),
-                           p95=round(float(np.percentile(x, 95)), 3),
-                           max=round(float(np.max(x)), 3))
+        for kk, r in agg.iterrows():
+            n = int(r["size"]); n_ok = int(r["count"])
+            row = {"safra": rot[int(kk)], "n": n,
+                   "pct_missing": round(100 * (n - n_ok) / n, 1) if n else float("nan")}
+            if n_ok:
+                row.update(min=round(float(r["min"]), 3), p5=round(float(p5[kk]), 3),
+                           media=round(float(r["mean"]), 3), p95=round(float(p95[kk]), 3),
+                           max=round(float(r["max"]), 3))
             else:
-                row.update({k: float("nan") for k in ("min", "p5", "media", "p95", "max")})
+                row.update({c: float("nan") for c in ("min", "p5", "media", "p95", "max")})
             rows.append(row)
+        if not rows:
+            return pd.DataFrame(columns=["safra", "n", "pct_missing", "min", "p5",
+                                         "media", "p95", "max"])
         return pd.DataFrame(rows).sort_values("safra").reset_index(drop=True)
 
     def variable_share_by_safra(self, feature, time_col=None, sample=None, top=8,
@@ -1653,19 +1798,23 @@ class ModelSegmenter:
         time_col = time_col or self.date_col
         if time_col is None:
             raise ValueError("Informe time_col ou configure date_col.")
-        sub = self.df if all_samples else self._frame(sample)
-        safra = pd.to_datetime(sub[time_col], errors="coerce").dt.to_period("M").astype(str)
-        cat = sub[feature]
-        keep = list(cat.dropna().astype(str).value_counts().head(top).index)
-
-        def lab(v):
-            if pd.isna(v):
-                return "(faltante)"
-            s = str(v)
-            return s if s in keep else "outras"
-
-        tab = pd.crosstab(safra, cat.map(lab))
-        tab = tab[tab.index != "NaT"]
+        # rótulo por VALOR DISTINTO (factorize), não por linha — o antigo
+        # cat.map(lab) chamava uma função Python milhões de vezes
+        cod_s, rot_s = self._safra_codes(time_col)
+        linhas = self._rows_mask(sample, all_rows=all_samples)
+        cat = self.df[feature][linhas]
+        codes, uniq = pd.factorize(cat, use_na_sentinel=True)
+        ustr = np.array([str(u) for u in uniq], dtype=object)
+        cont = pd.Series(np.bincount(codes[codes >= 0], minlength=len(ustr)),
+                         index=ustr).groupby(level=0, sort=False).sum()
+        keep = list(cont.sort_values(ascending=False, kind="stable").head(top).index)
+        lab_u = np.array([s if s in keep else "outras" for s in ustr], dtype=object)
+        rotulo = np.where(codes >= 0, lab_u[np.where(codes >= 0, codes, 0)]
+                          if len(lab_u) else "outras", "(faltante)")
+        saf = cod_s[linhas]
+        ok = saf >= 0
+        tab = pd.crosstab(np.asarray(rot_s, dtype=object)[saf[ok]], rotulo[ok])
+        tab.columns.name = feature
         if tab.empty:
             return pd.DataFrame(columns=["safra"])
         pct = tab.div(tab.sum(axis=1), axis=0) * 100
@@ -1689,19 +1838,29 @@ class ModelSegmenter:
         bins, _kind = self._resolve_bins(feature, max_n_bins, min_bin_size)
         if not bins:
             return pd.DataFrame(columns=["safra", "n", "psi", "classificacao"])
-        ref = self._frame(self.ref_sample, cols=[feature])
-        n_ref = max(len(ref), 1)
-        ref_pct = [max(int(self._mask_in(ref, feature, b).sum()) / n_ref, eps) for b in bins]
-        safra = pd.to_datetime(self.df[time_col], errors="coerce").dt.to_period("M")
+        # contagens faixa × safra numa passada (np.bincount sobre a faixa de cada linha)
+        nb = len(bins)
+        bc = self._feature_bin_codes(feature, bins)
+        ref_m = self._rows_mask(self.ref_sample)
+        n_ref = max(int(ref_m.sum()), 1)
+        ref_cont = np.bincount(bc[ref_m & (bc >= 0)], minlength=nb)
+        ref_pct = [max(int(c) / n_ref, eps) for c in ref_cont]
+        cod, rot = self._safra_codes(time_col)
+        n_t = np.bincount(cod[cod >= 0], minlength=len(rot))
+        ok = (cod >= 0) & (bc >= 0)
+        cont = np.bincount(cod[ok].astype(np.int64) * nb + bc[ok],
+                           minlength=len(rot) * nb).reshape(len(rot), nb)
         rows = []
-        for per, g in self.df.groupby(safra):
-            n_g = len(g)
+        for k, r in enumerate(rot):
+            n_g = int(n_t[k])
             if n_g == 0:
                 continue
-            cur_pct = [int(self._mask_in(g, feature, b).sum()) / n_g for b in bins]
+            cur_pct = [int(c) / n_g for c in cont[k]]
             psi = _psi_from_shares(ref_pct, cur_pct, eps)
-            rows.append({"safra": str(per), "n": n_g, "psi": round(psi, 4),
+            rows.append({"safra": r, "n": n_g, "psi": round(psi, 4),
                          "classificacao": _classifica_psi(psi)})
+        if not rows:
+            return pd.DataFrame(columns=["safra", "n", "psi", "classificacao"])
         return pd.DataFrame(rows).sort_values("safra").reset_index(drop=True)
 
     # ------------------------------------------------------------------
@@ -1712,33 +1871,41 @@ class ModelSegmenter:
         """Risco de cada bin por amostra e por safra. Devolve dict com chaves
         ``ordered`` (bins na ordem de risco DES), ``labels``, ``samples`` (xs +
         series por bin) e ``safras`` (xs + series por bin)."""
+        # vetorizado: a faixa de cada linha sai UMA vez (_feature_bin_codes) e o
+        # risco por faixa × amostra/safra vem de np.bincount — antes era uma
+        # máscara por faixa × safra sobre recortes copiados da base
         labels = [self._bin_label(feature, b) for b in bins]
-        ref = self._frame(self.ref_sample, cols=[feature, self.target])
-        ref_risco = [self._risco(ref.loc[self._mask_in(ref, feature, b), self.target])
-                     for b in bins]
+        nb = len(bins)
+        bc = self._feature_bin_codes(feature, bins)
+        zeros = np.zeros(len(self.df), dtype=np.int32)
+        ref_risco = list(self._risco_por_grupo(
+            bc, zeros, 1, nb, self._rows_mask(self.ref_sample))[0])
         order = sorted(range(len(bins)),
                        key=lambda i: (np.inf if pd.isna(ref_risco[i]) else ref_risco[i]))
 
         # por amostra
         xs_s = self._samples()
-        ser_s = {i: [] for i in range(len(bins))}
-        for a in xs_s:
-            fa = self._frame(a)
-            for i, b in enumerate(bins):
-                ser_s[i].append(self._risco(fa.loc[self._mask_in(fa, feature, b), self.target]))
+        cod_a = np.full(len(self.df), -1, dtype=np.int32)
+        for j, a in enumerate(xs_s):
+            cod_a[self._rows_mask(a)] = j
+        mat_s = self._risco_por_grupo(bc, cod_a, len(xs_s), nb,
+                                      np.ones(len(self.df), dtype=bool))
+        ser_s = {i: list(mat_s[:, i]) for i in range(nb)}
 
         # por safra
-        xs_t, ser_t = [], {i: [] for i in range(len(bins))}
+        xs_t, ser_t = [], {i: [] for i in range(nb)}
         tcol = time_col or self.date_col
         if tcol is not None and tcol in self.df.columns:
-            base = self._frame(sample) if sample else self.df
-            safra = pd.to_datetime(base[tcol], errors="coerce").dt.to_period("M")
-            for per, g in base.groupby(safra):
-                if len(g) < min_n:
+            linhas = self._rows_mask(sample, all_rows=not sample)
+            cod_t, rot_t = self._safra_codes(tcol)
+            n_t = np.bincount(cod_t[linhas & (cod_t >= 0)], minlength=len(rot_t))
+            mat_t = self._risco_por_grupo(bc, cod_t, len(rot_t), nb, linhas)
+            for k, rot in enumerate(rot_t):
+                if n_t[k] == 0 or n_t[k] < min_n:   # safra ausente ou pequena fica fora
                     continue
-                xs_t.append(str(per))
-                for i, b in enumerate(bins):
-                    ser_t[i].append(self._risco(g.loc[self._mask_in(g, feature, b), self.target]))
+                xs_t.append(rot)
+                for i in range(nb):
+                    ser_t[i].append(mat_t[k, i])
         return {"ordered": order, "labels": labels, "ref_risco": ref_risco,
                 "xs_sample": xs_s, "ser_sample": ser_s,
                 "xs_safra": xs_t, "ser_safra": ser_t}
@@ -2022,24 +2189,23 @@ class ModelSegmenter:
         time_col = time_col or self.date_col
         if time_col is None:
             raise ValueError("Informe time_col ou configure date_col.")
-        sub = self.df if all_samples else self._frame(sample)
-        if time_col not in sub.columns:
+        if time_col not in self.df.columns:
             raise ValueError(f"Coluna de tempo '{time_col}' não existe no DataFrame.")
         if bins is None:
             bins, _kind = self._resolve_bins(feature, max_n_bins, min_bin_size, None, sample)
-        safra = pd.to_datetime(sub[time_col], errors="coerce").dt.to_period("M").astype(str)
-        faixa = pd.Series("(faltante)", index=sub.index, dtype=object)
-        ordem = []
-        for b in bins or []:
-            lab = self._bin_label(feature, b)
-            ordem.append(lab)
-            m = self._mask_in(sub, feature, b).to_numpy()
-            faixa.loc[sub.index[m]] = lab
-        tmp = pd.DataFrame({"safra": safra.to_numpy(), "faixa": faixa.to_numpy()})
-        tmp = tmp[tmp["safra"] != "NaT"]
-        if tmp.empty or not ordem:
+        ordem = [self._bin_label(feature, b) for b in (bins or [])]
+        if not ordem:
             return pd.DataFrame(columns=["safra"])
-        tab = pd.crosstab(tmp["safra"], tmp["faixa"])
+        # faixa de cada linha numa passada; sem faixa → "(faltante)"
+        linhas = self._rows_mask(sample, all_rows=all_samples)
+        cod, rot = self._safra_codes(time_col)
+        bc = self._feature_bin_codes(feature, bins)
+        ok = linhas & (cod >= 0)
+        if not ok.any():
+            return pd.DataFrame(columns=["safra"])
+        rot_faixa = np.asarray(ordem + ["(faltante)"], dtype=object)
+        tab = pd.crosstab(np.asarray(rot, dtype=object)[cod[ok]],
+                          rot_faixa[np.where(bc[ok] >= 0, bc[ok], len(ordem))])
         pct = tab.div(tab.sum(axis=1), axis=0) * 100
         cols = [c for c in dict.fromkeys(ordem) if c in pct.columns]
         if "(faltante)" in pct.columns and "(faltante)" not in cols:
@@ -2115,7 +2281,7 @@ class ModelSegmenter:
         ok = ~np.isnan(y)
         x, y = x[ok], y[ok]
         x_obs = x[~np.isnan(x)]
-        if len(y) < 4 or x_obs.size == 0 or np.unique(x_obs).size < 2:
+        if len(y) < 4 or x_obs.size == 0 or x_obs.min() == x_obs.max():
             return []
         if self.task_type == "classification":
             b = OptimalBinning(name=feature, dtype="numerical", max_n_bins=max_n_bins,
@@ -2435,6 +2601,36 @@ class ModelSegmenter:
     def derived_features(self) -> list:
         """Variáveis categóricas criadas via :meth:`create_categorical`."""
         return [n for n, m in self.var_meta.items() if m.get("derived_from")]
+
+    def remove_derived(self, name) -> str:
+        """Exclui UMA variável criada (:meth:`create_categorical` /
+        :meth:`create_scorecard_dummies`) **da base**: tira do DataFrame, das
+        candidatas, da seleção, do ``var_meta`` e dos rótulos. Só vale para
+        variáveis criadas — as colunas originais da base não são apagadas.
+
+        Recusa (``ValueError``) quando a variável está no **modelo treinado** (a
+        escoragem dependeria dela — re-treine sem ela antes) ou quando outra
+        variável criada foi derivada dela (exclua aquela primeiro)."""
+        meta = self.var_meta.get(name, {})
+        if not meta.get("derived_from"):
+            raise ValueError(f"'{name}' não é uma variável criada — só as variáveis "
+                             "criadas na categorização podem ser excluídas da base.")
+        if self.model is not None and name in (self.model_features or []):
+            raise ValueError(f"'{self.label(name)}' está no modelo treinado — re-treine "
+                             "sem ela antes de excluí-la da base.")
+        filhas = [n for n, m in self.var_meta.items() if m.get("derived_from") == name]
+        if filhas:
+            raise ValueError(f"'{self.label(name)}' é a origem de {filhas} — exclua "
+                             "essas variáveis antes.")
+        if name in self.df.columns:
+            self.df.drop(columns=name, inplace=True)
+        if name in self.candidates:
+            self.candidates.remove(name)
+        self.included.discard(name)
+        self.var_meta.pop(name, None)
+        self.feature_labels.pop(name, None)
+        self._invalidate_bins(name)
+        return name
 
     def clear_derived(self) -> list:
         """Remove **todas** as variáveis criadas via :meth:`create_categorical`
@@ -4337,11 +4533,19 @@ class ModelSegmenter:
             "correlação com outra variável do modelo ou de faixas com risco parecido. "
             "Revise: funda faixas, retire a variável correlacionada ou a própria variável.")
 
-    def model_coefficients(self, use_labels=True) -> pd.DataFrame:
+    def model_coefficients(self, use_labels=True, ordem="blocos") -> pd.DataFrame:
         """Coeficientes do modelo **linear/logístico** ajustado: ``termo``, ``coef``
         e — na classificação — ``odds_ratio`` (``exp(coef)``). Na **logística**
         inclui também ``p_valor`` (Wald aprox.) e ``signif`` (estrelas). O intercepto
-        fica em ``.attrs['intercept']``. Erro para modelos não-lineares (use SHAP)."""
+        fica em ``.attrs['intercept']``. Erro para modelos não-lineares (use SHAP).
+
+        ``variavel``/``variavel_label``: a variável ORIGINAL de cada termo (dummies
+        de scorecard, one-hot e WoE apontam para a variável de origem) e
+        ``termo_curto``: o termo sem o nome da variável (a faixa/categoria).
+
+        ``ordem``: ``"blocos"`` (padrão) agrupa os termos por variável — blocos
+        ordenados pela maior |coef| do bloco e, dentro dele, por |coef| —;
+        ``"magnitude"`` ordena todos os termos por |coef| (comportamento antigo)."""
         if self.model is None:
             raise RuntimeError("Ajuste o modelo antes (fit / set_model).")
         if self.algorithm not in ("logistica", "linear"):
@@ -4355,10 +4559,22 @@ class ModelSegmenter:
         coef = np.ravel(np.asarray(getattr(est, "coef_", []), dtype="float64"))
         intercept = float(np.ravel(np.asarray(getattr(est, "intercept_", [0.0])))[0])
         names = self._design_feature_names(pre, use_labels=use_labels)
+        try:
+            crus = [str(n) for n in pre.get_feature_names_out()]
+        except Exception:                                 # noqa: BLE001
+            crus = list(names)
         if len(names) != len(coef):                       # robustez a divergências
             names = [f"x{i}" for i in range(len(coef))]
+            crus = list(names)
         rows = [{"termo": nm, "coef": round(float(c), 6)} for nm, c in zip(names, coef)]
         out = pd.DataFrame(rows, columns=["termo", "coef"])
+        if not out.empty:
+            out["variavel"] = [self._original_feature_of(c) for c in crus]
+            out["variavel_label"] = out["variavel"].map(
+                lambda f: self.label(f) if use_labels else f)
+            out["termo_curto"] = [self._termo_curto(t, v, lv)
+                                  for t, v, lv in zip(out["termo"], out["variavel"],
+                                                      out["variavel_label"])]
         if self.task_type == "classification" and not out.empty:
             out["odds_ratio"] = np.exp(out["coef"]).round(4)
         if self.algorithm == "logistica" and not out.empty:
@@ -4369,9 +4585,31 @@ class ModelSegmenter:
                     out["signif"] = out["p_valor"].map(self._signif_stars)
             except Exception:
                 pass
-        out = out.reindex(out["coef"].abs().sort_values(ascending=False).index).reset_index(drop=True)
+        if out.empty:
+            pass
+        elif ordem == "magnitude":
+            out = out.reindex(out["coef"].abs().sort_values(ascending=False).index)
+        else:
+            # blocos por variável, na ordem da maior |coef| do bloco; dentro do
+            # bloco, por |coef| — a leitura fica "variável a variável"
+            absc = out["coef"].abs()
+            peso = absc.groupby(out["variavel"]).transform("max")
+            out = (out.assign(_p=peso, _a=absc)
+                   .sort_values(["_p", "variavel", "_a"], ascending=[False, True, False])
+                   .drop(columns=["_p", "_a"]))
+        out = out.reset_index(drop=True)
         out.attrs["intercept"] = round(intercept, 6)
         return out
+
+    @staticmethod
+    def _termo_curto(termo, var, var_label) -> str:
+        """O termo sem o nome da variável: ``renda = (1500, 3000]`` → ``(1500, 3000]``,
+        ``uf_SP`` → ``SP``; termos 1:1 (numérica, WoE) ficam como estão."""
+        termo = str(termo)
+        for pref in (f"{var_label} = ", f"{var} = ", f"{var_label}_", f"{var}_"):
+            if termo.startswith(pref) and len(termo) > len(pref):
+                return termo[len(pref):]
+        return termo
 
     def vif_table(self, use_labels=True) -> pd.DataFrame:
         """VIF (fator de inflação de variância) de cada termo da **matriz de
@@ -8693,6 +8931,11 @@ class ModelSegmenter:
         s._samples_cache = None
         s._rank_cache = {}
         s._metrics_cache = None
+        # caches por LINHA da base (safra/faixa) e por variável: nada disso pode
+        # ir no pickle para os executores
+        s._safra_cache = {}
+        s._bincode_cache = {}
+        s._iv_row_cache = {}
         s._metrics_ci_cache = None
         s._shap_cache = {}
         s.score_ = None

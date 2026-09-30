@@ -245,8 +245,13 @@ def test_model_formula(seg):
     coefs = seg.model_coefficients()
     assert {"termo", "coef"}.issubset(coefs.columns)
     assert "intercept" in coefs.attrs
-    # ordenado por |coef| desc
-    abs_coef = coefs["coef"].abs().to_numpy()
+    # em BLOCOS por variável: blocos pela maior |coef|, dentro do bloco por |coef|
+    maximos = coefs.groupby("variavel", sort=False)["coef"].apply(lambda s: s.abs().max())
+    assert (np.diff(maximos.to_numpy()) <= 1e-9).all()
+    for _, g in coefs.groupby("variavel", sort=False):
+        assert (np.diff(g["coef"].abs().to_numpy()) <= 1e-9).all()
+    # ordem="magnitude" mantém a ordenação global antiga
+    abs_coef = seg.model_coefficients(ordem="magnitude")["coef"].abs().to_numpy()
     assert (np.diff(abs_coef) <= 1e-9).all()
     fm = seg.model_formula()
     assert {"intercept", "coef", "z_expr", "text", "latex"}.issubset(fm)

@@ -288,6 +288,12 @@ _CSS = """
 .mseg-coef th.term, .mseg-coef td.term { text-align:left; font-weight:500; }
 .mseg-coef td.read, .mseg-coef th.read { text-align:left; }
 .mseg-coef td.num { font-variant-numeric:tabular-nums; font-weight:600; }
+/* blocos por variável: cabeçalho do bloco e termos recuados */
+.mseg .mseg-coef tbody tr.blk td { text-align:left; font-weight:600; color:var(--ink);
+  background-color:var(--tile-bg); padding-top:8px; border-bottom-color:var(--line); }
+.mseg-coef tr.blk .blk-d { font-weight:400; color:var(--muted); font-size:11px; }
+.mseg-coef tr.in-blk td.term { padding-left:24px; }
+.mseg-eq-blk { white-space:nowrap; }
 .mseg-coef tbody tr:hover td { background-color:var(--tbl-hover); }
 .mseg-coef tr.base td { background-color:var(--tbl-zebra); color:var(--muted); font-style:italic; }
 .mseg-barcell { width:150px; }
@@ -1413,6 +1419,15 @@ class ModelSegmenterUI:
         self.btn_exclude = W.Button(description="Excluir do modelo", icon="minus",
                                     layout=W.Layout(width="auto", min_width="166px"),
                                     tooltip="Remove do modelo a variável escolhida em 'Variável:'.")
+        # variável CRIADA na categorização: apagar da base (coluna, candidatas,
+        # seleção). Só habilita para variáveis criadas — as originais ficam.
+        self.btn_drop_derived = W.Button(
+            description="Excluir da base", icon="trash", button_style="danger",
+            layout=W.Layout(width="auto", min_width="150px"), disabled=True,
+            tooltip="Apaga da base a variável CRIADA na categorização (não só do "
+                    "modelo). Disponível só para variáveis criadas; desfazível.")
+        self.btn_drop_derived.on_click(self._on_drop_derived)
+        self.dd_var.observe(lambda _c: self._sync_drop_derived(), names="value")
         self.btn_set_cat = W.Button(description="Categorizar", icon="tag")
         self.btn_incl_all = W.Button(description="Incluir todas", icon="plus")
         self.btn_clear = W.Button(description="Limpar", icon="trash")
@@ -1532,7 +1547,7 @@ class ModelSegmenterUI:
                     self.btn_auto, self.btn_auto_cat]),
             self.out_mono_hint,
             # incluir/excluir UMA variável por vez — a escolhida em 'Variável:'
-            W.HBox([self.dd_var, self.btn_include, self.btn_exclude]),
+            W.HBox([self.dd_var, self.btn_include, self.btn_exclude, self.btn_drop_derived]),
             W.VBox([self.sel_included,
                     W.HBox([self.btn_incl_all, self.btn_clear,
                             self.btn_refresh_vars, self.btn_clear_derived],
@@ -3817,6 +3832,32 @@ class ModelSegmenterUI:
         self._sync_sel(); self._refresh_vars(); self._mark_dirty(); self._refresh_bar()
         self._log(f"[excluir] '{self.seg.label(feat)}' fora do modelo · {len(self.seg.included)} no total.")
 
+    def _sync_drop_derived(self):
+        """'Excluir da base' só para variável CRIADA na categorização."""
+        feat = self.dd_var.value
+        criada = bool(feat is not None and self.seg.var_meta.get(feat, {}).get("derived_from"))
+        self.btn_drop_derived.disabled = not criada
+
+    def _on_drop_derived(self, b):
+        feat = self.dd_var.value
+        if feat is None:
+            return
+        rotulo = self.seg.label(feat)
+        try:
+            with self._undoable("excluir variável criada"):   # desfazer recria a coluna
+                self.seg.remove_derived(feat)
+        except Exception as e:
+            self._log(f"[excluir da base] {e}")
+            return
+        self._refresh_candidates()
+        self._sync_sel()
+        self._refresh_vars()
+        self._mark_dirty()
+        self._refresh_bar()
+        self._sync_drop_derived()
+        self._log(f"[excluir da base] '{rotulo}' removida da base, das candidatas e da "
+                  "seleção (use ↶ Desfazer para recuperá-la).")
+
     def _on_include_all(self):
         """Inclui TODAS as candidatas no modelo (desfazível: ↶ volta a seleção)."""
         with self._undoable("incluir todas"):
@@ -4351,6 +4392,8 @@ class ModelSegmenterUI:
                 dd.value = cur
         self.sel_included.options = opts
         self.sel_included.value = tuple(f for f in cands if f in self.seg.included)
+        if getattr(self, "btn_drop_derived", None) is not None:
+            self._sync_drop_derived()
 
     def _on_create_cat(self, b):
         feat = self.dd_var2.value
@@ -4684,20 +4727,46 @@ class ModelSegmenterUI:
         # z = intercepto + Σ coefᵢ·termoᵢ numa LINHA de equação limpa e discreta
         # (coeficiente colorido pelo sinal); o detalhe rigoroso fica na TABELA abaixo.
         parts = [f"<span class='mseg-{'pos' if b0 >= 0 else 'neg'}-tx'>{b0:+.4f}</span>"]
-        for _, r in coef.iterrows():
-            c = float(r["coef"]); cls = "pos" if c >= 0 else "neg"
-            parts.append(
-                f" <span style='color:var(--faint-ink)'>{'+' if c >= 0 else '−'}</span> "
-                f"<span class='mseg-{cls}-tx'>{abs(c):.4f}</span>"
-                f"<span style='color:var(--faint-ink)'>·</span>{r['termo']}")
+        # termos agrupados por variável: [ variável: termos do bloco ]
+        blocos = (list(coef.groupby("variavel", sort=False)) if "variavel" in coef.columns
+                  else [(None, coef)])
+        for var, g in blocos:
+            multi = var is not None and len(g) > 1
+            if multi:
+                parts.append(f" <span class='mseg-eq-blk'>{g['variavel_label'].iloc[0]}: [")
+            for _, r in g.iterrows():
+                c = float(r["coef"]); cls = "pos" if c >= 0 else "neg"
+                termo = r["termo_curto"] if multi else r["termo"]
+                parts.append(
+                    f" <span style='color:var(--faint-ink)'>{'+' if c >= 0 else '−'}</span> "
+                    f"<span class='mseg-{cls}-tx'>{abs(c):.4f}</span>"
+                    f"<span style='color:var(--faint-ink)'>·</span>{termo}")
+            if multi:
+                parts.append(" ]</span>")
         z_html = "<span style='color:var(--muted);font-weight:600'>z =</span> " + "".join(parts)
 
         # tabela de coeficientes com barra de magnitude (|coef|) e leitura do efeito
         cmax = float(coef["coef"].abs().max()) or 1.0
         has_p = "p_valor" in coef.columns          # logística → teste de hipótese (Wald)
         rows = []
-        for _, r in coef.iterrows():
+        n_cols = 3 + (2 if is_clf else 1) + (1 if has_p else 0)
+        var_atual = object()
+        tamanho = (coef.groupby("variavel")["coef"].transform("size")
+                   if "variavel" in coef.columns else None)
+        for i, r in coef.iterrows():
             c = float(r["coef"]); cls = "pos" if c >= 0 else "neg"
+            # cabeçalho do bloco (variável com mais de um termo: dummies/one-hot)
+            multi = tamanho is not None and int(tamanho.iloc[i]) > 1
+            if multi and r["variavel"] != var_atual:
+                g = coef[coef["variavel"] == r["variavel"]]
+                rows.append(
+                    f"<tr class='blk'><td colspan='{n_cols}'>{r['variavel_label']}"
+                    f"<span class='blk-d'> · {len(g)} termos · |coef| máx "
+                    f"{g['coef'].abs().max():.4f}</span></td></tr>")
+            if tamanho is not None:
+                var_atual = r["variavel"]
+            termo = r["termo_curto"] if multi else r["termo"]
+            tr_cls = " class='in-blk'" if multi else ""
             bar = (f"<div class='mseg-barwrap'><div class='mseg-bar-{cls}' "
                    f"style='width:{100 * abs(c) / cmax:.1f}%'></div></div>")
             if is_clf:
@@ -4716,7 +4785,7 @@ class ModelSegmenterUI:
                 pv_txt = "—" if (pv is None or (isinstance(pv, float) and np.isnan(pv))) else f"{pv:.4f}"
                 extra += f"<td class='num' style='color:{cor}'>{pv_txt} {sg}</td>"
             rows.append(
-                f"<tr><td class='term'>{r['termo']}</td>"
+                f"<tr{tr_cls}><td class='term'>{termo}</td>"
                 f"<td class='num mseg-{cls}-tx'>{c:+.4f}</td>"
                 f"<td class='barcell'>{bar}</td>{extra}</tr>")
         # linha do intercepto (baseline) — sem barra/leitura por unidade
@@ -4741,7 +4810,8 @@ class ModelSegmenterUI:
                     "bin (binagem da aba Análise). " if self.seg.feature_transform == "woe"
                     else "")
         legend = (
-            "<div class='mseg-legend'>" + woe_note + "Termos ordenados por |coef|. A barra compara "
+            "<div class='mseg-legend'>" + woe_note + "Termos agrupados por variável (blocos "
+            "na ordem da maior |coef| do bloco; dentro do bloco, por |coef|). A barra compara "
             "<b>|coef|</b> (relevante quando os termos estão na mesma escala, p.ex. WoE). "
             + ("<b>odds_ratio</b> = e<sup>coef</sup>: a cada +1 no termo, a razão de "
                "chances é multiplicada por esse fator." if is_clf

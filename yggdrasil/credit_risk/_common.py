@@ -126,7 +126,18 @@ def fmt_safras(safras) -> list:
     return fmt_month_year(safras)
 
 
-def fit_optbinning_splits(b, x, y) -> list:
+# Teto de linhas do AJUSTE do optbinning. Acima disso os cortes são aprendidos
+# numa amostra aleatória (semente fixa ⇒ determinístico); IV, tabelas e PSI
+# continuam calculados na base inteira com esses cortes. A pré-binagem do
+# optbinning (árvore CART sobre todas as linhas) era ~70% do tempo de abrir a UI
+# em bases de milhões de linhas; com 300 mil linhas (≥15 mil por faixa com o
+# mínimo de 5%) os cortes são estáveis e bases menores não mudam nada. 0/None
+# desliga.
+OPTBINNING_MAX_ROWS = 300_000
+OPTBINNING_SEED = 42
+
+
+def fit_optbinning_splits(b, x, y, max_rows=None) -> list:
     """Roda ``b.fit(x, y)`` e devolve ``list(b.splits)``.
 
     Silencia os ``RuntimeWarning`` de "divide by zero" benignos do optbinning
@@ -135,7 +146,16 @@ def fit_optbinning_splits(b, x, y) -> list:
 
     ``ValueError`` (problema inviável / sem corte) é o caminho esperado e fica
     silencioso. Qualquer outra exceção (ex.: incompatibilidade de versão de
-    dependência) é **avisada** em vez de mascarada como "sem corte válido"."""
+    dependência) é **avisada** em vez de mascarada como "sem corte válido".
+
+    ``max_rows`` (padrão :data:`OPTBINNING_MAX_ROWS`): com mais linhas, ajusta
+    numa amostra aleatória de ``max_rows`` (semente fixa)."""
+    cap = OPTBINNING_MAX_ROWS if max_rows is None else max_rows
+    if cap and len(x) > cap:
+        idx = np.sort(np.random.default_rng(OPTBINNING_SEED).choice(len(x), cap,
+                                                                     replace=False))
+        x = np.asarray(x)[idx]
+        y = np.asarray(y)[idx]
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
