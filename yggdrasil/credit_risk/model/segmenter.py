@@ -1073,6 +1073,7 @@ class ModelSegmenter:
         verbose: bool = True,
         score_scale: float = 1000.0,
         random_state: int | None = 42,
+        score_invertido: bool = True,
     ):
         if task_type not in ("classification", "regression"):
             raise ValueError("task_type deve ser 'classification' ou 'regression'.")
@@ -1183,8 +1184,16 @@ class ModelSegmenter:
         # [0,1] na classificação; alvo previsto na regressão) guardada em ``score_``
         # — usada pelas MÉTRICAS, calibração e ratings (fidelidade numérica). O que
         # o negócio consome (escoragem :meth:`predict`/:meth:`assign` e os eixos de
-        # score dos gráficos) é ``score_ * score_scale`` — 0–1000 por padrão.
+        # score dos gráficos) é a escala 0–score_scale (0–1000), invertida por padrão (ver abaixo).
         self.score_scale: float = float(score_scale)
+        # score de negócio INVERTIDO (padrão): na classificação a predição crua é a
+        # probabilidade do evento (risco), então o negócio recebe
+        # ``score_scale × (1 − p)`` — 1000 = melhor cliente, 0 = pior. Com
+        # ``score_invertido=False`` volta ao ``p × score_scale`` (1000 = pior). Só a
+        # ESCALA DE NEGÓCIO muda: ``score_``, métricas, calibração e ratings seguem
+        # na escala crua. Na regressão não se aplica (o alvo previsto não é limitado
+        # a [0, 1]) — ver :attr:`_score_inv`.
+        self.score_invertido: bool = bool(score_invertido)
         # seed global de reprodutibilidade na elaboração de modelos: default 42
         # (retrocompatível — números já publicados não mudam). Herdada como default
         # por _build_pipeline/_build_estimator, tune_optuna, backward_elimination e
@@ -4577,13 +4586,33 @@ class ModelSegmenter:
         return self
 
     @property
+    def _score_inv(self) -> bool:
+        """A escala de negócio está invertida? (``score_invertido`` na classificação.)"""
+        return (bool(getattr(self, "score_invertido", False))
+                and self.task_type == "classification")
+
+    def _to_points(self, raw):
+        """Score CRU → escala de negócio: ``score_scale × (1 − raw)`` quando invertido
+        (1000 = melhor cliente), senão ``raw × score_scale``. Aceita escalar, array
+        ou Series."""
+        esc = float(self.score_scale)
+        return esc * (1.0 - raw) if self._score_inv else raw * esc
+
+    def _from_points(self, pts):
+        """Inversa de :meth:`_to_points`: escala de negócio → score CRU."""
+        esc = float(self.score_scale) or 1.0
+        return 1.0 - pts / esc if self._score_inv else pts / esc
+
+    @property
     def score_points_(self):
         """Score em **escala de negócio** (0–``score_scale``, i.e. 0–1000 por
-        padrão): o ``score_`` cru multiplicado por ``score_scale``. É a escala
-        apresentada na escoragem (:meth:`predict`/:meth:`assign`) e nos eixos de
-        score dos gráficos. ``score_`` continua cru (probabilidade/predição) para
-        métricas e calibração. ``None`` se o modelo ainda não foi ajustado."""
-        return None if self.score_ is None else self.score_ * self.score_scale
+        padrão). Na classificação, com ``score_invertido=True`` (padrão), é
+        ``score_scale × (1 − score_)`` — **1000 = melhor cliente, 0 = pior**; com
+        ``score_invertido=False``, ``score_ × score_scale``. É a escala apresentada
+        na escoragem (:meth:`predict`/:meth:`assign`) e nos eixos de score dos
+        gráficos. ``score_`` continua cru (probabilidade/predição) para métricas e
+        calibração. ``None`` se o modelo ainda não foi ajustado."""
+        return None if self.score_ is None else self._to_points(self.score_)
 
     # ---- fórmula do modelo linear/logístico (coeficientes) ----
     def _design_feature_names(self, pre, use_labels=True) -> list:
@@ -5346,7 +5375,7 @@ class ModelSegmenter:
         # negócio (0–1000). As demais métricas são invariantes à escala (rank) ou
         # calculadas sobre o score CRU (brier/logloss, RMSE/R²), então não mudam.
         if "ks_cutoff" in out.columns:
-            out["ks_cutoff"] = out["ks_cutoff"] * self.score_scale
+            out["ks_cutoff"] = self._to_points(out["ks_cutoff"])
         self._metrics_cache = (self.score_, out)
         return out.copy()
 
@@ -5823,7 +5852,7 @@ class ModelSegmenter:
                              "de evento/não-evento); em regressão use plot_calibration/"
                              "plot_residuals.")
         y, sc = self._sample_scores(sample)
-        sc = sc * self.score_scale                          # score na escala de negócio
+        sc = self._to_points(sc)                            # score na escala de negócio
         fig, ax = _new_ax(figsize, dpi, ax)
         if len(np.unique(y)) < 2:
             ax.text(0.5, 0.5, "amostra com 1 classe", ha="center", va="center",
@@ -5983,7 +6012,7 @@ class ModelSegmenter:
     def plot_score_distribution(self, sample=None, bins=30, figsize=(6.6, 3.8),
                                 dpi=150, save_path=None, ax=None):
         y, sc = self._sample_scores(sample)
-        sc = sc * self.score_scale                          # score na escala de negócio
+        sc = self._to_points(sc)                            # score na escala de negócio
         fig, ax = _new_ax(figsize, dpi, ax)
         if self.task_type == "classification" and len(np.unique(y)) == 2:
             ax.hist(sc[y == 0], bins=bins, color="#1aa64b", alpha=0.55, label="não-evento (0)",
@@ -8429,7 +8458,7 @@ class ModelSegmenter:
         """Cópia do df com o score e o rating de cada linha."""
         out = self.df.copy()
         if self.score_ is not None:
-            out[col_score] = self.score_ * self.score_scale     # escala de negócio
+            out[col_score] = self._to_points(self.score_)       # escala de negócio
         if self.rating_ is not None:
             out[col_rating] = self.rating_
         return out
@@ -8538,15 +8567,18 @@ class ModelSegmenter:
 
     def to_sql(self, table: str = "minha_tabela", score_col: str = "score",
                col_rating: str = "rating", col_value=None, ruler_sample=None,
-               score_scale=None) -> str:
+               score_scale=None, score_invertido=None) -> str:
         """Gera SQL ANSI com ``CASE WHEN`` que reproduz a **régua de ratings** sobre
         uma coluna de score JÁ materializada. Pronto p/ copiar.
 
         ``table`` é a tabela/CTE de origem e ``score_col`` a coluna de score dela —
         esperada na **escala de negócio** (0–``score_scale``, i.e. 0–1000 por
         padrão), a mesma devolvida por :meth:`predict`/:meth:`score_table`/
-        :meth:`apply_spark`. Passe ``score_scale=1`` se a coluna guardar o score
-        CRU (0–1). Cada rating de :meth:`rating_ruler` vira um ramo do CASE, na
+        :meth:`apply_spark` (invertida por padrão: 1000 = melhor cliente). Passe
+        ``score_scale=1`` se a coluna guardar o score CRU (0–1): com ``score_scale``
+        explícito a inversão fica DESLIGADA, salvo ``score_invertido=True``.
+        ``score_invertido=None`` segue o segmentador quando ``score_scale`` é
+        omitido. Cada rating de :meth:`rating_ruler` vira um ramo do CASE, na
         ordem da régua, com o volume e o valor previsto do alvo no comentário.
 
         **Fronteiras e convenção de borda** (ver :meth:`_rating_score_cuts`): são
@@ -8564,7 +8596,19 @@ class ModelSegmenter:
         score não-nulo cai em alguma faixa (as pontas são abertas)."""
         ranges = self._rating_score_ranges()
         esc = float(self.score_scale if score_scale is None else score_scale)
+        if score_invertido is None:
+            inv = self._score_inv if score_scale is None else False
+        else:
+            inv = bool(score_invertido) and self.task_type == "classification"
         _cuts, borda = self._rating_score_cuts()
+        if inv:
+            # score = esc × (1 − cru): o intervalo cru [lo, hi) vira (esc(1−hi),
+            # esc(1−lo)] — as pontas trocam de lado e a convenção de borda espelha
+            ranges = [{"rating": r["rating"],
+                       "faixas": [(None if hi is None else 1.0 - hi,
+                                   None if lo is None else 1.0 - lo)
+                                  for lo, hi in r["faixas"]]} for r in ranges]
+            borda = "direita" if borda == "esquerda" else "esquerda"
         ge, lt = (">=", "<") if borda == "esquerda" else (">", "<=")
         ruler = self.rating_ruler(sample=ruler_sample)
         info = {r["rating"]: (int(r["n"]), float(r["valor_previsto"]))
@@ -8595,7 +8639,9 @@ class ModelSegmenter:
         cab = [f"-- Régua de ratings ({self.task_type}) gerada por ModelSegmenter "
                f"· {len(ranges)} faixas",
                f"-- método: {self.rating_config.get('method', '—')} · coluna de score "
-               f"'{score_col}' na escala 0–{_fmt(esc)} (score cru × {_fmt(esc)})",
+               f"'{score_col}' na escala 0–{_fmt(esc)} "
+               + (f"({_fmt(esc)} × (1 − score cru); {_fmt(esc)} = melhor)" if inv
+                  else f"(score cru × {_fmt(esc)})"),
                f"-- convenção de borda: {borda_txt}",
                f"-- score NULL ⇒ {col_rating} NULL (ELSE)"]
         if col_value is not None:
@@ -8643,9 +8689,10 @@ class ModelSegmenter:
             raise RuntimeError("Ajuste/defina o modelo antes (fit / set_model).")
         X = self._apply_derived(X)        # recria variáveis derivadas a partir da origem
         sc = self._compute_score(X)                              # predição CRUA (em blocos)
-        # o negócio recebe o score na escala 0–score_scale (0–1000); os ratings,
-        # porém, seguem a estratégia salva na escala CRUA (bins definidos no fit).
-        out = pd.DataFrame({col_score: sc * self.score_scale}, index=X.index)
+        # o negócio recebe o score na escala 0–score_scale (0–1000; invertido por
+        # padrão: 1000 = melhor); os ratings, porém, seguem a estratégia salva na
+        # escala CRUA (bins definidos no fit).
+        out = pd.DataFrame({col_score: self._to_points(sc)}, index=X.index)
         if self.rating_strategy is not None:
             wf = pd.DataFrame({"score": sc}, index=X.index)      # rating na escala crua
             cfg = self._make_cfg("_amostra")
@@ -8915,8 +8962,9 @@ class ModelSegmenter:
         """Gera SQL com a **fórmula da regressão logística** ajustada, sobre as
         colunas CRUAS da tabela: o logito (``col_logit`` = intercepto + Σ coef ×
         termo), a **probabilidade** (``1/(1+e^-z)``, com a camada de calibração
-        vigente, se houver) e o **score** na escala de negócio (probabilidade ×
-        ``score_scale`` — 0 a 1000 por padrão). Cada termo reproduz o
+        vigente, se houver) e o **score** na escala de negócio (0 a
+        ``score_scale``): ``(1 − probabilidade) × 1000`` com ``score_invertido``
+        (padrão — 1000 = melhor cliente) ou ``probabilidade × 1000`` sem. Cada termo reproduz o
         pré-processamento do pipeline: imputação (mediana/moda), one-hot, WoE da
         faixa, dummies de scorecard e variáveis derivadas.
 
@@ -8952,7 +9000,9 @@ class ModelSegmenter:
                f"{len(nomes)} termos",
                f"-- {col_logit} = intercepto + Σ coef × termo · {col_prob} = 1 / (1 + e^-"
                f"{col_logit})" + (f" (calibração '{metodo}')" if metodo else ""),
-               f"-- {col_score} = {col_prob} × {_fmt(esc)} (escala de negócio, 0–{_fmt(esc)})",
+               (f"-- {col_score} = (1 − {col_prob}) × {_fmt(esc)} (escala de negócio, "
+                f"0–{_fmt(esc)}; {_fmt(esc)} = melhor cliente)" if self._score_inv else
+                f"-- {col_score} = {col_prob} × {_fmt(esc)} (escala de negócio, 0–{_fmt(esc)})"),
                "-- termos: imputação do treino (mediana/moda), one-hot, WoE da faixa e "
                "dummies de scorecard sobre as colunas CRUAS"]
         if metodo == "isotonic":
@@ -8978,7 +9028,8 @@ class ModelSegmenter:
             "), _ygg_prob AS (",
             f"  SELECT *, {prob} AS {col_prob} FROM _ygg_logit",
             ")",
-            f"SELECT *, {col_prob} * {esc!r} AS {col_score}",
+            (f"SELECT *, (1.0 - {col_prob}) * {esc!r} AS {col_score}" if self._score_inv
+             else f"SELECT *, {col_prob} * {esc!r} AS {col_score}"),
             "FROM _ygg_prob;"])
 
     def _sql_case_labels(self, f, col, bins, alias, is_bool, comentario="") -> list:
@@ -9793,7 +9844,8 @@ class ModelSegmenter:
                      "sample_col": self.sample_col, "ref_sample": self.ref_sample,
                      "date_col": self.date_col, "feature_labels": self.feature_labels,
                      "problem_label": self.problem_label,
-                     "score_scale": self.score_scale, "random_state": self.random_state},
+                     "score_scale": self.score_scale, "random_state": self.random_state,
+                     "score_invertido": self.score_invertido},
             "candidates": list(self.candidates),
             "included": sorted(self.included),
             "var_meta": self.var_meta,
@@ -9840,7 +9892,9 @@ class ModelSegmenter:
                   problem_label=meta.get("problem_label"),
                   features=data.get("candidates"), date_col=meta.get("date_col"),
                   verbose=verbose, score_scale=meta.get("score_scale", 1000.0),
-                  random_state=meta.get("random_state", 42))
+                  random_state=meta.get("random_state", 42),
+                  # ausente = salvo antes da opção ⇒ mantém o score antigo (p × 1000)
+                  score_invertido=meta.get("score_invertido", False))
         seg.included = set(data.get("included", seg.candidates))
         seg.var_meta = data.get("var_meta", seg.var_meta)
         seg.algorithm = data.get("algorithm")

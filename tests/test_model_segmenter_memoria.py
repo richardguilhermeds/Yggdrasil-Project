@@ -463,8 +463,8 @@ def test_modelo_com_decimal_salvo_carrega_e_escora_igual(tmp_path, transform):
             volta = _seg(df, "classification").load(caminho, base)
         np.testing.assert_allclose(volta.score_.to_numpy(), seg.score_.to_numpy(),
                                    atol=1e-12)
-    np.testing.assert_allclose(seg.predict(df)["score"].to_numpy() / 1000,
-                               seg.score_.to_numpy(), atol=1e-12)
+    np.testing.assert_allclose(seg.predict(df)["score"].to_numpy(),
+                               seg.score_points_.to_numpy(), atol=1e-9)
 
 
 def test_trava_de_memoria_aponta_decimal(monkeypatch):

@@ -441,12 +441,13 @@ class ModelSegmenterUI:
 
     def __init__(self, df, target="target", task_type="classification", sample_col=None,
                  ref_sample="DES", feature_labels=None, problem_label=None, features=None, date_col=None,
-                 random_state=42):
+                 random_state=42, score_invertido=True):
         self.seg = ModelSegmenter(df, target=target, task_type=task_type,
                                   sample_col=sample_col, ref_sample=ref_sample,
                                   feature_labels=feature_labels, problem_label=problem_label,
                                   features=features,
-                                  date_col=date_col, random_state=random_state, verbose=False)
+                                  date_col=date_col, random_state=random_state, verbose=False,
+                                  score_invertido=score_invertido)
         self.df = df
         self.task_type = task_type
         self.date_col = date_col
@@ -2686,7 +2687,8 @@ class ModelSegmenterUI:
                    "sobre as colunas <b>cruas</b> da tabela: <code>logit</code> = intercepto + "
                    "Σ coeficiente × termo, <code>probabilidade</code> = 1 / (1 + e<sup>−logit"
                    "</sup>) (com a calibração vigente, se houver) e <code>score</code> = "
-                   "probabilidade × 1000. Cada termo reproduz o tratamento do treino — "
+                   "(1 − probabilidade) × 1000 — 1000 = melhor cliente (ou probabilidade × "
+                   "1000 com <code>score_invertido=False</code>). Cada termo reproduz o tratamento do treino — "
                    "imputação, one-hot, WoE da faixa, dummies de scorecard e variáveis "
                    "criadas na aba Análise.</div>"),
             W.HBox([self.tx_logit_table, self.btn_logit_sql],
@@ -6416,10 +6418,9 @@ class ModelSegmenterUI:
                 self._log("[ratings] informe os cortes (manual_score) ou percentis "
                           "(manual_percentil)."); return
             if method == "manual_score":
-                # o usuário digita na escala de negócio (0–1000); build_ratings opera
-                # no score CRU (0–1) → converte dividindo por score_scale.
-                scale = getattr(self.seg, "score_scale", 1.0) or 1.0
-                kw = {"cuts": [c / scale for c in nums]}
+                # o usuário digita na escala de negócio (0–1000, invertida por
+                # padrão); build_ratings opera no score CRU (0–1) → converte.
+                kw = {"cuts": sorted(float(self.seg._from_points(c)) for c in nums)}
             else:
                 kw = {"percentiles": nums}
         try:

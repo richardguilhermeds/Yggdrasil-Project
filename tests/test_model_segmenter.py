@@ -2446,15 +2446,18 @@ def test_to_sql_opcoes_e_guarda(seg):
     sql = seg.to_sql(table="cat.esq.carteira", score_col="pontuacao",
                      col_rating="faixa_risco")
     assert "FROM cat.esq.carteira;" in sql
-    assert "pontuacao >=" in sql and "END AS faixa_risco" in sql
+    # score invertido (classificação, padrão) espelha a borda: [lo, hi) cru vira
+    # (lo, hi] na escala de negócio
+    ge = ">" if seg._score_inv else ">="
+    assert f"pontuacao {ge} " in sql and "END AS faixa_risco" in sql
     assert "AS valor_previsto" not in sql          # col_value=None ⇒ só o rating
-    # score_scale=1 escreve as fronteiras na escala CRUA (0–1)
+    # score_scale=1 escreve as fronteiras na escala CRUA (0–1), sem inversão
     cru = seg.to_sql(score_scale=1)
     cortes_cru = [float(t) for t in re.findall(r"score >= ([\d.eE+-]+)", cru)]
-    cortes_neg = [float(t) for t in re.findall(r"score >= ([\d.eE+-]+)",
+    cortes_neg = [float(t) for t in re.findall(rf"score {ge} ([\d.eE+-]+)",
                                                seg.to_sql())]
-    assert cortes_cru and np.allclose(np.array(cortes_neg),
-                                      np.array(cortes_cru) * seg.score_scale)
+    assert cortes_cru and np.allclose(sorted(cortes_neg),
+                                      sorted(seg._to_points(np.array(cortes_cru))))
 
 
 # ----------------------------------------------------------------------
