@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import threading
 import warnings
+from contextlib import contextmanager
 
 import numpy as np
 import pandas as pd
@@ -761,6 +762,72 @@ def _bin_masks(series: pd.Series, bins) -> list:
     return out
 
 
+def _spearman_pairwise(frame: pd.DataFrame) -> pd.DataFrame:
+    """Spearman par a par com a MESMA regra de ``DataFrame.corr("spearman")``
+    (linhas completas do par, ranks médios nos empates), mais rápido: colunas
+    sem NaN são ranqueadas UMA vez e correlacionadas numa operação de matriz; só
+    os pares que envolvem NaN são re-ranqueados no recorte completo do par."""
+    from scipy.stats import rankdata
+    cols = list(frame.columns)
+    X = frame.apply(pd.to_numeric, errors="coerce").to_numpy(dtype="float64")
+    k = len(cols)
+    out = np.eye(k)
+    tem_nan = np.isnan(X).any(axis=0)
+
+    def _pearson(a, b):
+        if a.size < 2:
+            return np.nan
+        a = a - a.mean(); b = b - b.mean()
+        den = np.sqrt((a * a).sum() * (b * b).sum())
+        return float((a * b).sum() / den) if den > 0 else np.nan
+
+    completas = [i for i in range(k) if not tem_nan[i]]
+    if len(completas) >= 2:
+        R = np.column_stack([rankdata(X[:, i]) for i in completas])
+        with np.errstate(invalid="ignore", divide="ignore"):
+            C = np.corrcoef(R, rowvar=False)
+        for a, i in enumerate(completas):
+            for b, j in enumerate(completas):
+                if i != j:
+                    out[i, j] = C[a, b]
+    # pares com NaN: ranks médios no recorte completo do par, SEM re-ordenar —
+    # a ordem de cada coluna é calculada uma vez e só filtrada pelo recorte
+    ordens = {}
+
+    def _rank_no_recorte(i, ok):
+        if i not in ordens:
+            ordens[i] = np.argsort(X[:, i], kind="mergesort")   # NaN vão ao fim
+        o = ordens[i]
+        o = o[ok[o]]                                    # linhas válidas, já ordenadas
+        v = X[o, i]
+        n = v.size
+        if n == 0:
+            return np.empty(0)
+        novo = np.r_[True, v[1:] != v[:-1]]             # início de cada grupo de empate
+        grupo = np.cumsum(novo) - 1
+        inicio = np.flatnonzero(novo)
+        tam = np.diff(np.r_[inicio, n])
+        media = inicio + (tam + 1) / 2.0                # rank médio (1-based) do grupo
+        r = np.empty(len(X))
+        r[o] = media[grupo]
+        return r[ok]
+
+    for i in range(k):
+        for j in range(i + 1, k):
+            if not (tem_nan[i] or tem_nan[j]):
+                continue
+            ok = ~np.isnan(X[:, i]) & ~np.isnan(X[:, j])
+            v = _pearson(_rank_no_recorte(i, ok), _rank_no_recorte(j, ok))
+            out[i, j] = out[j, i] = v
+    # coluna constante: o pandas devolve NaN (desvio zero) — mantém
+    for i in range(k):
+        v = X[:, i][~np.isnan(X[:, i])]
+        if v.size and np.all(v == v[0]):
+            out[i, :] = np.nan; out[:, i] = np.nan
+            out[i, i] = np.nan
+    return pd.DataFrame(out, index=cols, columns=cols)
+
+
 def _bin_codes(series: pd.Series, bins) -> np.ndarray:
     """Índice da faixa de cada linha (``-1`` = fora de todas), na regra da 1ª faixa
     que casa — a mesma de :class:`WoeBinEncoder`. Base das contagens vetorizadas
@@ -1244,12 +1311,54 @@ class ModelSegmenter:
         return mask
 
     # ---- caches por linha p/ as análises por safra/amostra (vetorizadas) ----
-    def _rows_mask(self, sample=None, all_rows=False) -> np.ndarray:
+    # Teto de linhas dos GRÁFICOS da aba Análise de variáveis (ver
+    # :meth:`_amostra_graficos`): acima disso eles usam uma amostra aleatória fixa.
+    # IV, tabela por faixa, PSI do resumo e o ranking seguem na base inteira.
+    # ``None``/0 desliga.
+    max_linhas_graficos = 300_000
+
+    @contextmanager
+    def _amostra_graficos(self):
+        """Dentro do bloco, as análises por safra/amostra que alimentam os
+        GRÁFICOS (:meth:`_rows_mask`) usam uma amostra aleatória (semente fixa)
+        de até :attr:`max_linhas_graficos` linhas — só quando a base é maior que
+        isso. Fora do bloco (API, ranking, relatórios) tudo segue na base inteira."""
+        anterior = self.__dict__.get("_amostra_graficos_on", False)
+        self._amostra_graficos_on = True
+        try:
+            yield self.amostra_graficos_ativa()
+        finally:
+            self._amostra_graficos_on = anterior
+
+    def amostra_graficos_ativa(self) -> bool:
+        """``True`` quando os gráficos da análise usam amostra (base maior que o teto)."""
+        cap = self.max_linhas_graficos
+        return bool(cap) and len(self.df) > int(cap)
+
+    def _mascara_amostra_graficos(self):
+        """Máscara (memoizada) da amostra aleatória dos gráficos, ou ``None``."""
+        if not (self.__dict__.get("_amostra_graficos_on") and self.amostra_graficos_ativa()):
+            return None
+        cap, n = int(self.max_linhas_graficos), len(self.df)
+        hit = self.__dict__.get("_amostra_graficos_cache")
+        if hit is None or hit[0] != (cap, n):
+            m = np.zeros(n, dtype=bool)
+            m[np.random.default_rng(self.random_state).choice(n, cap, replace=False)] = True
+            hit = ((cap, n), m)
+            self._amostra_graficos_cache = hit
+        return hit[1]
+
+    def _rows_mask(self, sample=None, all_rows=False, amostrar=True) -> np.ndarray:
         """Máscara das linhas de ``sample`` (referência por padrão); ``all_rows``
-        ou sem ``sample_col`` ⇒ todas — mesmo recorte de :meth:`_frame`."""
+        ou sem ``sample_col`` ⇒ todas — mesmo recorte de :meth:`_frame`. Dentro
+        de :meth:`_amostra_graficos`, restrita à amostra dos gráficos (exceto com
+        ``amostrar=False`` — números de decisão, como o PSI do ranking)."""
         if all_rows or self.sample_col is None:
-            return np.ones(len(self.df), dtype=bool)
-        return self._frame_mask(sample)
+            base = np.ones(len(self.df), dtype=bool)
+        else:
+            base = self._frame_mask(sample)
+        amostra = self._mascara_amostra_graficos() if amostrar else None
+        return base if amostra is None else (base & amostra)
 
     def _safra_codes(self, time_col):
         """``(codigos, rotulos)``: índice da safra mensal de cada linha do ``df``
@@ -1263,6 +1372,23 @@ class ModelSegmenter:
             codes, uniq = pd.factorize(per, sort=True, use_na_sentinel=True)
             hit = (np.asarray(codes, dtype=np.int32), [str(u) for u in uniq])
             cache[time_col] = hit
+        return hit
+
+    def _fatias_por_safra(self, time_col, sample=None, all_rows=False):
+        """``(idx, limites, rotulos)``: posições das linhas do recorte ordenadas
+        por safra (estável) e os limites de cada safra em ``idx`` — a safra ``k``
+        é ``idx[limites[k]:limites[k+1]]``. Memoizado: vale p/ qualquer variável."""
+        cache = self.__dict__.setdefault("_fatias_cache", {})
+        key = (time_col, sample, bool(all_rows) or self.sample_col is None,
+               self._mascara_amostra_graficos() is not None)
+        hit = cache.get(key)
+        if hit is None:
+            cod, rot = self._safra_codes(time_col)
+            idx = np.flatnonzero(self._rows_mask(sample, all_rows=all_rows) & (cod >= 0))
+            idx = idx[np.argsort(cod[idx], kind="stable")]
+            limites = np.searchsorted(cod[idx], np.arange(len(rot) + 1))
+            hit = (idx, limites, rot)
+            cache[key] = hit
         return hit
 
     def _feature_bin_codes(self, feature, bins) -> np.ndarray:
@@ -1699,15 +1825,21 @@ class ModelSegmenter:
         out = {a: np.nan for a in samples}
         if not bins:
             return out
-        ref = self._frame(self.ref_sample, cols=[feature])
-        n_ref = max(len(ref), 1)
-        ref_pct = [max(int(m.sum()) / n_ref, eps) for m in _bin_masks(ref[feature], bins)]
+        # faixa de cada linha numa passada na coluna inteira + contagem por
+        # amostra (np.bincount): sem copiar a referência e cada amostra
+        nb = len(bins)
+        bc = _bin_codes(self.df[feature], bins)
+        ref_m = self._rows_mask(self.ref_sample, amostrar=False)   # ranking: base inteira
+        n_ref = max(int(ref_m.sum()), 1)
+        ref_cont = np.bincount(bc[ref_m & (bc >= 0)], minlength=nb)
+        ref_pct = [max(int(c) / n_ref, eps) for c in ref_cont]
         for a in samples:
-            cur = self._frame(a, cols=[feature])
-            n_cur = len(cur)
+            m = self._rows_mask(a, amostrar=False)
+            n_cur = int(m.sum())
             if n_cur == 0:
                 continue
-            cur_pct = [int(m.sum()) / n_cur for m in _bin_masks(cur[feature], bins)]
+            cont = np.bincount(bc[m & (bc >= 0)], minlength=nb)
+            cur_pct = [int(c) / n_cur for c in cont]
             out[a] = round(_psi_from_shares(ref_pct, cur_pct, eps), 4)
         return out
 
@@ -1765,24 +1897,25 @@ class ModelSegmenter:
         time_col = time_col or self.date_col
         if time_col is None:
             raise ValueError("Informe time_col ou configure date_col.")
-        # agregação agrupada numa passada (sem recortar a base por safra)
-        cod, rot = self._safra_codes(time_col)
-        linhas = self._rows_mask(sample, all_rows=all_samples) & (cod >= 0)
-        x = pd.to_numeric(self.df[feature], errors="coerce").to_numpy(dtype="float64")[linhas]
-        k = cod[linhas]
-        tab = pd.DataFrame({"k": k, "x": x})
-        g = tab.groupby("k")["x"]
-        agg = g.agg(["size", "count", "min", "mean", "max"])
-        p5, p95 = g.quantile(0.05), g.quantile(0.95)
+        # fatias por safra sobre arrays (ordem por safra memoizada) + percentil do
+        # numpy por fatia — o groupby().quantile do pandas custava ~1 s/variável
+        idx, limites, rot = self._fatias_por_safra(time_col, sample, all_samples)
+        xall = pd.to_numeric(self.df[feature], errors="coerce").to_numpy(dtype="float64")
         rows = []
-        for kk, r in agg.iterrows():
-            n = int(r["size"]); n_ok = int(r["count"])
-            row = {"safra": rot[int(kk)], "n": n,
-                   "pct_missing": round(100 * (n - n_ok) / n, 1) if n else float("nan")}
-            if n_ok:
-                row.update(min=round(float(r["min"]), 3), p5=round(float(p5[kk]), 3),
-                           media=round(float(r["mean"]), 3), p95=round(float(p95[kk]), 3),
-                           max=round(float(r["max"]), 3))
+        for j, per in enumerate(rot):
+            ii = idx[limites[j]:limites[j + 1]]
+            n = int(ii.size)
+            if n == 0:
+                continue
+            x = xall[ii]
+            x = x[~np.isnan(x)]
+            row = {"safra": per, "n": n,
+                   "pct_missing": round(100 * (n - x.size) / n, 1)}
+            if x.size:
+                p5, p95 = np.percentile(x, [5, 95])
+                row.update(min=round(float(x.min()), 3), p5=round(float(p5), 3),
+                           media=round(float(x.mean()), 3), p95=round(float(p95), 3),
+                           max=round(float(x.max()), 3))
             else:
                 row.update({c: float("nan") for c in ("min", "p5", "media", "p95", "max")})
             rows.append(row)
@@ -2533,20 +2666,27 @@ class ModelSegmenter:
             fig.tight_layout(); return fig
 
         safra = pd.to_datetime(base[time_col], errors="coerce").dt.to_period("M")
-        pers = sorted(p for p in safra.dropna().unique())
+        cod, pers = pd.factorize(safra, sort=True, use_na_sentinel=True)   # NaT → -1
+        pers = list(pers)
         if not pers:
             ax.text(0.5, 0.5, "sem dados por safra", ha="center", va="center",
                     transform=ax.transAxes, color="#889"); ax.axis("off")
             fig.tight_layout(); return fig
         xs = [str(p) for p in pers]; x = list(range(len(xs)))
+        # risco grupo × safra por contagem (np.bincount), sem máscara por safra
+        y_b = pd.to_numeric(base[self.target], errors="coerce").to_numpy(dtype="float64")
+        P = len(pers)
         series = []
         for label, gmask in groups:
-            gm = gmask.to_numpy()
-            ys = []
-            for p in pers:
-                m = gm & (safra == p).to_numpy()
-                ys.append(self._risco(base.loc[m, self.target]) if int(m.sum()) >= min_n
-                          else np.nan)
+            gm = np.asarray(gmask.to_numpy(dtype=bool, na_value=False)
+                            if hasattr(gmask, "to_numpy") else gmask, dtype=bool)
+            sel = gm & (cod >= 0)
+            n_p = np.bincount(cod[sel], minlength=P)
+            ok = sel & ~np.isnan(y_b)
+            soma = np.bincount(cod[ok], weights=y_b[ok], minlength=P)
+            cont = np.bincount(cod[ok], minlength=P)
+            ys = [float(soma[k] / cont[k]) if (n_p[k] >= min_n and cont[k] > 0) else np.nan
+                  for k in range(P)]
             series.append((label, ys))
 
         is_clf = self.task_type == "classification"
@@ -3216,9 +3356,16 @@ class ModelSegmenter:
             if f in self.df.columns and f not in vistos:
                 feats.append(f); vistos.add(f)
         sub = self._frame(sample, cols=feats)
+        # associação numa amostra de até max_linhas_graficos linhas (semente
+        # fixa): p/ triagem de redundância (corte ~0,85) o erro da correlação
+        # fica na 3ª casa — e o Spearman do pandas com NaN re-ranqueava a base
+        # inteira POR PAR (~150 s em 3,5M linhas × 18 numéricas)
+        cap = self.max_linhas_graficos
+        if cap and len(sub) > int(cap):
+            sub = sub.sample(n=int(cap), random_state=self.random_state)
         num = [f for f in feats if self._detect_kind(f, sub) == "num"]
         cat = [f for f in feats if self._detect_kind(f, sub) == "cat"]
-        corr_num = (sub[num].corr(method="spearman") if len(num) >= 2
+        corr_num = (_spearman_pairwise(sub[num]) if len(num) >= 2
                     else pd.DataFrame(np.eye(len(num)), index=num, columns=num))
         if len(cat) >= 2:
             vals = np.eye(len(cat))
@@ -3656,6 +3803,8 @@ class ModelSegmenter:
         self.model.fit(X, y, **fit_kwargs)
         self.calibration_ = None           # modelo novo ⇒ a camada antiga não vale
         self.score_ = self._compute_score(self.df)
+        # sem calibração, o score_ recém-calculado É o score cru deste modelo
+        self._raw_score_cache = (self.model, len(self.df), self.score_)
         self._shap_cache = {}
         self._avisa_sinal_scorecard()      # ordinais de scorecard: coeficiente < 0?
         return self
@@ -4630,9 +4779,20 @@ class ModelSegmenter:
             raise RuntimeError("Ajuste o modelo antes (fit / set_model).")
         pre = (self.model.named_steps.get("pre")
                if hasattr(self.model, "named_steps") else None)
+        # diagnóstico: acima de max_linhas_graficos linhas de treino, o QR roda
+        # numa amostra aleatória (semente fixa) — o VIF estimado não muda de
+        # leitura (<5 · 5–10 · >10) e a transformação da base inteira sai do caminho
+        linhas = np.asarray(self._fit_mask(), dtype=bool)
+        cap = self.max_linhas_graficos
+        if cap and int(linhas.sum()) > int(cap):
+            pos = np.flatnonzero(linhas)
+            escolha = np.random.default_rng(self.random_state).choice(
+                pos.size, int(cap), replace=False)
+            linhas = np.zeros_like(linhas)
+            linhas[pos[np.sort(escolha)]] = True
         n, R, constante = self._qr_acumulado(
             self._design_block(pre, bloco)
-            for bloco in self._row_blocks(self._fit_mask(), self.model_features))
+            for bloco in self._row_blocks(linhas, self.model_features))
         names = self._design_feature_names(pre, use_labels=use_labels)
         k = R.shape[1] - 1 if R is not None else len(names)
         if len(names) != k:                              # robustez a divergências
@@ -4873,11 +5033,28 @@ class ModelSegmenter:
         """Score CRU do modelo — SEM a camada de calibração — na base ``df``
         (default: o df de treino). É sobre ele que :meth:`calibrate` ajusta:
         re-calibrar SUBSTITUI a camada (nunca empilha uma sobre a outra)."""
+        if df is None:
+            return self._raw_score_df()
         cal, self.calibration_ = self.calibration_, None
         try:
-            return self._compute_score(self.df if df is None else df)
+            return self._compute_score(df)
         finally:
             self.calibration_ = cal
+
+    def _raw_score_df(self) -> pd.Series:
+        """Score CRU (sem calibração) do ``df`` de treino, memoizado pela
+        identidade do modelo — calibrar/comparar/atualizar ratings re-escorava a
+        base inteira várias vezes com o MESMO modelo."""
+        hit = self.__dict__.get("_raw_score_cache")
+        if hit is not None and hit[0] is self.model and hit[1] == len(self.df):
+            return hit[2]
+        cal, self.calibration_ = self.calibration_, None
+        try:
+            raw = self._compute_score(self.df)
+        finally:
+            self.calibration_ = cal
+        self._raw_score_cache = (self.model, len(self.df), raw)
+        return raw
 
     def _calibration_xy(self, sample=None):
         """``(y, score cru, score calibrado)`` da amostra, alinhados e sem NaN —
@@ -5025,7 +5202,14 @@ class ModelSegmenter:
         **reprojetada** sobre o novo score (mesmos cortes; padrão do load e do
         retreino na UI). Se a reprojeção falhar, os ratings são limpos para não
         refletirem o score antigo."""
-        self.score_ = self._compute_score(self.df)
+        # score calibrado = camada sobre o score CRU memoizado (mesmo resultado de
+        # re-escorar a base com o modelo vigente, sem passar pelo pipeline de novo)
+        raw = self._raw_score_df()
+        vals = raw.to_numpy(dtype="float64")
+        if self.calibration_ is not None:
+            vals = self._apply_calibration(vals)
+        self.score_ = pd.Series(np.asarray(vals, dtype="float64"), index=raw.index,
+                                name="score", dtype="float64")
         self._metrics_cache = None
         self._metrics_ci_cache = None
         if self.rating_strategy is not None:
@@ -6142,21 +6326,25 @@ class ModelSegmenter:
             raise ValueError("Informe time_col ou configure date_col.")
         if self.score_ is None:
             raise RuntimeError("Ajuste o modelo antes (fit / set_model / load).")
-        base = self._frame(sample) if sample else self.df
-        if time_col not in base.columns:
+        if time_col not in self.df.columns:
             raise ValueError(f"Coluna de tempo '{time_col}' não existe no DataFrame.")
         is_clf = self.task_type == "classification"
-        sc_full = self.score_.reindex(base.index)
-        safra = pd.to_datetime(base[time_col], errors="coerce").dt.to_period("M")
         met_cols = (["taxa_evento", "auc", "ks", "gini"] if is_clf
                     else ["previsto_medio", "realizado_medio", "mae", "rmse", "r2"])
+        # fatias por safra sobre ARRAYS (uma ordenação), sem recortar o DataFrame
+        # inteiro safra a safra (o groupby da base copiava todas as colunas)
+        idx, limites, rot = self._fatias_por_safra(time_col, sample, all_rows=not sample)
+        y_all = pd.to_numeric(self.df[self.target], errors="coerce").to_numpy(dtype="float64")
+        sc_all = self.score_.reindex(self.df.index).to_numpy(dtype="float64")
         rows = []
-        for per, g in base.groupby(safra):            # groupby dropa safra NaT
-            y = g[self.target].to_numpy(dtype="float64")
-            sc = sc_full.reindex(g.index).to_numpy(dtype="float64")
+        for j, per in enumerate(rot):
+            ii = idx[limites[j]:limites[j + 1]]
+            if ii.size == 0:                          # safra ausente neste recorte
+                continue
+            y, sc = y_all[ii], sc_all[ii]
             ok = ~np.isnan(y) & ~np.isnan(sc)
             y, sc = y[ok], sc[ok]
-            row = {"safra": str(per), "n": int(y.size)}
+            row = {"safra": per, "n": int(y.size)}
             row.update({c: float("nan") for c in met_cols})
             if is_clf:
                 row["taxa_evento"] = self._risco(y)
@@ -6398,6 +6586,30 @@ class ModelSegmenter:
         txt = str(txt)
         return txt if len(txt) <= n else txt[:n - 1] + "…"
 
+    def _amostra_dominante_por_safra(self, time_col) -> dict:
+        """``{safra 'AAAA-MM': amostra mais frequente}`` — a moda de ``sample_col``
+        por safra (empate → o menor valor, como ``Series.mode``). Memoizado por
+        coluna: não depende da variável, e era recalculado a cada subplot com um
+        ``to_period().astype(str)`` + moda Python por safra em milhões de linhas."""
+        cache = self.__dict__.setdefault("_amostra_safra_cache", {})
+        if time_col in cache:
+            return cache[time_col]
+        cod, rot = self._safra_codes(time_col)
+        s_codes, s_uniq = pd.factorize(self.df[self.sample_col], use_na_sentinel=True)
+        ok = (cod >= 0) & (s_codes >= 0)
+        ns = len(s_uniq)
+        cont = np.bincount(cod[ok].astype(np.int64) * ns + s_codes[ok],
+                           minlength=len(rot) * ns).reshape(len(rot), ns)
+        out = {}
+        for k, per in enumerate(rot):
+            linha = cont[k]
+            if not linha.any():
+                continue
+            mx = linha.max()
+            out[per] = sorted(s_uniq[j] for j in np.flatnonzero(linha == mx))[0]
+        cache[time_col] = out
+        return out
+
     def _sample_boundaries(self, safras, time_col=None):
         """Índices no eixo X (= ``range(len(safras))``) onde a AMOSTRA dominante
         muda entre safras consecutivas. ``safras`` é a sequência de safras (Period
@@ -6408,11 +6620,7 @@ class ModelSegmenter:
         time_col = time_col or self.date_col
         if time_col is None or time_col not in self.df.columns:
             return []
-        saf = pd.to_datetime(self.df[time_col], errors="coerce").dt.to_period("M").astype(str)
-        samp_by = (self.df.assign(_saf=saf)
-                   .dropna(subset=[self.sample_col])
-                   .groupby("_saf")[self.sample_col]
-                   .agg(lambda s: s.mode().iat[0] if not s.mode().empty else None))
+        samp_by = self._amostra_dominante_por_safra(time_col)
         seq = [samp_by.get(str(p)) for p in safras]
         return [i for i in range(1, len(seq))
                 if seq[i] is not None and seq[i - 1] is not None and seq[i] != seq[i - 1]]
@@ -6430,18 +6638,17 @@ class ModelSegmenter:
         feats = self._profile_feats(features)
         if not feats:
             raise ValueError("Nenhuma variável do modelo disponível (treine ou selecione).")
-        safra = pd.to_datetime(self.df[time_col], errors="coerce").dt.to_period("M")
-        pers = sorted(p for p in safra.dropna().unique())
-        xs = _fmt_safras([str(p) for p in pers]); x = list(range(len(pers)))
+        cod, pers = self._safra_codes(time_col)              # memoizado
+        xs = _fmt_safras(list(pers)); x = list(range(len(pers)))
+        n_p = np.bincount(cod[cod >= 0], minlength=len(pers))
         fig, axes, nrows, ncols = self._profile_grid(len(feats), ncols, dpi)
         for idx, f in enumerate(feats):
             ax = axes[idx // ncols][idx % ncols]
-            col = self.df[f]
-            ys = []
-            for p in pers:
-                m = (safra == p).to_numpy()
-                nn = int(m.sum())
-                ys.append(100.0 * int(col[m].isna().sum()) / nn if nn else np.nan)
+            # % de missing por safra numa contagem (sem máscara por safra)
+            na = self.df[f].isna().to_numpy(dtype=bool, na_value=True) & (cod >= 0)
+            miss = np.bincount(cod[na], minlength=len(pers))
+            ys = [100.0 * int(miss[k]) / int(n_p[k]) if n_p[k] else np.nan
+                  for k in range(len(pers))]
             ax.fill_between(x, 0, ys, color="#c0392b", alpha=0.12)
             ax.plot(x, ys, marker="o", lw=1.7, ms=4, color="#c0392b",
                     markeredgecolor="#33424f", markeredgewidth=0.4)
@@ -7148,6 +7355,29 @@ class ModelSegmenter:
             raise RuntimeError("Gere os ratings antes (build_ratings).")
         return self.rating_
 
+    def _rating_codes(self) -> np.ndarray:
+        """Índice do rating (na ordem de ``rating_labels_``) de cada linha do
+        ``df``, ``-1`` = sem rating. Memoizado pela identidade de ``rating_`` —
+        comparar a coluna de texto com cada rótulo (``rating == lab``) por
+        amostra/safra custava ~550 varreduras de milhões de linhas."""
+        rating = self._rating_series()
+        hit = self.__dict__.get("_rating_codes_cache")
+        if hit is not None and hit[0] is rating and hit[1] == list(self.rating_labels_):
+            return hit[2]
+        codes = pd.Categorical(rating, categories=list(self.rating_labels_)).codes
+        codes = np.asarray(codes, dtype=np.int32)
+        self._rating_codes_cache = (rating, list(self.rating_labels_), codes)
+        return codes
+
+    def _sample_codes(self):
+        """``(codigos, amostras)``: índice da amostra de cada linha (``-1`` = fora),
+        na ordem de :meth:`_samples`."""
+        amostras = self._samples()
+        cod = np.full(len(self.df), -1, dtype=np.int32)
+        for j, a in enumerate(amostras):
+            cod[self._rows_mask(a)] = j
+        return cod, amostras
+
     def rating_table(self) -> pd.DataFrame:
         """Por rating (na ordem dos rótulos): n, repr_% (na DES) e o risco
         (event_rate/alvo médio) em **cada amostra** — leitura de monotonicidade e
@@ -7256,19 +7486,21 @@ class ModelSegmenter:
         safra_rows, safra_series = [], {}
         tcol = time_col or self.date_col
         if tcol is not None and tcol in self.df.columns:
-            base = self._frame(sample) if sample else self.df
-            r2 = rating.reindex(base.index)
-            safra = pd.to_datetime(base[tcol], errors="coerce").dt.to_period("M")
-            for per, g in base.groupby(safra):
-                if len(g) < min_n:
+            # risco rating × safra numa passada (np.bincount sobre códigos)
+            linhas = self._rows_mask(sample, all_rows=not sample)
+            cod_t, rot_t = self._safra_codes(tcol)
+            rc = self._rating_codes()
+            n_t = np.bincount(cod_t[linhas & (cod_t >= 0)], minlength=len(rot_t))
+            mat = self._risco_por_grupo(rc, cod_t, len(rot_t), len(labels), linhas)
+            for k, per in enumerate(rot_t):
+                if n_t[k] == 0 or n_t[k] < min_n:
                     continue
-                rr = r2.reindex(g.index)
-                vals = {lab: self._risco(g.loc[rr == lab, self.target]) for lab in labels}
-                safra_series[str(per)] = vals
+                vals = {lab: float(mat[k, i]) for i, lab in enumerate(labels)}
+                safra_series[per] = vals
                 n_inv, npp = _count_inversions(ordered, vals)
                 if npp == 0:
                     continue
-                safra_rows.append({"safra": str(per), "n_inv": n_inv, "n_pares": npp})
+                safra_rows.append({"safra": per, "n_inv": n_inv, "n_pares": npp})
 
         sample_inv = sum(r["n_inv"] for r in sample_rows if r["amostra"] != self.ref_sample)
         n_safras = len(safra_rows)
@@ -7529,17 +7761,18 @@ class ModelSegmenter:
         """PSI da distribuição de RATINGS por amostra (DES como referência)."""
         if self.sample_col is None:
             raise ValueError("PSI requer sample_col.")
-        rating = self._rating_series()
         labels = self.rating_labels_
-        valid = rating.notna()
+        rc = self._rating_codes()
+        nl = len(labels)
         dist = {}
         for a in self.df[self.sample_col].dropna().unique():
-            am = self.df[self.sample_col] == a
+            am = self._rows_mask(a)
             # denominador = ratings NÃO-NaN da amostra (score inválido ⇒ rating NaN
             # não entra na distribuição), para as proporções somarem 1 e o PSI
             # coincidir com rating_psi_by_safra (que já normaliza por não-NaN).
-            n_a = max(int((valid & am).sum()), 1)
-            dist[a] = {l: int(((rating == l) & am).sum()) / n_a for l in labels}
+            cont = np.bincount(rc[am & (rc >= 0)], minlength=nl)
+            n_a = max(int(cont.sum()), 1)
+            dist[a] = {l: int(cont[i]) / n_a for i, l in enumerate(labels)}
         ref = dist[self.ref_sample]
         rows = []
         for a, pct in dist.items():
@@ -7610,26 +7843,29 @@ class ModelSegmenter:
         time_col = time_col or self.date_col
         if time_col is None:
             raise ValueError("Informe time_col ou configure date_col.")
-        rating = self._rating_series()
         labels = self.rating_labels_
+        nl = len(labels)
+        rc = self._rating_codes()
         # distribuição de referência: ratings na DES (ou toda a base, sem sample_col).
         # Denominador = ratings NÃO-NaN (score inválido ⇒ rating NaN não entra na
         # distribuição); assim as proporções somam 1, como o value_counts por safra.
-        ref_mask = (self._frame_mask(self.ref_sample) if self.sample_col is not None
-                    else pd.Series(True, index=self.df.index))
-        valid = rating.notna()
-        n_ref = max(int((valid & ref_mask).sum()), 1)
-        ref_pct = {l: max(int(((rating == l) & ref_mask).sum()) / n_ref, eps) for l in labels}
-        safra = pd.to_datetime(self.df[time_col], errors="coerce").dt.to_period("M")
+        ref_mask = self._rows_mask(self.ref_sample)
+        ref_cont = np.bincount(rc[ref_mask & (rc >= 0)], minlength=nl)
+        n_ref = max(int(ref_cont.sum()), 1)
+        ref_pct = {l: max(int(ref_cont[i]) / n_ref, eps) for i, l in enumerate(labels)}
+        # contagens rating × safra numa passada (safra NaT e rating NaN ficam fora)
+        cod, rot = self._safra_codes(time_col)
+        ok = (cod >= 0) & (rc >= 0)
+        cont = np.bincount(cod[ok].astype(np.int64) * nl + rc[ok],
+                           minlength=len(rot) * nl).reshape(len(rot), nl)
         rows = []
-        for per, r_g in rating.groupby(safra):        # groupby dropa safra NaT
-            n_g = int(r_g.notna().sum())              # ignora ratings NaN no denominador
+        for k, per in enumerate(rot):
+            n_g = int(cont[k].sum())                  # ignora ratings NaN no denominador
             if n_g == 0:
                 continue
-            vc = r_g.value_counts()
             psi = _psi_from_shares([ref_pct[l] for l in labels],
-                                   [int(vc.get(l, 0)) / n_g for l in labels], eps)
-            rows.append({"safra": str(per), "n": int(n_g), "psi": round(psi, 4),
+                                   [int(cont[k, i]) / n_g for i in range(nl)], eps)
+            rows.append({"safra": per, "n": int(n_g), "psi": round(psi, 4),
                          "classificacao": _classifica_psi(psi)})
         return (pd.DataFrame(rows, columns=["safra", "n", "psi", "classificacao"])
                 .sort_values("safra").reset_index(drop=True))
@@ -7814,17 +8050,27 @@ class ModelSegmenter:
             vals = vals[~np.isnan(vals)]
             n = len(vals)
             if n >= 2:
-                # bootstrap em BLOCOS de n_boot: limita a matriz de reamostragem a
-                # ~4M elementos (em vez de n_boot×n inteiro de uma vez — um rating
-                # com n=100k estouraria a memória do driver no Databricks).
-                means = np.empty(n_boot, dtype="float64")
-                passo = max(1, min(n_boot, 4_000_000 // max(n, 1)))
-                feito = 0
-                while feito < n_boot:
-                    b = min(passo, n_boot - feito)
-                    idx = rng.integers(0, n, size=(b, n))
-                    means[feito:feito + b] = vals[idx].mean(axis=1)
-                    feito += b
+                niveis, freq = np.unique(vals, return_counts=True)
+                if len(niveis) <= 256:
+                    # poucos valores distintos (alvo 0/1 da PD, notas): a média de
+                    # uma reamostra com reposição = Σ valor × contagem/n, com as
+                    # contagens ~ Multinomial(n, frequências) — MESMA distribuição
+                    # da reamostragem por índice, em O(n_boot × níveis) e não
+                    # O(n_boot × n) (ratings com centenas de milhares de linhas)
+                    cont = rng.multinomial(n, freq / n, size=n_boot)
+                    means = cont @ niveis.astype("float64") / n
+                else:
+                    # bootstrap em BLOCOS de n_boot: limita a matriz de
+                    # reamostragem a ~4M elementos (em vez de n_boot×n inteiro de
+                    # uma vez — um rating com n=100k estouraria a memória do driver).
+                    means = np.empty(n_boot, dtype="float64")
+                    passo = max(1, min(n_boot, 4_000_000 // max(n, 1)))
+                    feito = 0
+                    while feito < n_boot:
+                        b = min(passo, n_boot - feito)
+                        idx = rng.integers(0, n, size=(b, n))
+                        means[feito:feito + b] = vals[idx].mean(axis=1)
+                        feito += b
                 lo, hi = np.quantile(means, [alpha, 1 - alpha])
                 pt = float(vals.mean())
             elif n == 1:
@@ -8936,6 +9182,11 @@ class ModelSegmenter:
         s._safra_cache = {}
         s._bincode_cache = {}
         s._iv_row_cache = {}
+        s._fatias_cache = {}
+        s._amostra_safra_cache = {}
+        s._rating_codes_cache = None
+        s._raw_score_cache = None
+        s._amostra_graficos_cache = None
         s._metrics_ci_cache = None
         s._shap_cache = {}
         s.score_ = None

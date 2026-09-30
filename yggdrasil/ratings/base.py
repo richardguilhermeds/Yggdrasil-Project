@@ -131,7 +131,12 @@ class RatingStrategy(ABC):
         if not self._fitted:
             raise RuntimeError("Estratégia de rating não foi ajustada (chame fit).")
         raw = self._raw_groups(np.asarray(df[cfg.score_col], dtype=float))
-        labels = [self.raw_to_label_.get(int(r)) for r in raw]
+        # tradução grupo → rótulo só nos valores DISTINTOS (poucos grupos) e
+        # aplicada por índice — antes um dict.get por linha (milhões de chamadas)
+        codes, uniq = pd.factorize(np.asarray(raw), use_na_sentinel=True)
+        rot_u = np.array([self.raw_to_label_.get(int(u)) for u in uniq] + [None],
+                         dtype=object)
+        labels = rot_u[np.where(codes >= 0, codes, len(rot_u) - 1)]
         return pd.Series(labels, index=df.index, name=self.column, dtype="object")
 
     def fit_transform(

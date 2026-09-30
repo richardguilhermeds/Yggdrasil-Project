@@ -1047,7 +1047,15 @@ class ModelSegmenterUI:
             txt = (f"<b>{nome}</b> está fora do modelo — análise exploratória. "
                    "Para usá-la, inclua na aba Variáveis.")
         cls = {"modelo": " st-modelo", "sel": " st-sel"}.get(st, "")
-        self.out_an_status.value = f"<div class='mseg-an-status{cls}'>{txt}</div>"
+        nota = ""
+        if s.amostra_graficos_ativa():
+            n_am = f"{int(s.max_linhas_graficos):,}".replace(",", ".")
+            n_base = f"{len(s.df):,}".replace(",", ".")
+            nota = ("<div class='mseg-legend' style='margin:2px 0 0 2px'>⚡ Gráficos por "
+                    f"safra/amostra calculados numa amostra de {n_am} linhas (base: "
+                    f"{n_base}); IV, tabela por faixa e PSI do resumo usam a base "
+                    "inteira.</div>")
+        self.out_an_status.value = f"<div class='mseg-an-status{cls}'>{txt}</div>{nota}"
 
     def _iv_por_variavel(self):
         """``{coluna: iv}`` a partir do ranking (memoizado no segmentador)."""
@@ -3901,6 +3909,16 @@ class ModelSegmenterUI:
 
     # ------------------------------------------------------------------ Aba 2 handlers
     def _on_analyze(self, b):
+        """Renderiza a aba Análise; os GRÁFICOS por safra/amostra usam a amostra
+        de até ``seg.max_linhas_graficos`` linhas em bases maiores (IV, tabela e
+        PSI do resumo seguem na base inteira) — ver ``_amostra_graficos``."""
+        seg = getattr(self, "seg", None)
+        if seg is None:                        # UI ainda não montada: no-op seguro
+            return self._on_analyze_impl(b)
+        with seg._amostra_graficos():
+            return self._on_analyze_impl(b)
+
+    def _on_analyze_impl(self, b):
         # o observer de dd_var2 pode chamar isto durante a construção/refresh —
         # antes dos painéis existirem ou sem variável selecionada: no-op seguro.
         if (getattr(self, "dd_var2", None) is None or self.dd_var2.value is None
