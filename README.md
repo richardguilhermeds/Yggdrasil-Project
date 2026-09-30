@@ -177,6 +177,14 @@ pip install -e ".[pycaret]"      # opcional: treino automatizado via PyCaret
 
 > CatBoost é o único motor de boosting não incluído por padrão (`pip install -e ".[catboost]"`).
 
+> **Databricks — UIs (ipywidgets):** use o ipywidgets que já vem no cluster. O
+> kernel precisa casar com o front-end do notebook; se aparecer
+> `Class HTMLStyleModel not found in module @jupyter-widgets/controls`, o kernel
+> ficou com ipywidgets 8 e o front-end é 7.x. Corrija com
+> `%pip install "ipywidgets<8"` + `dbutils.library.restartPython()` (ou desanexe e
+> reanexe o notebook). Evite `--force-reinstall` sem `--no-deps`: ele reinstala as
+> dependências e pode trocar o ipywidgets do cluster.
+
 > Localmente, o MLflow 3.x exige `MLFLOW_ALLOW_FILE_STORE=true` para usar o backend `./mlruns` (os notebooks já definem isso). No Databricks, use o tracking do workspace.
 
 ## 🚀 Uso rápido

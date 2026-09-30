@@ -70,12 +70,13 @@ dependencies = [
     # parte do core: a UI do modelo traz o botão "Tunar com Optuna" por padrão e
     # os trials são logáveis no MLflow.
     "optuna>=3.0",
-    # anywidget: preview CLICÁVEL da árvore (selecionar/fundir/recolher direto na
-    # imagem) — parte do CORE para a interface interativa vir pronta por padrão.
-    # Entrega o JS pelo próprio comm do widget, por isso funciona também no
-    # Databricks; sem ele a UI cai no PNG estático. (ipywidgets/ipython seguem no
-    # extra [ui].)
-    "anywidget>=0.9",
+    # SEM ipywidgets/anywidget no core (extra [ui]): o anywidget exige
+    # ipywidgets, e um `pip install --force-reinstall yggdrasil-project` num
+    # cluster Databricks subia o ipywidgets do kernel para 8.x — com o front-end
+    # do notebook na linha 7 toda UI quebrava com "Class HTMLStyleModel not found
+    # in module @jupyter-widgets/controls". O core não pode mexer no ipywidgets
+    # do ambiente; sem anywidget a árvore cai no PNG estático (já o padrão no
+    # Databricks).
 ]
 
 [project.optional-dependencies]
@@ -93,8 +94,10 @@ pycaret = ["pycaret>=3.0"]
 # anywidget: preview CLICÁVEL da árvore na TreeSegmenterUI (selecionar/fundir/
 # recolher direto na imagem). Entrega o JS pelo próprio comm do widget, por
 # isso funciona também no Databricks (runtimes recentes); sem ele a UI cai no
-# PNG estático.
-ui = ["ipywidgets>=8.0", "ipython>=8.0", "anywidget>=0.9"]
+# PNG estático. ipywidgets 7.6+ OU 8.x: o código das UIs roda nas duas linhas, e
+# o kernel precisa casar com o front-end do notebook (Databricks antigo = 7.x;
+# forçar >=8 ali quebra a UI com "HTMLStyleModel not found").
+ui = ["ipywidgets>=7.6,<9", "ipython>=7.0", "anywidget>=0.9"]
 # Geração/aplicação da régua em PySpark (no Databricks o pyspark já vem
 # no cluster; instale só fora dele).
 spark = ["pyspark>=3.4"]
