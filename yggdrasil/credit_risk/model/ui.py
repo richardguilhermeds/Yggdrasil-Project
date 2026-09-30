@@ -40,6 +40,7 @@ depois de desfazer é preciso **re-treinar** para o modelo refletir a configura�
 from __future__ import annotations
 
 import re
+import warnings
 from contextlib import contextmanager, suppress
 
 import numpy as np
@@ -1575,6 +1576,20 @@ class ModelSegmenterUI:
                                                "variável categórica, candidata ao modelo e recriada "
                                                "ao escorar. Junte categorias na mão como na árvore.")
         self.out_bin_hint = W.HTML()
+        # codificação ordinal de scorecard (só sobre bins manuais): a variável
+        # entra no modelo como código da faixa, pior = 0 → coeficiente negativo
+        self.cb_ordinal = W.Checkbox(
+            value=False, indent=False,
+            description="Ordinal p/ scorecard (pior faixa = 0 → coeficiente negativo)",
+            layout=W.Layout(width="auto", display="none"))
+        self.cb_ordinal.tooltip = (
+            "A variável entra no modelo como UM código por faixa, ordenado pelo risco "
+            "na referência: pior faixa = 0, ..., melhor = maior código. Numa PD a "
+            "logística ganha coeficiente negativo e a pior faixa vale 0 pontos no "
+            "scorecard. Só com bins manuais; vale em valores crus e em WoE.")
+        self.cb_ordinal.observe(self._on_toggle_ordinal, names="value")
+        self._ord_syncing = False
+        self.out_ord_table = W.HTML()
         # categóricas no modo Manual: uma "caixa" (Dropdown de grupo) por categoria,
         # para alocar cada categoria a um grupo — como no TreeSegmenter. As numéricas
         # seguem no campo de cortes (tx_cuts). Preenchida por _rebuild_an_cat_box.
@@ -1608,6 +1623,8 @@ class ModelSegmenterUI:
             W.HBox([self.tg_binmode, self.tx_cuts, self.btn_apply_bins, self.btn_clear_bins]),
             self.an_cat_box,          # caixas de grupo por categoria (categóricas, modo Manual)
             self.out_bin_hint,
+            self.cb_ordinal,          # ordinal de scorecard (só com bins manuais)
+            self.out_ord_table,
             W.HBox([self.tx_new_cat, self.btn_create_cat]),
         ])
         bin_card.add_class("mseg-card")
@@ -3931,7 +3948,63 @@ class ModelSegmenterUI:
         self._sync_binmode()
         self._render_bin_hint(feat)
 
+    def _sync_ordinal(self, feat):
+        """Checkbox ordinal: só aparece com bins manuais; reflete o estado da
+        variável e mostra a tabela faixa → código quando ligada."""
+        tem_manual = feat is not None and bool(self.seg.manual_bins(feat))
+        self.cb_ordinal.layout.display = "" if tem_manual else "none"
+        self._ord_syncing = True
+        try:
+            self.cb_ordinal.value = bool(tem_manual and self.seg.scorecard_ordinal(feat))
+        finally:
+            self._ord_syncing = False
+        if not (tem_manual and self.seg.scorecard_ordinal(feat)):
+            self.out_ord_table.value = ""
+            return
+        try:
+            tab = self.seg.scorecard_ordinal_table(feat)
+            self.out_ord_table.value = (
+                "<div class='mseg-legend'>Códigos que entram no modelo "
+                "(<b>0 = pior faixa</b>; maior código = menor risco na referência). "
+                "O termo aparece como <code>ord(variável)</code> nos coeficientes.</div>"
+                + self._df_html(tab, max_height="200px", center=True))
+        except Exception as e:                  # noqa: BLE001 — tabela é informativa
+            self.out_ord_table.value = f"<i>tabela ordinal indisponível: {e}</i>"
+
+    def _on_toggle_ordinal(self, change):
+        if self._ord_syncing or getattr(self, "_restoring", False):
+            return
+        feat = self.dd_var2.value
+        try:
+            with self._undoable("ordinal scorecard"):
+                self.seg.set_scorecard_ordinal(feat, bool(change["new"]))
+            estado = ("ligada — pior faixa = 0" if change["new"] else "desligada")
+            self._log(f"[scorecard] '{self.seg.label(feat)}': codificação ordinal {estado}.")
+            self._mark_dirty()
+        except Exception as e:
+            self._log(f"[scorecard] erro: {e}")
+        self._sync_ordinal(feat)
+
+    def _scorecard_sign_html(self) -> str:
+        """Resumo pós-treino do sinal das variáveis ordinais de scorecard."""
+        chk = self.seg.scorecard_sign_check()
+        if chk.empty:
+            return ""
+        ruins = chk[~chk["sinal_ok"]]
+        if ruins.empty:
+            return ("<div class='mseg-legend'><span style='color:var(--ok-ink);"
+                    f"font-weight:600'>✓ Scorecard: as {len(chk)} variáveis ordinais têm "
+                    "coeficiente negativo.</span></div>")
+        import html as _h
+        lista = ", ".join(f"<b>{_h.escape(str(self.seg.label(r.variavel)))}</b> "
+                          f"({r.coef:+.4f})" for r in ruins.itertuples())
+        return ("<div class='mseg-legend' style='color:var(--warn-ink)'>⚠ Scorecard: "
+                f"coeficiente ≥ 0 em {lista}. Com pior faixa = 0 o esperado é negativo — "
+                "costuma ser correlação com outra variável do modelo. Revise: funda "
+                "faixas ou retire a variável correlacionada.</div>")
+
     def _render_bin_hint(self, feat):
+        self._sync_ordinal(feat)
         is_cat = (feat is not None and self.seg._detect_kind(feat) == "cat")
         if self.seg.manual_bins(feat):
             self.out_bin_hint.value = (
@@ -4480,9 +4553,12 @@ class ModelSegmenterUI:
                 # ficado marcado de um algoritmo anterior (a linha fica oculta).
                 monotone = ("auto" if (self.cb_monotone.value
                                        and algo in MONOTONE_ALGORITHMS) else None)
-                self.seg.fit(algo, hyperparams=self._collect_hyperparams(algo),
-                             transform=transform, class_balance=balance,
-                             monotone=monotone)
+                with warnings.catch_warnings():
+                    # o aviso de sinal do scorecard vai para o status/log abaixo
+                    warnings.filterwarnings("ignore", message="Scorecard:")
+                    self.seg.fit(algo, hyperparams=self._collect_hyperparams(algo),
+                                 transform=transform, class_balance=balance,
+                                 monotone=monotone)
                 modo = "WoE/bins" if transform == "woe" else "valores crus"
                 if balance:
                     modo += " · classes balanceadas"
@@ -4494,7 +4570,16 @@ class ModelSegmenterUI:
                 self.out_fit_status.value = (
                     f"<div class='mseg-legend'><span style='color:var(--ok-ink);font-weight:600'>"
                     f"✓ {algo} treinado com {len(self.seg.model_features)} variáveis "
-                    f"({modo}).</span></div>")
+                    f"({modo}).</span></div>") + self._scorecard_sign_html()
+                chk = self.seg.scorecard_sign_check()
+                if not chk.empty:
+                    ruins = chk[~chk["sinal_ok"]]
+                    self._log("[scorecard] " + (
+                        f"{len(chk)} variáveis ordinais, todos os coeficientes negativos."
+                        if ruins.empty else
+                        "coeficiente ≥ 0 em: " + ", ".join(
+                            f"{self.seg.label(r.variavel)} ({r.coef:+.4f})"
+                            for r in ruins.itertuples()) + " — revise a categorização."))
             self.pb_fit.bar_style = "success"
             self.pb_fit.description = "concluído ✓"
             self._render_metrics()

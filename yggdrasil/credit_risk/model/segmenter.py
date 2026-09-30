@@ -727,19 +727,26 @@ class WoeBinEncoder(BaseEstimator, TransformerMixin):
 
     ``encodings``: ``{feature: {"kind", "bins": [(bin_dict, valor), ...],
     "fallback": float}}``. Valores fora de qualquer bin (categoria nova, faltante
-    sem bin próprio) recebem ``fallback`` (0 = WoE neutro)."""
+    sem bin próprio) recebem ``fallback`` (0 = WoE neutro).
 
-    def __init__(self, encodings=None, features=None, name_prefix="WoE"):
+    ``prefixes`` (opcional): ``{feature: prefixo}`` que sobrepõe ``name_prefix``
+    no nome de saída — ex.: ``ord`` para as variáveis em codificação ordinal de
+    scorecard (ver :meth:`ModelSegmenter.set_scorecard_ordinal`)."""
+
+    def __init__(self, encodings=None, features=None, name_prefix="WoE", prefixes=None):
         self.encodings = encodings
         self.features = features
         self.name_prefix = name_prefix
+        self.prefixes = prefixes
 
     def fit(self, X, y=None):
         return self
 
     def get_feature_names_out(self, input_features=None):
         feats = self.features or []
-        return np.asarray([f"{self.name_prefix}({f})" for f in feats], dtype=object)
+        pref = self.prefixes or {}
+        return np.asarray([f"{pref.get(f, self.name_prefix)}({f})" for f in feats],
+                          dtype=object)
 
     def transform(self, X):
         X = pd.DataFrame(X).reset_index(drop=True)
@@ -2357,14 +2364,97 @@ class ModelSegmenter:
             meta["splits"] = splits
         else:
             meta.pop("splits", None)
+            meta.pop("ordinal_scorecard", None)   # a ordinal só existe sobre bins manuais
         self._invalidate_bins(feature)   # só ESTA variável re-bina; demais ficam quentes
         return self
 
     def clear_manual_bins(self, feature):
-        """Remove os bins manuais da variável (volta ao binning ótimo)."""
-        self.var_meta.get(feature, {}).pop("splits", None)
+        """Remove os bins manuais da variável (volta ao binning ótimo) — e, com
+        eles, a codificação ordinal de scorecard, que depende das faixas manuais."""
+        meta = self.var_meta.get(feature, {})
+        meta.pop("splits", None)
+        meta.pop("ordinal_scorecard", None)
         self._invalidate_bins(feature)   # só ESTA variável volta ao ótimo
         return self
+
+    # ---- codificação ordinal de scorecard (só categorização manual) ----
+    def set_scorecard_ordinal(self, feature, ativo=True):
+        """Liga (ou desliga) a **codificação ordinal de scorecard** na variável.
+
+        Cada faixa manual vira um código inteiro ordenado pelo **risco** da faixa
+        na referência (DES): a **pior faixa = 0**, a seguinte 1, ... até a melhor
+        (maior código = menor risco). Com alvo 1 = mau (PD), a logística ganha um
+        único coeficiente **negativo** por variável — padrão de *scorecard*: a
+        pior faixa vale 0 pontos e as demais somam pontos. Vale nos dois
+        ``transform`` (``raw`` e ``woe``) e aparece como ``ord(variável)`` nos
+        coeficientes.
+
+        Só para variáveis com **bins manuais** (:meth:`set_manual_bins`): a
+        ordem precisa vir de faixas escolhidas por você. Limpar os bins manuais
+        desliga a opção. A ordem das faixas é recalculada a cada treino."""
+        if feature not in self.candidates:
+            raise ValueError(f"'{feature}' não é variável candidata.")
+        meta = self.var_meta.setdefault(feature, {})
+        if ativo:
+            if not self.manual_bins(feature):
+                raise ValueError(
+                    f"'{self.label(feature)}' não tem categorização manual — a "
+                    "codificação ordinal de scorecard só vale sobre bins manuais "
+                    "(defina-os com set_manual_bins / modo Manual da aba Análise).")
+            meta["ordinal_scorecard"] = True
+        else:
+            meta.pop("ordinal_scorecard", None)
+        return self
+
+    def scorecard_ordinal(self, feature) -> bool:
+        """``True`` se a variável entra no modelo em codificação ordinal de scorecard."""
+        return bool(self.var_meta.get(feature, {}).get("ordinal_scorecard")
+                    and self.manual_bins(feature))
+
+    def scorecard_ordinal_features(self, features=None) -> list:
+        """Variáveis (de ``features`` ou das candidatas) em codificação ordinal."""
+        feats = list(features) if features is not None else list(self.candidates)
+        return [f for f in feats if self.scorecard_ordinal(f)]
+
+    def _ordinal_faixas(self, feature) -> list:
+        """``[(bin, risco, n, codigo), ...]`` na ordem das faixas: código 0 = maior
+        risco na referência. Faixa sem observação na referência (risco NaN) vai
+        para o código 0 — conservador: sem evidência, trata como a pior."""
+        ref = self._frame(self.ref_sample, cols=[feature, self.target])
+        bins, _kind = self._resolve_bins(feature, sample=self.ref_sample)
+        y_all = ref[self.target].to_numpy(dtype="float64")
+        riscos, ns = [], []
+        for m in _bin_masks(ref[feature], bins):
+            riscos.append(self._risco(y_all[m]))
+            ns.append(int(m.sum()))
+        # pior primeiro: NaN (-inf na chave) empata no topo; empate mantém a ordem
+        ordem = sorted(range(len(bins)),
+                       key=lambda i: -(riscos[i] if np.isfinite(riscos[i]) else np.inf))
+        codigo = {i: c for c, i in enumerate(ordem)}
+        return [(bins[i], riscos[i], ns[i], codigo[i]) for i in range(len(bins))]
+
+    def _ordinal_encoding(self, feature) -> dict:
+        """Especificação p/ o :class:`WoeBinEncoder`: cada faixa → seu código
+        ordinal (pior = 0). Valor fora das faixas vistas (categoria nova,
+        faltante sem faixa própria) recebe 0 — a pior faixa, conservador."""
+        _bins, kind = self._resolve_bins(feature, sample=self.ref_sample)
+        faixas = self._ordinal_faixas(feature)
+        return {"kind": kind, "bins": [(b, float(c)) for b, _r, _n, c in faixas],
+                "fallback": 0.0}
+
+    def scorecard_ordinal_table(self, feature) -> pd.DataFrame:
+        """Tabela da codificação ordinal da variável: ``faixa``, ``n`` e ``risco``
+        na referência e o ``codigo`` que entra no modelo (0 = pior faixa),
+        ordenada do pior para o melhor."""
+        if not self.manual_bins(feature):
+            raise ValueError(f"'{self.label(feature)}' não tem categorização manual.")
+        col_risco = "taxa_maus" if self.task_type == "classification" else "alvo_medio"
+        rows = [{"faixa": self._bin_label(feature, b), "n": n,
+                 col_risco: (round(float(r), 6) if np.isfinite(r) else np.nan),
+                 "codigo": int(c)}
+                for b, r, n, c in self._ordinal_faixas(feature)]
+        return (pd.DataFrame(rows, columns=["faixa", "n", col_risco, "codigo"])
+                .sort_values("codigo").reset_index(drop=True))
 
     def manual_bins(self, feature):
         """Bins manuais da variável (cortes ou grupos), ou ``None`` se ótimo."""
@@ -2839,8 +2929,11 @@ class ModelSegmenter:
         from sklearn.impute import SimpleImputer
         from sklearn.pipeline import Pipeline
 
-        num = [f for f in features if self._detect_kind(f) == "num"]
-        cat = [f for f in features if self._detect_kind(f) == "cat"]
+        # ordinal de scorecard: bloco próprio (código da faixa, pior = 0), fora do
+        # num/cat — vem depois deles, então as posições de num/cat não mudam
+        ordinais = self.scorecard_ordinal_features(features)
+        num = [f for f in features if self._detect_kind(f) == "num" and f not in ordinais]
+        cat = [f for f in features if self._detect_kind(f) == "cat" and f not in ordinais]
         transformers = []
         if num:
             transformers.append(("num", SimpleImputer(strategy="median"), num))
@@ -2848,6 +2941,10 @@ class ModelSegmenter:
             cat_pipe = Pipeline([("imp", SimpleImputer(strategy="most_frequent")),
                                  ("ohe", _make_ohe())])
             transformers.append(("cat", cat_pipe, cat))
+        if ordinais:
+            enc = WoeBinEncoder(encodings={f: self._ordinal_encoding(f) for f in ordinais},
+                                features=list(ordinais), name_prefix="ord")
+            transformers.append(("ord", enc, list(ordinais)))
         return ColumnTransformer(transformers, remainder="drop")
 
     def _check_design_memory(self, X, features) -> None:
@@ -2861,7 +2958,8 @@ class ModelSegmenter:
         quando não cabe na memória livre, levanta ``MemoryError`` nomeando as
         variáveis responsáveis. No-op quando não há categórica ou quando a
         memória livre não é mensurável."""
-        cat = [f for f in features if self._detect_kind(f) == "cat"]
+        ordinais = set(self.scorecard_ordinal_features(features))
+        cat = [f for f in features if self._detect_kind(f) == "cat" and f not in ordinais]
         if not cat or any(isinstance(X[f], pd.DataFrame) for f in cat):
             return      # nome repetido no df: o sklearn recusa com mensagem clara
         livre = _available_memory_bytes()
@@ -2897,11 +2995,15 @@ class ModelSegmenter:
         est = _build_estimator(algorithm, task, hyperparams, random_state=self.random_state,
                                class_counts=class_counts)
         if transform == "woe":
-            # variáveis transformadas no estilo scorecard (binagem + WoE/risco do bin)
-            encodings = {f: self._bin_encoding(f) for f in features}
+            # variáveis transformadas no estilo scorecard (binagem + WoE/risco do bin);
+            # as marcadas como ordinal de scorecard entram pelo código da faixa
+            ordinais = set(self.scorecard_ordinal_features(features))
+            encodings = {f: (self._ordinal_encoding(f) if f in ordinais
+                             else self._bin_encoding(f)) for f in features}
             prefix = "WoE" if task == "classification" else "bin"
             pre = WoeBinEncoder(encodings=encodings, features=list(features),
-                                name_prefix=prefix)
+                                name_prefix=prefix,
+                                prefixes={f: "ord" for f in ordinais} or None)
             return Pipeline([("pre", pre), ("est", est)])
 
         return Pipeline([("pre", self._build_raw_preprocessor(features)), ("est", est)])
@@ -3103,6 +3205,7 @@ class ModelSegmenter:
         self.calibration_ = None           # modelo novo ⇒ a camada antiga não vale
         self.score_ = self._compute_score(self.df)
         self._shap_cache = {}
+        self._avisa_sinal_scorecard()      # ordinais de scorecard: coeficiente < 0?
         return self
 
     def fit_two_stage(self, threshold, clf_algorithm="logistica", reg_algorithm="linear",
@@ -3878,13 +3981,14 @@ class ModelSegmenter:
         """Nome de exibição de UM termo do desenho/SHAP: remove o prefixo
         ``num__``/``cat__``, desembrulha ``WoE(...)``/``bin(...)`` e aplica o alias
         de ``feature_labels`` quando houver — mesma convenção da fórmula."""
-        for p in ("num__", "cat__"):
+        for p in ("num__", "cat__", "ord__"):
             if nm.startswith(p):
                 nm = nm[len(p):]
                 break
-        # termos transformados vêm como 'WoE(feat)'/'bin(feat)': rotula o miolo
+        # termos transformados vêm como 'WoE(feat)'/'bin(feat)'/'ord(feat)':
+        # rotula o miolo
         wrap = None
-        for w in ("WoE", "bin"):
+        for w in ("WoE", "bin", "ord"):
             if nm.startswith(f"{w}(") and nm.endswith(")"):
                 wrap, nm = w, nm[len(w) + 1:-1]
                 break
@@ -3925,6 +4029,50 @@ class ModelSegmenter:
             return ""
         return ("***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05
                 else "." if p < 0.10 else "n.s.")
+
+    def scorecard_sign_check(self) -> pd.DataFrame:
+        """Sinal dos coeficientes das variáveis em **codificação ordinal de
+        scorecard** no modelo linear/logístico ajustado: ``variavel``, ``coef`` e
+        ``sinal_ok`` (``coef < 0``). Com pior faixa = 0, o esperado é coeficiente
+        NEGATIVO (mais código = menos risco); positivo indica que, no modelo
+        multivariado, a variável inverteu — em geral por correlação com outra
+        variável. Vazio se não há ordinais no modelo ou o algoritmo não é linear."""
+        cols = ["variavel", "coef", "sinal_ok"]
+        ords = self.scorecard_ordinal_features(self.model_features or [])
+        if (not ords or self.model is None or self.two_stage
+                or self.algorithm not in ("logistica", "linear")
+                or not hasattr(self.model, "named_steps")):
+            return pd.DataFrame(columns=cols)
+        est = self.model.named_steps["est"]
+        pre = self.model.named_steps.get("pre")
+        coef = np.ravel(np.asarray(getattr(est, "coef_", []), dtype="float64"))
+        try:
+            nomes = list(pre.get_feature_names_out())
+        except Exception:                           # noqa: BLE001 — sem nomes, sem checagem
+            return pd.DataFrame(columns=cols)
+        rows = []
+        for nm, c in zip(nomes, coef):
+            base = nm[len("ord__"):] if nm.startswith("ord__") else nm
+            if base.startswith("ord(") and base.endswith(")"):
+                f = base[4:-1]
+                rows.append({"variavel": f, "coef": round(float(c), 6),
+                             "sinal_ok": bool(c < 0)})
+        return pd.DataFrame(rows, columns=cols)
+
+    def _avisa_sinal_scorecard(self) -> None:
+        """Pós-treino: avisa as ordinais de scorecard que ficaram com coeficiente
+        ≥ 0 (o scorecard exige todos negativos)."""
+        chk = self.scorecard_sign_check()
+        ruins = chk[~chk["sinal_ok"]] if not chk.empty else chk
+        if ruins.empty:
+            return
+        lista = ", ".join(f"{self.label(r.variavel)} (coef {r.coef:+.4f})"
+                          for r in ruins.itertuples())
+        warnings.warn(
+            f"Scorecard: {len(ruins)} variável(is) ordinal(is) com coeficiente ≥ 0 — "
+            f"{lista}. Com pior faixa = 0 o esperado é negativo; isso costuma vir de "
+            "correlação com outra variável do modelo. Revise: funda faixas, retire a "
+            "variável correlacionada ou a própria variável.")
 
     def model_coefficients(self, use_labels=True) -> pd.DataFrame:
         """Coeficientes do modelo **linear/logístico** ajustado: ``termo``, ``coef``
@@ -5941,11 +6089,11 @@ class ModelSegmenter:
         ``x``). Casa pelo prefixo mais longo em ``model_features`` — desambigua
         nomes de variáveis que contêm ``_`` (ex.: ``uf`` vs ``uf_regiao``)."""
         raw = str(name)
-        for p in ("num__", "cat__"):
+        for p in ("num__", "cat__", "ord__"):
             if raw.startswith(p):
                 raw = raw[len(p):]
                 break
-        for w in ("WoE", "bin"):
+        for w in ("WoE", "bin", "ord"):
             if raw.startswith(f"{w}(") and raw.endswith(")"):
                 raw = raw[len(w) + 1:-1]
                 break
