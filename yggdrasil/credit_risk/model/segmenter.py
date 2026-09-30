@@ -742,7 +742,7 @@ class WoeBinEncoder(BaseEstimator, TransformerMixin):
 
     ``prefixes`` (opcional): ``{feature: prefixo}`` que sobrepõe ``name_prefix``
     no nome de saída — ex.: ``ord`` para as variáveis em codificação ordinal de
-    scorecard (ver :meth:`ModelSegmenter.set_scorecard_ordinal`)."""
+    scorecard."""
 
     def __init__(self, encodings=None, features=None, name_prefix="WoE", prefixes=None):
         self.encodings = encodings
@@ -775,6 +775,44 @@ class WoeBinEncoder(BaseEstimator, TransformerMixin):
                 assigned |= m
             out[:, j] = vals
         return out
+
+
+class ScorecardDummyEncoder(BaseEstimator, TransformerMixin):
+    """Dummies de *scorecard*: cada faixa (bins já ajustados na referência) vira
+    uma coluna 0/1, **exceto a referência** (pior faixa), que é omitida — com alvo
+    1 = mau os coeficientes medem o quanto cada faixa é melhor que a pior.
+
+    ``specs``: ``{feature: {"bins": [...], "labels": [...], "ref": int}}``. Valor
+    fora de qualquer faixa (categoria nova) fica 0 em todas = referência (pior),
+    conservador. Nomes de saída: ``"<feature>=<faixa>"``."""
+
+    def __init__(self, specs=None, features=None):
+        self.specs = specs
+        self.features = features
+
+    def fit(self, X, y=None):
+        return self
+
+    def get_feature_names_out(self, input_features=None):
+        nomes = []
+        for f in self.features or []:
+            sp = self.specs[f]
+            nomes += [f"{f}={lbl}" for i, lbl in enumerate(sp["labels"]) if i != sp["ref"]]
+        return np.asarray(nomes, dtype=object)
+
+    def transform(self, X):
+        X = pd.DataFrame(X).reset_index(drop=True)
+        cols = []
+        for f in self.features or []:
+            sp = self.specs[f]
+            feito = np.zeros(len(X), dtype=bool)
+            for i, m in enumerate(_bin_masks(X[f], sp["bins"])):
+                m = m & ~feito                       # 1ª faixa que casa (como no WoE)
+                feito |= m
+                if i != sp["ref"]:
+                    cols.append(m.astype("float64"))
+        return (np.column_stack(cols) if cols
+                else np.empty((len(X), 0), dtype="float64"))
 
 
 class _TwoStageModel:
@@ -1202,6 +1240,13 @@ class ModelSegmenter:
         fit = self._frame(sample, cols=[feature, self.target])
         kind = self._detect_kind(feature, fit)
 
+        if splits is None:
+            # binária (2 níveis): um nível por faixa, sem optbinning — o mínimo de
+            # 5% por faixa apagava o IV das flags raras (ver _bins_binaria)
+            binaria = self._bins_binaria(feature, fit, kind)
+            if binaria is not None:
+                return binaria, kind
+
         if kind == "num":
             if splits is not None:
                 lo, hi = fit[feature].min(), fit[feature].max()
@@ -1264,6 +1309,59 @@ class ModelSegmenter:
         if bins and na_present:
             bins.append({"kind": "na"})
         return self._aplica_destino_na(feature, bins, fit, splits is not None), kind
+
+    # níveis da flag abaixo destes limites deixam o IV instável (aviso, não bloqueio)
+    _BINARIA_MIN_SHARE = 0.01
+    _BINARIA_MIN_EVENTOS = 30
+
+    def _bins_binaria(self, feature, fit, kind):
+        """Bins de uma variável **binária** (exatamente 2 valores distintos fora os
+        faltantes): um nível por faixa, sem optbinning. ``None`` se não for binária.
+
+        O binning ótimo exige ``min_bin_size`` (5%) por faixa; numa flag rara
+        (ex.: "teve restrição" em 3% da base) ele não consegue separar os dois
+        níveis e o IV sai NaN/0 — a variável parecia inútil sendo forte. Aqui cada
+        nível vira a sua faixa (numérica: corte no ponto médio; categórica/bool:
+        um grupo por nível) e os faltantes seguem em faixa própria."""
+        col = fit[feature]
+        obs = col.dropna()
+        if kind == "num":
+            vals = np.unique(obs.to_numpy(dtype="float64"))
+            if vals.size != 2:
+                return None
+            bins = [{"kind": "num", "lo": -np.inf, "hi": float(vals.mean())},
+                    {"kind": "num", "lo": float(vals.mean()), "hi": np.inf}]
+        else:
+            niveis = sorted({str(v) for v in obs} - {"nan", "NaN", "<NA>", "None"})
+            if len(niveis) != 2:
+                return None
+            bins = [{"kind": "cat", "cats": [v]} for v in niveis]
+        if col.isna().any():
+            bins.append({"kind": "na"})
+        self._avisa_binaria_rara(feature, fit, bins)
+        return bins
+
+    def _avisa_binaria_rara(self, feature, fit, bins) -> None:
+        """Avisa quando o nível minoritário da flag é pequeno demais para um IV
+        estável (share < 1% ou, na classificação, < 30 eventos)."""
+        y = fit[self.target].to_numpy(dtype="float64")
+        tot = int(np.sum(~np.isnan(y)))
+        if not tot:
+            return
+        fracos = []
+        for b, m in zip(bins[:2], _bin_masks(fit[feature], bins[:2])):
+            yi = y[m]
+            yi = yi[~np.isnan(yi)]
+            share = len(yi) / tot
+            eventos = int((yi == 1).sum()) if self.task_type == "classification" else None
+            if share < self._BINARIA_MIN_SHARE or (
+                    eventos is not None and eventos < self._BINARIA_MIN_EVENTOS):
+                txt = f"{self._bin_label(feature, b)}: {100 * share:.2f}% da base"
+                fracos.append(txt + (f", {eventos} eventos" if eventos is not None else ""))
+        if fracos:
+            warnings.warn(
+                f"'{self.label(feature)}' é binária com nível raro ({'; '.join(fracos)}) — "
+                "o IV é calculado nível a nível, mas fica instável com tão poucos casos.")
 
     def _aplica_destino_na(self, feature, bins, fit, manual) -> list:
         """Categorização manual: move os faltantes para a faixa escolhida em
@@ -2004,6 +2102,11 @@ class ModelSegmenter:
         fit = self._frame(sample, cols=[feature, self.target])
         if self._detect_kind(feature, fit) != "num":
             return []
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")      # o aviso de nível raro já sai no ranking
+            binaria = self._bins_binaria(feature, fit, "num")
+        if binaria is not None:
+            return binaria
         x = fit[feature].to_numpy(dtype="float64")
         y = fit[self.target].to_numpy(dtype="float64")
         ok = ~np.isnan(y)
@@ -2406,7 +2509,8 @@ class ModelSegmenter:
             meta["splits"] = splits
         else:
             meta.pop("splits", None)
-            meta.pop("ordinal_scorecard", None)   # a ordinal só existe sobre bins manuais
+            meta.pop("ordinal_scorecard", None)   # dummies/ordinal só existem sobre bins manuais
+            meta.pop("scorecard_dummies", None)
             meta.pop("na_destino", None)          # idem o destino dos faltantes
         self._invalidate_bins(feature)   # só ESTA variável re-bina; demais ficam quentes
         if splits and missing is not None:
@@ -2420,6 +2524,7 @@ class ModelSegmenter:
         meta = self.var_meta.get(feature, {})
         meta.pop("splits", None)
         meta.pop("ordinal_scorecard", None)
+        meta.pop("scorecard_dummies", None)
         meta.pop("na_destino", None)
         self._invalidate_bins(feature)   # só ESTA variável volta ao ótimo
         return self
@@ -2498,49 +2603,51 @@ class ModelSegmenter:
         return {"n": n, "pct": (n / tot if tot else float("nan")), "taxa": taxa,
                 "destino": self.missing_bin(feature), "faixa": faixa}
 
-    # ---- codificação ordinal de scorecard (só categorização manual) ----
-    def set_scorecard_ordinal(self, feature, ativo=True):
-        """Liga (ou desliga) a **codificação ordinal de scorecard** na variável.
+    # ---- dummies de scorecard (só categorização manual) ----
+    def set_scorecard_dummies(self, feature, ativo=True):
+        """Liga (ou desliga) as **dummies de scorecard** na variável.
 
-        Cada faixa manual vira um código inteiro ordenado pelo **risco** da faixa
-        na referência (DES): a **pior faixa = 0**, a seguinte 1, ... até a melhor
-        (maior código = menor risco). Com alvo 1 = mau (PD), a logística ganha um
-        único coeficiente **negativo** por variável — padrão de *scorecard*: a
-        pior faixa vale 0 pontos e as demais somam pontos. Vale nos dois
-        ``transform`` (``raw`` e ``woe``) e aparece como ``ord(variável)`` nos
-        coeficientes.
+        Cada faixa manual vira uma coluna 0/1, e a **pior faixa** (maior risco
+        na referência/DES) é a **referência** — a coluna omitida. Com alvo 1 = mau
+        (PD), cada coeficiente mede o quanto a faixa é melhor que a pior e sai
+        **negativo**: no scorecard a pior faixa vale 0 pontos e as demais somam
+        pontos. Vale nos dois ``transform`` (``raw`` e ``woe``); os termos aparecem
+        como ``variável = faixa`` nos coeficientes.
 
-        Só para variáveis com **bins manuais** (:meth:`set_manual_bins`): a
-        ordem precisa vir de faixas escolhidas por você. Limpar os bins manuais
-        desliga a opção. A ordem das faixas é recalculada a cada treino."""
+        Só para variáveis com **bins manuais** (:meth:`set_manual_bins`). Limpar
+        os bins manuais desliga a opção. A pior faixa é recalculada a cada treino;
+        valor fora das faixas (categoria nova) cai na referência (0 em todas)."""
         if feature not in self.candidates:
             raise ValueError(f"'{feature}' não é variável candidata.")
         meta = self.var_meta.setdefault(feature, {})
+        meta.pop("ordinal_scorecard", None)            # chave da 0.0.14 (ordinal)
         if ativo:
             if not self.manual_bins(feature):
                 raise ValueError(
-                    f"'{self.label(feature)}' não tem categorização manual — a "
-                    "codificação ordinal de scorecard só vale sobre bins manuais "
+                    f"'{self.label(feature)}' não tem categorização manual — as "
+                    "dummies de scorecard só valem sobre bins manuais "
                     "(defina-os com set_manual_bins / modo Manual da aba Análise).")
-            meta["ordinal_scorecard"] = True
+            meta["scorecard_dummies"] = True
         else:
-            meta.pop("ordinal_scorecard", None)
+            meta.pop("scorecard_dummies", None)
         return self
 
-    def scorecard_ordinal(self, feature) -> bool:
-        """``True`` se a variável entra no modelo em codificação ordinal de scorecard."""
-        return bool(self.var_meta.get(feature, {}).get("ordinal_scorecard")
+    def scorecard_dummies(self, feature) -> bool:
+        """``True`` se a variável entra no modelo como dummies de scorecard.
+        (Aceita a chave ``ordinal_scorecard`` de modelos salvos na 0.0.14.)"""
+        meta = self.var_meta.get(feature, {})
+        return bool((meta.get("scorecard_dummies") or meta.get("ordinal_scorecard"))
                     and self.manual_bins(feature))
 
-    def scorecard_ordinal_features(self, features=None) -> list:
-        """Variáveis (de ``features`` ou das candidatas) em codificação ordinal."""
+    def scorecard_dummy_features(self, features=None) -> list:
+        """Variáveis (de ``features`` ou das candidatas) com dummies de scorecard."""
         feats = list(features) if features is not None else list(self.candidates)
-        return [f for f in feats if self.scorecard_ordinal(f)]
+        return [f for f in feats if self.scorecard_dummies(f)]
 
-    def _ordinal_faixas(self, feature) -> list:
-        """``[(bin, risco, n, codigo), ...]`` na ordem das faixas: código 0 = maior
-        risco na referência. Faixa sem observação na referência (risco NaN) vai
-        para o código 0 — conservador: sem evidência, trata como a pior."""
+    def _faixas_por_risco(self, feature) -> list:
+        """``[(bin, risco, n, ordem), ...]`` na ordem das faixas: ordem 0 = maior
+        risco na referência (a referência das dummies). Faixa sem observação na
+        referência (risco NaN) vai para o topo — conservador."""
         ref = self._frame(self.ref_sample, cols=[feature, self.target])
         bins, _kind = self._resolve_bins(feature, sample=self.ref_sample)
         y_all = ref[self.target].to_numpy(dtype="float64")
@@ -2551,31 +2658,51 @@ class ModelSegmenter:
         # pior primeiro: NaN (-inf na chave) empata no topo; empate mantém a ordem
         ordem = sorted(range(len(bins)),
                        key=lambda i: -(riscos[i] if np.isfinite(riscos[i]) else np.inf))
-        codigo = {i: c for c, i in enumerate(ordem)}
-        return [(bins[i], riscos[i], ns[i], codigo[i]) for i in range(len(bins))]
+        pos = {i: c for c, i in enumerate(ordem)}
+        return [(bins[i], riscos[i], ns[i], pos[i]) for i in range(len(bins))]
 
-    def _ordinal_encoding(self, feature) -> dict:
-        """Especificação p/ o :class:`WoeBinEncoder`: cada faixa → seu código
-        ordinal (pior = 0). Valor fora das faixas vistas (categoria nova,
-        faltante sem faixa própria) recebe 0 — a pior faixa, conservador."""
-        _bins, kind = self._resolve_bins(feature, sample=self.ref_sample)
-        faixas = self._ordinal_faixas(feature)
-        return {"kind": kind, "bins": [(b, float(c)) for b, _r, _n, c in faixas],
-                "fallback": 0.0}
+    def _dummy_spec(self, feature) -> dict:
+        """Especificação p/ o :class:`ScorecardDummyEncoder`: faixas, rótulos e o
+        índice da referência (pior faixa)."""
+        faixas = self._faixas_por_risco(feature)
+        return {"bins": [b for b, _r, _n, _o in faixas],
+                "labels": [self._bin_label(feature, b) for b, _r, _n, _o in faixas],
+                "ref": next(i for i, (_b, _r, _n, o) in enumerate(faixas) if o == 0)}
 
-    def scorecard_ordinal_table(self, feature) -> pd.DataFrame:
-        """Tabela da codificação ordinal da variável: ``faixa``, ``n`` e ``risco``
-        na referência e o ``codigo`` que entra no modelo (0 = pior faixa),
-        ordenada do pior para o melhor."""
+    def scorecard_table(self, feature) -> pd.DataFrame:
+        """Tabela das dummies de scorecard da variável: ``faixa``, ``n`` e risco na
+        referência e o ``papel`` no modelo (``referência`` = pior faixa, omitida;
+        ``dummy`` = coluna 0/1), ordenada da pior para a melhor faixa."""
         if not self.manual_bins(feature):
             raise ValueError(f"'{self.label(feature)}' não tem categorização manual.")
         col_risco = "taxa_maus" if self.task_type == "classification" else "alvo_medio"
         rows = [{"faixa": self._bin_label(feature, b), "n": n,
                  col_risco: (round(float(r), 6) if np.isfinite(r) else np.nan),
-                 "codigo": int(c)}
-                for b, r, n, c in self._ordinal_faixas(feature)]
-        return (pd.DataFrame(rows, columns=["faixa", "n", col_risco, "codigo"])
-                .sort_values("codigo").reset_index(drop=True))
+                 "papel": "referência" if o == 0 else "dummy", "_o": o}
+                for b, r, n, o in self._faixas_por_risco(feature)]
+        return (pd.DataFrame(rows).sort_values("_o").drop(columns="_o")
+                .reset_index(drop=True))
+
+    # aliases da 0.0.14 (codificação ORDINAL, substituída pelas dummies)
+    def set_scorecard_ordinal(self, feature, ativo=True):
+        """Descontinuado: use :meth:`set_scorecard_dummies` (a opção de scorecard
+        agora gera dummies com a pior faixa como referência)."""
+        warnings.warn("set_scorecard_ordinal foi substituído por set_scorecard_dummies "
+                      "(dummies com a pior faixa como referência).", DeprecationWarning,
+                      stacklevel=2)
+        return self.set_scorecard_dummies(feature, ativo)
+
+    def scorecard_ordinal(self, feature) -> bool:
+        """Descontinuado: use :meth:`scorecard_dummies`."""
+        return self.scorecard_dummies(feature)
+
+    def scorecard_ordinal_features(self, features=None) -> list:
+        """Descontinuado: use :meth:`scorecard_dummy_features`."""
+        return self.scorecard_dummy_features(features)
+
+    def scorecard_ordinal_table(self, feature) -> pd.DataFrame:
+        """Descontinuado: use :meth:`scorecard_table`."""
+        return self.scorecard_table(feature)
 
     def manual_bins(self, feature):
         """Bins manuais da variável (cortes ou grupos), ou ``None`` se ótimo."""
@@ -3050,9 +3177,9 @@ class ModelSegmenter:
         from sklearn.impute import SimpleImputer
         from sklearn.pipeline import Pipeline
 
-        # ordinal de scorecard: bloco próprio (código da faixa, pior = 0), fora do
-        # num/cat — vem depois deles, então as posições de num/cat não mudam
-        ordinais = self.scorecard_ordinal_features(features)
+        # dummies de scorecard: bloco próprio (0/1 por faixa, pior = referência),
+        # fora do num/cat — vem depois deles, então as posições de num/cat não mudam
+        ordinais = self.scorecard_dummy_features(features)
         num = [f for f in features if self._detect_kind(f) == "num" and f not in ordinais]
         cat = [f for f in features if self._detect_kind(f) == "cat" and f not in ordinais]
         transformers = []
@@ -3063,9 +3190,9 @@ class ModelSegmenter:
                                  ("ohe", _make_ohe())])
             transformers.append(("cat", cat_pipe, cat))
         if ordinais:
-            enc = WoeBinEncoder(encodings={f: self._ordinal_encoding(f) for f in ordinais},
-                                features=list(ordinais), name_prefix="ord")
-            transformers.append(("ord", enc, list(ordinais)))
+            enc = ScorecardDummyEncoder(specs={f: self._dummy_spec(f) for f in ordinais},
+                                        features=list(ordinais))
+            transformers.append(("dum", enc, list(ordinais)))
         return ColumnTransformer(transformers, remainder="drop")
 
     def _check_design_memory(self, X, features) -> None:
@@ -3079,7 +3206,7 @@ class ModelSegmenter:
         quando não cabe na memória livre, levanta ``MemoryError`` nomeando as
         variáveis responsáveis. No-op quando não há categórica ou quando a
         memória livre não é mensurável."""
-        ordinais = set(self.scorecard_ordinal_features(features))
+        ordinais = set(self.scorecard_dummy_features(features))
         cat = [f for f in features if self._detect_kind(f) == "cat" and f not in ordinais]
         if not cat or any(isinstance(X[f], pd.DataFrame) for f in cat):
             return      # nome repetido no df: o sklearn recusa com mensagem clara
@@ -3117,15 +3244,20 @@ class ModelSegmenter:
                                class_counts=class_counts)
         if transform == "woe":
             # variáveis transformadas no estilo scorecard (binagem + WoE/risco do bin);
-            # as marcadas como ordinal de scorecard entram pelo código da faixa
-            ordinais = set(self.scorecard_ordinal_features(features))
-            encodings = {f: (self._ordinal_encoding(f) if f in ordinais
-                             else self._bin_encoding(f)) for f in features}
+            # as marcadas com dummies de scorecard entram como 0/1 por faixa
+            dums = self.scorecard_dummy_features(features)
+            resto = [f for f in features if f not in dums]
             prefix = "WoE" if task == "classification" else "bin"
-            pre = WoeBinEncoder(encodings=encodings, features=list(features),
-                                name_prefix=prefix,
-                                prefixes={f: "ord" for f in ordinais} or None)
-            return Pipeline([("pre", pre), ("est", est)])
+            woe = WoeBinEncoder(encodings={f: self._bin_encoding(f) for f in resto},
+                                features=resto, name_prefix=prefix)
+            if not dums:
+                return Pipeline([("pre", woe), ("est", est)])
+            from sklearn.compose import ColumnTransformer
+            blocos = [("woe", woe, resto)] if resto else []
+            blocos.append(("dum", ScorecardDummyEncoder(
+                specs={f: self._dummy_spec(f) for f in dums}, features=dums), dums))
+            return Pipeline([("pre", ColumnTransformer(blocos, remainder="drop")),
+                             ("est", est)])
 
         return Pipeline([("pre", self._build_raw_preprocessor(features)), ("est", est)])
 
@@ -4102,10 +4234,15 @@ class ModelSegmenter:
         """Nome de exibição de UM termo do desenho/SHAP: remove o prefixo
         ``num__``/``cat__``, desembrulha ``WoE(...)``/``bin(...)`` e aplica o alias
         de ``feature_labels`` quando houver — mesma convenção da fórmula."""
-        for p in ("num__", "cat__", "ord__"):
+        dummy = nm.startswith("dum__")
+        for p in ("num__", "cat__", "ord__", "woe__", "dum__"):
             if nm.startswith(p):
                 nm = nm[len(p):]
                 break
+        if dummy and "=" in nm:                 # dummy de scorecard: 'var=faixa'
+            f, faixa = nm.split("=", 1)
+            lbl = self.feature_labels.get(f, f) if use_labels else f
+            return f"{lbl} = {faixa}"
         # termos transformados vêm como 'WoE(feat)'/'bin(feat)'/'ord(feat)':
         # rotula o miolo
         wrap = None
@@ -4152,15 +4289,15 @@ class ModelSegmenter:
                 else "." if p < 0.10 else "n.s.")
 
     def scorecard_sign_check(self) -> pd.DataFrame:
-        """Sinal dos coeficientes das variáveis em **codificação ordinal de
-        scorecard** no modelo linear/logístico ajustado: ``variavel``, ``coef`` e
-        ``sinal_ok`` (``coef < 0``). Com pior faixa = 0, o esperado é coeficiente
-        NEGATIVO (mais código = menos risco); positivo indica que, no modelo
-        multivariado, a variável inverteu — em geral por correlação com outra
-        variável. Vazio se não há ordinais no modelo ou o algoritmo não é linear."""
-        cols = ["variavel", "coef", "sinal_ok"]
-        ords = self.scorecard_ordinal_features(self.model_features or [])
-        if (not ords or self.model is None or self.two_stage
+        """Sinal dos coeficientes das **dummies de scorecard** no modelo
+        linear/logístico ajustado: ``variavel``, ``faixa``, ``coef`` e ``sinal_ok``
+        (``coef < 0``). Com a pior faixa como referência, toda dummy deve sair
+        NEGATIVA (faixa melhor que a pior); positiva indica que, no multivariado,
+        a faixa inverteu — em geral por correlação com outra variável. Vazio se
+        não há dummies de scorecard no modelo ou o algoritmo não é linear."""
+        cols = ["variavel", "faixa", "coef", "sinal_ok"]
+        dums = self.scorecard_dummy_features(self.model_features or [])
+        if (not dums or self.model is None or self.two_stage
                 or self.algorithm not in ("logistica", "linear")
                 or not hasattr(self.model, "named_steps")):
             return pd.DataFrame(columns=cols)
@@ -4173,27 +4310,26 @@ class ModelSegmenter:
             return pd.DataFrame(columns=cols)
         rows = []
         for nm, c in zip(nomes, coef):
-            base = nm[len("ord__"):] if nm.startswith("ord__") else nm
-            if base.startswith("ord(") and base.endswith(")"):
-                f = base[4:-1]
-                rows.append({"variavel": f, "coef": round(float(c), 6),
+            if nm.startswith("dum__") and "=" in nm:
+                f, faixa = nm[len("dum__"):].split("=", 1)
+                rows.append({"variavel": f, "faixa": faixa, "coef": round(float(c), 6),
                              "sinal_ok": bool(c < 0)})
         return pd.DataFrame(rows, columns=cols)
 
     def _avisa_sinal_scorecard(self) -> None:
-        """Pós-treino: avisa as ordinais de scorecard que ficaram com coeficiente
-        ≥ 0 (o scorecard exige todos negativos)."""
+        """Pós-treino: avisa as dummies de scorecard que ficaram com coeficiente
+        ≥ 0 (o scorecard exige todas negativas)."""
         chk = self.scorecard_sign_check()
         ruins = chk[~chk["sinal_ok"]] if not chk.empty else chk
         if ruins.empty:
             return
-        lista = ", ".join(f"{self.label(r.variavel)} (coef {r.coef:+.4f})"
+        lista = ", ".join(f"{self.label(r.variavel)} = {r.faixa} (coef {r.coef:+.4f})"
                           for r in ruins.itertuples())
         warnings.warn(
-            f"Scorecard: {len(ruins)} variável(is) ordinal(is) com coeficiente ≥ 0 — "
-            f"{lista}. Com pior faixa = 0 o esperado é negativo; isso costuma vir de "
-            "correlação com outra variável do modelo. Revise: funda faixas, retire a "
-            "variável correlacionada ou a própria variável.")
+            f"Scorecard: {len(ruins)} dummy(ies) com coeficiente ≥ 0 — {lista}. Com a "
+            "pior faixa como referência o esperado é negativo; isso costuma vir de "
+            "correlação com outra variável do modelo ou de faixas com risco parecido. "
+            "Revise: funda faixas, retire a variável correlacionada ou a própria variável.")
 
     def model_coefficients(self, use_labels=True) -> pd.DataFrame:
         """Coeficientes do modelo **linear/logístico** ajustado: ``termo``, ``coef``
@@ -6210,10 +6346,13 @@ class ModelSegmenter:
         ``x``). Casa pelo prefixo mais longo em ``model_features`` — desambigua
         nomes de variáveis que contêm ``_`` (ex.: ``uf`` vs ``uf_regiao``)."""
         raw = str(name)
-        for p in ("num__", "cat__", "ord__"):
+        dummy = raw.startswith("dum__")
+        for p in ("num__", "cat__", "ord__", "woe__", "dum__"):
             if raw.startswith(p):
                 raw = raw[len(p):]
                 break
+        if dummy and "=" in raw:                 # dummy de scorecard: 'var=faixa'
+            return raw.split("=", 1)[0]
         for w in ("WoE", "bin", "ord"):
             if raw.startswith(f"{w}(") and raw.endswith(")"):
                 raw = raw[len(w) + 1:-1]
@@ -8012,6 +8151,159 @@ class ModelSegmenter:
             out[f"{f}{suffix}"] = self._labels_from_bins(X[f], bins, f)
         return pd.DataFrame(out, index=X.index)
 
+    # ---- categorização como SQL ----
+    def _sql_cond(self, col, b, is_bool=False) -> str:
+        """Condição SQL de UM bin sobre a coluna ``col`` — mesma regra das máscaras
+        Python: numérica ``(lo, hi]``, grupo categórico por igualdade de texto,
+        faltante ``IS NULL`` e ``include_na`` (faltantes alocados na faixa)."""
+        def _n(v):
+            return repr(float(v))
+        if b["kind"] == "na":
+            return f"{col} IS NULL"
+        if b["kind"] == "num":
+            partes = []
+            if np.isfinite(b["lo"]):
+                partes.append(f"{col} > {_n(b['lo'])}")
+            if np.isfinite(b["hi"]):
+                partes.append(f"{col} <= {_n(b['hi'])}")
+            cond = " AND ".join(partes) if partes else f"{col} IS NOT NULL"
+        elif is_bool:
+            vals = sorted({c for c in b["cats"] if c in ("True", "False")})
+            cond = (f"{col} = {vals[0].upper()}" if len(vals) == 1
+                    else f"{col} IS NOT NULL")
+        else:
+            lits = ", ".join("'" + str(c).replace("'", "''") + "'" for c in b["cats"])
+            cond = f"{col} IN ({lits})"
+        if b.get("include_na"):
+            cond = f"({cond} OR {col} IS NULL)"
+        return cond
+
+    def categorization_sql(self, features=None, table: str = "minha_tabela",
+                           woe=None, suffix_faixa: str = "_faixa",
+                           suffix_woe: str = "_woe") -> str:
+        """Gera SQL (``CASE WHEN``) que reproduz a **categorização das variáveis**
+        — faixas numéricas, grupos categóricos, faltantes (inclusive alocados numa
+        faixa), dummies de scorecard e variáveis derivadas — para rodar direto no
+        banco/Databricks. Pronto p/ copiar.
+
+        Por variável sai:
+
+        * ``<var><suffix_faixa>``: rótulo da faixa (``(lo, hi]``, ``{A, B}``,
+          ``(faltante)``; valor fora das faixas = ``'(outros)'``, NULL sem faixa
+          própria = NULL — igual a :meth:`recreate_categories`);
+        * ``<var><suffix_woe>``: o WoE da faixa (classificação) ou o risco médio da
+          faixa (regressão), quando ``woe=True`` (padrão: se o modelo usa
+          ``transform='woe'``) e a variável não é dummy de scorecard;
+        * dummies de scorecard: uma coluna 0/1 por faixa (``<var>=<faixa>`` do
+          modelo, aqui ``<var>__d<k>`` — dois ``_`` p/ não colidir com as variáveis
+          de :meth:`create_scorecard_dummies`), sem a pior faixa (referência);
+        * variáveis derivadas (:meth:`create_categorical` /
+          :meth:`create_scorecard_dummies`): recriadas a partir da variável de origem.
+
+        ``features`` padrão: as variáveis do modelo (ou as selecionadas, antes do
+        treino). As faixas são as da referência (manuais ou ótimas), com os
+        valores de WoE/risco aprendidos nela."""
+        feats = (list(features) if features is not None
+                 else (list(self.model_features) or self.selected_features()
+                       or list(self.candidates)))
+        if woe is None:
+            woe = (self.feature_transform == "woe" and self.model is not None)
+        dums = set(self.scorecard_dummy_features(feats))
+        linhas, avisos = [], []
+        for f in feats:
+            meta = self.var_meta.get(f, {})
+            src = meta.get("derived_from")
+            if src:                                          # derivada → sai da origem
+                col = src
+                bins = meta.get("derived_bins") or []
+                is_bool = src in self.df.columns and pd.api.types.is_bool_dtype(self.df[src])
+                if meta.get("derived_dummy"):
+                    expr = f"CASE WHEN {self._sql_cond(col, bins[0], is_bool)} THEN 1 ELSE 0 END"
+                    linhas.append(f"  -- {self.label(f)} (dummy de '{src}'; referência = "
+                                  f"{meta.get('dummy_ref', '—')})")
+                    linhas.append(f"  {expr} AS {f},")
+                else:
+                    expr = self._sql_label_expr(col, bins, is_bool)
+                    linhas += self._sql_case_labels(f, col, bins, f, is_bool,
+                                                    comentario=f"derivada de '{src}'")
+                if woe and f in (self.model_features or []):
+                    # o modelo usa o WoE da derivada: sai da expressão sobre a origem
+                    linhas += self._sql_case_woe(f, f"({expr})", False, f"{f}{suffix_woe}")
+                continue
+            if f not in self.df.columns:
+                avisos.append(f"-- '{f}' ignorada: não está no DataFrame.")
+                continue
+            bins, _kind = self._resolve_bins(f, sample=self.ref_sample)
+            if not bins:
+                avisos.append(f"-- '{f}' ignorada: sem faixas (binning não separou níveis).")
+                continue
+            is_bool = pd.api.types.is_bool_dtype(self.df[f])
+            origem = "manual" if self.manual_bins(f) else "binning ótimo"
+            linhas += self._sql_case_labels(f, f, bins, f"{f}{suffix_faixa}", is_bool,
+                                            comentario=origem)
+            if f in dums:
+                spec = self._dummy_spec(f)
+                linhas.append(f"  -- dummies de scorecard de {self.label(f)} · referência "
+                              f"(omitida, 0 pts) = {spec['labels'][spec['ref']]}")
+                for k, (b, lbl) in enumerate(zip(spec["bins"], spec["labels"])):
+                    if k == spec["ref"]:
+                        continue
+                    linhas.append(f"  CASE WHEN {self._sql_cond(f, b, is_bool)} THEN 1 "
+                                  f"ELSE 0 END AS {f}__d{k + 1},  -- {lbl}")
+            elif woe:
+                linhas += self._sql_case_woe(f, f, is_bool, f"{f}{suffix_woe}")
+        # a última expressão do SELECT não leva vírgula
+        corpo = self._sql_tira_virgula_final("\n".join(linhas).rstrip())
+        cab = [f"-- Categorização das variáveis ({self.task_type}) gerada por ModelSegmenter",
+               f"-- faixas ajustadas na amostra '{self.ref_sample}' · numéricas (lo, hi] · "
+               "a 1ª faixa que casa vence (mesma regra do Python)",
+               "-- valor fora das faixas: '(outros)' no rótulo, WoE neutro/risco médio no "
+               "WoE, 0 nas dummies (= referência)"]
+        return "\n".join(cab + avisos + ["SELECT", "  *,", corpo, f"FROM {table};"])
+
+    def _sql_case_woe(self, f, col, is_bool, alias) -> list:
+        """``CASE`` do WoE (classificação) / risco médio (regressão) da faixa de
+        ``f`` sobre a expressão ``col`` — os mesmos valores do :class:`WoeBinEncoder`."""
+        enc = self._bin_encoding(f)
+        nome = "WoE" if self.task_type == "classification" else "risco médio"
+        linhas = [f"  CASE  -- {nome} da faixa ({self.label(f)})"]
+        for b, v in enc["bins"]:
+            linhas.append(f"    WHEN {self._sql_cond(col, b, is_bool)} THEN {v!r}"
+                          f"  -- {self._bin_label(f, b)}")
+        linhas.append(f"    ELSE {float(enc['fallback'])!r}  -- fora das faixas")
+        linhas.append(f"  END AS {alias},")
+        return linhas
+
+    def _sql_label_expr(self, col, bins, is_bool) -> str:
+        """Expressão (uma linha) do rótulo da faixa — p/ embutir em outro CASE."""
+        whens = " ".join(
+            f"WHEN {self._sql_cond(col, b, is_bool)} THEN "
+            f"'{self._bin_label(col, b).replace(chr(39), chr(39) * 2)}'" for b in bins)
+        return f"CASE {whens} WHEN {col} IS NOT NULL THEN '(outros)' ELSE NULL END"
+
+    def _sql_case_labels(self, f, col, bins, alias, is_bool, comentario="") -> list:
+        """``CASE`` do rótulo da faixa (mesma saída de :meth:`_labels_from_bins`)."""
+        linhas = [f"  CASE  -- faixa de {self.label(f)}" + (f" ({comentario})" if comentario else "")]
+        for b in bins:
+            lbl = self._bin_label(col, b).replace("'", "''")
+            linhas.append(f"    WHEN {self._sql_cond(col, b, is_bool)} THEN '{lbl}'")
+        linhas.append(f"    WHEN {col} IS NOT NULL THEN '(outros)'")
+        linhas.append("    ELSE NULL")
+        linhas.append(f"  END AS {alias},")
+        return linhas
+
+    @staticmethod
+    def _sql_tira_virgula_final(corpo: str) -> str:
+        """Remove a vírgula da ÚLTIMA expressão do SELECT (preserva comentário)."""
+        linhas = corpo.split("\n")
+        for i in range(len(linhas) - 1, -1, -1):
+            ln = linhas[i]
+            codigo, sep, com = ln.partition("  --")
+            if codigo.rstrip().endswith(","):
+                linhas[i] = codigo.rstrip()[:-1] + (sep + com if sep else "")
+                break
+        return "\n".join(linhas)
+
     def create_categorical(self, feature, new_name=None) -> str:
         """Materializa a binagem atual de ``feature`` (faixas numéricas ou grupos
         categóricos — **manuais** quando definidos, senão o **ótimo**) como uma NOVA
@@ -8021,25 +8313,75 @@ class ModelSegmenter:
 
         A derivação fica registrada (origem + bins), então a variável é **recriada
         automaticamente** ao escorar uma base que tenha só as variáveis originais.
-        Devolve o nome da nova variável."""
+        Devolve o nome da nova variável. Para as dummies de scorecard (uma coluna
+        0/1 por faixa, pior faixa como referência) use
+        :meth:`create_scorecard_dummies`."""
         if feature not in self.df.columns:
             raise ValueError(f"'{feature}' não está no DataFrame.")
         bins, kind = self._resolve_bins(feature, sample=self.ref_sample)
         if not bins:
             raise ValueError(f"Sem bins para '{feature}'. Defina cortes/grupos (ou rode o "
                              "binning ótimo) antes de criar a variável.")
-        name = new_name or f"{feature}_cat"
-        base, k = name, 2
-        while name in self.df.columns:
-            name = f"{base}_{k}"; k += 1
-        self.df[name] = self._labels_from_bins(self.df[feature], bins, feature).to_numpy()
+        name = self._nome_livre(new_name or f"{feature}_cat")
+        meta = {"categoria": None, "derived_from": feature,
+                "derived_kind": kind, "derived_bins": bins}
+        self.df[name] = self._derived_values(self.df[feature], meta, feature)
         if name not in self.candidates:
             self.candidates.append(name)
-        self.var_meta[name] = {"categoria": None, "derived_from": feature,
-                               "derived_kind": kind, "derived_bins": bins}
+        self.var_meta[name] = meta
         self.feature_labels.setdefault(name, f"{self.label(feature)} (cat.)")
         self._rank_version += 1   # nova candidata → o ranking de IV precisa recalcular
         return name
+
+    def create_scorecard_dummies(self, feature, prefix=None) -> list:
+        """Materializa as **dummies de scorecard** de ``feature`` como variáveis
+        0/1 no DataFrame, candidatas ao modelo: uma por faixa, **exceto a pior**
+        (maior risco na referência), que é a referência — assim, com alvo 1 = mau,
+        cada coeficiente sai negativo. Nomes ``<prefixo>_d<k>`` (``k`` = posição
+        da faixa, 1 = primeira) e rótulo ``"<variável> = <faixa>"``.
+
+        Usa as faixas atuais (manuais, com o destino dos faltantes). Cada dummy é
+        registrada como derivada e **recriada automaticamente** na escoragem.
+        Devolve a lista de nomes criados."""
+        if feature not in self.df.columns:
+            raise ValueError(f"'{feature}' não está no DataFrame.")
+        if not self.manual_bins(feature):
+            raise ValueError(f"'{self.label(feature)}' não tem categorização manual — "
+                             "as dummies de scorecard usam as faixas manuais.")
+        bins, kind = self._resolve_bins(feature, sample=self.ref_sample)
+        spec = self._dummy_spec(feature)
+        base = prefix or feature
+        criadas = []
+        for k, (b, lbl) in enumerate(zip(spec["bins"], spec["labels"])):
+            if k == spec["ref"]:
+                continue
+            name = self._nome_livre(f"{base}_d{k + 1}")
+            meta = {"categoria": None, "derived_from": feature, "derived_kind": kind,
+                    "derived_bins": [b], "derived_dummy": True,
+                    "dummy_ref": spec["labels"][spec["ref"]]}
+            self.df[name] = self._derived_values(self.df[feature], meta, feature)
+            if name not in self.candidates:
+                self.candidates.append(name)
+            self.var_meta[name] = meta
+            self.feature_labels.setdefault(name, f"{self.label(feature)} = {lbl}")
+            criadas.append(name)
+        self._rank_version += 1
+        return criadas
+
+    def _nome_livre(self, name) -> str:
+        """``name`` ou ``name_2``, ``name_3``... — o primeiro livre no DataFrame."""
+        base, k = name, 2
+        while name in self.df.columns:
+            name = f"{base}_{k}"; k += 1
+        return name
+
+    def _derived_values(self, series, meta, src) -> np.ndarray:
+        """Valores de uma variável derivada a partir da origem: rótulo da faixa
+        (``create_categorical``) ou 0/1 da faixa (dummy de scorecard)."""
+        bins = meta.get("derived_bins") or []
+        if meta.get("derived_dummy"):
+            return _bin_masks(series, bins)[0].astype("int64")
+        return self._labels_from_bins(series, bins, src).to_numpy()
 
     def _apply_derived(self, X):
         """Recria, em ``X``, as variáveis derivadas (criadas via
@@ -8055,8 +8397,7 @@ class ModelSegmenter:
             if src not in X.columns:
                 raise ValueError(f"Para recriar a variável derivada '{n}', a tabela "
                                  f"precisa conter a variável de origem '{src}'.")
-            X[n] = self._labels_from_bins(X[src], meta.get("derived_bins") or [],
-                                          src).to_numpy()
+            X[n] = self._derived_values(X[src], meta, src)
         return X
 
     def _rebuild_derived(self):
@@ -8066,8 +8407,7 @@ class ModelSegmenter:
             src = meta.get("derived_from")
             if not src or name in self.df.columns or src not in self.df.columns:
                 continue
-            self.df[name] = self._labels_from_bins(
-                self.df[src], meta.get("derived_bins") or [], src).to_numpy()
+            self.df[name] = self._derived_values(self.df[src], meta, src)
 
     def _score_pandas(self, pdf, col_score="score", col_rating="rating", col_value=None,
                       ruler_sample=None, recreate_categories=None, cat_suffix="_faixa",

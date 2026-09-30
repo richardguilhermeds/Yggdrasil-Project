@@ -95,16 +95,16 @@ def test_limpar_bins_limpa_destino():
 def test_modelo_e_escoragem_seguem_o_destino(transform):
     seg = _seg()
     seg.set_manual_bins("renda", "1500, 3000, 5000", missing=0)
-    seg.set_scorecard_ordinal("renda")
-    tab = seg.scorecard_ordinal_table("renda")
+    seg.set_scorecard_dummies("renda")
+    tab = seg.scorecard_table("renda")
     assert "(-inf, 1500] + faltante" in list(tab["faixa"])
     with contextlib.redirect_stdout(io.StringIO()):
         seg.fit(features=["renda"], transform=transform)
     X = pd.DataFrame({"renda": [np.nan, 100.0, 9000.0]})
     enc = seg.model.named_steps["pre"].transform(X)
-    enc = np.asarray(enc, dtype=float)[:, 0]
-    assert enc[0] == enc[1]                        # NaN codificado como a faixa (-inf, 1500]
-    assert enc[2] != enc[1]
+    enc = np.asarray(enc, dtype=float)
+    assert (enc[0] == enc[1]).all()                # NaN codificado como a faixa (-inf, 1500]
+    assert (enc[2] != enc[1]).any()
 
 
 def test_persistencia_do_destino():
@@ -153,13 +153,13 @@ def test_ui_manual_escolhe_faixa_e_atualiza_tudo(ui):
     assert ui._passo_res.layout.display == ""
     valores = [v for _, v in ui.dd_na_dest.options]
     assert valores[:3] == ["separado", "pior", "melhor"] and valores[3:] == [0, 1, 2, 3]
-    assert "faltantes aqui" in ui.out_ord_table.value            # linha (faltante)
+    assert "faltantes aqui" in ui.out_faixas_table.value            # linha (faltante)
 
     with contextlib.redirect_stdout(io.StringIO()):
         ui.dd_na_dest.value = 3
     assert ui.seg.missing_bin("renda") == 3
     assert "(5000, inf] + faltante" in ui.out_na_info.value
-    assert "(5000, inf] + faltante" in ui.out_ord_table.value
+    assert "(5000, inf] + faltante" in ui.out_faixas_table.value
     assert "(5000, inf] + faltante" in ui.out_an_table.value     # análise re-renderizada
 
     with contextlib.redirect_stdout(io.StringIO()):
@@ -178,4 +178,4 @@ def test_ui_novos_cortes_invalidam_indice(ui):
 
 def test_ui_tabela_nao_troca_virgula_do_rotulo(ui):
     _aplica(ui, "1500, 3000, 5000")
-    assert "(1500, 3000]" in ui.out_ord_table.value
+    assert "(1500, 3000]" in ui.out_faixas_table.value

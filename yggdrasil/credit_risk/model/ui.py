@@ -1223,7 +1223,7 @@ class ModelSegmenterUI:
         atual, alvo = s.var_meta, snap["var_meta"]
         mudadas = {f for f in set(atual) | set(alvo)
                    if any((atual.get(f) or {}).get(k) != (alvo.get(f) or {}).get(k)
-                          for k in ("splits", "derived_from", "derived_bins"))}
+                          for k in ("splits", "derived_from", "derived_bins", "derived_dummy"))}
         # derivadas que não existem no estado alvo saem do DataFrame
         alvo_derivadas = {n for n, m in alvo.items() if m.get("derived_from")}
         for n in [n for n, m in atual.items() if m.get("derived_from")]:
@@ -1607,20 +1607,20 @@ class ModelSegmenterUI:
                                                "variável categórica, candidata ao modelo e recriada "
                                                "ao escorar. Junte categorias na mão como na árvore.")
         self.out_bin_hint = W.HTML()
-        # codificação ordinal de scorecard (só sobre bins manuais): a variável
-        # entra no modelo como código da faixa, pior = 0 → coeficiente negativo
-        self.cb_ordinal = W.Checkbox(
+        # dummies de scorecard (só sobre bins manuais): uma coluna 0/1 por faixa,
+        # pior faixa = referência (omitida) → coeficientes negativos
+        self.cb_scorecard = W.Checkbox(
             value=False, indent=False,
-            description="Ordinal p/ scorecard (pior faixa = 0 → coeficiente negativo)",
+            description="Dummies p/ scorecard (referência = pior faixa → coeficientes negativos)",
             layout=W.Layout(width="auto", display="none"))
-        self.cb_ordinal.tooltip = (
-            "A variável entra no modelo como UM código por faixa, ordenado pelo risco "
-            "na referência: pior faixa = 0, ..., melhor = maior código. Numa PD a "
-            "logística ganha coeficiente negativo e a pior faixa vale 0 pontos no "
+        self.cb_scorecard.tooltip = (
+            "Cada faixa vira uma coluna 0/1 no modelo e a PIOR faixa (maior risco na "
+            "referência) é a referência omitida: numa PD cada coeficiente mede o quanto "
+            "a faixa é melhor que a pior e sai negativo — a pior faixa vale 0 pontos no "
             "scorecard. Só com bins manuais; vale em valores crus e em WoE.")
-        self.cb_ordinal.observe(self._on_toggle_ordinal, names="value")
-        self._ord_syncing = False
-        self.out_ord_table = W.HTML()       # faixas resultantes (+ código ordinal)
+        self.cb_scorecard.observe(self._on_toggle_scorecard, names="value")
+        self._sc_syncing = False
+        self.out_faixas_table = W.HTML()     # faixas resultantes (+ papel no scorecard)
         # faltantes: resumo (n, %, taxa, destino) + seletor do destino (só manual)
         self.out_na_info = W.HTML()
         self.dd_na_dest = W.Dropdown(
@@ -1674,11 +1674,11 @@ class ModelSegmenterUI:
             _passo(2, "Faltantes", "onde os valores vazios são alocados"),
             self.out_na_info, self.dd_na_dest])
         self._passo_na.add_class("mseg-step")
-        # passo 3 — faixas resultantes + ordinal de scorecard (só com bins manuais)
+        # passo 3 — faixas resultantes + dummies de scorecard (só com bins manuais)
         self._passo_res = W.VBox([
             _passo(3, "Faixas resultantes", "o que entra na análise e no modelo"),
-            self.cb_ordinal,          # ordinal de scorecard (só com bins manuais)
-            self.out_ord_table],
+            self.cb_scorecard,        # dummies de scorecard (só com bins manuais)
+            self.out_faixas_table],
             layout=W.Layout(display="none"))
         self._passo_res.add_class("mseg-step")
         passo_nova = W.VBox([W.HBox([self.tx_new_cat, self.btn_create_cat])])
@@ -2611,6 +2611,41 @@ class ModelSegmenterUI:
                    layout=W.Layout(flex_flow="row wrap", align_items="center")),
             self.out_sql,
         ]); card_sql.add_class("mseg-card")
+        # --- categorização das variáveis como SQL (CASE WHEN sobre as colunas cruas) ---
+        self.tx_catsql_table = W.Text(value="minha_tabela", description="tabela:",
+                                      style=_sql_sty, layout=W.Layout(width="30%"))
+        self.dd_catsql_scope = W.Dropdown(
+            options=[("variáveis do modelo", "modelo"), ("variáveis selecionadas", "selecao"),
+                     ("variáveis com bins manuais", "manuais"), ("todas as candidatas", "todas")],
+            value="modelo", description="variáveis:", style=_sql_sty,
+            layout=W.Layout(width="36%"))
+        self.cb_catsql_woe = W.Checkbox(value=True, indent=False,
+                                        description="incluir WoE/risco da faixa")
+        self.btn_catsql = W.Button(description="Gerar SQL da categorização",
+                                   button_style="primary", icon="code",
+                                   layout=W.Layout(width="auto"),
+                                   tooltip="CASE WHEN das faixas de cada variável (manuais ou "
+                                           "ótimas), com faltantes, WoE, dummies de scorecard "
+                                           "e variáveis derivadas")
+        self.out_catsql = W.Textarea(layout=W.Layout(width="99%", height="280px"))
+        self.btn_catsql.on_click(self._on_catsql)
+        card_catsql = W.VBox([
+            W.HTML("<div class='mseg-h'>Exportar a categorização das variáveis como SQL "
+                   "(CASE WHEN)</div>"),
+            W.HTML("<div class='mseg-legend'>Reproduz em SQL a <b>categorização</b> de cada "
+                   "variável sobre as colunas <b>cruas</b> da tabela: a <b>faixa</b> "
+                   "(<code>&lt;var&gt;_faixa</code>, com os faltantes onde você os alocou), o "
+                   "<b>WoE</b> da faixa (<code>&lt;var&gt;_woe</code>) e as <b>dummies de "
+                   "scorecard</b> (<code>&lt;var&gt;__d&lt;k&gt;</code>, sem a pior faixa). "
+                   "Variáveis criadas na aba Análise são recriadas a partir da origem. Mesma "
+                   "regra do Python: numéricas <code>(lo, hi]</code>, 1ª faixa que casa vence, "
+                   "valor fora das faixas = <code>'(outros)'</code>.</div>"),
+            W.HBox([self.tx_catsql_table, self.dd_catsql_scope],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            W.HBox([self.cb_catsql_woe, self.btn_catsql],
+                   layout=W.Layout(flex_flow="row wrap", align_items="center")),
+            self.out_catsql,
+        ]); card_catsql.add_class("mseg-card")
         card_diff = W.VBox([
             W.HTML("<div class='mseg-h'>Comparar com modelo salvo (JSON)</div>"),
             W.HTML("<div class='mseg-legend'>Carrega outro modelo salvo por <b>Salvar</b> "
@@ -2629,6 +2664,7 @@ class ModelSegmenterUI:
                    layout=W.Layout(justify_content="space-between", align_items="stretch")),
             # Cards novos desta versão, ao FIM da aba (SQL da régua e diff de modelo).
             card_sql,
+            card_catsql,
             card_diff,
         ], layout=W.Layout(padding="2px"))
 
@@ -4010,17 +4046,24 @@ class ModelSegmenterUI:
         self._sync_binmode()
         self._render_bin_hint(feat)
 
-    def _sync_ordinal(self, feat):
+    def _sync_scorecard(self, feat):
         """Passos 2 e 3 do card de categorização: faltantes (resumo + destino),
-        checkbox ordinal e a tabela das faixas resultantes."""
+        checkbox das dummies de scorecard e a tabela das faixas resultantes."""
         tem_manual = feat is not None and bool(self.seg.manual_bins(feat))
-        self.cb_ordinal.layout.display = "" if tem_manual else "none"
+        self.cb_scorecard.layout.display = "" if tem_manual else "none"
         self._passo_res.layout.display = "" if tem_manual else "none"
-        self._ord_syncing = True
+        self._sc_syncing = True
         try:
-            self.cb_ordinal.value = bool(tem_manual and self.seg.scorecard_ordinal(feat))
+            self.cb_scorecard.value = bool(tem_manual and self.seg.scorecard_dummies(feat))
         finally:
-            self._ord_syncing = False
+            self._sc_syncing = False
+        # com as dummies ligadas, o botão cria <var>_d1, <var>_d2... (0/1 por faixa)
+        dummies = bool(tem_manual and self.seg.scorecard_dummies(feat))
+        self.btn_create_cat.description = ("Criar variáveis dummy" if dummies
+                                           else "Criar variável categórica")
+        self.tx_new_cat.description = "Prefixo:" if dummies else "Nova variável:"
+        self.tx_new_cat.placeholder = ((feat if dummies else f"{feat}_cat")
+                                       if feat is not None else "nome (opcional)")
         self.out_bin_status.value = (
             self._pill("✎ bins manuais", "yellow") if tem_manual
             else self._pill("binning ótimo", "muted")) if feat is not None else ""
@@ -4028,7 +4071,7 @@ class ModelSegmenterUI:
             # destino de faltantes inválido após trocar os cortes: o painel já diz
             warnings.simplefilter("ignore")
             self._render_na(feat, tem_manual)
-            self.out_ord_table.value = self._faixas_html(feat) if tem_manual else ""
+            self.out_faixas_table.value = self._faixas_html(feat) if tem_manual else ""
 
     def _render_na(self, feat, tem_manual):
         """Resumo dos faltantes (n, % da referência, taxa) e para onde vão; no
@@ -4086,7 +4129,7 @@ class ModelSegmenterUI:
 
     def _faixas_html(self, feat) -> str:
         """Tabela compacta das faixas manuais: n, % da referência, risco (com
-        barra), código ordinal (se ligado) e a faixa que recebe os faltantes."""
+        barra), papel no scorecard (se ligado) e a faixa que recebe os faltantes."""
         import html as _h
         try:
             vt = self.seg.variable_table(feat)
@@ -4095,17 +4138,17 @@ class ModelSegmenterUI:
         if vt.empty:
             return "<i>sem faixas</i>"
         col_r = vt.columns[3]                   # event_rate (clf) / alvo médio (reg)
-        codigos = {}
-        ordinal = self.seg.scorecard_ordinal(feat)
-        if ordinal:
+        papeis = {}
+        dummies = self.seg.scorecard_dummies(feat)
+        if dummies:
             with suppress(Exception):
-                t = self.seg.scorecard_ordinal_table(feat)
-                codigos = dict(zip(t["faixa"], t["codigo"]))
+                t = self.seg.scorecard_table(feat)
+                papeis = dict(zip(t["faixa"], t["papel"]))
         rmax = float(pd.to_numeric(vt[col_r], errors="coerce").max() or 0) or 1.0
         clf = self.task_type == "classification"
         head = ("<tr><th>faixa</th><th>n</th><th>% ref.</th>"
                 f"<th>{'% de maus' if clf else 'alvo médio'}</th>"
-                + ("<th>código ordinal</th>" if ordinal else "") + "</tr>")
+                + ("<th>scorecard</th>" if dummies else "") + "</tr>")
         linhas = []
         for _, r in vt.iterrows():
             faixa = str(r["faixa"])
@@ -4116,16 +4159,19 @@ class ModelSegmenterUI:
                      "</span>") if ok else ""
             rtxt = (f"{100 * float(risco):.1f}%" if clf else f"{float(risco):.4f}") if ok else "—"
             tag = "<span class='tag'>◀ faltantes aqui</span>" if na else ""
-            cod = (f"<td class='num'>{codigos.get(faixa, '—')}</td>" if ordinal else "")
+            papel = papeis.get(faixa, "—")
+            cod = ((f"<td><b>referência</b> · 0 pts</td>" if papel == "referência"
+                    else f"<td>dummy 0/1</td>") if dummies else "")
             n_txt = f"{int(r['n']):,}".replace(",", ".")
             linhas.append(
                 f"<tr class='{'na' if na else ''}'><td>{_h.escape(faixa)}{tag}</td>"
                 f"<td class='num'>{n_txt}</td>"
                 f"<td class='num'>{float(r['repr_%']):.1f}%</td>"
                 f"<td class='num'>{barra}{rtxt}</td>{cod}</tr>")
-        leg = ("<div class='mseg-legend'>Código ordinal: <b>0 = pior faixa</b>; maior "
-               "código = menor risco na referência. O termo aparece como "
-               "<code>ord(variável)</code> nos coeficientes.</div>") if ordinal else ""
+        leg = ("<div class='mseg-legend'>Dummies de scorecard: cada faixa vira uma coluna "
+               "0/1; a <b>pior faixa é a referência</b> (omitida, 0 pontos), então os "
+               "coeficientes das demais devem sair negativos. Nos coeficientes os termos "
+               "aparecem como <code>variável = faixa</code>.</div>") if dummies else ""
         return (f"<table class='mseg-faixas'><thead>{head}</thead>"
                 f"<tbody>{''.join(linhas)}</tbody></table>{leg}")
 
@@ -4147,40 +4193,41 @@ class ModelSegmenterUI:
         except Exception as e:
             self._log(f"[faltantes] erro: {e}")
 
-    def _on_toggle_ordinal(self, change):
-        if self._ord_syncing or getattr(self, "_restoring", False):
+    def _on_toggle_scorecard(self, change):
+        if self._sc_syncing or getattr(self, "_restoring", False):
             return
         feat = self.dd_var2.value
         try:
-            with self._undoable("ordinal scorecard"):
-                self.seg.set_scorecard_ordinal(feat, bool(change["new"]))
-            estado = ("ligada — pior faixa = 0" if change["new"] else "desligada")
-            self._log(f"[scorecard] '{self.seg.label(feat)}': codificação ordinal {estado}.")
+            with self._undoable("dummies scorecard"):
+                self.seg.set_scorecard_dummies(feat, bool(change["new"]))
+            estado = ("ligadas — referência = pior faixa" if change["new"] else "desligadas")
+            self._log(f"[scorecard] '{self.seg.label(feat)}': dummies {estado}.")
             self._mark_dirty()
         except Exception as e:
             self._log(f"[scorecard] erro: {e}")
-        self._sync_ordinal(feat)
+        self._sync_scorecard(feat)
 
     def _scorecard_sign_html(self) -> str:
-        """Resumo pós-treino do sinal das variáveis ordinais de scorecard."""
+        """Resumo pós-treino do sinal das dummies de scorecard."""
         chk = self.seg.scorecard_sign_check()
         if chk.empty:
             return ""
         ruins = chk[~chk["sinal_ok"]]
         if ruins.empty:
             return ("<div class='mseg-legend'><span style='color:var(--ok-ink);"
-                    f"font-weight:600'>✓ Scorecard: as {len(chk)} variáveis ordinais têm "
-                    "coeficiente negativo.</span></div>")
+                    f"font-weight:600'>✓ Scorecard: as {len(chk)} dummies têm coeficiente "
+                    "negativo (todas as faixas melhores que a pior).</span></div>")
         import html as _h
-        lista = ", ".join(f"<b>{_h.escape(str(self.seg.label(r.variavel)))}</b> "
-                          f"({r.coef:+.4f})" for r in ruins.itertuples())
+        lista = ", ".join(f"<b>{_h.escape(str(self.seg.label(r.variavel)))} = "
+                          f"{_h.escape(str(r.faixa))}</b> ({r.coef:+.4f})"
+                          for r in ruins.itertuples())
         return ("<div class='mseg-legend' style='color:var(--warn-ink)'>⚠ Scorecard: "
-                f"coeficiente ≥ 0 em {lista}. Com pior faixa = 0 o esperado é negativo — "
-                "costuma ser correlação com outra variável do modelo. Revise: funda "
-                "faixas ou retire a variável correlacionada.</div>")
+                f"coeficiente ≥ 0 em {lista}. Com a pior faixa como referência o esperado "
+                "é negativo — costuma ser correlação com outra variável ou faixas de risco "
+                "parecido. Revise: funda faixas ou retire a variável correlacionada.</div>")
 
     def _render_bin_hint(self, feat):
-        self._sync_ordinal(feat)
+        self._sync_scorecard(feat)
         is_cat = (feat is not None and self.seg._detect_kind(feat) == "cat")
         if self.seg.manual_bins(feat):
             self.out_bin_hint.value = (
@@ -4257,16 +4304,26 @@ class ModelSegmenterUI:
         feat = self.dd_var2.value
         name = self.tx_new_cat.value.strip() or None
         try:
-            with self._undoable("nova variável"):   # desfazer remove a derivada
-                new = self.seg.create_categorical(feat, new_name=name)
-            ncat = int(self.seg.df[new].nunique(dropna=True))
+            dummies = bool(self.seg.manual_bins(feat) and self.seg.scorecard_dummies(feat))
+            with self._undoable("nova variável"):   # desfazer remove a(s) derivada(s)
+                if dummies:
+                    novas = self.seg.create_scorecard_dummies(feat, prefix=name)
+                else:
+                    novas = [self.seg.create_categorical(feat, new_name=name)]
             self.tx_new_cat.value = ""
             self._refresh_candidates()
             self._refresh_vars()
             self._mark_dirty()
             self._refresh_bar()
-            self._log(f"[nova variável] '{new}' criada de '{self.seg.label(feat)}' ({ncat} categorias) — "
-                      f"já disponível na seleção e no modelo.")
+            if dummies:
+                ref = self.seg.var_meta[novas[0]].get("dummy_ref", "—") if novas else "—"
+                self._log(f"[nova variável] {len(novas)} dummies criadas de "
+                          f"'{self.seg.label(feat)}': {', '.join(novas)} (referência = "
+                          f"{ref}) — já disponíveis na seleção e no modelo.")
+            else:
+                ncat = int(self.seg.df[novas[0]].nunique(dropna=True))
+                self._log(f"[nova variável] '{novas[0]}' criada de '{self.seg.label(feat)}' "
+                          f"({ncat} categorias) — já disponível na seleção e no modelo.")
         except Exception as e:
             self._log(f"[nova variável] erro: {e}")
 
@@ -4762,10 +4819,10 @@ class ModelSegmenterUI:
                 if not chk.empty:
                     ruins = chk[~chk["sinal_ok"]]
                     self._log("[scorecard] " + (
-                        f"{len(chk)} variáveis ordinais, todos os coeficientes negativos."
+                        f"{len(chk)} dummies, todos os coeficientes negativos."
                         if ruins.empty else
                         "coeficiente ≥ 0 em: " + ", ".join(
-                            f"{self.seg.label(r.variavel)} ({r.coef:+.4f})"
+                            f"{self.seg.label(r.variavel)} = {r.faixa} ({r.coef:+.4f})"
                             for r in ruins.itertuples()) + " — revise a categorização."))
             self.pb_fit.bar_style = "success"
             self.pb_fit.description = "concluído ✓"
@@ -5553,6 +5610,38 @@ class ModelSegmenterUI:
                 self._log("[SQL] régua gerada — selecione tudo na caixa e copie (Ctrl+C).")
             except Exception as e:
                 self.out_sql.value = f"-- Erro ao gerar SQL: {type(e).__name__}: {e}"
+                self._log(f"[SQL] erro: {type(e).__name__}: {e}")
+
+    def _on_catsql(self, _):
+        """Gera a categorização das variáveis como CASE WHEN (colunas cruas)."""
+        s = self.seg
+        escopo = self.dd_catsql_scope.value
+        if escopo == "modelo":
+            feats = list(s.model_features or [])
+            if not feats:
+                self.out_catsql.value = ("-- Treine o modelo antes (aba Modelo) ou escolha "
+                                         "outro conjunto de variáveis.")
+                return
+        elif escopo == "selecao":
+            feats = s.selected_features()
+        elif escopo == "manuais":
+            feats = [f for f in s.candidates if s.manual_bins(f)]
+        else:
+            feats = list(s.candidates)
+        if not feats:
+            self.out_catsql.value = "-- Nenhuma variável nesse conjunto."
+            return
+        tbl = (self.tx_catsql_table.value or "minha_tabela").strip()
+        with self._busy(self.btn_catsql, msg="gerando o SQL da categorização…"):
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    self.out_catsql.value = s.categorization_sql(
+                        features=feats, table=tbl, woe=bool(self.cb_catsql_woe.value))
+                self._log(f"[SQL] categorização de {len(feats)} variável(is) gerada — "
+                          "selecione tudo na caixa e copie (Ctrl+C).")
+            except Exception as e:
+                self.out_catsql.value = f"-- Erro ao gerar SQL: {type(e).__name__}: {e}"
                 self._log(f"[SQL] erro: {type(e).__name__}: {e}")
 
     def _invalidate_diag_sql(self, stale=True):
