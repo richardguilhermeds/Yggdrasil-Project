@@ -696,12 +696,17 @@ def _make_ohe():
 def _bin_mask_series(series: pd.Series, b: dict) -> pd.Series:
     """Máscara das linhas que caem no bin ``b`` (faltante / faixa numérica /
     grupo categórico). Espelha ``ModelSegmenter._mask_in`` para uso fora da classe
-    (no transformador serializável)."""
+    (no transformador serializável).
+
+    ``b["include_na"]`` (categorização manual com faltantes alocados numa faixa —
+    ver :meth:`ModelSegmenter.set_missing_bin`): a faixa também recebe os NaN."""
     if b["kind"] == "na":
         return series.isna()
     if b["kind"] == "num":
-        return series.between(b["lo"], b["hi"], inclusive="right")
-    return series.astype(str).isin(b["cats"])
+        m = series.between(b["lo"], b["hi"], inclusive="right")
+    else:
+        m = series.astype(str).isin(b["cats"])
+    return (m | series.isna()) if b.get("include_na") else m
 
 
 def _bin_masks(series: pd.Series, bins) -> list:
@@ -713,9 +718,15 @@ def _bin_masks(series: pd.Series, bins) -> list:
     ``Int64``, ``float64[pyarrow]``) o ``between`` devolve NA nos faltantes, e
     sem isso a soma das máscaras virava ``pd.NA`` (PSI NaN)."""
     texto = series.astype(str) if any(b["kind"] == "cat" for b in bins) else None
-    return [(texto.isin(b["cats"]) if b["kind"] == "cat"
-             else _bin_mask_series(series, b)).to_numpy(dtype=bool, na_value=False)
-            for b in bins]
+    na = series.isna() if any(b.get("include_na") for b in bins) else None
+
+    def _um(b):
+        if b["kind"] != "cat":
+            return _bin_mask_series(series, b)
+        m = texto.isin(b["cats"])
+        return (m | na) if b.get("include_na") else m
+
+    return [_um(b).to_numpy(dtype=bool, na_value=False) for b in bins]
 
 
 class WoeBinEncoder(BaseEstimator, TransformerMixin):
@@ -1130,18 +1141,16 @@ class ModelSegmenter:
     # Binning de uma variável (classificação OU regressão)
     # ------------------------------------------------------------------
     def _mask_in(self, frame, feature, b):
-        if b["kind"] == "na":
-            return frame[feature].isna()
-        if b["kind"] == "num":
-            return frame[feature].between(b["lo"], b["hi"], inclusive="right")
-        return frame[feature].astype(str).isin(b["cats"])
+        return _bin_mask_series(frame[feature], b)
 
     def _bin_label(self, feature, b) -> str:
         if b["kind"] == "na":
             return "(faltante)"
         if b["kind"] == "num":
-            return f"({_fmt(b['lo'])}, {_fmt(b['hi'])}]"
-        return "{" + ", ".join(map(str, b["cats"])) + "}"
+            lbl = f"({_fmt(b['lo'])}, {_fmt(b['hi'])}]"
+        else:
+            lbl = "{" + ", ".join(map(str, b["cats"])) + "}"
+        return lbl + (" + faltante" if b.get("include_na") else "")
 
     @staticmethod
     def _splits_key(sp):
@@ -1168,7 +1177,8 @@ class ModelSegmenter:
         invalidado POR VARIÁVEL em set/clear_manual_bins e clear_derived."""
         eff_splits = splits if splits is not None else self.var_meta.get(feature, {}).get("splits")
         sample_key = sample if sample is not None else self.ref_sample
-        ck = (feature, max_n_bins, min_bin_size, sample_key, self._splits_key(eff_splits))
+        ck = (feature, max_n_bins, min_bin_size, sample_key, self._splits_key(eff_splits),
+              self.var_meta.get(feature, {}).get("na_destino"))
         hit = self._bins_cache.get(ck)
         if hit is not None:
             return hit
@@ -1222,7 +1232,7 @@ class ModelSegmenter:
                     for i in range(len(edges) - 1)]
             if fit[feature].isna().any():
                 bins.append({"kind": "na"})
-            return bins, kind
+            return self._aplica_destino_na(feature, bins, fit, splits is not None), kind
 
         # categórico
         na_present = bool(fit[feature].isna().any())
@@ -1253,7 +1263,36 @@ class ModelSegmenter:
                 bins.append({"kind": "cat", "cats": cats})
         if bins and na_present:
             bins.append({"kind": "na"})
-        return bins, kind
+        return self._aplica_destino_na(feature, bins, fit, splits is not None), kind
+
+    def _aplica_destino_na(self, feature, bins, fit, manual) -> list:
+        """Categorização manual: move os faltantes para a faixa escolhida em
+        :meth:`set_missing_bin` (a faixa ganha ``include_na`` e a faixa
+        "(faltante)" some). Vale mesmo sem faltante na referência — assim os NaN
+        da OOT/escoragem já têm destino. Binning ótimo: nada muda."""
+        destino = self.var_meta.get(feature, {}).get("na_destino") if manual else None
+        faixas = [b for b in bins if b["kind"] != "na"]
+        if destino in (None, "separado") or not faixas:
+            return bins
+        if destino in ("pior", "melhor"):
+            y = fit[self.target].to_numpy(dtype="float64")
+            riscos = [self._risco(y[m]) for m in _bin_masks(fit[feature], faixas)]
+            validos = [i for i, r in enumerate(riscos) if np.isfinite(r)]
+            if not validos:
+                return bins
+            escolha = max if destino == "pior" else min
+            idx = escolha(validos, key=lambda i: riscos[i])
+        else:
+            idx = int(destino)
+            if not 0 <= idx < len(faixas):
+                warnings.warn(
+                    f"'{self.label(feature)}': faltantes apontavam para a faixa {idx + 1}, "
+                    f"mas a categorização atual tem {len(faixas)} faixas — faltantes "
+                    "voltam para faixa própria. Escolha o destino de novo.")
+                return bins
+        faixas = [dict(b) for b in faixas]
+        faixas[idx]["include_na"] = True
+        return faixas
 
     def _risco(self, y) -> float:
         """Valor de risco de um conjunto de alvos: event_rate (classificação)
@@ -2348,13 +2387,16 @@ class ModelSegmenter:
                 grupos.append(cats)
         return grupos or None
 
-    def set_manual_bins(self, feature, spec):
+    def set_manual_bins(self, feature, spec, missing=None):
         """Define **bins manuais** para a variável, sobrepondo o binning ótimo em
         toda a análise univariada (tabela, IV, logodds/WoE, PSI, inversão).
 
         ``spec`` pode ser o texto da UI (ver :meth:`_parse_bin_spec`), uma lista
         já parseada (cortes numéricos ou grupos categóricos), ou ``None``/``""``
-        para limpar e voltar ao binning ótimo."""
+        para limpar e voltar ao binning ótimo.
+
+        ``missing`` (opcional): destino dos faltantes — ver :meth:`set_missing_bin`
+        (``None`` mantém o destino atual)."""
         if feature not in self.candidates:
             raise ValueError(f"'{feature}' não é variável candidata.")
         splits = self._parse_bin_spec(feature, spec) if isinstance(spec, (str, type(None))) \
@@ -2365,17 +2407,96 @@ class ModelSegmenter:
         else:
             meta.pop("splits", None)
             meta.pop("ordinal_scorecard", None)   # a ordinal só existe sobre bins manuais
+            meta.pop("na_destino", None)          # idem o destino dos faltantes
         self._invalidate_bins(feature)   # só ESTA variável re-bina; demais ficam quentes
+        if splits and missing is not None:
+            self.set_missing_bin(feature, missing)
         return self
 
     def clear_manual_bins(self, feature):
         """Remove os bins manuais da variável (volta ao binning ótimo) — e, com
-        eles, a codificação ordinal de scorecard, que depende das faixas manuais."""
+        eles, a codificação ordinal de scorecard e o destino dos faltantes, que
+        dependem das faixas manuais."""
         meta = self.var_meta.get(feature, {})
         meta.pop("splits", None)
         meta.pop("ordinal_scorecard", None)
+        meta.pop("na_destino", None)
         self._invalidate_bins(feature)   # só ESTA variável volta ao ótimo
         return self
+
+    # ---- faltantes na categorização manual ----
+    def set_missing_bin(self, feature, destino="separado"):
+        """Escolhe **onde os faltantes (NaN) ficam** na categorização manual.
+
+        ``destino``:
+
+        * ``"separado"`` (padrão) — faixa própria "(faltante)", como no binning ótimo;
+        * ``"pior"`` / ``"melhor"`` — juntam-se à faixa de maior / menor risco
+          na referência (recalculado a cada binning);
+        * ``int`` — juntam-se à faixa de índice ``destino`` (0 = primeira, na
+          ordem de :meth:`manual_bins_faixas`).
+
+        A faixa escolhida vira ``"<faixa> + faltante"`` em toda a análise (tabela,
+        IV, PSI, WoE, ordinal de scorecard) e na escoragem — inclusive para NaN
+        que só aparecem fora da referência. Só com bins manuais."""
+        if not self.manual_bins(feature):
+            raise ValueError(
+                f"'{self.label(feature)}' não tem categorização manual — o destino "
+                "dos faltantes só se escolhe sobre bins manuais.")
+        if isinstance(destino, (bool, np.bool_)):
+            raise ValueError("destino deve ser 'separado', 'pior', 'melhor' ou o índice da faixa.")
+        if isinstance(destino, (int, np.integer)):
+            n = len(self.manual_bins_faixas(feature))
+            if not 0 <= int(destino) < n:
+                raise ValueError(f"faixa {int(destino)} inexistente — a variável tem "
+                                 f"{n} faixas (índices 0 a {n - 1}).")
+            destino = int(destino)
+        elif destino not in ("separado", "pior", "melhor"):
+            raise ValueError("destino deve ser 'separado', 'pior', 'melhor' ou o índice "
+                             f"da faixa (recebi {destino!r}).")
+        meta = self.var_meta.setdefault(feature, {})
+        if destino == "separado":
+            meta.pop("na_destino", None)
+        else:
+            meta["na_destino"] = destino
+        self._invalidate_bins(feature)
+        return self
+
+    def missing_bin(self, feature):
+        """Destino atual dos faltantes: ``"separado"``, ``"pior"``, ``"melhor"`` ou índice."""
+        return self.var_meta.get(feature, {}).get("na_destino", "separado")
+
+    def manual_bins_faixas(self, feature) -> list:
+        """Rótulos das faixas manuais (sem a de faltantes e sem "+ faltante"), na
+        ordem dos índices aceitos por :meth:`set_missing_bin`."""
+        if not self.manual_bins(feature):
+            return []
+        bins, _ = self._resolve_bins(feature, sample=self.ref_sample)
+        return [self._bin_label(feature, {k: v for k, v in b.items() if k != "include_na"})
+                for b in bins if b["kind"] != "na"]
+
+    def missing_info(self, feature) -> dict:
+        """Resumo dos faltantes da variável na referência e de onde eles caem:
+        ``n``, ``pct`` (da referência), ``taxa`` (risco dos faltantes), ``destino``
+        (como configurado) e ``faixa`` (rótulo da faixa que os recebe)."""
+        ref = self._frame(self.ref_sample, cols=[feature, self.target])
+        na = ref[feature].isna().to_numpy()
+        n, tot = int(na.sum()), len(ref)
+        taxa = self._risco(ref[self.target].to_numpy(dtype="float64")[na]) if n else float("nan")
+        if not self.manual_bins(feature):
+            # binning ótimo: faltante sempre em faixa própria — sem rodar o optbinning
+            return {"n": n, "pct": (n / tot if tot else float("nan")), "taxa": taxa,
+                    "destino": "separado", "faixa": "(faltante)" if n else None}
+        bins, _ = self._resolve_bins(feature, sample=self.ref_sample)
+        alvo = next((b for b in bins if b.get("include_na")), None)
+        if alvo is not None:
+            faixa = self._bin_label(feature, alvo)
+        elif any(b["kind"] == "na" for b in bins):
+            faixa = "(faltante)"
+        else:
+            faixa = None
+        return {"n": n, "pct": (n / tot if tot else float("nan")), "taxa": taxa,
+                "destino": self.missing_bin(feature), "faixa": faixa}
 
     # ---- codificação ordinal de scorecard (só categorização manual) ----
     def set_scorecard_ordinal(self, feature, ativo=True):

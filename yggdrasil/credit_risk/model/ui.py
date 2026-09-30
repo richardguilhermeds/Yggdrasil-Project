@@ -150,6 +150,37 @@ _CSS = """
 .mseg-var-modelo .mseg-an-sec .mseg-h { color:var(--ok-ink); }
 .mseg-var-sel .mseg-an-sec { background-color:var(--info-bg); border-left-color:var(--info-ink); }
 .mseg-var-sel .mseg-an-sec .mseg-h { color:var(--info-ink); }
+/* card "Categorizar a variável na mão": passos numerados, faltantes e faixas */
+.mseg-step { margin-top:12px; padding-top:10px; border-top-width:1px;
+  border-top-style:dashed; border-top-color:var(--line); }
+.mseg-step-h { font-size:12px; font-weight:600; color:var(--ink); margin-bottom:6px;
+  display:flex; align-items:center; gap:7px; }
+.mseg-step-h .n { display:inline-flex; align-items:center; justify-content:center;
+  width:19px; height:19px; border-radius:50%; background-color:var(--ac-soft);
+  color:var(--ac-deep); font-size:11px; font-weight:700; flex:none; }
+.mseg-step-h .d { font-weight:400; color:var(--muted); font-size:11.5px; }
+.mseg-na { font-size:12.5px; line-height:1.5; padding:8px 12px; border-radius:9px;
+  background-color:var(--tile-bg); color:var(--body-ink); margin:2px 0 8px 0;
+  border-left-width:3px; border-left-style:solid; border-left-color:var(--line); }
+.mseg-na b { color:var(--ink); }
+.mseg-na.tem { border-left-color:var(--warn-ink); }
+.mseg-na .fx { font-family:'IBM Plex Mono', ui-monospace, Menlo, Consolas, monospace;
+  background-color:var(--warn-bg); color:var(--warn-ink); padding:1px 7px;
+  border-radius:6px; font-weight:600; }
+.mseg table.mseg-faixas { border-collapse:collapse; font-size:12px; min-width:62%;
+  margin:4px 0 2px 0; }
+.mseg table.mseg-faixas thead tr th { background-color:var(--tbl-head-bg);
+  color:var(--tbl-head-ink); font-weight:600; text-align:left; padding:6px 10px;
+  border-bottom-width:1px; border-bottom-style:solid; border-bottom-color:var(--tbl-head-line); }
+.mseg table.mseg-faixas tbody tr td { padding:5px 10px; color:var(--ink);
+  background-color:transparent; border-bottom-width:1px; border-bottom-style:solid;
+  border-bottom-color:var(--tbl-line); }
+.mseg table.mseg-faixas tbody tr td.num { text-align:right; font-variant-numeric:tabular-nums; }
+.mseg table.mseg-faixas tbody tr.na td { background-color:var(--warn-bg); }
+.mseg table.mseg-faixas .tag { font-size:10.5px; font-weight:600; color:var(--warn-ink);
+  margin-left:6px; white-space:nowrap; }
+.mseg table.mseg-faixas .bar { display:inline-block; height:7px; border-radius:4px;
+  background-color:var(--bad-ink); opacity:.5; vertical-align:middle; margin-right:7px; }
 /* caixa de tutorial (algoritmo/parâmetros) e legenda de categorias */
 .mseg-help { background-color:var(--help-bg); border-width:1px;border-style:solid;border-color:var(--help-line);
   border-left-width:3px;border-left-style:solid;border-left-color:var(--ac);
@@ -1589,7 +1620,16 @@ class ModelSegmenterUI:
             "scorecard. Só com bins manuais; vale em valores crus e em WoE.")
         self.cb_ordinal.observe(self._on_toggle_ordinal, names="value")
         self._ord_syncing = False
-        self.out_ord_table = W.HTML()
+        self.out_ord_table = W.HTML()       # faixas resultantes (+ código ordinal)
+        # faltantes: resumo (n, %, taxa, destino) + seletor do destino (só manual)
+        self.out_na_info = W.HTML()
+        self.dd_na_dest = W.Dropdown(
+            options=[("faixa própria — (faltante)", "separado")], value="separado",
+            description="Faltantes vão para:", style={"description_width": "initial"},
+            layout=W.Layout(width="440px", display="none"))
+        self.dd_na_dest.observe(self._on_na_dest, names="value")
+        self._na_syncing = False
+        self.out_bin_status = W.HTML()      # pill "bins manuais" / "binning ótimo"
         # categóricas no modo Manual: uma "caixa" (Dropdown de grupo) por categoria,
         # para alocar cada categoria a um grupo — como no TreeSegmenter. As numéricas
         # seguem no campo de cortes (tx_cuts). Preenchida por _rebuild_an_cat_box.
@@ -1618,14 +1658,36 @@ class ModelSegmenterUI:
         self.out_an_optbin_share = W.HTML()   # distribuição ACUMULADA das faixas optbin no tempo
         self.btn_analyze.on_click(self._on_analyze)
 
-        bin_card = W.VBox([
-            W.HTML("<div class='mseg-h'>Categorizar a variável na mão (bins manuais)</div>"),
+        def _passo(n, titulo, desc=""):
+            d = f"<span class='d'>· {desc}</span>" if desc else ""
+            return W.HTML(f"<div class='mseg-step-h'><span class='n'>{n}</span>{titulo}{d}</div>")
+
+        # passo 1 — faixas (modo, cortes/grupos, aplicar)
+        passo_faixas = W.VBox([
+            _passo(1, "Faixas", "binning ótimo ou cortes/grupos definidos por você"),
             W.HBox([self.tg_binmode, self.tx_cuts, self.btn_apply_bins, self.btn_clear_bins]),
             self.an_cat_box,          # caixas de grupo por categoria (categóricas, modo Manual)
             self.out_bin_hint,
+        ])
+        # passo 2 — faltantes: onde os NaN caem (seletor só com bins manuais)
+        self._passo_na = W.VBox([
+            _passo(2, "Faltantes", "onde os valores vazios são alocados"),
+            self.out_na_info, self.dd_na_dest])
+        self._passo_na.add_class("mseg-step")
+        # passo 3 — faixas resultantes + ordinal de scorecard (só com bins manuais)
+        self._passo_res = W.VBox([
+            _passo(3, "Faixas resultantes", "o que entra na análise e no modelo"),
             self.cb_ordinal,          # ordinal de scorecard (só com bins manuais)
-            self.out_ord_table,
-            W.HBox([self.tx_new_cat, self.btn_create_cat]),
+            self.out_ord_table],
+            layout=W.Layout(display="none"))
+        self._passo_res.add_class("mseg-step")
+        passo_nova = W.VBox([W.HBox([self.tx_new_cat, self.btn_create_cat])])
+        passo_nova.add_class("mseg-step")
+        bin_card = W.VBox([
+            W.HBox([W.HTML("<div class='mseg-h'>Categorizar a variável na mão "
+                           "(bins manuais)</div>"), self.out_bin_status],
+                   layout=W.Layout(justify_content="space-between", align_items="center")),
+            passo_faixas, self._passo_na, self._passo_res, passo_nova,
         ])
         bin_card.add_class("mseg-card")
         bin_card.layout = W.Layout(margin="26px 0 0 0")   # respiro até a linha da variável
@@ -3949,27 +4011,141 @@ class ModelSegmenterUI:
         self._render_bin_hint(feat)
 
     def _sync_ordinal(self, feat):
-        """Checkbox ordinal: só aparece com bins manuais; reflete o estado da
-        variável e mostra a tabela faixa → código quando ligada."""
+        """Passos 2 e 3 do card de categorização: faltantes (resumo + destino),
+        checkbox ordinal e a tabela das faixas resultantes."""
         tem_manual = feat is not None and bool(self.seg.manual_bins(feat))
         self.cb_ordinal.layout.display = "" if tem_manual else "none"
+        self._passo_res.layout.display = "" if tem_manual else "none"
         self._ord_syncing = True
         try:
             self.cb_ordinal.value = bool(tem_manual and self.seg.scorecard_ordinal(feat))
         finally:
             self._ord_syncing = False
-        if not (tem_manual and self.seg.scorecard_ordinal(feat)):
-            self.out_ord_table.value = ""
+        self.out_bin_status.value = (
+            self._pill("✎ bins manuais", "yellow") if tem_manual
+            else self._pill("binning ótimo", "muted")) if feat is not None else ""
+        with warnings.catch_warnings():
+            # destino de faltantes inválido após trocar os cortes: o painel já diz
+            warnings.simplefilter("ignore")
+            self._render_na(feat, tem_manual)
+            self.out_ord_table.value = self._faixas_html(feat) if tem_manual else ""
+
+    def _render_na(self, feat, tem_manual):
+        """Resumo dos faltantes (n, % da referência, taxa) e para onde vão; no
+        modo manual, o seletor de destino com uma opção por faixa."""
+        import html as _h
+        if feat is None:
+            self.out_na_info.value = ""
+            self.dd_na_dest.layout.display = "none"
             return
+        info = self.seg.missing_info(feat)
+        n = info["n"]
+        risco_nome = "taxa de maus" if self.task_type == "classification" else "alvo médio"
+        if n:
+            taxa = info["taxa"]
+            taxa_txt = (f"{100 * taxa:.1f}%" if self.task_type == "classification"
+                        else f"{taxa:.4f}") if np.isfinite(taxa) else "—"
+            onde = (f"<span class='fx'>{_h.escape(str(info['faixa']))}</span>"
+                    if info["faixa"] else "—")
+            n_txt = f"{n:,}".replace(",", ".")
+            txt = (f"<b>{n_txt}</b> faltantes na referência ({100 * info['pct']:.1f}% · "
+                   f"{risco_nome} {taxa_txt}) → alocados em {onde}")
+            if not tem_manual:
+                txt += " <i>(binning ótimo: faltante sempre em faixa própria)</i>"
+            cls = "mseg-na tem"
+        else:
+            if tem_manual and info["faixa"]:
+                txt = ("Sem faltantes na referência. Faltantes que aparecerem na OOT ou "
+                       f"na escoragem vão para <span class='fx'>{_h.escape(info['faixa'])}"
+                       "</span>.")
+            else:
+                txt = ("Sem faltantes na referência"
+                       + (" — escolha abaixo para onde vão os que aparecerem na OOT ou "
+                          "na escoragem." if tem_manual else "."))
+            cls = "mseg-na"
+        self.out_na_info.value = f"<div class='{cls}'>{txt}</div>"
+        # seletor de destino: só sobre bins manuais
+        self.dd_na_dest.layout.display = "" if tem_manual else "none"
+        if not tem_manual:
+            return
+        faixas = self.seg.manual_bins_faixas(feat)
+        opts = ([("faixa própria — (faltante)", "separado"),
+                 ("junto da pior faixa (maior risco)", "pior"),
+                 ("junto da melhor faixa (menor risco)", "melhor")]
+                + [(f"junto de {lbl}", i) for i, lbl in enumerate(faixas)])
+        atual = self.seg.missing_bin(feat)
+        if isinstance(atual, int) and atual >= len(faixas):
+            atual = "separado"
+        self._na_syncing = True
         try:
-            tab = self.seg.scorecard_ordinal_table(feat)
-            self.out_ord_table.value = (
-                "<div class='mseg-legend'>Códigos que entram no modelo "
-                "(<b>0 = pior faixa</b>; maior código = menor risco na referência). "
-                "O termo aparece como <code>ord(variável)</code> nos coeficientes.</div>"
-                + self._df_html(tab, max_height="200px", center=True))
-        except Exception as e:                  # noqa: BLE001 — tabela é informativa
-            self.out_ord_table.value = f"<i>tabela ordinal indisponível: {e}</i>"
+            if list(self.dd_na_dest.options) != opts:
+                self.dd_na_dest.options = opts
+            self.dd_na_dest.value = atual
+        finally:
+            self._na_syncing = False
+
+    def _faixas_html(self, feat) -> str:
+        """Tabela compacta das faixas manuais: n, % da referência, risco (com
+        barra), código ordinal (se ligado) e a faixa que recebe os faltantes."""
+        import html as _h
+        try:
+            vt = self.seg.variable_table(feat)
+        except Exception as e:                  # noqa: BLE001 — painel informativo
+            return f"<i>faixas indisponíveis: {e}</i>"
+        if vt.empty:
+            return "<i>sem faixas</i>"
+        col_r = vt.columns[3]                   # event_rate (clf) / alvo médio (reg)
+        codigos = {}
+        ordinal = self.seg.scorecard_ordinal(feat)
+        if ordinal:
+            with suppress(Exception):
+                t = self.seg.scorecard_ordinal_table(feat)
+                codigos = dict(zip(t["faixa"], t["codigo"]))
+        rmax = float(pd.to_numeric(vt[col_r], errors="coerce").max() or 0) or 1.0
+        clf = self.task_type == "classification"
+        head = ("<tr><th>faixa</th><th>n</th><th>% ref.</th>"
+                f"<th>{'% de maus' if clf else 'alvo médio'}</th>"
+                + ("<th>código ordinal</th>" if ordinal else "") + "</tr>")
+        linhas = []
+        for _, r in vt.iterrows():
+            faixa = str(r["faixa"])
+            na = "faltante" in faixa
+            risco = r[col_r]
+            ok = pd.notna(risco)
+            barra = (f"<span class='bar' style='width:{max(3, 70 * float(risco) / rmax):.0f}px'>"
+                     "</span>") if ok else ""
+            rtxt = (f"{100 * float(risco):.1f}%" if clf else f"{float(risco):.4f}") if ok else "—"
+            tag = "<span class='tag'>◀ faltantes aqui</span>" if na else ""
+            cod = (f"<td class='num'>{codigos.get(faixa, '—')}</td>" if ordinal else "")
+            n_txt = f"{int(r['n']):,}".replace(",", ".")
+            linhas.append(
+                f"<tr class='{'na' if na else ''}'><td>{_h.escape(faixa)}{tag}</td>"
+                f"<td class='num'>{n_txt}</td>"
+                f"<td class='num'>{float(r['repr_%']):.1f}%</td>"
+                f"<td class='num'>{barra}{rtxt}</td>{cod}</tr>")
+        leg = ("<div class='mseg-legend'>Código ordinal: <b>0 = pior faixa</b>; maior "
+               "código = menor risco na referência. O termo aparece como "
+               "<code>ord(variável)</code> nos coeficientes.</div>") if ordinal else ""
+        return (f"<table class='mseg-faixas'><thead>{head}</thead>"
+                f"<tbody>{''.join(linhas)}</tbody></table>{leg}")
+
+    def _on_na_dest(self, change):
+        if self._na_syncing or getattr(self, "_restoring", False):
+            return
+        feat = self.dd_var2.value
+        destino = change["new"]
+        try:
+            with self._undoable("faltantes"):
+                self.seg.set_missing_bin(feat, destino)
+            info = self.seg.missing_info(feat)
+            self._log(f"[faltantes] '{self.seg.label(feat)}': "
+                      f"{'faixa própria' if destino == 'separado' else info['faixa']}.")
+            self._mark_dirty()
+            self._render_bin_hint(feat)
+            self._on_analyze(None)
+            self._refresh_vars()
+        except Exception as e:
+            self._log(f"[faltantes] erro: {e}")
 
     def _on_toggle_ordinal(self, change):
         if self._ord_syncing or getattr(self, "_restoring", False):
@@ -4030,6 +4206,17 @@ class ModelSegmenterUI:
             spec = self._an_cat_groups() if is_cat else self.tx_cuts.value
             with self._undoable("bins"):   # desfazer volta aos bins anteriores
                 self.seg.set_manual_bins(feat, spec)
+                # destino de faltantes por índice que deixou de existir com os
+                # cortes novos: volta para faixa própria (e avisa no log)
+                dest = self.seg.missing_bin(feat)
+                if isinstance(dest, int) and self.seg.manual_bins(feat):
+                    self.seg.var_meta[feat].pop("na_destino", None)   # p/ contar faixas
+                    self.seg._invalidate_bins(feat)
+                    if dest < len(self.seg.manual_bins_faixas(feat)):
+                        self.seg.set_missing_bin(feat, dest)
+                    else:
+                        self._log(f"[faltantes] '{self.seg.label(feat)}': a faixa escolhida "
+                                  "não existe mais — faltantes voltaram para faixa própria.")
             if not self.seg.manual_bins(feat):
                 self._log(f"[bins] '{self.seg.label(feat)}': nada para aplicar.")
             else:
