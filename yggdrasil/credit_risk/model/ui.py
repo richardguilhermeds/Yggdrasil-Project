@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import re
 import warnings
+from collections import OrderedDict
 from contextlib import contextmanager, suppress
 
 import numpy as np
@@ -418,6 +419,48 @@ _CSS = """
 """
 
 
+class _CacheHtmlLRU(OrderedDict):
+    """Memo de HTML pronto (figuras em base64) com despejo LRU por quantidade E
+    por tamanho total do texto — no lugar do ``clear()`` total acima de N, que
+    apagava justamente as entradas ainda válidas. ``busca`` marca o uso;
+    ``guarda`` insere e despeja as mais antigas; ``remapeia`` (troca de tema)
+    devolve um cache novo na mesma ordem e com os mesmos limites."""
+
+    def __init__(self, max_itens=64, max_bytes=64 * 1024 * 1024, itens=()):
+        super().__init__()
+        self.max_itens, self.max_bytes, self.n_bytes = int(max_itens), int(max_bytes), 0
+        for k, v in itens:
+            self.guarda(k, v)
+
+    @staticmethod
+    def _tam(v) -> int:
+        return sum(len(x) for x in v) if isinstance(v, tuple) else len(v)
+
+    def busca(self, k):
+        v = self.get(k)
+        if v is not None:
+            self.move_to_end(k)
+        return v
+
+    def guarda(self, k, v):
+        if k in self:
+            self.n_bytes -= self._tam(self.pop(k))
+        self[k] = v
+        self.n_bytes += self._tam(v)
+        # a entrada recém-guardada fica mesmo se sozinha passar do limite
+        while len(self) > 1 and (len(self) > self.max_itens or self.n_bytes > self.max_bytes):
+            _k, velho = self.popitem(last=False)
+            self.n_bytes -= self._tam(velho)
+
+    def clear(self):
+        super().clear()
+        self.n_bytes = 0
+
+    def remapeia(self, fn):
+        return _CacheHtmlLRU(self.max_itens, self.max_bytes,
+                             ((k, fn(v)) for k, v in self.items()))
+
+
 class ModelSegmenterUI:
     # cores via var(--tbl-*): o CSS do Styler é injetado dentro do painel
     # .mseg, então os tokens resolvem no tema ativo (claro ou escuro) sem
@@ -458,13 +501,15 @@ class ModelSegmenterUI:
         # serializado cresce sem limite e trafega pelo comm a cada ação). Mantemos
         # só as últimas N linhas reescrevendo a área com clear_output.
         self._log_lines: list = []
-        # cache do <img> base64 da prévia da variável por (feature, versão de bins):
-        # trocar/clicar na lista de variáveis regenerava a figura a cada vez.
-        self._preview_cache: dict = {}
+        # cache do <img> base64 da prévia da variável por (feature, assinatura da
+        # variável — ver _assinatura_variavel): trocar/clicar na lista de
+        # variáveis regenerava a figura a cada vez.
+        self._preview_cache = _CacheHtmlLRU(max_itens=128, max_bytes=32 * 1024 * 1024)
         # cache dos HTMLs das figuras da aba "Análise de variáveis" (aba 2) por
-        # (feature, amostra, coluna-de-safra, versão de bins): revisitar uma
-        # variável já analisada não re-renderiza nem re-encoda os 4–8 PNGs.
-        self._an_fig_cache: dict = {}
+        # (feature, amostra, coluna-de-safra, y01, assinatura da variável):
+        # revisitar uma variável já analisada não re-renderiza nem re-encoda os
+        # 4–8 PNGs — e editar OUTRA variável não o invalida.
+        self._an_fig_cache = _CacheHtmlLRU(max_itens=64, max_bytes=64 * 1024 * 1024)
         # contrapartida de cada <img> nos dois temas (ver _fig_html/_on_dark): o
         # toggle troca a tag no lugar, sem refazer o cálculo que gerou a figura
         self._fig_escuro: dict = {}      # <img> claro  -> <img> escuro
@@ -699,9 +744,9 @@ class ModelSegmenterUI:
                     anda(raiz)
             # os caches guardam HTML pronto: sem isto, revisitar uma variável já
             # analisada devolve o PNG do tema ANTERIOR
-            self._preview_cache = {k: troca(v) for k, v in self._preview_cache.items()}
-            self._an_fig_cache = {k: tuple(troca(v) for v in vs)
-                                  for k, vs in self._an_fig_cache.items()}
+            self._preview_cache = self._preview_cache.remapeia(troca)
+            self._an_fig_cache = self._an_fig_cache.remapeia(
+                lambda vs: tuple(troca(v) for v in vs))
         except Exception as exc:  # noqa: BLE001 - cosmético, nunca fatal
             self._log(f"[tema] gráficos não repintados ({type(exc).__name__}): {exc}")
 
@@ -3526,6 +3571,23 @@ class ModelSegmenterUI:
                 return "dummies"
         return "faixas manuais"
 
+    def _assinatura_variavel(self, feat):
+        """Tudo de que as figuras/tabelas de UMA variável dependem além de
+        amostra/safra/y01 (que já vão na chave): versão dos valores da coluna (e
+        do alvo), o ``var_meta`` dela (bins manuais, destino do faltante,
+        derivação, dummies — sem categoria/motivo, que nenhum gráfico lê), o
+        rótulo, a derivação da ORIGEM (entra no rótulo das faixas de uma
+        derivada), coluna de data, palavra de risco e a amostra dos gráficos
+        (teto, n, semente). Substitui o ``_rank_version`` global, que subia com
+        a edição de QUALQUER variável e invalidava as figuras de todas."""
+        s = self.seg
+        meta = s.var_meta.get(feat) or {}
+        src = meta.get("derived_from")
+        return (feat in s.df.columns, s._col_key(feat), s._col_key(s.target),
+                repr(sorted((k, v) for k, v in meta.items() if k not in ("categoria", "motivo"))),
+                s.label(feat), (s.var_meta.get(src) or {}).get("derived_from") if src else None,
+                s.date_col, s.task_type, s._risk_word, s._chave_amostra_graficos())
+
     def _refresh_var_preview(self):
         """Prévia ao lado do ranking: a **estabilidade no tempo** da variável — risco
         de cada faixa por safra (cruzamentos/safras sombreadas = inversão ao longo do
@@ -3543,18 +3605,16 @@ class ModelSegmenterUI:
                        "<span style='font-weight:400;text-transform:none'>(defina uma coluna de "
                        "safra para ver a estabilidade no tempo)</span></div>")
             self.out_var_preview_h.value = hdr
-            # cache do <img> por (feature, versão de bins): revisitar a mesma
-            # variável (clicar na lista / trocar dropdown) reusa o PNG em vez de
-            # re-renderizar a figura e reencodá-la a cada interação.
-            ck = (feat, bool(self.seg.date_col), self.seg._rank_version)
-            html = self._preview_cache.get(ck)
+            # cache do <img> por (feature, assinatura da variável): revisitar a
+            # mesma variável (clicar na lista / trocar dropdown) reusa o PNG em vez
+            # de re-renderizar a figura e reencodá-la a cada interação.
+            ck = (feat, self._assinatura_variavel(feat))
+            html = self._preview_cache.busca(ck)
             if html is None:
                 fig = (self.seg.plot_variable_risk_by_safra(feat) if self.seg.date_col
                        else self.seg.plot_variable_logodds(feat))
                 html = self._fig_html(fig, tight=False)
-                if len(self._preview_cache) > 128:      # backstop de memória
-                    self._preview_cache.clear()
-                self._preview_cache[ck] = html
+                self._preview_cache.guarda(ck, html)
             self.out_var_preview.value = html
         except Exception as e:
             self.out_var_preview.value = f"<i>{e}</i>"
@@ -3934,11 +3994,12 @@ class ModelSegmenterUI:
         _an_ws = (self.out_an_distbad, self.out_an_table,
                   self.out_an_inv_sample, self.out_an_cards, self.out_an_time,
                   self.out_an_inv_safra, self.out_an_psi, self.out_an_optbin_share)
-        # cache das figuras por (feature, amostra, safra, versão de bins): revisitar
-        # uma variável já analisada restaura os HTMLs sem re-renderizar/re-encodar os
-        # PNGs. _rank_version invalida quando bins/derivadas/amostra mudam.
-        _ck = (feat, sample, tcol, self.seg._rank_version, y01)
-        _cached = self._an_fig_cache.get(_ck)
+        # cache das figuras por (feature, amostra, safra, y01, assinatura da
+        # variável): revisitar uma variável já analisada restaura os HTMLs sem
+        # re-renderizar/re-encodar os PNGs. Só o que a PRÓPRIA variável usa entra
+        # na chave — editar bins/derivadas de outra não invalida esta.
+        _ck = (feat, sample, tcol, y01, self._assinatura_variavel(feat))
+        _cached = self._an_fig_cache.busca(_ck)
         if _cached is not None:
             for _w, _v in zip(_an_ws, _cached):
                 _w.value = _v
@@ -4009,9 +4070,7 @@ class ModelSegmenterUI:
         # memoiza os HTMLs renderizados (só em caso de sucesso) para revisita
         # instantânea desta variável — evita re-render/re-encode dos PNGs
         if _an_ok:
-            if len(self._an_fig_cache) > 64:      # backstop de memória
-                self._an_fig_cache.clear()
-            self._an_fig_cache[_ck] = tuple(_w.value for _w in _an_ws)
+            self._an_fig_cache.guarda(_ck, tuple(_w.value for _w in _an_ws))
 
     def _var_cards(self, s, trend=None):
         """Resumo & estabilidade rico (unificado com o TreeSegmenterUI): chips de
@@ -4097,7 +4156,9 @@ class ModelSegmenterUI:
             return
         if not force and self._an_cat_ctx == feat and self._an_cat_widgets:
             return
-        ref = self.seg._frame(self.seg.ref_sample)
+        # só as 2 colunas lidas abaixo (variável + alvo) — a cópia da referência
+        # inteira, com todas as colunas, dominava em base grande
+        ref = self.seg._frame(self.seg.ref_sample, cols=[feat, self.seg.target])
         col = ref[feat]
         valid = ref[col.notna()]
         self._an_cat_widgets = {}

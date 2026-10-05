@@ -35,6 +35,7 @@ import json
 import threading
 import warnings
 from contextlib import contextmanager
+from datetime import date as _date
 
 import numpy as np
 import pandas as pd
@@ -285,6 +286,73 @@ def _inverted_pairs(ordered, values) -> list:
 
 
 # _fit_optbinning_splits vem de credit_risk._common (import acima)
+
+
+def _safra_por_unicos(dtype) -> bool:
+    """A coluna de safra converte pelos valores ÚNICOS (ver
+    :meth:`ModelSegmenter._safra_codes`)? Texto/objeto/categoria e arrow de
+    data/texto: o ``to_datetime`` deles é elemento a elemento (o formato vem do
+    1º não nulo, o mesmo nos dois caminhos). datetime64 (com/sem fuso), period e
+    numéricos seguem o caminho de sempre."""
+    if isinstance(dtype, pd.ArrowDtype):
+        import pyarrow as pa
+        t = dtype.pyarrow_dtype
+        return pa.types.is_date(t) or pa.types.is_string(t) or pa.types.is_large_string(t)
+    return dtype == object or isinstance(dtype, (pd.StringDtype, pd.CategoricalDtype))
+
+
+# ---- reuso da pré-binagem CART do optbinning entre max_n_bins ----
+# A pré-binagem (árvore CART, max_n_prebins=20, min_prebin_size=0.05) não depende
+# de max_n_bins/min_bin_size, que só entram no CP-SAT. Os cortes crus da árvore
+# são capturados no 1º ajuste numérico (o do ranking) e os ajustes seguintes da
+# MESMA variável/amostra/sorteio (6 da aba Análise, 10 do PSI por safra) os
+# recebem como ``user_splits``: no optbinning 0.20 esse caminho chama o mesmo
+# ``_prebinning_refinement`` com o mesmo x/y e pula só a árvore. Depende de
+# detalhe interno — fixado no 0.20.x (com sklearn < 1.8: ``check_array`` dos
+# user_splits usa ``force_all_finite``); fora disso, ajuste completo como antes.
+def _prebins_reuso_suportado() -> bool:
+    try:
+        import optbinning as _ob
+        import sklearn as _sk
+        maior, menor = (int(p) for p in str(_sk.__version__).split(".")[:2])
+        return (OptimalBinning is not None
+                and str(_ob.__version__).startswith("0.20.")
+                and (maior, menor) < (1, 8)
+                and all(callable(getattr(c, m, None))
+                        for c in (OptimalBinning, ContinuousOptimalBinning)
+                        for m in ("_fit_prebinning", "_prebinning_refinement")))
+    except Exception:   # noqa: BLE001 — versão ilegível ⇒ caminho antigo
+        return False
+
+
+_PREBINS_REUSO = _prebins_reuso_suportado()
+
+
+class _CapturaPrebins:
+    """Mixin do optbinning: guarda em ``_yg_prebins`` os cortes CRUS da
+    pré-binagem (o 1º argumento de ``_prebinning_refinement`` dentro de
+    ``_fit_prebinning`` — antes de qualquer refinamento), com o mesmo x/y,
+    ``_n_samples`` e pesos do próprio ajuste. Nada mais muda no ajuste."""
+
+    def _fit_prebinning(self, *args, **kwargs):
+        refina = self._prebinning_refinement
+
+        def captura(splits_prebinning, *a, **k):
+            self._yg_prebins = np.array(splits_prebinning, copy=True)
+            return refina(splits_prebinning, *a, **k)
+        self._prebinning_refinement = captura          # só durante este ajuste
+        try:
+            return super()._fit_prebinning(*args, **kwargs)
+        finally:
+            self.__dict__.pop("_prebinning_refinement", None)
+
+
+if OptimalBinning is not None:
+    class _OptimalBinningCaptura(_CapturaPrebins, OptimalBinning):
+        pass
+
+    class _ContinuousOptimalBinningCaptura(_CapturaPrebins, ContinuousOptimalBinning):
+        pass
 
 
 def _new_ax(figsize, dpi, ax):
@@ -1225,7 +1293,8 @@ class ModelSegmenter:
                    ("_bincode_cache", dict), ("_iv_row_cache", dict),
                    ("_amostra_safra_cache", dict), ("_rating_codes_cache", None),
                    ("_raw_score_cache", None), ("_amostra_graficos_cache", None),
-                   ("_ajuste_pos_cache", dict), ("_psi_amostras_cache", None))
+                   ("_ajuste_pos_cache", dict), ("_psi_amostras_cache", None),
+                   ("_bin_series_cache", dict))
 
     def __init__(
         self,
@@ -1274,6 +1343,12 @@ class ModelSegmenter:
         # não mudam após a construção).
         self._bins_cache: dict = {}
         self._mask_cache: dict = {}
+        # memos chaveados pela versão da coluna (_col_key), que set/clear_manual_bins
+        # NÃO esvaziam (o resultado não depende dos bins manuais): cortes crus da
+        # pré-binagem CART do optbinning (ver _cortes_num_optbinning) e faixas do
+        # binning ótimo do gráfico "faixas do optimal binning" (_optbin_numeric_bins)
+        self._prebin_cache: dict = {}
+        self._optbin_cache: dict = {}
         # cache do RANKING caro de variable_iv (binning+IV+PSI por variável). A
         # parte mutável barata (incluida/categoria/motivo) é reanexada a cada
         # chamada, então include/exclude/set_category NÃO recomputam o ranking;
@@ -1562,11 +1637,66 @@ class ModelSegmenter:
         cache = self.__dict__.setdefault("_safra_cache", {})
         hit = cache.get(time_col)
         if hit is None:
-            per = pd.to_datetime(self.df[time_col], errors="coerce").dt.to_period("M")
-            codes, uniq = pd.factorize(per, sort=True, use_na_sentinel=True)
-            hit = (np.asarray(codes, dtype=np.int32), [str(u) for u in uniq])
+            col = self.df[time_col]
+            if _safra_por_unicos(col.dtype):
+                # texto/objeto/categoria/arrow: factorize da coluna e conversão SÓ
+                # dos valores únicos (1ª aparição, como o cache interno do
+                # to_datetime — o formato inferido parte do mesmo 1º não nulo);
+                # evita o map de n objetos e o to_period de n linhas.
+                try:
+                    cu, uniq = pd.factorize(col, use_na_sentinel=True)
+                    vals = np.asarray(uniq, dtype=object)
+                except TypeError:       # valor não hashável (list/dict): caminho de sempre
+                    vals = None
+                # só tipos que o hash NÃO funde com conversões diferentes: texto,
+                # date/datetime/Timestamp sem fuso e datetime64. bool/número/
+                # Decimal (1 == 1.0 == True, 0 == False) e datetime com fuso (o
+                # mesmo instante em fusos distintos) vão pelo caminho de sempre
+                if vals is not None and all(
+                        isinstance(v, (str, np.datetime64))
+                        or (isinstance(v, _date) and getattr(v, "tzinfo", None) is None)
+                        for v in vals):
+                    # recorte convertido = recorte destes códigos só se a conversão
+                    # for elemento a elemento: datetime.date puro (sem formato a
+                    # inferir, sem fuso)
+                    exato = all(type(v) is _date for v in vals)
+                    if len(vals) == 0:
+                        hit = (np.full(len(col), -1, dtype=np.int32), [])
+                    else:
+                        per_u = pd.to_datetime(pd.Series(vals), errors="coerce").dt.to_period("M")
+                        c2, u2 = pd.factorize(per_u, sort=True, use_na_sentinel=True)
+                        c2 = np.append(np.asarray(c2, dtype=np.int32), np.int32(-1))
+                        hit = (c2[cu], [str(u) for u in u2])   # cu=-1 ⇒ sentinela -1
+            if hit is None:   # datetime64 (com/sem tz), period, numéricos, mistos: caminho de sempre
+                per = pd.to_datetime(col, errors="coerce").dt.to_period("M")
+                codes, uniq = pd.factorize(per, sort=True, use_na_sentinel=True)
+                hit = (np.asarray(codes, dtype=np.int32), [str(u) for u in uniq])
+                exato = isinstance(col.dtype, np.dtype) and col.dtype.kind == "M"
             cache[time_col] = hit
+            cache[(time_col, "recorte_exato")] = exato
         return hit
+
+    def _safra_codes_linhas(self, time_col, mask=None):
+        """``(códigos, rótulos)`` da safra só nas linhas ``mask`` (posicional,
+        ``None`` = todas), com os rótulos restritos às safras presentes e os
+        códigos renumerados — o MESMO que ``to_datetime``/``to_period`` +
+        ``factorize(sort=True)`` sobre o recorte, reusando :meth:`_safra_codes`
+        (memoizado) em vez de reconverter as datas a cada gráfico/ação. Só
+        quando a conversão é elemento a elemento (datetime64 sem fuso ou
+        ``datetime.date`` puro — nada de formato inferido do 1º valor do recorte
+        nem de fuso); senão ``None`` (o chamador converte o recorte, como antes)."""
+        if not isinstance(self.df[time_col], pd.Series):
+            return None
+        cod, rot = self._safra_codes(time_col)
+        if not self._safra_cache.get((time_col, "recorte_exato")):
+            return None
+        c = cod if mask is None else cod[mask]
+        pres = np.unique(c[c >= 0])
+        if len(pres) == len(rot):
+            return c, list(rot)
+        novo = np.full(len(rot) + 1, -1, dtype=np.int32)   # último = sentinela (-1)
+        novo[pres] = np.arange(len(pres), dtype=np.int32)
+        return novo[c], [rot[i] for i in pres]
 
     def _fatias_por_safra(self, time_col, sample=None, all_rows=False, amostrar=True):
         """``(idx, limites, rotulos)``: posições das linhas do recorte ordenadas
@@ -1735,14 +1865,27 @@ class ModelSegmenter:
                   int(n_ok[i])) for i in range(nb)]
         return max(int(ref.sum()), 1), y_all, stats, bc
 
-    def _risco_por_grupo(self, bin_codes, grupo_codes, n_grupos, n_bins, linhas):
+    def _risco_por_grupo(self, bin_codes, grupo_codes, n_grupos, n_bins, linhas,
+                         pos=None):
         """Risco (média do alvo, NaN-safe — igual a :meth:`_risco`) por grupo ×
-        faixa numa passada: matriz ``(n_grupos, n_bins)``, NaN onde não há alvo."""
+        faixa numa passada: matriz ``(n_grupos, n_bins)``, NaN onde não há alvo.
+
+        ``pos`` (opcional): posições CRESCENTES das linhas (``flatnonzero`` de
+        ``linhas``), usadas no lugar da máscara — as mesmas linhas, na mesma
+        ordem, entram no ``np.bincount`` (soma idêntica bit a bit), mas os
+        filtros rodam só nelas (ex.: a amostra dos gráficos) e não nas n linhas."""
         y = self.df[self.target].to_numpy(dtype="float64")
-        ok = linhas & (bin_codes >= 0) & (grupo_codes >= 0) & ~np.isnan(y)
-        idx = grupo_codes[ok].astype(np.int64) * n_bins + bin_codes[ok]
+        if pos is None:
+            ok = linhas & (bin_codes >= 0) & (grupo_codes >= 0) & ~np.isnan(y)
+            idx = grupo_codes[ok].astype(np.int64) * n_bins + bin_codes[ok]
+            w = y[ok]
+        else:
+            yp, bp, gp = y[pos], bin_codes[pos], grupo_codes[pos]
+            ok = (bp >= 0) & (gp >= 0) & ~np.isnan(yp)
+            idx = gp[ok].astype(np.int64) * n_bins + bp[ok]
+            w = yp[ok]
         tam = n_grupos * n_bins
-        soma = np.bincount(idx, weights=y[ok], minlength=tam)
+        soma = np.bincount(idx, weights=w, minlength=tam)
         cont = np.bincount(idx, minlength=tam)
         with np.errstate(invalid="ignore", divide="ignore"):
             r = np.where(cont > 0, soma / np.maximum(cont, 1), np.nan)
@@ -1839,15 +1982,19 @@ class ModelSegmenter:
         optbinning). A chave cobre tudo que altera o resultado; o cache é
         invalidado POR VARIÁVEL em set/clear_manual_bins e clear_derived."""
         eff_splits = splits if splits is not None else self.var_meta.get(feature, {}).get("splits")
-        sample_key = sample if sample is not None else self.ref_sample
-        ck = (feature, max_n_bins, min_bin_size, sample_key, self._splits_key(eff_splits),
-              self.var_meta.get(feature, {}).get("na_destino"))
+        ck = self._chave_bins_cache(feature, max_n_bins, min_bin_size, eff_splits, sample)
         hit = self._bins_cache.get(ck)
         if hit is not None:
             return hit
         res = self._resolve_bins_uncached(feature, max_n_bins, min_bin_size, eff_splits, sample)
         self._bins_cache[ck] = res
         return res
+
+    def _chave_bins_cache(self, feature, max_n_bins, min_bin_size, eff_splits, sample):
+        """Chave de :attr:`_bins_cache` (a de :meth:`_resolve_bins`)."""
+        sample_key = sample if sample is not None else self.ref_sample
+        return (feature, max_n_bins, min_bin_size, sample_key, self._splits_key(eff_splits),
+                self.var_meta.get(feature, {}).get("na_destino"))
 
     def _resolve_bins_uncached(self, feature, max_n_bins=5, min_bin_size=0.05, splits=None,
                                sample=None):
@@ -1903,16 +2050,9 @@ class ModelSegmenter:
                 if len(y) < 4 or x_obs.size == 0 or x_obs.min() == x_obs.max():
                     cortes = []
                 else:
-                    if self.task_type == "classification":
-                        b = OptimalBinning(name=feature, dtype="numerical",
-                                           max_n_bins=max_n_bins, min_bin_size=min_bin_size,
-                                           monotonic_trend="auto_asc_desc")
-                        cortes = _fit_optbinning_splits(b, x, y.astype(int))
-                    else:
-                        b = ContinuousOptimalBinning(
-                            name=feature, dtype="numerical", max_n_bins=max_n_bins,
-                            min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
-                        cortes = _fit_optbinning_splits(b, x, y)
+                    cortes = self._cortes_num_optbinning(
+                        feature, x, y.astype(int) if self.task_type == "classification" else y,
+                        max_n_bins, min_bin_size, sample, len(y))
             if not cortes:
                 return [], kind
             edges = [-np.inf, *cortes, np.inf]
@@ -2036,6 +2176,67 @@ class ModelSegmenter:
             hit = self._ajuste_pos_cache[ck] = (mask, pos, sel, yf[sel])
         return hit
 
+    def _chave_prebins(self, feature, sample, n_ajuste):
+        """Chave de :attr:`_prebin_cache`: tudo que fixa o (x, y) entregue à
+        pré-binagem — variável e alvo (versões dos valores), amostra (normalizada
+        como em :meth:`_posicoes_ajuste`), tipo de alvo e o sorteio do teto
+        (linhas com alvo observado + teto em vigor: o sorteio só depende disso).
+        ``max_n_prebins``/``min_prebin_size`` são sempre os padrões do optbinning.
+        ``None`` quando o reuso não é suportado (ajuste completo, como antes)."""
+        if not _PREBINS_REUSO:
+            return None
+        sk = None if self.sample_col is None else (
+            sample if sample is not None else self.ref_sample)
+        return (feature, sk, self.task_type, int(n_ajuste),
+                _common_mod.OPTBINNING_MAX_ROWS, self._col_key(feature),
+                self._col_key(self.target))
+
+    def _cortes_num_optbinning(self, feature, x, y, max_n_bins, min_bin_size, sample,
+                               n_ajuste, max_rows=None):
+        """Cortes do binning ótimo NUMÉRICO de ``(x, y)`` (``y`` já no tipo do
+        ajuste: int na classificação) via :func:`_fit_optbinning_splits` — o
+        ``max_rows`` segue o dele. ``n_ajuste`` = linhas com alvo observado ANTES
+        do sorteio do teto (identifica o sorteio na chave dos prebins).
+
+        Com os cortes crus da pré-binagem CART desta variável/amostra/sorteio já
+        capturados (1º ajuste, em geral o do ranking), o ajuste recebe-os como
+        ``user_splits`` e pula só a árvore — mesmos cortes finais (ver
+        :data:`_PREBINS_REUSO`). Prebins vazios ⇒ ``[]`` direto (o ajuste completo
+        também dá ``[]``; o optbinning com ``user_splits=[]`` nem preenche as
+        contagens de faltante). Se o ajuste com ``user_splits`` não terminar,
+        refaz o ajuste completo — o comportamento (e o aviso) de antes."""
+        clf = self.task_type == "classification"
+        kw = dict(name=feature, dtype="numerical", max_n_bins=max_n_bins,
+                  min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
+        ck = self._chave_prebins(feature, sample, n_ajuste)
+        cache = self.__dict__.setdefault("_prebin_cache", {})
+        pre = cache.get(ck) if ck is not None else None
+        if pre is not None:
+            if not len(pre):
+                return []
+            b = (OptimalBinning if clf else ContinuousOptimalBinning)(
+                user_splits=pre.copy(), **kw)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")      # falha aqui ⇒ ajuste completo abaixo
+                cortes = _fit_optbinning_splits(b, x, y, max_rows=max_rows)
+            if getattr(b, "_is_fitted", False):
+                return cortes
+        if ck is None:
+            cls = OptimalBinning if clf else ContinuousOptimalBinning
+        else:
+            cls = _OptimalBinningCaptura if clf else _ContinuousOptimalBinningCaptura
+        b = cls(**kw)
+        cortes = _fit_optbinning_splits(b, x, y, max_rows=max_rows)
+        capt = b.__dict__.get("_yg_prebins")
+        # só de ajuste que terminou (``_is_fitted``); prebins vazios só se o
+        # ajuste completo de fato deu "sem corte"
+        if (ck is not None and capt is not None and getattr(b, "_is_fitted", False)
+                and (len(capt) or not cortes)):
+            if len(cache) > 4096:                    # backstop (entradas de ≤20 floats)
+                cache.clear()
+            cache[ck] = capt
+        return cortes
+
     def _bins_num_por_posicao(self, feature, max_n_bins, min_bin_size, sample=None):
         """Binning ótimo de uma variável NUMÉRICA sem copiar o recorte: os mesmos
         (x, y) que :meth:`_resolve_bins_uncached` entregava ao optbinning, por
@@ -2066,16 +2267,11 @@ class ModelSegmenter:
                 varia = bool(xo.size) and xo.min() != xo.max()
             if not varia:
                 cortes = []
-            elif self.task_type == "classification":
-                b = OptimalBinning(name=feature, dtype="numerical",
-                                   max_n_bins=max_n_bins, min_bin_size=min_bin_size,
-                                   monotonic_trend="auto_asc_desc")
-                cortes = _fit_optbinning_splits(b, x, y.astype(int), max_rows=0)
             else:
-                b = ContinuousOptimalBinning(
-                    name=feature, dtype="numerical", max_n_bins=max_n_bins,
-                    min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
-                cortes = _fit_optbinning_splits(b, x, y.copy(), max_rows=0)
+                cortes = self._cortes_num_optbinning(
+                    feature, x,
+                    y.astype(int) if self.task_type == "classification" else y.copy(),
+                    max_n_bins, min_bin_size, sample, len(pos), max_rows=0)
         if not cortes:
             return []
         edges = [-np.inf, *cortes, np.inf]
@@ -2642,39 +2838,62 @@ class ModelSegmenter:
         # máscara por faixa × safra sobre recortes copiados da base
         labels = [self._bin_label(feature, b) for b in bins]
         nb = len(bins)
-        bc = self._feature_bin_codes(feature, bins)
-        zeros = np.zeros(len(self.df), dtype=np.int32)
-        ref_risco = list(self._risco_por_grupo(
-            bc, zeros, 1, nb, self._rows_mask(self.ref_sample))[0])
-        order = sorted(range(len(bins)),
-                       key=lambda i: (np.inf if pd.isna(ref_risco[i]) else ref_risco[i]))
+        # memo em 2 níveis (as duas plots de inversão da aba chamam isto com
+        # amostra/safra diferentes): (i) risco de referência, ordem e série por
+        # amostra; (ii) série por safra. Chave: faixas, versões dos valores e a
+        # amostra dos gráficos em vigor ((teto, n, semente), nunca um bool).
+        # Podado com a variável (registro em _ROW_CACHES); devolve cópias.
+        memo = self.__dict__.setdefault("_bin_series_cache", {})
+        if len(memo) > 64:
+            memo.clear()
+        base_k = (feature, repr(bins), self._chave_amostra_graficos(),
+                  self._col_key(feature), self._col_key(self.target))
+        k1 = base_k + ("amostras", self.ref_sample)
+        hit = memo.get(k1)
+        if hit is None:
+            bc = self._feature_bin_codes(feature, bins)
+            zeros = np.zeros(len(self.df), dtype=np.int32)
+            ref_risco = list(self._risco_por_grupo(
+                bc, zeros, 1, nb, None, pos=np.flatnonzero(self._rows_mask(self.ref_sample)))[0])
+            order = sorted(range(len(bins)),
+                           key=lambda i: (np.inf if pd.isna(ref_risco[i]) else ref_risco[i]))
 
-        # por amostra
-        xs_s = self._samples()
-        cod_a = np.full(len(self.df), -1, dtype=np.int32)
-        for j, a in enumerate(xs_s):
-            cod_a[self._rows_mask(a)] = j
-        mat_s = self._risco_por_grupo(bc, cod_a, len(xs_s), nb,
-                                      np.ones(len(self.df), dtype=bool))
-        ser_s = {i: list(mat_s[:, i]) for i in range(nb)}
+            # por amostra (só as linhas de alguma amostra entram)
+            xs_s = self._samples()
+            cod_a = np.full(len(self.df), -1, dtype=np.int32)
+            for j, a in enumerate(xs_s):
+                cod_a[self._rows_mask(a)] = j
+            mat_s = self._risco_por_grupo(bc, cod_a, len(xs_s), nb, None,
+                                          pos=np.flatnonzero(cod_a >= 0))
+            ser_s = {i: list(mat_s[:, i]) for i in range(nb)}
+            hit = memo[k1] = (ref_risco, order, list(xs_s), ser_s)
+        ref_risco, order, xs_s, ser_s = hit
 
         # por safra
         xs_t, ser_t = [], {i: [] for i in range(nb)}
         tcol = time_col or self.date_col
         if tcol is not None and tcol in self.df.columns:
-            linhas = self._rows_mask(sample, all_rows=not sample)
-            cod_t, rot_t = self._safra_codes(tcol)
-            n_t = np.bincount(cod_t[linhas & (cod_t >= 0)], minlength=len(rot_t))
-            mat_t = self._risco_por_grupo(bc, cod_t, len(rot_t), nb, linhas)
-            for k, rot in enumerate(rot_t):
-                if n_t[k] == 0 or n_t[k] < min_n:   # safra ausente ou pequena fica fora
-                    continue
-                xs_t.append(rot)
-                for i in range(nb):
-                    ser_t[i].append(mat_t[k, i])
-        return {"ordered": order, "labels": labels, "ref_risco": ref_risco,
-                "xs_sample": xs_s, "ser_sample": ser_s,
-                "xs_safra": xs_t, "ser_safra": ser_t}
+            k2 = base_k + ("safras", tcol, self._col_key(tcol), sample, min_n,
+                           self.sample_col is None)
+            hit2 = memo.get(k2)
+            if hit2 is None:
+                bc = self._feature_bin_codes(feature, bins)
+                linhas = self._rows_mask(sample, all_rows=not sample)
+                cod_t, rot_t = self._safra_codes(tcol)
+                pos_t = np.flatnonzero(linhas & (cod_t >= 0))
+                n_t = np.bincount(cod_t[pos_t], minlength=len(rot_t))
+                mat_t = self._risco_por_grupo(bc, cod_t, len(rot_t), nb, None, pos=pos_t)
+                for k, rot in enumerate(rot_t):
+                    if n_t[k] == 0 or n_t[k] < min_n:   # safra ausente ou pequena fica fora
+                        continue
+                    xs_t.append(rot)
+                    for i in range(nb):
+                        ser_t[i].append(mat_t[k, i])
+                hit2 = memo[k2] = (xs_t, ser_t)
+            xs_t, ser_t = hit2
+        return {"ordered": list(order), "labels": labels, "ref_risco": list(ref_risco),
+                "xs_sample": list(xs_s), "ser_sample": {i: list(v) for i, v in ser_s.items()},
+                "xs_safra": list(xs_t), "ser_safra": {i: list(v) for i, v in ser_t.items()}}
 
     def variable_inversion(self, feature, time_col=None, sample=None,
                            max_n_bins=6, min_bin_size=0.05, min_n=20) -> dict:
@@ -3046,9 +3265,52 @@ class ModelSegmenter:
         optbinning na amostra ``sample`` (default: referência/DES), IGNORANDO eventuais
         bins manuais. Retorna a lista de bins numéricos (+ ``na`` se houver faltantes)
         ou ``[]`` quando não dá para binar. (:meth:`_resolve_bins` respeita bins
-        manuais; este não.)"""
+        manuais; este não.)
+
+        Memoizado em :attr:`_optbin_cache` pela versão dos valores da coluna e
+        pela derivação — não pelos bins manuais, que este resultado ignora (por
+        isso set/clear_manual_bins não o esvaziam). Sem bins manuais e sem
+        derivação o resultado é o MESMO de ``_resolve_bins(feature, max_n_bins,
+        min_bin_size, None, sample)`` (mesma sequência: binária, optbinning com o
+        mesmo sorteio, faixa ``na``; destino do faltante só vale p/ manual) —
+        lido do ``_bins_cache`` quando o ranking já o calculou (só leitura: no
+        miss roda o recorte, sem gravar lá). A lista devolvida é compartilhada:
+        não mutar."""
         if OptimalBinning is None:
             raise ImportError("optbinning não instalado. Rode: pip install optbinning")
+        if self._detect_kind(feature) != "num":      # dtype do df = dtype do recorte
+            return []
+        meta = self.var_meta.get(feature) or {}
+        ck = (feature, max_n_bins, min_bin_size,
+              sample if sample is not None else self.ref_sample, self.task_type,
+              meta.get("derived_from"), repr(meta.get("derived_bins")),
+              bool(meta.get("derived_dummy")), self._col_key(feature),
+              self._col_key(self.target), _common_mod.OPTBINNING_MAX_ROWS)
+        cache = self.__dict__.setdefault("_optbin_cache", {})
+        hit = cache.get(ck)
+        if hit is not None:
+            return hit
+        rb = None
+        if (meta.get("splits") is None and not meta.get("derived_from")
+                and not meta.get("derived_bins")):
+            # só o HIT puro do ranking (leitura, sem efeito colateral): no miss,
+            # gravar no _bins_cache calaria o aviso de nível raro / de falha do
+            # optbinning que o ranking emitiria depois na mesma chave
+            rb = self._bins_cache.get(
+                self._chave_bins_cache(feature, max_n_bins, min_bin_size, None, sample))
+        if rb is not None:
+            bins, kind = rb
+            bins = bins if kind == "num" else []
+        else:
+            bins = self._optbin_numeric_bins_recorte(feature, sample, max_n_bins, min_bin_size)
+        if len(cache) > 4096:                        # backstop de memória
+            cache.clear()
+        cache[ck] = bins
+        return bins
+
+    def _optbin_numeric_bins_recorte(self, feature, sample, max_n_bins, min_bin_size):
+        """Corpo de :meth:`_optbin_numeric_bins` no recorte (variável com bins
+        manuais ou derivada): optbinning ignorando os manuais."""
         fit = self._frame(sample, cols=[feature, self.target])
         if self._detect_kind(feature, fit) != "num":
             return []
@@ -3064,14 +3326,9 @@ class ModelSegmenter:
         x_obs = x[~np.isnan(x)]
         if len(y) < 4 or x_obs.size == 0 or x_obs.min() == x_obs.max():
             return []
-        if self.task_type == "classification":
-            b = OptimalBinning(name=feature, dtype="numerical", max_n_bins=max_n_bins,
-                               min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
-            cortes = _fit_optbinning_splits(b, x, y.astype(int))
-        else:
-            b = ContinuousOptimalBinning(name=feature, dtype="numerical", max_n_bins=max_n_bins,
-                                         min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
-            cortes = _fit_optbinning_splits(b, x, y)
+        cortes = self._cortes_num_optbinning(
+            feature, x, y.astype(int) if self.task_type == "classification" else y,
+            max_n_bins, min_bin_size, sample, len(y))
         if not cortes:
             return []
         edges = [-np.inf, *cortes, np.inf]
@@ -3334,9 +3591,17 @@ class ModelSegmenter:
                     transform=ax.transAxes, color="#889"); ax.axis("off")
             fig.tight_layout(); return fig
 
-        safra = pd.to_datetime(base[time_col], errors="coerce").dt.to_period("M")
-        cod, pers = pd.factorize(safra, sort=True, use_na_sentinel=True)   # NaT → -1
-        pers = list(pers)
+        # safra do recorte: reusa os códigos memoizados da coluna (pela máscara
+        # posicional que gerou ``base``) quando a conversão é elemento a elemento
+        reuso = self._safra_codes_linhas(
+            time_col, self._frame_mask(sample) if (sample and self.sample_col is not None)
+            else None)
+        if reuso is not None:
+            cod, pers = reuso
+        else:
+            safra = pd.to_datetime(base[time_col], errors="coerce").dt.to_period("M")
+            cod, pers = pd.factorize(safra, sort=True, use_na_sentinel=True)   # NaT → -1
+            pers = list(pers)
         if not pers:
             ax.text(0.5, 0.5, "sem dados por safra", ha="center", va="center",
                     transform=ax.transAxes, color="#889"); ax.axis("off")
@@ -7250,7 +7515,15 @@ class ModelSegmenter:
         sub = self.df if all_samples else self._frame(None)
         if time_col not in sub.columns:
             raise ValueError(f"Coluna de tempo '{time_col}' não existe no DataFrame.")
-        safra = pd.to_datetime(sub[time_col], errors="coerce").dt.to_period("M").astype(str)
+        reuso = self._safra_codes_linhas(
+            time_col, None if (all_samples or self.sample_col is None) else self._frame_mask(None))
+        if reuso is not None:
+            # mesmo texto do ``to_period().astype(str)``: 'AAAA-MM', 'NaT' p/ -1
+            cod, rot = reuso
+            safra = pd.Series(np.asarray(list(rot) + ["NaT"], dtype=object)[cod],
+                              index=sub.index)
+        else:
+            safra = pd.to_datetime(sub[time_col], errors="coerce").dt.to_period("M").astype(str)
         rows = []
         for f in feats:
             col = sub[f]
@@ -9960,6 +10233,8 @@ class ModelSegmenter:
         # caches por LINHA da base (safra/faixa) e por variável: nada disso pode
         # ir no pickle para os executores (registro único em _ROW_CACHES)
         s._reset_row_caches()
+        s._prebin_cache = {}                      # memos de análise: não vão ao broadcast
+        s._optbin_cache = {}
         s._col_version = dict(self.__dict__.get("_col_version") or {})
         s._metrics_ci_cache = None
         s._shap_cache = {}
