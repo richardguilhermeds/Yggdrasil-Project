@@ -869,12 +869,35 @@ def _spearman_pairwise(frame: pd.DataFrame) -> pd.DataFrame:
     (linhas completas do par, ranks médios nos empates), mais rápido: colunas
     sem NaN são ranqueadas UMA vez e correlacionadas numa operação de matriz; só
     os pares que envolvem NaN são re-ranqueados no recorte completo do par."""
-    from scipy.stats import rankdata
     cols = list(frame.columns)
-    X = frame.apply(pd.to_numeric, errors="coerce").to_numpy(dtype="float64")
+    return _spearman_memo(cols, lambda idx: frame.iloc[:, idx], {}, [None] * len(cols))
+
+
+def _spearman_memo(cols, obter_frame, memo, chaves) -> pd.DataFrame:
+    """Núcleo de :func:`_spearman_pairwise` com memo entre chamadas (usado por
+    :meth:`ModelSegmenter.correlation_report`). ``obter_frame(idx)`` devolve o
+    recorte com as colunas nas posições ``idx`` (só as que faltam no memo são
+    lidas); ``chaves[i]`` é a identidade da coluna ``i`` nas chaves do ``memo``
+    (``None`` = não memoiza). Memoizados: o diagnóstico por coluna (tem NaN,
+    constante), o valor de cada par com NaN (o Pearson dos ranks é simétrico bit
+    a bit) e a matriz do bloco sem NaN — esta pela tupla EXATA das colunas do
+    bloco, porque o ``corrcoef`` (BLAS) pode variar no último bit com outro
+    conjunto de colunas."""
+    from scipy.stats import rankdata
     k = len(cols)
     out = np.eye(k)
-    tem_nan = np.isnan(X).any(axis=0)
+    vetores = {}
+
+    def _X(idx):
+        # mesma conversão de antes (to_numeric + float64), que é coluna a coluna:
+        # só converte as colunas ainda não lidas nesta chamada
+        falta = [i for i in idx if i not in vetores]
+        if falta:
+            X = (obter_frame(falta).apply(pd.to_numeric, errors="coerce")
+                 .to_numpy(dtype="float64"))
+            for t, i in enumerate(falta):
+                vetores[i] = X[:, t]
+        return vetores
 
     def _pearson(a, b):
         if a.size < 2:
@@ -883,51 +906,241 @@ def _spearman_pairwise(frame: pd.DataFrame) -> pd.DataFrame:
         den = np.sqrt((a * a).sum() * (b * b).sum())
         return float((a * b).sum() / den) if den > 0 else np.nan
 
+    # diagnóstico por coluna: (tem NaN, constante)
+    info = [memo.get(("col", c)) if c is not None else None for c in chaves]
+    falta = [i for i in range(k) if info[i] is None]
+    if falta:
+        V = _X(falta)
+        for i in falta:
+            x = V[i]
+            nan = np.isnan(x)
+            v = x[~nan]
+            info[i] = (bool(nan.any()), bool(v.size and np.all(v == v[0])))
+            if chaves[i] is not None:
+                memo[("col", chaves[i])] = info[i]
+    tem_nan = [t for t, _ in info]
+    constante = [c for _, c in info]
+
     completas = [i for i in range(k) if not tem_nan[i]]
     if len(completas) >= 2:
-        R = np.column_stack([rankdata(X[:, i]) for i in completas])
-        with np.errstate(invalid="ignore", divide="ignore"):
-            C = np.corrcoef(R, rowvar=False)
+        kb = tuple(chaves[i] for i in completas)
+        chave_b = ("bloco", kb) if None not in kb else None
+        C = memo.get(chave_b) if chave_b is not None else None
+        if C is None:
+            V = _X(completas)
+            R = np.column_stack([rankdata(V[i]) for i in completas])
+            with np.errstate(invalid="ignore", divide="ignore"):
+                C = np.corrcoef(R, rowvar=False)
+            del R
+            if chave_b is not None:
+                blocos = [c for c in memo if c[0] == "bloco"]
+                for c in blocos[:max(0, len(blocos) - 15)]:   # guarda os 16 últimos
+                    memo.pop(c, None)
+                memo[chave_b] = C
         for a, i in enumerate(completas):
             for b, j in enumerate(completas):
                 if i != j:
                     out[i, j] = C[a, b]
-    # pares com NaN: ranks médios no recorte completo do par, SEM re-ordenar —
-    # a ordem de cada coluna é calculada uma vez e só filtrada pelo recorte
-    ordens = {}
 
-    def _rank_no_recorte(i, ok):
-        if i not in ordens:
-            ordens[i] = np.argsort(X[:, i], kind="mergesort")   # NaN vão ao fim
-        o = ordens[i]
-        o = o[ok[o]]                                    # linhas válidas, já ordenadas
-        v = X[o, i]
-        n = v.size
-        if n == 0:
-            return np.empty(0)
-        novo = np.r_[True, v[1:] != v[:-1]]             # início de cada grupo de empate
-        grupo = np.cumsum(novo) - 1
-        inicio = np.flatnonzero(novo)
-        tam = np.diff(np.r_[inicio, n])
-        media = inicio + (tam + 1) / 2.0                # rank médio (1-based) do grupo
-        r = np.empty(len(X))
-        r[o] = media[grupo]
-        return r[ok]
-
+    # pares com NaN: ranks médios no recorte completo do par. Par com coluna
+    # constante não é calculado (o laço final o deixa NaN de qualquer forma).
+    pares = []
     for i in range(k):
         for j in range(i + 1, k):
-            if not (tem_nan[i] or tem_nan[j]):
+            if not (tem_nan[i] or tem_nan[j]) or constante[i] or constante[j]:
                 continue
-            ok = ~np.isnan(X[:, i]) & ~np.isnan(X[:, j])
-            v = _pearson(_rank_no_recorte(i, ok), _rank_no_recorte(j, ok))
+            chave = (("par", frozenset((chaves[i], chaves[j])))
+                     if chaves[i] is not None and chaves[j] is not None else None)
+            v = memo.get(chave) if chave is not None else None
+            if v is None:
+                pares.append((i, j, chave))
+            else:
+                out[i, j] = out[j, i] = v
+    if pares:
+        # por coluna, UMA vez: máscara dos válidos (contígua) e o código denso de
+        # cada valor válido na ordem crescente (np.unique ordena; inválidos = 0).
+        # O rank médio no recorte do par sai de bincount + cumsum dos códigos do
+        # recorte: fim − (cnt − 1)/2 = início + (cnt + 1)/2 do grupo de empate —
+        # meio-inteiros exatos em float64, os MESMOS ranks do argsort por par.
+        # Memória: ~5 B × linhas por coluna envolvida (int32 + bool).
+        precisa = sorted({p[0] for p in pares} | {p[1] for p in pares})
+        V = _X(precisa)
+        n = len(V[precisa[0]])
+        tipo = np.int32 if n < 2 ** 31 else np.intp
+        valido, codigo, nu = {}, {}, {}
+        for i in precisa:
+            ok = ~np.isnan(V[i])
+            u, inv = np.unique(V[i][ok], return_inverse=True)
+            c = np.zeros(n, dtype=tipo)
+            c[ok] = inv.reshape(-1)
+            valido[i], codigo[i], nu[i] = ok, c, len(u)
+
+        def _rank(i, m):
+            c = codigo[i][m]
+            cnt = np.bincount(c, minlength=nu[i])
+            fim = np.cumsum(cnt)
+            return (fim - (cnt - 1) * 0.5)[c]
+
+        for i, j, chave in pares:
+            m = valido[i] & valido[j]
+            v = _pearson(_rank(i, m), _rank(j, m))
             out[i, j] = out[j, i] = v
+            if chave is not None:
+                memo[chave] = v
     # coluna constante: o pandas devolve NaN (desvio zero) — mantém
     for i in range(k):
-        v = X[:, i][~np.isnan(X[:, i])]
-        if v.size and np.all(v == v[0]):
+        if constante[i]:
             out[i, :] = np.nan; out[:, i] = np.nan
             out[i, i] = np.nan
     return pd.DataFrame(out, index=cols, columns=cols)
+
+
+#: Teto de células (níveis × níveis) da tabela de contingência DENSA no V de
+#: Cramér: até aqui a tabela é montada por bincount e passa pelo mesmo
+#: ``chi2_contingency`` de antes (resultado bit a bit igual ao do crosstab, com
+#: pico de ~50 B/célula — ~250 MB no teto, o mesmo do caminho antigo).
+_CRAMER_DENSO_MAX = 5_000_000
+
+#: Teto de células da réplica EXATA em blocos (:func:`_chi2_blocos`): acima de
+#: :data:`_CRAMER_DENSO_MAX` e até aqui, o qui-quadrado sai bit a bit igual ao do
+#: ``chi2_contingency`` com só a matriz dos termos em memória (8 B/célula, ~800 MB
+#: no teto) — o caminho antigo pedia ~50 B/célula (~5 GB). Acima disso, o
+#: qui-quadrado esparso (memória O(linhas)), que difere do denso no
+#: arredondamento da soma (~1 ulp em V).
+_CRAMER_EXATO_MAX = 100_000_000
+
+#: Células por bloco na réplica em blocos (limita os temporários a ~70 MB).
+_CRAMER_BLOCO = 1_000_000
+
+_CRAMER_REPLICA_OK = None      # autoverificação da réplica (lazy, por processo)
+
+
+def _chi2_blocos(a2, b2, nr, nc, bloco=None) -> float:
+    """Qui-quadrado de Pearson (sem correção) da tabela densa ``nr × nc`` dos
+    códigos compactos ``a2`` (linha) × ``b2`` (coluna), bit a bit igual a
+    ``chi2_contingency(tab, correction=False)[0]`` sem montar a tabela nem os ~5
+    arrays do tamanho dela que o scipy aloca. Reproduz as mesmas operações por
+    célula — ``E = (R_i·C_j)/n`` e ``(O − E)²/E`` em float64 — numa matriz de
+    termos C-contígua (o layout em que o scipy os soma), preenchida por blocos
+    de células na ordem da memória e somada pelo mesmo ``np.sum``. Só é usada
+    se :func:`_replica_chi2_confere` validar a equivalência neste ambiente."""
+    bloco = int(bloco or _CRAMER_BLOCO)
+    a2 = np.asarray(a2, dtype=np.int64)
+    b2 = np.asarray(b2, dtype=np.int64)
+    Rf = np.bincount(a2, minlength=nr).astype(np.float64)
+    Cf = np.bincount(b2, minlength=nc).astype(np.float64)
+    nf = float(a2.size)                      # = tab.sum(): inteiro exato em float64
+    cel = np.sort(a2 * nc + b2)              # células observadas, na ordem C
+    terms = np.empty(nr * nc, dtype=np.float64)
+    for c0 in range(0, nr * nc, bloco):
+        c1 = min(nr * nc, c0 + bloco)
+        s0, s1 = np.searchsorted(cel, (c0, c1))
+        O = np.bincount(cel[s0:s1] - c0, minlength=c1 - c0).astype(np.float64)
+        i, j = np.divmod(np.arange(c0, c1, dtype=np.int64), nc)
+        E = Rf[i] * Cf[j] / nf
+        terms[c0:c1] = (O - E) ** 2 / E
+    return float(np.sum(terms.reshape(nr, nc)))
+
+
+def _replica_chi2_confere() -> bool:
+    """Confere UMA vez por processo, em tabelas pequenas fixas (vários blocos),
+    que :func:`_chi2_blocos` dá exatamente o ``chi2_contingency`` deste
+    numpy/scipy. Se uma versão futura mudar o layout ou a soma do scipy, a
+    réplica é desligada e as tabelas acima de :data:`_CRAMER_DENSO_MAX` vão
+    para o esparso — nunca um valor 'quase igual' passando por exato."""
+    global _CRAMER_REPLICA_OK
+    if _CRAMER_REPLICA_OK is None:
+        ok = True
+        try:
+            from scipy.stats import chi2_contingency
+            rs = np.random.RandomState(20240611)
+            for nr, nc, n in ((2, 3, 40), (23, 41, 3000), (57, 2, 900), (64, 129, 20000)):
+                a2 = np.concatenate([np.arange(max(nr, nc)) % nr, rs.randint(0, nr, n)])
+                b2 = np.concatenate([np.arange(max(nr, nc)) % nc,
+                                     (a2[max(nr, nc):] * 7 + rs.randint(0, 3, n)) % nc])
+                tab = np.bincount(b2 * nr + a2, minlength=nr * nc).reshape(nc, nr).T
+                ref = float(chi2_contingency(tab, correction=False)[0])
+                for bloco in (7, 64, nr * nc):
+                    if _chi2_blocos(a2, b2, nr, nc, bloco=bloco) != ref:
+                        ok = False
+        except Exception:  # noqa: BLE001
+            ok = False
+        _CRAMER_REPLICA_OK = ok
+    return _CRAMER_REPLICA_OK
+
+
+def _cramers_v_codigos(a, b) -> float:
+    """V de Cramér a partir dos códigos (inteiros ≥ 0, na ORDEM das categorias —
+    a mesma das linhas/colunas do ``crosstab``) das linhas válidas nas duas
+    séries. Só entram níveis observados no recorte (como no crosstab); ``NaN``
+    sem linhas ou com menos de 2 níveis de um dos lados.
+
+    O qui-quadrado depende do tamanho da tabela (níveis × níveis):
+
+    - até :data:`_CRAMER_DENSO_MAX` células: tabela densa montada por bincount
+      no mesmo layout (Fortran) do ``np.asarray(crosstab)`` e o mesmo
+      ``chi2_contingency`` — idêntico ao caminho antigo;
+    - até :data:`_CRAMER_EXATO_MAX`: réplica em blocos (:func:`_chi2_blocos`),
+      também bit a bit igual, com 8 B/célula em vez dos ~50 do caminho antigo;
+    - acima disso (o caminho antigo pedia > ~5 GB; ex.: coluna tipo ID com 300k
+      níveis × categórica com mais de ~330 níveis), qui-quadrado esparso
+      ``Σ_obs (O−E)²/E + max(n − Σ_obs E, 0)`` (as células vazias contribuem
+      só com E), truncado em 0. Difere do denso só no arredondamento da soma
+      (~1 ulp em V) — o que pode trocar a ordem de pares EMPATADOS (V≈1 entre
+      colunas tipo ID) na tabela de :meth:`ModelSegmenter.correlation_report`."""
+    a = np.asarray(a, dtype=np.int64)
+    b = np.asarray(b, dtype=np.int64)
+    n = int(a.size)
+    if n == 0:
+        return float("nan")
+    R = np.bincount(a)
+    C = np.bincount(b)
+    pr, pc = R > 0, C > 0
+    nr, nc = int(pr.sum()), int(pc.sum())
+    if nr < 2 or nc < 2:
+        return float("nan")
+    k = min(nr, nc) - 1
+    if nr * nc <= _CRAMER_EXATO_MAX:
+        denso = nr * nc <= _CRAMER_DENSO_MAX
+        if denso or _replica_chi2_confere():
+            a2 = (np.cumsum(pr) - 1)[a]             # níveis presentes, mesma ordem
+            b2 = (np.cumsum(pc) - 1)[b]
+            if denso:
+                from scipy.stats import chi2_contingency
+                tab = np.bincount(b2 * nr + a2, minlength=nr * nc).reshape(nc, nr).T
+                chi2 = float(chi2_contingency(tab, correction=False)[0])
+            else:
+                chi2 = _chi2_blocos(a2, b2, nr, nc)
+            return float(np.sqrt(chi2 / (float(n) * k)))
+    uc, O = np.unique(a * len(C) + b, return_counts=True)
+    ia, ib = np.divmod(uc, len(C))
+    nf = float(n)
+    E = R[ia].astype(np.float64) * C[ib].astype(np.float64) / nf
+    chi2 = float(np.sum((O - E) ** 2 / E)) + max(nf - float(np.sum(E)), 0.0)
+    chi2 = max(chi2, 0.0)
+    return float(np.sqrt(chi2 / (nf * k)))
+
+
+def _str_por_elemento(dtype) -> bool:
+    """``astype(str)`` do dtype converte elemento a elemento (o texto de um valor
+    não depende das demais linhas) — condição para fatorar a coluna categórica
+    UMA vez e recortar os códigos por par no V de Cramér. Categórica (as
+    categorias inteiras são convertidas, qualquer que seja o recorte), objeto,
+    texto e booleanos. Fora disso (datetime/timedelta/period, arrow…), o
+    formato do texto pode depender do recorte e o par usa o caminho por série."""
+    if isinstance(dtype, (pd.CategoricalDtype, pd.StringDtype, pd.BooleanDtype)):
+        return True
+    return isinstance(dtype, np.dtype) and dtype.kind in "Ob"
+
+
+def _codigos_cramer(s: pd.Series) -> np.ndarray:
+    """Códigos (int64; ``-1`` = faltante) do texto ``astype(str)`` de ``s`` nos
+    não nulos, na ordem crescente do texto (a ordem do ``crosstab``)."""
+    m = s.notna().to_numpy(dtype=bool)
+    c = np.full(len(s), -1, dtype=np.int64)
+    if m.any():
+        c[m] = pd.factorize(s[m].astype(str), sort=True)[0]
+    return c
 
 
 def _bin_codes(series: pd.Series, bins) -> np.ndarray:
@@ -1367,6 +1580,11 @@ class ModelSegmenter:
         # o bootstrap custa segundos e é pedido 2× no mesmo clique (tabela da UI +
         # qualificação do shift em metric_shifts).
         self._metrics_ci_cache: tuple | None = None
+        # redundância: valores por par de correlation_report (Spearman/Cramér)
+        # para as linhas em vigor (ver _memo_correlacao) e o VIF do modelo
+        # vigente (referência ao modelo comparada com `is`, ver vif_table)
+        self._corr_cache: tuple | None = None
+        self._vif_cache: tuple | None = None
         self._reset_row_caches()
         # versão dos VALORES de cada coluna: chave dos memos por variável — nunca
         # id()/ponteiro de dados, que mudam a cada acesso (pandas 3) ou são
@@ -4257,18 +4475,96 @@ class ModelSegmenter:
         """V de Cramér entre duas séries categóricas (0 = independentes · 1 =
         associação perfeita), via qui-quadrado da tabela de contingência (sem
         correção de continuidade). ``NaN`` quando alguma delas tem menos de 2
-        categorias observadas."""
-        from scipy.stats import chi2_contingency
+        categorias observadas.
+
+        Fatora o texto ``astype(str)`` das linhas válidas nas duas (o mesmo do
+        antigo ``crosstab``) e delega a :func:`_cramers_v_codigos`: a tabela de
+        contingência é a mesma, sem a agregação Python por célula do crosstab.
+        Até :data:`_CRAMER_EXATO_MAX` células o valor é bit a bit o do caminho
+        antigo (com bem menos memória). Acima disso — onde o crosstab +
+        ``chi2_contingency`` pediam > ~5 GB e, nas tabelas acima de 2^31
+        células, dezenas de GB (falta de memória) — vale o qui-quadrado esparso
+        em memória O(linhas), que pode diferir em ~1 ulp."""
         m = x.notna() & y.notna()
         if not bool(m.any()):
             return float("nan")
-        tab = pd.crosstab(x[m].astype(str), y[m].astype(str))
-        if tab.shape[0] < 2 or tab.shape[1] < 2:
-            return float("nan")
-        chi2 = float(chi2_contingency(tab, correction=False)[0])
-        n = float(tab.to_numpy().sum())
-        k = min(tab.shape) - 1
-        return float(np.sqrt(chi2 / (n * k))) if n > 0 else float("nan")
+        a = pd.factorize(x[m].astype(str), sort=True)[0]
+        b = pd.factorize(y[m].astype(str), sort=True)[0]
+        return _cramers_v_codigos(a, b)
+
+    def _cramers_v_par(self, sub, fi, fj, codigos, unicas=True) -> float:
+        """V de Cramér do par ``(fi, fj)`` de ``sub`` no laço de
+        :meth:`correlation_report`: cada categórica é fatorada UMA vez (texto
+        ``astype(str)`` dos não nulos, cache ``codigos`` da chamada) e o par só
+        recorta os códigos nas linhas válidas das duas. Vale quando o texto é
+        convertido elemento a elemento (:func:`_str_por_elemento`); fora disso,
+        com colunas duplicadas ou com ``_cramers_v`` sobrescrito numa subclasse,
+        o par vai pelo :meth:`_cramers_v` por série, como antes."""
+        if (not unicas or type(self)._cramers_v is not ModelSegmenter._cramers_v
+                or not (_str_por_elemento(sub[fi].dtype)
+                        and _str_por_elemento(sub[fj].dtype))):
+            return self._cramers_v(sub[fi], sub[fj])
+        for f in (fi, fj):
+            if f not in codigos:
+                codigos[f] = _codigos_cramer(sub[f])
+        ci, cj = codigos[fi], codigos[fj]
+        ok = (ci >= 0) & (cj >= 0)
+        return _cramers_v_codigos(ci[ok], cj[ok])
+
+    def _posicoes_correlacao(self, sample=None):
+        """Posições (no df) das linhas de ``sample`` (referência por padrão; todas
+        sem ``sample_col``) e se passam do teto :attr:`max_linhas_graficos` — caso
+        em que :meth:`_recorte_correlacao` as sorteia."""
+        cap = self.max_linhas_graficos
+        pos = (np.arange(len(self.df)) if self.sample_col is None
+               else np.flatnonzero(self._frame_mask(sample)))
+        return pos, bool(cap) and len(pos) > int(cap)
+
+    def _recorte_correlacao(self, feats, pos, sorteia) -> pd.DataFrame:
+        """Recorte ``feats`` × linhas de :meth:`correlation_report`. Com
+        ``sorteia``, o MESMO sorteio do ``DataFrame.sample(n=cap,
+        random_state=self.random_state)`` feito antes sobre a cópia da amostra
+        inteira — ``random_state(...).choice(n, cap, replace=False)`` em intp,
+        sem ordenar —, aplicado às posições: mesmas linhas, ordem, índice e
+        dtypes, sem copiar a amostra inteira antes."""
+        if sorteia:
+            from pandas.core import common as _pd_com
+            rs = _pd_com.random_state(self.random_state)
+            pos = pos[rs.choice(len(pos), size=int(self.max_linhas_graficos),
+                                replace=False, p=None).astype(np.intp, copy=False)]
+        try:
+            cidx = self.df.columns.get_indexer(feats)
+            unicas = bool((cidx >= 0).all())
+        except Exception:  # noqa: BLE001 (colunas duplicadas no df)
+            unicas = False
+        return self.df.iloc[pos, cidx] if unicas else self.df.iloc[pos][feats]
+
+    def _memo_correlacao(self, sample, n_linhas, sorteia):
+        """Memo (dict) dos valores por par de :meth:`correlation_report` para as
+        linhas em vigor, ou ``None`` quando o sorteio não é determinístico
+        (``random_state`` que não é inteiro: RNG global ou RandomState que
+        avança). Uma entrada só, trocada quando as linhas mudam — amostra,
+        ``sample_col`` (versão), tamanho do df, nº de linhas da amostra e, com
+        sorteio, ``(max_linhas_graficos, random_state)``. Dentro dele, as chaves
+        levam ``(coluna, versão dos valores)`` de cada variável
+        (:meth:`_col_key`): derivada recriada/removida e recriada com o mesmo
+        nome não reaproveita valor velho. Mutar ``seg.df`` por fora (sem a API)
+        exige limpar ``_corr_cache``, como os demais memos por coluna."""
+        rs = self.random_state
+        if sorteia and (isinstance(rs, bool) or not isinstance(rs, (int, np.integer))):
+            return None
+        scol = self.sample_col
+        linhas = ((self.ref_sample if sample is None else sample) if scol is not None else None,
+                  scol, self._col_key(scol) if scol is not None else None,
+                  len(self.df), int(n_linhas),
+                  (int(self.max_linhas_graficos), int(rs)) if sorteia else None)
+        hit = self.__dict__.get("_corr_cache")
+        if hit is None or hit[0] != linhas:
+            hit = (linhas, {})
+            self._corr_cache = hit
+        if len(hit[1]) > 200_000:            # backstop (versões velhas acumuladas)
+            hit[1].clear()
+        return hit[1]
 
     def correlation_report(self, threshold=0.85, features=None, sample=None) -> pd.DataFrame:
         """Relatório de **multicolinearidade** entre as variáveis selecionadas
@@ -4292,23 +4588,52 @@ class ModelSegmenter:
         for f in base:                       # dedup preservando a ordem
             if f in self.df.columns and f not in vistos:
                 feats.append(f); vistos.add(f)
-        sub = self._frame(sample, cols=feats)
         # associação numa amostra de até max_linhas_graficos linhas (semente
         # fixa): p/ triagem de redundância (corte ~0,85) o erro da correlação
         # fica na 3ª casa — e o Spearman do pandas com NaN re-ranqueava a base
-        # inteira POR PAR (~150 s em 3,5M linhas × 18 numéricas)
-        cap = self.max_linhas_graficos
-        if cap and len(sub) > int(cap):
-            sub = sub.sample(n=int(cap), random_state=self.random_state)
-        num = [f for f in feats if self._detect_kind(f, sub) == "num"]
-        cat = [f for f in feats if self._detect_kind(f, sub) == "cat"]
-        corr_num = (_spearman_pairwise(sub[num]) if len(num) >= 2
-                    else pd.DataFrame(np.eye(len(num)), index=num, columns=num))
+        # inteira POR PAR (~150 s em 3,5M linhas × 18 numéricas).
+        # As POSIÇÕES são sorteadas antes da cópia (antes: df.loc[mask, feats]
+        # da amostra inteira e só depois .sample): o mesmo sorteio do
+        # DataFrame.sample — random_state(...).choice(n, cap, replace=False) —,
+        # logo as mesmas linhas, na mesma ordem e com o mesmo índice.
+        pos, sorteia = self._posicoes_correlacao(sample)
+        unicas = bool(self.df.columns.is_unique)
+        # memo dos valores por par entre cliques (mudar o limiar, analisar de
+        # novo após "Excluir redundantes"); None = linhas não determinísticas
+        memo = self._memo_correlacao(sample, len(pos), sorteia) if unicas else None
+        sub_ = []
+
+        def _sub():
+            if not sub_:
+                sub_.append(self._recorte_correlacao(feats, pos, sorteia))
+            return sub_[0]
+
+        if memo is None:
+            _sub()      # sorteio na hora, como antes (RNG global/RandomState avança igual)
+        # o tipo (num/cat) só olha o dtype, que o recorte por posição preserva
+        fonte = self.df if unicas else _sub()
+        num = [f for f in feats if self._detect_kind(f, fonte) == "num"]
+        cat = [f for f in feats if self._detect_kind(f, fonte) == "cat"]
+        chave_col = (lambda f: (f, self._col_key(f)))
+        if len(num) < 2:
+            corr_num = pd.DataFrame(np.eye(len(num)), index=num, columns=num)
+        elif memo is None:
+            corr_num = _spearman_pairwise(_sub()[num])
+        else:
+            corr_num = _spearman_memo(num, lambda idx: _sub()[[num[i] for i in idx]],
+                                      memo, [chave_col(f) for f in num])
         if len(cat) >= 2:
             vals = np.eye(len(cat))
+            codigos = {}
             for i in range(len(cat)):
                 for j in range(i + 1, len(cat)):
-                    v = self._cramers_v(sub[cat[i]], sub[cat[j]])
+                    ch = (("cramer", chave_col(cat[i]), chave_col(cat[j]))
+                          if memo is not None else None)
+                    v = memo.get(ch) if ch is not None else None
+                    if v is None:
+                        v = self._cramers_v_par(_sub(), cat[i], cat[j], codigos, unicas)
+                        if ch is not None:
+                            memo[ch] = v
                     vals[i, j] = vals[j, i] = v
             corr_cat = pd.DataFrame(vals, index=cat, columns=cat)
         else:
@@ -5469,6 +5794,7 @@ class ModelSegmenter:
         """Recebe um modelo já ajustado (sklearn/pipeline). ``features`` indica as
         colunas de entrada (default: as selecionadas). Calcula ``score_``."""
         self.model = model
+        self._vif_cache = None   # o MESMO objeto pode ter sido reajustado por fora
         self.algorithm = self.algorithm or "externo"
         # um _TwoStageModel injetado por fora também ativa o modo hurdle
         self.two_stage = isinstance(model, _TwoStageModel)
@@ -5741,21 +6067,47 @@ class ModelSegmenter:
         # leitura (<5 · 5–10 · >10) e a transformação da base inteira sai do caminho
         linhas = np.asarray(self._fit_mask(), dtype=bool)
         cap = self.max_linhas_graficos
-        if cap and int(linhas.sum()) > int(cap):
-            pos = np.flatnonzero(linhas)
-            escolha = np.random.default_rng(self.random_state).choice(
-                pos.size, int(cap), replace=False)
-            linhas = np.zeros_like(linhas)
-            linhas[pos[np.sort(escolha)]] = True
-        n, R, constante = self._qr_acumulado(
-            self._design_block(pre, bloco)
-            for bloco in self._row_blocks(linhas, self.model_features))
-        names = self._design_feature_names(pre, use_labels=use_labels)
-        k = R.shape[1] - 1 if R is not None else len(names)
+        sorteia = bool(cap) and int(linhas.sum()) > int(cap)
+        # memo do VIF por termo CRU entre cliques: guarda a REFERÊNCIA ao modelo
+        # (comparada com `is`, como em _raw_score_cache — nunca id()) e a chave das
+        # linhas/valores (variáveis e versões, alvo, amostra, teto + semente do
+        # sorteio, tamanho do bloco do QR). Os nomes (rótulos) saem na hora, então
+        # trocar feature_labels sem reajustar não fica velho. Sorteio com semente
+        # não inteira (RNG global) não é memoizado.
+        rs = self.random_state
+        chave = None
+        if not sorteia or (isinstance(rs, (int, np.integer)) and not isinstance(rs, bool)):
+            scol = self.sample_col
+            chave = (tuple(self.model_features),
+                     tuple(self._col_key(f) for f in self.model_features),
+                     self._col_key(self.target), scol,
+                     self._col_key(scol) if scol is not None else None, self.ref_sample,
+                     len(self.df), int(self._CHUNK_ROWS),
+                     (int(cap), int(rs)) if sorteia else None)
+        hit = self.__dict__.get("_vif_cache")
+        if chave is not None and hit is not None and hit[0] is self.model and hit[1] == chave:
+            n, kR, vifs_qr = hit[2]
+            names = self._design_feature_names(pre, use_labels=use_labels)
+        else:
+            if sorteia:
+                pos = np.flatnonzero(linhas)
+                escolha = np.random.default_rng(self.random_state).choice(
+                    pos.size, int(cap), replace=False)
+                linhas = np.zeros_like(linhas)
+                linhas[pos[np.sort(escolha)]] = True
+            n, R, constante = self._qr_acumulado(
+                self._design_block(pre, bloco)
+                for bloco in self._row_blocks(linhas, self.model_features))
+            names = self._design_feature_names(pre, use_labels=use_labels)
+            kR = R.shape[1] - 1 if R is not None else None
+            vifs_qr = (self._vif_from_qr(R, constante) if R is not None and n >= 2
+                       else None)
+            if chave is not None:
+                self._vif_cache = (self.model, chave, (n, kR, vifs_qr))
+        k = kR if kR is not None else len(names)
         if len(names) != k:                              # robustez a divergências
             names = [f"x{i}" for i in range(k)]
-        vifs = (self._vif_from_qr(R, constante) if R is not None and n >= 2
-                else [float("nan")] * len(names))
+        vifs = vifs_qr if vifs_qr is not None else [float("nan")] * len(names)
         out = pd.DataFrame({
             "termo": names,
             "vif": [round(v, 3) if np.isfinite(v) else v for v in vifs]})
@@ -10235,6 +10587,8 @@ class ModelSegmenter:
         s._reset_row_caches()
         s._prebin_cache = {}                      # memos de análise: não vão ao broadcast
         s._optbin_cache = {}
+        s._corr_cache = None
+        s._vif_cache = None
         s._col_version = dict(self.__dict__.get("_col_version") or {})
         s._metrics_ci_cache = None
         s._shap_cache = {}
