@@ -15,7 +15,7 @@ build-backend = "setuptools.build_meta"
 # "yggdrasil-project". O nome de IMPORT continua `yggdrasil` (ver
 # [tool.setuptools.packages.find]), entÃ£o o uso segue: `from yggdrasil import ...`.
 name = "yggdrasil-project"
-version = "0.0.20"
+version = "0.0.21"
 description = "Ferramentas e esteiras governadas de Machine Learning para ciÃªncia de dados e risco de crÃ©dito"
 readme = "README.md"
 # Formato clÃ¡ssico (Metadata 2.1/2.2) â€” ver o teto de setuptools em [build-system].
