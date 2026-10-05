@@ -962,6 +962,33 @@ def _particao_exata(series: pd.Series, bins) -> bool:
     return True
 
 
+def _texto_por_valor_estavel(series: pd.Series) -> bool:
+    """``True`` quando o TEXTO de cada valor não depende de qual representante
+    o ``pd.factorize`` escolhe entre valores iguais no hash — aí os grupos
+    categóricos casam igual fatorando a base inteira ou só o recorte. Falso em
+    objeto misto (``1``/``1.0``/``True`` viram um nível só, com o texto do 1º
+    que aparece: na base inteira pode ser ``'True'``, no recorte ``'1'``), em
+    ``Decimal`` de escala mista (``1.0``/``1.00``) e em float (``-0.0``/``0.0``)."""
+    dt = series.dtype
+    if isinstance(dt, np.dtype) and dt.kind in "biu":
+        return True
+    if isinstance(dt, pd.CategoricalDtype):
+        return pd.api.types.infer_dtype(dt.categories, skipna=True) == "string"
+    return pd.api.types.infer_dtype(series, skipna=True) in ("string", "empty")
+
+
+def _codigos_compactos(codes: np.ndarray, n: int):
+    """``codes`` (``-1..n-1``) no menor inteiro com sinal que os comporta —
+    ``int8`` até 127 faixas, ``int16`` até 32767; ``None`` acima disso. Corta 4×
+    a memória do vetor por linha e deixa o ``argsort(kind='stable')`` no radix
+    (O(N)) em vez do timsort."""
+    if n <= np.iinfo(np.int8).max:
+        return codes.astype(np.int8, copy=False)
+    if n <= np.iinfo(np.int16).max:
+        return codes.astype(np.int16, copy=False)
+    return None
+
+
 def _primeiros_observados(col: pd.Series, mask=None, n: int = 10_000) -> pd.Series:
     """Os ``n`` primeiros valores não nulos de ``col`` (só nas linhas de ``mask``,
     se dada), na ordem e no dtype original: o mesmo que
@@ -1198,7 +1225,7 @@ class ModelSegmenter:
                    ("_bincode_cache", dict), ("_iv_row_cache", dict),
                    ("_amostra_safra_cache", dict), ("_rating_codes_cache", None),
                    ("_raw_score_cache", None), ("_amostra_graficos_cache", None),
-                   ("_ajuste_pos_cache", dict))
+                   ("_ajuste_pos_cache", dict), ("_psi_amostras_cache", None))
 
     def __init__(
         self,
@@ -1575,6 +1602,138 @@ class ModelSegmenter:
             hit = _bin_codes(self.df[feature], bins)
             cache[key] = hit
         return hit
+
+    def _bin_codes_em_cache(self, feature, bins):
+        """O vetor de :meth:`_feature_bin_codes` se a aba de análise já o montou
+        (``None`` se não) — só leitura, nunca grava."""
+        return self.__dict__.get("_bincode_cache", {}).get((feature, repr(bins)))
+
+    def _bin_codes_sem_cache(self, feature, bins) -> np.ndarray:
+        """Mesmo vetor de :meth:`_feature_bin_codes`, mas SEM gravar no
+        ``_bincode_cache``: usa a entrada se a aba de análise já a montou e,
+        senão, calcula e devolve. O ranking passa por ~100 variáveis — gravar
+        cada uma encheria o cache (17 × 40 MB a 10M linhas) e despejaria as
+        entradas da aba Análise."""
+        hit = self._bin_codes_em_cache(feature, bins)
+        return hit if hit is not None else _bin_codes(self.df[feature], bins)
+
+    def _codigos_amostras_psi(self, samples):
+        """``(cod, n, pos)`` do PSI numa passada: ``cod`` = grupo de amostra de
+        cada linha (0 = referência, ``1..k`` = demais amostras distintas, ``-1``
+        = fora), ``n[g]`` = linhas do grupo e ``pos[a]`` = grupo de cada amostra
+        pedida. Memoizado (uma entrada; linhas e ``sample_col`` não mudam após a
+        construção). ``None`` sem ``sample_col``, com rótulo não hashável ou se
+        as máscaras de duas amostras se sobrepuserem — aí o PSI segue pelo laço
+        de uma máscara por amostra."""
+        if self.sample_col is None:
+            return None
+        try:
+            grupos = list(dict.fromkeys([self.ref_sample, *samples]))
+            chave = (self.ref_sample, tuple(grupos))
+        except TypeError:
+            return None
+        hit = self.__dict__.get("_psi_amostras_cache")
+        pos = {a: grupos.index(a) for a in samples}
+        if hit is not None and hit[0] == chave:
+            return (*hit[1], pos)
+        if len(grupos) > np.iinfo(np.int16).max:
+            return None
+        cod = np.full(len(self.df), -1, dtype=np.int16 if len(grupos) > 127 else np.int8)
+        n = []
+        for g, a in enumerate(grupos):
+            m = self._frame_mask(a)
+            if not (isinstance(m, np.ndarray) and m.dtype == bool):
+                return None
+            if (cod[m] >= 0).any():          # amostras sobrepostas: laço antigo
+                return None
+            cod[m] = g
+            n.append(int(m.sum()))
+        self._psi_amostras_cache = (chave, (cod, n))
+        return cod, n, pos
+
+    #: Regressão também pelo caminho por códigos de :meth:`variable_table`
+    #: (ordenação estável + ``np.mean`` por segmento). Medido no par tabela+PSI
+    #: do ranking a 300k linhas: ~0,20 s → ~0,14 s em 6 variáveis; o núcleo da
+    #: regressão (máscara por faixa × argsort radix) a 1M: 0,020 → 0,016 s com
+    #: 6 faixas e 0,035 → 0,019 s com 51 — não fica mais lenta que as máscaras;
+    #: ``False`` volta a regressão ao caminho antigo.
+    _TABELA_CODIGOS_REGRESSAO = True
+
+    def _contagens_por_codigo(self, feature, bins, sample, para_psi=False):
+        """Caminho rápido de :meth:`variable_table`: as contagens por faixa saem
+        de UM vetor de códigos (:func:`_bin_codes`) + ``np.bincount``, sem a
+        cópia ``_frame`` da referência nem uma máscara por faixa. Só quando as
+        faixas formam partição (:func:`_particao_exata`) — aí contar por código
+        dá o mesmo que somar as máscaras. Devolve ``(n_tot, y_all, stats, bc)``
+        (``stats[i] = (n, risco, n_evt, n_non, n_ok)`` da faixa ``i``; ``bc`` =
+        códigos compactos da base inteira, repassados ao PSI da mesma variável)
+        ou ``None`` → caminho das máscaras, com o mesmo resultado.
+
+        ``para_psi=False`` (tabela avulsa, sem PSI em seguida): só com os códigos
+        já no ``_bincode_cache`` — binar a base INTEIRA só para a tabela da
+        referência custa mais que o recorte + máscaras; o ganho vem de a tabela
+        e o PSI dividirem o mesmo vetor."""
+        if self.sample_col is None:
+            return None
+        if not para_psi and self._bin_codes_em_cache(feature, bins) is None:
+            return None
+        if self.task_type != "classification" and not self._TABELA_CODIGOS_REGRESSAO:
+            return None
+        col = self.df[feature]
+        if not _particao_exata(col, bins):
+            return None
+        # grupos categóricos: os códigos vêm da base INTEIRA e a tabela antiga
+        # fatorava só o recorte — iguais só se o texto do nível não depender do
+        # representante escolhido (ver _texto_por_valor_estavel)
+        if (any(b["kind"] != "num" and b.get("cats") for b in bins)
+                and not _texto_por_valor_estavel(col)):
+            return None
+        ref = self._frame_mask(sample)
+        if not (isinstance(ref, np.ndarray) and ref.dtype == bool):
+            return None
+        try:
+            # coluna inteira → recorte: os mesmos valores, na mesma ordem, que o
+            # to_numpy do recorte (_frame); se a conversão falhar (ex.: Int64 com
+            # <NA> fora da referência), o caminho antigo decide
+            y_all = self.df[self.target].to_numpy(dtype="float64")[ref]
+        except (TypeError, ValueError):
+            return None
+        nb = len(bins)
+        try:
+            # binar a base INTEIRA não pode falhar onde o recorte não falharia
+            # (a tabela antiga só lia a referência): na dúvida, caminho antigo
+            bc = _codigos_compactos(self._bin_codes_sem_cache(feature, bins), nb)
+        except Exception:  # noqa: BLE001
+            return None
+        if bc is None:
+            return None
+        bc_ref = bc[ref]
+        n_bin = np.bincount(bc_ref[bc_ref >= 0], minlength=nb)
+        ok = (bc_ref >= 0) & ~np.isnan(y_all)
+        bo, yo = bc_ref[ok], y_all[ok]
+        clf = self.task_type == "classification"
+        n_evt = np.bincount(bo[yo == 1], minlength=nb) if clf else None
+        n_non = np.bincount(bo[yo == 0], minlength=nb) if clf else None
+        if clf and int(n_evt.sum()) + int(n_non.sum()) == yo.size:
+            # alvo só 0/1: a soma da faixa é a contagem de eventos, exata em
+            # qualquer ordem → n_evt/n tem os mesmos bits do np.mean (pairwise)
+            # de _risco
+            n_ok = n_evt + n_non
+            riscos = [float(n_evt[i] / n_ok[i]) if n_ok[i] else float("nan")
+                      for i in range(nb)]
+        else:
+            n_ok = np.bincount(bo, minlength=nb)
+            # caso geral: ordenação estável (radix, códigos int8/int16) mantém a
+            # ordem das linhas dentro de cada faixa → cada segmento é a MESMA
+            # sequência de y_all[m] e o np.mean (pairwise) dá os mesmos bits
+            ys = yo[np.argsort(bo, kind="stable")]
+            lim = np.concatenate(([0], np.cumsum(n_ok)))
+            riscos = [float(ys[lim[i]:lim[i + 1]].mean()) if n_ok[i] else float("nan")
+                      for i in range(nb)]
+        stats = [(int(n_bin[i]), riscos[i],
+                  float(n_evt[i]) if clf else None, float(n_non[i]) if clf else None,
+                  int(n_ok[i])) for i in range(nb)]
+        return max(int(ref.sum()), 1), y_all, stats, bc
 
     def _risco_por_grupo(self, bin_codes, grupo_codes, n_grupos, n_bins, linhas):
         """Risco (média do alvo, NaN-safe — igual a :meth:`_risco`) por grupo ×
@@ -2073,37 +2232,48 @@ class ModelSegmenter:
         ``faixa, n, repr_%, risco`` e — na **classificação** — ``woe, logodds`` e
         ``iv_parcial`` (escala WoE/IV de Siddiqi). Na **regressão**, ``iv_parcial``
         é o desvio absoluto ponderado do alvo. IV total em ``.attrs['iv']``."""
+        return self._variable_table(feature, sample, max_n_bins, min_bin_size, splits)[0]
+
+    def _variable_table(self, feature, sample=None, max_n_bins=6, min_bin_size=0.05,
+                        splits=None, para_psi=False):
+        """:meth:`variable_table` + ``(bins, códigos)`` da variável na base
+        inteira quando o caminho por códigos rodou (``None`` no das máscaras) —
+        o ranking (``para_psi=True``) repassa o vetor ao PSI da mesma variável
+        e o descarta em seguida, sem passar pelo ``_bincode_cache``."""
         bins, kind = self._resolve_bins(feature, max_n_bins, min_bin_size, splits, sample)
-        sub = self._frame(sample, cols=[feature, self.target])
-        n_tot = max(len(sub), 1)
         risco_label = "event_rate" if self.task_type == "classification" else "alvo_medio"
+        rapido = (self._contagens_por_codigo(feature, bins, sample, para_psi=para_psi)
+                  if bins else None)
+        if rapido is not None:
+            n_tot, y_all, stats, bc = rapido
+            codigos = (bins, bc)
+        else:
+            codigos = None
+            sub = self._frame(sample, cols=[feature, self.target])
+            n_tot = max(len(sub), 1)
         if not bins:
             out = pd.DataFrame(columns=["faixa", "n", "repr_%", risco_label])
             out.attrs.update(iv=float("nan"), mono_ok=True, kind=kind,
                              risco_label=risco_label)
-            return out
+            return out, None
 
-        y_all = sub[self.target].to_numpy(dtype="float64")
+        if rapido is None:
+            y_all = sub[self.target].to_numpy(dtype="float64")
+            stats = self._contagens_por_mascara(y_all, _bin_masks(sub[feature], bins))
         mean_global = self._risco(y_all)
         n_evt_tot = float(np.nansum(y_all == 1)) if self.task_type == "classification" else 0.0
         n_non_tot = float(np.nansum(y_all == 0)) if self.task_type == "classification" else 0.0
         n_base = float(np.sum(~np.isnan(y_all)))
 
         rows, iv_total, is_na = [], 0.0, []
-        for b, m in zip(bins, _bin_masks(sub[feature], bins)):
-            yi = y_all[m]
-            yi_ok = yi[~np.isnan(yi)]
-            n_i = int(m.sum())
+        for b, (n_i, risco, n_evt, n_non, n_ok) in zip(bins, stats):
             if n_i == 0:
                 continue
             is_na.append(b.get("kind") == "na")
-            risco = self._risco(yi)
             row = {"faixa": self._bin_label(feature, b), "n": n_i,
                    "repr_%": round(100 * n_i / n_tot, 1),
                    risco_label: round(risco, 4) if np.isfinite(risco) else np.nan}
             if self.task_type == "classification":
-                n_evt = float((yi_ok == 1).sum())
-                n_non = float((yi_ok == 0).sum())
                 d_evt = n_evt / max(n_evt_tot, _EPS)
                 d_non = n_non / max(n_non_tot, _EPS)
                 woe = float(np.log((d_non + _EPS) / (d_evt + _EPS)))
@@ -2115,7 +2285,7 @@ class ModelSegmenter:
                            iv_parcial=round(ivp, 4))
                 iv_total += ivp
             else:
-                ivp = ((yi_ok.size / max(n_base, _EPS)) *
+                ivp = ((n_ok / max(n_base, _EPS)) *
                        abs(risco - mean_global)) if np.isfinite(risco) else 0.0
                 row["iv_parcial"] = round(ivp, 4)
                 iv_total += ivp
@@ -2135,7 +2305,22 @@ class ModelSegmenter:
                          risco_label=risco_label, mean_global=round(mean_global, 4),
                          # risco das faixas ORDENÁVEIS (sem o NA) p/ tendência/inversões
                          risco_ordenavel=[float(x) for x in rcol])
-        return out
+        return out, codigos
+
+    def _contagens_por_mascara(self, y_all, masks):
+        """``stats[i] = (n, risco, n_evt, n_non, n_ok)`` de cada faixa a partir
+        das máscaras (:func:`_bin_masks`) sobre o recorte — o caminho geral de
+        :meth:`variable_table` (faixas sobrepostas, ``-inf``, NaN ≠ NA etc.)."""
+        clf = self.task_type == "classification"
+        stats = []
+        for m in masks:
+            yi = y_all[m]
+            yi_ok = yi[~np.isnan(yi)]
+            stats.append((int(m.sum()), self._risco(yi),
+                          float((yi_ok == 1).sum()) if clf else None,
+                          float((yi_ok == 0).sum()) if clf else None,
+                          yi_ok.size))
+        return stats
 
     def variable_iv(self, features=None, sample=None, max_n_bins=5, min_bin_size=0.05,
                     with_psi=True) -> pd.DataFrame:
@@ -2189,9 +2374,15 @@ class ModelSegmenter:
                 continue
             iv, nb, kind, trend, n_inv = np.nan, 0, "—", "—", 0
             psi_vals = {a: np.nan for a in nonref}
+            codigos = None
             try:
-                vt = self.variable_table(feat, sample=sample, max_n_bins=max_n_bins,
-                                         min_bin_size=min_bin_size)
+                # os códigos de faixa da tabela (se o caminho por códigos rodou)
+                # vão direto ao PSI da MESMA variável e morrem aqui — sem passar
+                # pelo _bincode_cache (ver _bin_codes_sem_cache)
+                vt, codigos = self._variable_table(feat, sample=sample,
+                                                   max_n_bins=max_n_bins,
+                                                   min_bin_size=min_bin_size,
+                                                   para_psi=bool(nonref))
                 kind = vt.attrs.get("kind", "—")
                 nb = len(vt)
                 iv = vt.attrs.get("iv", np.nan)
@@ -2203,9 +2394,11 @@ class ModelSegmenter:
                         vals = vt[vt.attrs.get("risco_label")].tolist()
                     trend, n_inv = _trend(vals)
                 if nonref:
-                    psi_vals = self._variable_psi(feat, nonref, max_n_bins, min_bin_size)
+                    psi_vals = self._variable_psi(feat, nonref, max_n_bins, min_bin_size,
+                                                  _codigos=codigos)
             except Exception:
                 pass
+            codigos = None
             row = {"variavel": feat, "tipo": kind, "n_bins": nb,
                    "iv": round(float(iv), 4) if np.isfinite(iv) else np.nan,
                    "forca": _classifica_iv(iv, self.task_type),
@@ -2230,8 +2423,12 @@ class ModelSegmenter:
         return base
 
     def _variable_psi(self, feature, samples, max_n_bins=5, min_bin_size=0.05,
-                      eps=1e-6) -> dict:
-        """PSI da variável (bins fixados na DES) entre DES e cada amostra."""
+                      eps=1e-6, _codigos=None) -> dict:
+        """PSI da variável (bins fixados na DES) entre DES e cada amostra.
+
+        ``_codigos``: ``(bins, códigos)`` já calculados pela tabela da mesma
+        variável (:meth:`_variable_table`), usados só se as faixas forem as
+        mesmas."""
         bins, _kind = self._resolve_bins(feature, max_n_bins, min_bin_size)
         out = {a: np.nan for a in samples}
         if not bins:
@@ -2239,7 +2436,28 @@ class ModelSegmenter:
         # faixa de cada linha numa passada na coluna inteira + contagem por
         # amostra (np.bincount): sem copiar a referência e cada amostra
         nb = len(bins)
-        bc = _bin_codes(self.df[feature], bins)
+        bc = None
+        if _codigos is not None and repr(_codigos[0]) == repr(bins):
+            bc = _codigos[1]
+        if bc is None:
+            bc = self._bin_codes_sem_cache(feature, bins)
+        grupos = self._codigos_amostras_psi(samples)
+        if grupos is not None:
+            # UMA contagem para todas as amostras: índice (grupo, faixa) em int64
+            # — nunca a aritmética no int8/int16 dos códigos (estoura com nb > 43)
+            cod, n_g, pos = grupos
+            w = (bc >= 0) & (cod >= 0)
+            cont = np.bincount(cod[w].astype(np.int64) * nb + bc[w],
+                               minlength=len(n_g) * nb).reshape(len(n_g), nb)
+            n_ref = max(n_g[0], 1)
+            ref_pct = [max(int(c) / n_ref, eps) for c in cont[0]]
+            for a in samples:
+                g = pos[a]
+                if n_g[g] == 0:
+                    continue
+                cur_pct = [int(c) / n_g[g] for c in cont[g]]
+                out[a] = round(_psi_from_shares(ref_pct, cur_pct, eps), 4)
+            return out
         ref_m = self._rows_mask(self.ref_sample, amostrar=False)   # ranking: base inteira
         n_ref = max(int(ref_m.sum()), 1)
         ref_cont = np.bincount(bc[ref_m & (bc >= 0)], minlength=nb)
