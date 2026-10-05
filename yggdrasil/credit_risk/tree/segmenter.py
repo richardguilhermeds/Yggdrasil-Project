@@ -68,6 +68,23 @@ _UNIT_METRICS = frozenset({"ks", "auc", "gini"})
 # ======================================================================
 # Helpers (formatação/classificação/optbinning vêm de credit_risk._common)
 # ======================================================================
+def _copy_on_write_ativo() -> bool:
+    """True quando o pandas garante copy-on-write: pandas >= 3 (sempre ligado)
+    ou ``mode.copy_on_write is True`` no 2.x. Nunca testar a opção como
+    truthy: no 2.2+ ela pode valer ``"warn"`` (truthy), que NÃO é CoW — só
+    avisa. Com CoW, ``df.copy(deep=False)`` já isola o segmentador do df do
+    chamador, então a cópia profunda é dispensável."""
+    try:
+        if int(str(pd.__version__).split(".")[0]) >= 3:
+            return True
+    except ValueError:
+        pass
+    try:
+        return pd.options.mode.copy_on_write is True
+    except Exception:            # opção ausente (pandas antigo) → sem CoW
+        return False
+
+
 def _sem_prefixo_da_variavel(labels, feature):
     """Rótulos de bin sem o prefixo ``"<feature>: "``.
 
@@ -366,7 +383,19 @@ class TreeSegmenter:
         date_col: str | None = None,
         weight_col: str | None = None,
         verbose: bool = True,
+        copy: bool = True,
     ):
+        # copy: True (padrão) guarda uma cópia PROFUNDA do df — o segmentador
+        # fica isolado de qualquer escrita posterior no df do chamador. False
+        # guarda uma cópia RASA (df.copy(deep=False)): DataFrame novo (incluir
+        # ou remover colunas no original não o afeta) que COMPARTILHA os dados,
+        # sem duplicar a base na RAM. O segmentador nunca escreve em self.df,
+        # então os resultados são idênticos — DESDE QUE o chamador também não
+        # altere o df in-place (df.loc[...] = ...) enquanto usa o segmentador:
+        # no pandas 2.x sem copy-on-write essa escrita passaria a ser vista aqui
+        # e deixaria velhos os caches por máscara. Com copy-on-write ligado
+        # (pandas >= 3, ou mode.copy_on_write=True) a cópia rasa já é isolada,
+        # e é usada mesmo com copy=True. Não é persistido em to_dict().
         if task_type not in TASK_TYPES:
             raise ValueError(
                 f"task_type inválido: {task_type!r}. Use um de {TASK_TYPES}.")
@@ -416,7 +445,7 @@ class TreeSegmenter:
             raise ValueError(f"Coluna alvo '{target}' não está no DataFrame "
                              f"(colunas: {list(df.columns)}).")
 
-        self.df = df.copy()
+        self.df = df.copy(deep=bool(copy) and not _copy_on_write_ativo())
         self.target = target
         self.sample_col = sample_col
         self.ref_sample = ref_sample
@@ -868,7 +897,13 @@ class TreeSegmenter:
     def grow(self, feature, splits=None, dtype=None, max_n_bins=4,
              min_bin_size=0.05, only_segments=None, max_bin_size=None, relax_max=False,
              min_mean_diff=0.0, criterion="optbin", na_to_worst=True):
-        self._bump_version()      # estrutura vai mudar → invalida agregados memoizados
+        # A versão só sobe na PRIMEIRA mutação real (logo antes do 1º
+        # is_leaf=False), não no início: um grow que não divide nada (variável
+        # constante, sem corte válido, 0/1 filho) deixa a árvore idêntica e não
+        # deve invalidar os agregados memoizados. Bump antes da escrita (e não
+        # "só no fim") mantém o cache coerente mesmo com exceção numa folha
+        # seguinte de um grow com várias folhas-alvo.
+        mudou = False
         targets = {
             sid: s for sid, s in self.segments.items()
             if s["is_leaf"] and (only_segments is None or sid in only_segments)
@@ -912,6 +947,9 @@ class TreeSegmenter:
             if na_to_worst:               # sem nó de faltantes → missings vão p/ a pior irmã
                 self._assign_na_to_worst(filhos_sid)
             novos.update(filhos_sid)
+            if not mudou:          # 1ª mutação real → invalida agregados memoizados
+                self._bump_version()
+                mudou = True
             self.segments[sid]["is_leaf"] = False
         self.segments.update(novos)
         self.history.append({"feature": feature, "modo": modo_usado, "splits": splits})
@@ -6039,8 +6077,11 @@ class TreeSegmenter:
 
     @classmethod
     def from_dict(cls, data: dict, df: pd.DataFrame, verbose: bool = False,
-                  mask_cache: dict | None = None):
+                  mask_cache: dict | None = None, copy: bool = True):
         """Reconstrói um segmentador a partir de `to_dict()` + um DataFrame.
+
+        ``copy`` é repassado ao construtor (cópia profunda × rasa do ``df`` —
+        ver ``TreeSegmenter.__init__``); não faz parte do JSON.
 
         ``mask_cache`` (opcional): cache condições→máscara de OUTRA árvore sobre
         o **mesmo** ``df`` (o dict devolvido por :meth:`_prime_mask_cache`). O
@@ -6070,7 +6111,7 @@ class TreeSegmenter:
                   feature_labels=meta.get("feature_labels"),
                   problem_label=meta.get("problem_label"),
                   min_leaf_rows=meta.get("min_leaf_rows", 50),
-                  verbose=verbose)
+                  verbose=verbose, copy=copy)
         # fallback persistido (JSONs antigos não têm a chave → None = sem fallback)
         seg.fallback = meta.get("fallback")
         if mask_cache is not None:      # cache compartilhado (mesmo df) — ver docstring
@@ -6085,12 +6126,14 @@ class TreeSegmenter:
         return seg
 
     @classmethod
-    def load(cls, path: str, df: pd.DataFrame, verbose: bool = False):
-        """Carrega uma árvore salva em JSON e a aplica ao DataFrame fornecido."""
+    def load(cls, path: str, df: pd.DataFrame, verbose: bool = False,
+             copy: bool = True):
+        """Carrega uma árvore salva em JSON e a aplica ao DataFrame fornecido.
+        ``copy`` é repassado ao construtor (ver ``TreeSegmenter.__init__``)."""
         import json
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return cls.from_dict(data, df, verbose=verbose)
+        return cls.from_dict(data, df, verbose=verbose, copy=copy)
 
     # ==================================================================
     # RÉGUA / SCORING

@@ -827,6 +827,17 @@ def _tree_canvas_widget_cls():
 
 
 class TreeSegmenterUI:
+    """UI interativa (ipywidgets) de construção da árvore de segmentação.
+
+    **Não altere o ``df`` in-place com a UI aberta** (``df.loc[...] = ...``,
+    ``df[col].fillna(..., inplace=True)`` etc.). Para não duplicar a base na
+    RAM, a UI cria o :class:`TreeSegmenter` com ``copy=False``: o segmentador
+    compartilha os dados do ``df`` e guarda caches por máscara. No pandas 2.x
+    sem copy-on-write, uma escrita in-place passaria a ser vista no meio da
+    sessão e deixaria esses caches velhos. Para usar dados alterados,
+    reconstrua a UI. Incluir ou remover colunas do ``df`` não afeta o
+    segmentador já criado."""
+
     # mesma figsize p/ os dois gráficos lado a lado da faixa de detalhe
     # (distribuição da variável + cortes  e  histograma da alvo/target da folha)
     _PREVIEW_FIGSIZE = (6.0, 3.6)
@@ -969,7 +980,10 @@ class TreeSegmenterUI:
             features = [c for c in df.columns if c not in skip]
         self.features = features
 
-        self.seg = TreeSegmenter(df, **self._kwargs)
+        # copy=False: o segmentador compartilha os dados do df da UI em vez de
+        # duplicar a base na RAM (ver a docstring da classe: não altere o df
+        # in-place com a UI aberta)
+        self.seg = TreeSegmenter(df, copy=False, **self._kwargs)
         self.locked: set = set()
         # guarda do seletor de lado do "mover corte": trocar as options dispara o
         # observer, que não deve re-sincronizar enquanto a sincronia está em curso
@@ -4834,7 +4848,7 @@ class TreeSegmenterUI:
         with self._busy(self.btn_diff, status=self.out_diff,
                         msg="comparando as duas árvores…"):
             try:
-                other = TreeSegmenter.load(path, self.df)
+                other = TreeSegmenter.load(path, self.df, copy=False)
                 d = self.seg.diff_trees(other)
             except Exception as e:
                 self.out_diff.value = (f"<div style='color:var(--bad-tx);font-size:12px'>Erro ao "
@@ -4999,7 +5013,7 @@ class TreeSegmenterUI:
                 # segmentos que o cenário tem em comum com a árvore atual
                 cache = self.seg._prime_mask_cache()
                 other = TreeSegmenter.from_dict(scn["data"], self.df,
-                                                mask_cache=cache)
+                                                mask_cache=cache, copy=False)
                 d = self.seg.diff_trees(other)
             except Exception as e:
                 self.out_scn_diff.value = (
@@ -5986,15 +6000,32 @@ class TreeSegmenterUI:
                     self._log(msg); return
             redo_bak = list(self._redo)
             antes = self._delta_snapshot()
+            before = self._assinatura_arvore()
             self._checkpoint()
             try:
                 self.seg.grow(**self._pending)
                 self._pending = None
             except Exception as e:
-                self._revert_checkpoint(redo_bak)
+                self._apos_falha(before, redo_bak)   # grow de várias folhas: falha parcial
                 self._log(f"Erro ao criar segmento: {type(e).__name__}: {e}"); return
+            if self._split_noop(before, redo_bak):
+                return
             self._refresh()
             self._log_delta("dividir", antes)
+
+    def _split_noop(self, before, redo_bak):
+        """Guarda pós-grow do split (aba Construir e canvas): se o grow não criou
+        nenhum segmento (variável constante, sem corte válido, 0/1 filho), a
+        árvore está idêntica — desfaz o checkpoint espúrio (a pilha de refazer
+        volta) e NÃO refaz a tela (mesmo padrão de :meth:`_on_merge`). Devolve
+        True quando foi no-op. O preview que estava na tela continua lá."""
+        if self._assinatura_arvore() != before:
+            return False
+        self._revert_checkpoint(redo_bak)
+        self._pending = None
+        self._log("Sem corte válido: árvore inalterada (nada foi empilhado no "
+                  "desfazer).")
+        return True
 
     def _on_lock(self, _):
         sid = self._selected_leaf()
@@ -6016,13 +6047,19 @@ class TreeSegmenterUI:
         with self._busy(self.btn_prune, self.btn_cv_prune, msg="podando a árvore…"):
             redo_bak = list(self._redo)
             antes = self._delta_snapshot()
+            before = self._assinatura_arvore()
             self._checkpoint()
             try:
                 self.seg.prune(min_repr=self.sl_repr.value, min_valor_gap=self.sl_gap.value,
                                protect=set(self.locked))
             except Exception as e:
-                self._revert_checkpoint(redo_bak)
+                self._apos_falha(before, redo_bak)   # a poda também funde em rodadas
                 self._log(f"Erro na poda: {type(e).__name__}: {e}"); return
+            if self._assinatura_arvore() == before:      # 0 fusões → árvore idêntica
+                self._revert_checkpoint(redo_bak)
+                self._log("Poda sem fusões: árvore inalterada (nada foi empilhado "
+                          "no desfazer).")
+                return
             self.locked &= set(self.seg.segments)
             self._refresh()
             self._log_delta("poda", antes)
@@ -6032,7 +6069,7 @@ class TreeSegmenterUI:
                         msg="reiniciando a árvore…"):
             antes = self._delta_snapshot()
             self._checkpoint()
-            self.seg = TreeSegmenter(self.df, **self._kwargs)
+            self.seg = TreeSegmenter(self.df, copy=False, **self._kwargs)
             # o segmentador novo nasce sem fallback — reaplica a escolha da UI
             self.seg.fallback = self.dd_fallback.value
             self.locked.clear()
@@ -6986,6 +7023,27 @@ class TreeSegmenterUI:
         self._redo[:] = redo_bak
         self._sync_undo_buttons()
 
+    def _assinatura_arvore(self):
+        """Estrutura da árvore (sid → is_leaf) para detectar se uma ação mudou
+        algo. Inclui o ``is_leaf``, e não só os sids: um grow que falha numa
+        folha seguinte já marcou a 1ª como não-folha antes de inserir os filhos
+        (os sids não mudam, mas a árvore mudou)."""
+        return {sid: s["is_leaf"] for sid, s in self.seg.segments.items()}
+
+    def _apos_falha(self, before, redo_bak):
+        """Trata o checkpoint quando a mutação levantou exceção. ``before`` é a
+        :meth:`_assinatura_arvore` antes dela. Se a árvore não mudou, o checkpoint é
+        espúrio: :meth:`_revert_checkpoint`. Se a exceção veio depois de uma
+        mutação parcial (auto-merge/poda fundem em rodadas; o grow percorre várias
+        folhas), o snapshot FICA no undo — o ↶ volta exatamente ao estado anterior
+        à ação — e a tela é refeita para mostrar a árvore real."""
+        if self._assinatura_arvore() == before:
+            self._revert_checkpoint(redo_bak)
+            return
+        self.locked &= set(self.seg.segments)
+        self._pending = None
+        self._refresh()
+
     def _restore(self, snap):
         # registra as máscaras atuais (por condições) antes de carregar: os
         # segmentos que o undo/redo NÃO altera viram cache-hit e não são
@@ -7038,7 +7096,9 @@ class TreeSegmenterUI:
         with self._busy(self.btn_automerge, self.btn_cv_automerge,
                         msg="rodando o auto-merge…"):
             n0 = sum(s["is_leaf"] for s in self.seg.segments.values())
+            redo_bak = list(self._redo)
             antes = self._delta_snapshot()
+            before = self._assinatura_arvore()
             self._checkpoint()
             try:
                 buf = io.StringIO()
@@ -7049,6 +7109,9 @@ class TreeSegmenterUI:
                                         protect=set(self.locked),
                                         include_missing=self.cb_automerge_na.value)
             except Exception as e:
+                # o auto_merge funde em rodadas: a exceção pode vir DEPOIS de fusões
+                # já aplicadas (ver _apos_falha)
+                self._apos_falha(before, redo_bak)
                 self._log(f"Erro no auto-merge: {type(e).__name__}: {e}")
                 return
             n1 = sum(s["is_leaf"] for s in self.seg.segments.values())
@@ -7056,6 +7119,10 @@ class TreeSegmenterUI:
             if n1 == n0:
                 self._log("Nenhuma folha-irmã indistinguível (p > alpha) — nada a fundir. "
                           f"Aumente o alpha ou o 'Δ{self._risk_label} mínimo' para fundir mais.")
+            if self._assinatura_arvore() == before:      # nada fundido → árvore idêntica
+                self._revert_checkpoint(redo_bak)
+                self._log("Árvore inalterada (nada foi empilhado no desfazer).")
+                return
             self.locked &= set(self.seg.segments)
             self._pending = None
             self._refresh()
@@ -7956,13 +8023,16 @@ class TreeSegmenterUI:
             sid = self._pending["only_segments"][0]
             redo_bak = list(self._redo)
             antes = self._delta_snapshot()
+            before = self._assinatura_arvore()
             self._checkpoint()
             try:
                 self.seg.grow(**self._pending)
                 self._pending = None
             except Exception as e:
-                self._revert_checkpoint(redo_bak)
+                self._apos_falha(before, redo_bak)   # grow de várias folhas: falha parcial
                 self._log(f"Erro ao criar segmento: {type(e).__name__}: {e}"); return
+            if self._split_noop(before, redo_bak):
+                return
             self._cv_sel = sid                 # segue no nó recém-dividido
             self._refresh()                    # já redesenha o canvas (aba à vista)
             self._cv_center()
@@ -8197,7 +8267,7 @@ class TreeSegmenterUI:
             with self._busy(self.btn_cv_reset, msg="reiniciando a árvore…"):
                 antes = self._delta_snapshot()
                 self._checkpoint()
-                self.seg = TreeSegmenter(self.df, **self._kwargs)
+                self.seg = TreeSegmenter(self.df, copy=False, **self._kwargs)
                 self.seg.fallback = self.dd_fallback.value
                 self.locked.clear()
                 self._pending = None

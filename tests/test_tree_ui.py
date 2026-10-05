@@ -1321,10 +1321,14 @@ def test_ui_canvas_barra_de_acoes_da_arvore(task):
     apos_fit = _nleaf(ui)
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_automerge(None)
-    assert _nleaf(ui) <= apos_fit
+    apos_merge = _nleaf(ui)
+    assert apos_merge <= apos_fit
     with contextlib.redirect_stdout(io.StringIO()):
         ui._on_undo(None)
-    assert _nleaf(ui) == apos_fit and not ui.btn_cv_redo.disabled
+    # auto-merge sem fusão não empilha desfazer (onda 2.1): o ↶ desfaz a ação
+    # REAL anterior, o auto-fit; com fusão, volta ao estado pós-fit
+    esperado = apos_fit if apos_merge < apos_fit else 1
+    assert _nleaf(ui) == esperado and not ui.btn_cv_redo.disabled
 
 
 def test_ui_canvas_modal_confirma_acoes_automaticas(task):
