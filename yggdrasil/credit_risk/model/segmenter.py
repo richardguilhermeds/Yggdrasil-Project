@@ -53,6 +53,8 @@ from .._common import (
     count_inversions as _count_inversions,
     fit_optbinning_splits as _fit_optbinning_splits,
     psi_from_shares as _psi_from_shares,
+    sql_texto as _sql_texto,
+    eh_booleana as _eh_booleana,
     _amostra_optbinning,
 )
 from .. import _common as _common_mod   # OPTBINNING_MAX_ROWS lido na hora
@@ -9050,7 +9052,7 @@ class ModelSegmenter:
     def to_sql(self, table: str = "minha_tabela", score_col: str = "score",
                col_rating: str = "rating", col_value=None, ruler_sample=None,
                score_scale=None, score_invertido=None) -> str:
-        """Gera SQL ANSI com ``CASE WHEN`` que reproduz a **régua de ratings** sobre
+        """Gera SQL (dialeto Spark/Databricks) com ``CASE WHEN`` que reproduz a **régua de ratings** sobre
         uma coluna de score JÁ materializada. Pronto p/ copiar.
 
         ``table`` é a tabela/CTE de origem e ``score_col`` a coluna de score dela —
@@ -9141,8 +9143,8 @@ class ModelSegmenter:
             linhas.append(f"  END AS {alias}")
             return "\n".join(linhas)
 
-        def _q(v):                       # literal de texto com escape de aspas
-            return "'" + str(v).replace("'", "''") + "'"
+        def _q(v):                       # literal de texto (ver _common.sql_texto)
+            return _sql_texto(v)
 
         corpo = [case(_q, col_rating)]
         if col_value is not None:
@@ -9239,7 +9241,7 @@ class ModelSegmenter:
             return repr(float(v))
         if b["kind"] == "na":
             if b.get("cats"):
-                lits = ", ".join("'" + str(c).replace("'", "''") + "'" for c in b["cats"])
+                lits = ", ".join(_sql_texto(c) for c in b["cats"])
                 return f"({col} IS NULL OR {col} IN ({lits}))"
             return f"{col} IS NULL"
         if b["kind"] == "num":
@@ -9251,10 +9253,10 @@ class ModelSegmenter:
             cond = " AND ".join(partes) if partes else f"{col} IS NOT NULL"
         elif is_bool:
             vals = sorted({c for c in b["cats"] if c in ("True", "False")})
-            cond = (f"{col} = {vals[0].upper()}" if len(vals) == 1
+            cond = (f"CAST({col} AS BOOLEAN) = {vals[0].upper()}" if len(vals) == 1
                     else f"{col} IS NOT NULL")
         else:
-            lits = ", ".join("'" + str(c).replace("'", "''") + "'" for c in b["cats"])
+            lits = ", ".join(_sql_texto(c) for c in b["cats"])
             cond = f"{col} IN ({lits})"
         if b.get("include_na"):
             cond = f"({cond} OR {col} IS NULL)"
@@ -9298,7 +9300,7 @@ class ModelSegmenter:
             if src:                                          # derivada → sai da origem
                 col = src
                 bins = meta.get("derived_bins") or []
-                is_bool = src in self.df.columns and pd.api.types.is_bool_dtype(self.df[src])
+                is_bool = src in self.df.columns and _eh_booleana(self.df[src])
                 if meta.get("derived_dummy"):
                     expr = f"CASE WHEN {self._sql_cond(col, bins[0], is_bool)} THEN 1 ELSE 0 END"
                     linhas.append(f"  -- {self.label(f)} (dummy de '{src}'; referência = "
@@ -9319,7 +9321,7 @@ class ModelSegmenter:
             if not bins:
                 avisos.append(f"-- '{f}' ignorada: sem faixas (binning não separou níveis).")
                 continue
-            is_bool = pd.api.types.is_bool_dtype(self.df[f])
+            is_bool = _eh_booleana(self.df[f])
             origem = "manual" if self.manual_bins(f) else "binning ótimo"
             linhas += self._sql_case_labels(f, f, bins, f"{f}{suffix_faixa}", is_bool,
                                             comentario=origem)
@@ -9360,7 +9362,7 @@ class ModelSegmenter:
         """Expressão (uma linha) do rótulo da faixa — p/ embutir em outro CASE."""
         whens = " ".join(
             f"WHEN {self._sql_cond(col, b, is_bool)} THEN "
-            f"'{self._bin_label(col, b).replace(chr(39), chr(39) * 2)}'" for b in bins)
+            f"{_sql_texto(self._bin_label(col, b))}" for b in bins)
         return f"CASE {whens} WHEN {col} IS NOT NULL THEN '(outros)' ELSE NULL END"
 
     # ---- fórmula da logística como SQL ----
@@ -9372,7 +9374,7 @@ class ModelSegmenter:
         if not src:
             return f
         bins = meta.get("derived_bins") or []
-        is_bool = src in self.df.columns and pd.api.types.is_bool_dtype(self.df[src])
+        is_bool = src in self.df.columns and _eh_booleana(self.df[src])
         if meta.get("derived_dummy"):
             return f"(CASE WHEN {self._sql_cond(src, bins[0], is_bool)} THEN 1 ELSE 0 END)"
         return f"({self._sql_label_expr(src, bins, is_bool)})"
@@ -9384,7 +9386,7 @@ class ModelSegmenter:
             return "TRUE" if v else "FALSE"
         if isinstance(v, (int, float, np.integer, np.floating)):
             return repr(float(v))
-        return "'" + str(v).replace("'", "''") + "'"
+        return _sql_texto(v)
 
     def _sql_termos_logit(self) -> dict:
         """``{nome_da_coluna_do_desenho: expressão SQL}`` para cada coluna que o
@@ -9396,7 +9398,7 @@ class ModelSegmenter:
         def _cond(f, b):
             col = self._sql_valor(f)
             is_bool = (not self.var_meta.get(f, {}).get("derived_from")
-                       and pd.api.types.is_bool_dtype(self.df[f]))
+                       and _eh_booleana(self.df[f]))
             return self._sql_cond(col, b, is_bool)
 
         def _woe(enc_obj, prefixo):
@@ -9521,8 +9523,8 @@ class ModelSegmenter:
         """``CASE`` do rótulo da faixa (mesma saída de :meth:`_labels_from_bins`)."""
         linhas = [f"  CASE  -- faixa de {self.label(f)}" + (f" ({comentario})" if comentario else "")]
         for b in bins:
-            lbl = self._bin_label(col, b).replace("'", "''")
-            linhas.append(f"    WHEN {self._sql_cond(col, b, is_bool)} THEN '{lbl}'")
+            lbl = _sql_texto(self._bin_label(col, b))
+            linhas.append(f"    WHEN {self._sql_cond(col, b, is_bool)} THEN {lbl}")
         linhas.append(f"    WHEN {col} IS NOT NULL THEN '(outros)'")
         linhas.append("    ELSE NULL")
         linhas.append(f"  END AS {alias},")

@@ -183,3 +183,38 @@ def fit_optbinning_splits(b, x, y, max_rows=None, idx=None) -> list:
             f"optbinning falhou inesperadamente em '{getattr(b, 'name', '?')}': "
             f"{type(e).__name__}: {e}", RuntimeWarning)
         return []
+
+
+def sql_texto(v) -> str:
+    """Literal de TEXTO SQL que vale igual no Spark/Databricks e no ANSI.
+
+    No Spark SQL ``'O''Neil'`` NÃO é um apóstrofo escapado: são duas strings
+    adjacentes, que o parser concatena ("ONeil") — a categoria nunca casava. E a
+    barra invertida é caractere de escape no Spark. Os dois viram ``chr(39)`` /
+    ``chr(92)`` concatenados com ``||``; texto sem eles fica como sempre foi."""
+    s = str(v)
+    if "'" not in s and "\\" not in s:
+        return "'" + s + "'"
+    partes, atual = [], ""
+    for ch in s:
+        if ch in "'\\":
+            if atual:
+                partes.append("'" + atual + "'")
+                atual = ""
+            partes.append(f"chr({ord(ch)})")
+        else:
+            atual += ch
+    if atual:
+        partes.append("'" + atual + "'")
+    return "(" + " || ".join(partes) + ")"
+
+
+def eh_booleana(serie) -> bool:
+    """A coluna é BOOLEANA? ``bool``/``boolean`` ou ``object`` só com True/False (e
+    nulos) — é assim que uma booleana com faltantes chega do ``toPandas()``. Usada
+    pelos geradores de SQL/Spark, que comparam booleana com literal booleano (o
+    ``CAST(bool AS STRING)`` do Spark dá "true" minúsculo e não casa com 'True')."""
+    if pd.api.types.is_bool_dtype(serie):
+        return True
+    return serie.dtype == object and pd.api.types.infer_dtype(serie, skipna=True) == "boolean"
+

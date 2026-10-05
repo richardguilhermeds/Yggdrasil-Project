@@ -429,6 +429,20 @@ def _seg(task):
     return seg
 
 
+def _igual(a, b):
+    """Igualdade EXATA que trata NaN == NaN (o ``==`` de dict/lista falha com dois
+    ``float('nan')`` distintos — p.ex. uma faixa vazia numa safra —, até entre
+    duas chamadas idênticas do código antigo)."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        return list(a) == list(b) and all(_igual(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return (type(a) is type(b) and len(a) == len(b)
+                and all(_igual(x, y) for x, y in zip(a, b)))
+    if isinstance(a, float) and isinstance(b, float) and a != a and b != b:
+        return True
+    return type(a) is type(b) and a == b
+
+
 _CHAVES_AMOSTRA = ("ordered", "labels", "ref_risco")
 _CHAVES_SERIE_AMOSTRA = ("ordered", "labels", "ref_risco", "xs_sample", "ser_sample")
 
@@ -444,19 +458,19 @@ def test_inversion_sem_safras_e_por_tcol_mantem_o_por_amostra(task):
             sem = seg.variable_inversion(f, sid=sid, time_col=segmod._SEM_SAFRAS)
             if base["series"] is None:
                 assert alt["series"] is None and sem["series"] is None
-                assert sem == base
+                assert _igual(sem, base)
                 continue
             for r in (alt, sem):
                 for k in _CHAVES_AMOSTRA:
-                    assert r[k] == base[k]
-                assert r["samples"] == base["samples"]
-                assert r["sample_inv"] == base["sample_inv"]
+                    assert _igual(r[k], base[k])
+                assert _igual(r["samples"], base["samples"])
+                assert _igual(r["sample_inv"], base["sample_inv"])
                 for k in _CHAVES_SERIE_AMOSTRA:
-                    assert r["series"][k] == base["series"][k]
+                    assert _igual(r["series"][k], base["series"][k])
             assert sem["series"]["xs_safra"] == [] and sem["safras"] == []
             assert sem["n_safras"] == 0
             # o tcol explícito igual ao date_col dá o MESMO dict
-            assert seg.variable_inversion(f, sid=sid, time_col="dt_ref") == base
+            assert _igual(seg.variable_inversion(f, sid=sid, time_col="dt_ref"), base)
 
 
 @pytest.mark.parametrize("task", TASKS)

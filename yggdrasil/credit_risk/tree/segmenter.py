@@ -52,6 +52,8 @@ from .._common import (
     count_inversions as _count_inversions,
     fit_optbinning_splits as _fit_optbinning_splits,
     psi_from_shares as _psi_from_shares,
+    sql_texto as _sql_texto,
+    eh_booleana as _eh_booleana,
 )
 
 TASK_TYPES = ("classification", "regression")
@@ -6171,6 +6173,16 @@ class TreeSegmenter:
     # TO_PYSPARK: gera o código da régua como F.when().otherwise() para
     #   aplicar a segmentação (segmento + nota + alvo) em escala no Spark.
     # ------------------------------------------------------------------
+    def _bool_vals(self, feat, cats):
+        """Para variável BOOLEANA na base (bool/boolean), os valores do grupo como
+        literais booleanos (``[True]``, ``[False]`` ou os dois); ``None`` se a
+        variável não for booleana. No pandas a faixa compara ``astype(str)`` com
+        "True"/"False", mas no Spark ``CAST(bool AS STRING)`` dá "true"/"false"
+        (minúsculo) — comparar como texto deixava TODA linha sem folha."""
+        if feat not in self.df.columns or not _eh_booleana(self.df[feat]):
+            return None
+        return [v == "True" for v in ("True", "False") if v in {str(c) for c in cats}]
+
     def to_pyspark(self, func_name: str = "aplicar_regua",
                    fallback=_FALLBACK_OMITIDO) -> str:
         """Gera o código PySpark (string) que reproduz a régua (segmento, nota e alvo).
@@ -6203,9 +6215,16 @@ class TreeSegmenter:
                         sub.append(f'(F.col("{feat}") <= {c["hi"]})')
                     expr = " & ".join(sub) if sub else "F.lit(True)"
                 else:
-                    cats = ", ".join(repr(x) for x in c["cats"])
-                    # cast p/ string espelha o astype(str) do pandas/pyfunc
-                    expr = f'F.col("{feat}").cast("string").isin({cats})'
+                    vb = self._bool_vals(feat, c["cats"])
+                    if vb is not None:
+                        # booleana: compara com literal booleano (ver _bool_vals)
+                        b = f'F.col("{feat}").cast("boolean")'
+                        expr = (f'({b} == F.lit({vb[0]}))' if len(vb) == 1
+                                else f'{b}.isNotNull()' if vb else "F.lit(False)")
+                    else:
+                        cats = ", ".join(repr(x) for x in c["cats"])
+                        # cast p/ string espelha o astype(str) do pandas/pyfunc
+                        expr = f'F.col("{feat}").cast("string").isin({cats})'
                 if c.get("include_na"):
                     expr = f'(({expr}) | F.col("{feat}").isNull())'
                 parts.append(expr)
@@ -6249,7 +6268,11 @@ class TreeSegmenter:
     def to_sql(self, table: str = "minha_tabela", col_seg: str = "segmento",
                col_nota: str = "folha", col_valor: str = "valor_previsto",
                fallback=_FALLBACK_OMITIDO) -> str:
-        """Gera SQL ANSI com ``CASE WHEN`` que reproduz a régua. Pronto p/ copiar.
+        """Gera SQL com ``CASE WHEN`` que reproduz a régua. Pronto p/ copiar.
+
+        Dialeto Spark/Databricks (também roda em Postgres/Oracle): variável booleana
+        vira ``CAST(x AS BOOLEAN) = TRUE`` e texto com apóstrofo/barra invertida usa
+        ``chr(39)``/``chr(92)`` concatenado com ``||`` (ver ``_common.sql_texto``).
 
         ``table`` é o nome da tabela/CTE de origem. Cada folha vira um ramo do
         CASE (na ordem da nota); a condição final usa as MESMAS regras de
@@ -6268,8 +6291,8 @@ class TreeSegmenter:
         regua = self._regua_dict()
         fb = _folha_fallback(regua, self._fallback_resolvido(fallback))
 
-        def _q(v):                       # literal de categoria com escape de aspas
-            return "'" + str(v).replace("'", "''") + "'"
+        def _q(v):                       # literal de categoria (ver _common.sql_texto)
+            return _sql_texto(v)
 
         def cond_sql(conds):
             parts = []
@@ -6286,11 +6309,21 @@ class TreeSegmenter:
                         sub.append(f"{feat} <= {c['hi']}")
                     expr = " AND ".join(sub) if sub else "1=1"
                 else:
-                    cats = ", ".join(_q(x) for x in c["cats"])
-                    # STRING (não VARCHAR): no Spark/Databricks `CAST(x AS VARCHAR)`
-                    # sem tamanho falha ("VARCHAR requires a length parameter"); STRING
-                    # é o tipo canônico e equivale a VARCHAR(n) sem exigir comprimento.
-                    expr = f"CAST({feat} AS STRING) IN ({cats})"
+                    vb = self._bool_vals(feat, c["cats"])
+                    if vb is not None:
+                        # booleana: literal booleano (CAST(bool AS STRING) dá "true"
+                        # minúsculo no Spark e nunca casaria com 'True')
+                        # CAST AS BOOLEAN: aceita BOOLEAN, int 0/1 e texto True/true
+                        # (comparar int com TRUE falha no modo ANSI do Databricks)
+                        b = f"CAST({feat} AS BOOLEAN)"
+                        expr = (f"{b} = {str(vb[0]).upper()}" if len(vb) == 1
+                                else f"{b} IS NOT NULL" if vb else "1=0")
+                    else:
+                        cats = ", ".join(_q(x) for x in c["cats"])
+                        # STRING (não VARCHAR): no Spark/Databricks `CAST(x AS VARCHAR)`
+                        # sem tamanho falha ("VARCHAR requires a length parameter"); STRING
+                        # é o tipo canônico e equivale a VARCHAR(n) sem exigir comprimento.
+                        expr = f"CAST({feat} AS STRING) IN ({cats})"
                 if len(conds) > 1 or c["kind"] != "na":
                     expr = f"({expr})"
                 if c.get("include_na"):
@@ -6582,7 +6615,13 @@ class TreeSegmenter:
                     if c.get("include_na"):
                         part = part | fc.isNull()
                 else:
-                    part = fc.cast("string").isin([str(x) for x in c["cats"]])
+                    vb = self._bool_vals(feat, c["cats"])
+                    if vb is not None:        # booleana: literal booleano (ver _bool_vals)
+                        fb = fc.cast("boolean")
+                        part = ((fb == F.lit(vb[0])) if len(vb) == 1
+                                else fb.isNotNull() if vb else F.lit(False))
+                    else:
+                        part = fc.cast("string").isin([str(x) for x in c["cats"]])
                     if c.get("include_na"):
                         part = part | fc.isNull()
                 expr = expr & part

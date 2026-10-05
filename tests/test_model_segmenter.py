@@ -2428,6 +2428,7 @@ def test_to_sql_reproduz_ratings_do_python(seg, metodo):
     novo = _synthetic(seg.task_type, n=500, seed=7, com_cat=True)
     pred = seg.predict(novo, col_value="valor_previsto")
     con = sqlite3.connect(":memory:")
+    con.create_function("chr", 1, chr)  # SQL usa chr(39) p/ apóstrofo (Spark/ANSI)
     try:
         pred[["score"]].to_sql("base", con, index=False)
         got = pd.read_sql_query(sql, con)

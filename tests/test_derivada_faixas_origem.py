@@ -86,6 +86,7 @@ def test_sql_e_woe_da_derivada_batem_com_o_modelo(cenario):
         sql = seg.categorization_sql(table="base")
     X = seg.df[["renda", "idade"]]
     con = sqlite3.connect(":memory:")
+    con.create_function("chr", 1, chr)  # SQL usa chr(39) p/ apóstrofo (Spark/ANSI)
     try:
         X.to_sql("base", con, index=False)
         res = pd.read_sql(sql.rstrip(";"), con)

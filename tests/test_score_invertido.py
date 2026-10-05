@@ -76,6 +76,7 @@ def test_to_sql_invertido_reproduz_ratings(df):
     assert "= melhor" in sql
     pred = seg.predict(df)
     con = sqlite3.connect(":memory:")
+    con.create_function("chr", 1, chr)  # SQL usa chr(39) p/ apóstrofo (Spark/ANSI)
     try:
         pred[["score"]].to_sql("base", con, index=False)
         got = pd.read_sql_query(sql, con)
@@ -89,6 +90,7 @@ def test_logit_sql_score_invertido(df):
     sql = seg.logit_sql(table="base")
     assert "(1.0 - probabilidade)" in sql
     con = sqlite3.connect(":memory:")
+    con.create_function("chr", 1, chr)  # SQL usa chr(39) p/ apóstrofo (Spark/ANSI)
     con.create_function("EXP", 1, np.exp)
     try:
         df[["x1", "x2"]].to_sql("base", con, index=False)

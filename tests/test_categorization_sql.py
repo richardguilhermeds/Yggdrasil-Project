@@ -45,6 +45,7 @@ def cenario():
         seg.fit(features=feats, transform="woe")
         sql = seg.categorization_sql(table="base")
     con = sqlite3.connect(":memory:")
+    con.create_function("chr", 1, chr)  # SQL usa chr(39) p/ apóstrofo (Spark/ANSI)
     df.drop(columns="target").to_sql("base", con, index=False)
     res = pd.read_sql(sql.rstrip(";"), con)
     X = seg._apply_derived(df.drop(columns="target"))
@@ -94,8 +95,10 @@ def test_dummies_do_modelo_e_derivadas_batem(cenario):
 
 def test_apostrofo_escapado_e_bool_literal(cenario):
     _seg, sql, *_ = cenario
-    assert "'O''Neil'" in sql
-    assert "flag = TRUE" in sql or "flag = FALSE" in sql
+    # apóstrofo via chr(39): no Spark SQL 'O''Neil' são DUAS strings coladas ("ONeil")
+    assert "('O' || chr(39) || 'Neil')" in sql
+    assert "'O''Neil'" not in sql
+    assert "CAST(flag AS BOOLEAN) = TRUE" in sql or "CAST(flag AS BOOLEAN) = FALSE" in sql
 
 
 def test_sem_woe_e_escopo_de_variaveis():

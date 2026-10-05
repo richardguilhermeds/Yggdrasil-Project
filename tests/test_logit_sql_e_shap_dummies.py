@@ -51,6 +51,7 @@ def _fit(seg, **kw):
 
 def _roda_sql(sql, df):
     con = sqlite3.connect(":memory:")
+    con.create_function("chr", 1, chr)  # SQL usa chr(39) p/ apóstrofo (Spark/ANSI)
     con.create_function("EXP", 1, math.exp)
     df.drop(columns="target").to_sql("minha_tabela", con, index=False)
     return pd.read_sql(sql.rstrip(";"), con)
