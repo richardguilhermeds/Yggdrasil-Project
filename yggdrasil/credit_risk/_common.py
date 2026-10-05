@@ -137,7 +137,20 @@ OPTBINNING_MAX_ROWS = 300_000
 OPTBINNING_SEED = 42
 
 
-def fit_optbinning_splits(b, x, y, max_rows=None) -> list:
+def _amostra_optbinning(n, max_rows=None):
+    """Posições (ordenadas) da amostra de ajuste do optbinning sobre ``n``
+    linhas, ou ``None`` quando não há amostragem (``n`` dentro do teto ou teto
+    0/None). Mesmo sorteio de :func:`fit_optbinning_splits` — quem já tem as
+    linhas válidas em mãos sorteia aqui e entrega só as escolhidas.
+    :data:`OPTBINNING_MAX_ROWS` é lido na hora da chamada."""
+    cap = OPTBINNING_MAX_ROWS if max_rows is None else max_rows
+    if cap and n > cap:
+        return np.sort(np.random.default_rng(OPTBINNING_SEED).choice(n, cap,
+                                                                    replace=False))
+    return None
+
+
+def fit_optbinning_splits(b, x, y, max_rows=None, idx=None) -> list:
     """Roda ``b.fit(x, y)`` e devolve ``list(b.splits)``.
 
     Silencia os ``RuntimeWarning`` de "divide by zero" benignos do optbinning
@@ -149,11 +162,12 @@ def fit_optbinning_splits(b, x, y, max_rows=None) -> list:
     dependência) é **avisada** em vez de mascarada como "sem corte válido".
 
     ``max_rows`` (padrão :data:`OPTBINNING_MAX_ROWS`): com mais linhas, ajusta
-    numa amostra aleatória de ``max_rows`` (semente fixa)."""
-    cap = OPTBINNING_MAX_ROWS if max_rows is None else max_rows
-    if cap and len(x) > cap:
-        idx = np.sort(np.random.default_rng(OPTBINNING_SEED).choice(len(x), cap,
-                                                                     replace=False))
+    numa amostra aleatória de ``max_rows`` (semente fixa). ``idx`` (opcional):
+    posições já sorteadas (:func:`_amostra_optbinning`) — com ``None`` o sorteio
+    é feito aqui, exatamente como antes."""
+    if idx is None:
+        idx = _amostra_optbinning(len(x), max_rows)
+    if idx is not None:
         x = np.asarray(x)[idx]
         y = np.asarray(y)[idx]
     try:

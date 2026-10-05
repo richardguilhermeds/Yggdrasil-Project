@@ -1243,7 +1243,7 @@ class ModelSegmenterUI:
         alvo_derivadas = {n for n, m in alvo.items() if m.get("derived_from")}
         for n in [n for n, m in atual.items() if m.get("derived_from")]:
             if n not in alvo_derivadas and n in s.df.columns:
-                s.df.drop(columns=n, inplace=True)
+                s._drop_derived_column(n)
         s.candidates = list(snap["candidates"])
         s.included = set(snap["included"])
         s.var_meta = {k: dict(v) for k, v in alvo.items()}
@@ -4109,6 +4109,11 @@ class ModelSegmenterUI:
         risco = (valid.assign(_c=valid[feat].astype(str))
                  .groupby("_c")[self.seg.target].mean().sort_values())
         order = list(risco.index)
+        origem = self.seg._faixas_da_origem(feat)
+        if origem is not None:
+            # variável criada: as categorias SÃO as faixas da origem — na ordem dela
+            pos = {lbl: i for i, (lbl, _na) in enumerate(origem)}
+            order.sort(key=lambda c: pos.get(c, len(pos)))
         n = len(order)
         # grupo inicial: a partir dos grupos manuais atuais (se houver), senão 1..n
         cat_group = {}
@@ -4118,10 +4123,14 @@ class ModelSegmenterUI:
                 for c in grp:
                     cat_group[str(c)] = gi
         risco_h = "% de maus" if self.task_type == "classification" else "alvo médio"
+        if origem is not None:
+            src = self.seg.label(self.seg.var_meta[feat]["derived_from"])
+            ordem_txt = f"Na ordem das faixas de <b>{src}</b>"
+        else:
+            ordem_txt = f"Ordenadas por {risco_h} (referência)"
         rows = [W.HTML("<div class='mseg-legend'>Aloque cada categoria a um <b>grupo</b> — "
-                       "categorias no <b>mesmo grupo</b> viram uma única faixa. Ordenadas por "
-                       f"{risco_h} (referência). Faltantes (NaN) viram uma faixa própria."
-                       "</div>")]
+                       f"categorias no <b>mesmo grupo</b> viram uma única faixa. {ordem_txt}. "
+                       "Faltantes (NaN) viram uma faixa própria.</div>")]
         for k, c in enumerate(order, 1):
             val = min(max(int(cat_group.get(c, k)), 1), n)
             dd = W.Dropdown(options=[(f"grupo {g}", g) for g in range(1, n + 1)], value=val,
@@ -4161,8 +4170,12 @@ class ModelSegmenterUI:
         """Passos 2 e 3 do card de categorização: faltantes (resumo + destino),
         checkbox das dummies de scorecard e a tabela das faixas resultantes."""
         tem_manual = feat is not None and bool(self.seg.manual_bins(feat))
+        # variável criada: as faixas são as da origem (fixas) — o passo 3 mostra a
+        # mesma tabela de faixas da variável original
+        fixas = tem_manual or (feat is not None
+                               and self.seg._faixas_da_origem(feat) is not None)
         self.cb_scorecard.layout.display = "" if tem_manual else "none"
-        self._passo_res.layout.display = "" if tem_manual else "none"
+        self._passo_res.layout.display = "" if fixas else "none"
         self._sc_syncing = True
         try:
             self.cb_scorecard.value = bool(tem_manual and self.seg.scorecard_dummies(feat))
@@ -4178,12 +4191,13 @@ class ModelSegmenterUI:
                                        if feat is not None else "nome (opcional)")
         self.out_bin_status.value = (
             self._pill("✎ bins manuais", "yellow") if tem_manual
-            else self._pill("binning ótimo", "muted")) if feat is not None else ""
+            else self._pill("faixas da origem" if self.seg._faixas_da_origem(feat)
+                            is not None else "binning ótimo", "muted")) if feat is not None else ""
         with warnings.catch_warnings():
             # destino de faltantes inválido após trocar os cortes: o painel já diz
             warnings.simplefilter("ignore")
             self._render_na(feat, tem_manual)
-            self.out_faixas_table.value = self._faixas_html(feat) if tem_manual else ""
+            self.out_faixas_table.value = self._faixas_html(feat) if fixas else ""
 
     def _render_na(self, feat, tem_manual):
         """Resumo dos faltantes (n, % da referência, taxa) e para onde vão; no
@@ -4346,6 +4360,13 @@ class ModelSegmenterUI:
             self.out_bin_hint.value = (
                 "<div class='mseg-legend'>✎ Bins <b>manuais</b> ativos nesta variável — "
                 "aplicados à tabela, IV, logodds/WoE, PSI e inversão.</div>")
+        elif self.seg._faixas_da_origem(feat) is not None:
+            src = self.seg.label(self.seg.var_meta[feat]["derived_from"])
+            self.out_bin_hint.value = (
+                "<div class='mseg-legend'>Variável criada a partir das faixas de "
+                f"<b>{src}</b>: a análise usa as <b>mesmas faixas</b>, na mesma ordem "
+                "(sem novo binning). No modo <b>Manual</b>, junte faixas em grupos nas "
+                "caixas acima e clique em <i>Aplicar bins</i>.</div>")
         elif is_cat:
             self.out_bin_hint.value = (
                 "<div class='mseg-legend'>Binning <b>ótimo</b> (optbinning). No modo "
@@ -7054,7 +7075,8 @@ class ModelSegmenterUI:
             self.out_adv_msafra_fig.value = ""; return
         with self._busy(self.btn_msafra, msg="calculando métricas por safra…"):
             try:
-                ms = self.seg.metrics_by_safra(sample=self._adv_sample())
+                amostra = self._adv_sample()
+                ms = self.seg.metrics_by_safra(sample=amostra)
                 self.out_adv_msafra_tab.value = self._df_html(ms.round(4),
                                                               max_height="300px", center=True)
                 mets = tuple(self.sm_msafra_metrics.value) or (
@@ -7062,8 +7084,9 @@ class ModelSegmenterUI:
                 _ylim = ((0.0, 1.0) if getattr(self, "ck_msafra_unit", None) is not None
                          and self.ck_msafra_unit.value else None)
                 self.out_adv_msafra_fig.value = self._fig_html(
-                    self.seg.plot_metrics_by_safra(sample=self._adv_sample(),
-                                                   metrics=mets, ylim=_ylim),
+                    # a mesma tabela da grade: o gráfico não recalcula as safras
+                    self.seg.plot_metrics_by_safra(sample=amostra, metrics=mets,
+                                                   ylim=_ylim, table=ms),
                     stretch=True)
                 self._log("[avançado] métricas por safra calculadas.")
             except Exception as e:

@@ -30,6 +30,7 @@ Reaproveita :mod:`yggdrasil.metrics`, :mod:`yggdrasil.ratings` e
 """
 from __future__ import annotations
 
+import itertools
 import json
 import threading
 import warnings
@@ -40,6 +41,7 @@ import pandas as pd
 
 from ...config import ColumnConfig
 from ...metrics import bootstrap_metrics_ci, classification_metrics, regression_metrics
+from ...metrics.classification import _roc_pack
 from ...metrics.shift import HIGHER_IS_BETTER as _HIGHER_IS_BETTER
 from ...ratings import RATING_REGISTRY
 # helpers puros compartilhados com o TreeSegmenter (fonte única — sem drift)
@@ -51,7 +53,9 @@ from .._common import (
     count_inversions as _count_inversions,
     fit_optbinning_splits as _fit_optbinning_splits,
     psi_from_shares as _psi_from_shares,
+    _amostra_optbinning,
 )
+from .. import _common as _common_mod   # OPTBINNING_MAX_ROWS lido na hora
 
 try:  # optbinning é dependência core, mas degradamos com elegância.
     from optbinning import ContinuousOptimalBinning, OptimalBinning
@@ -64,6 +68,11 @@ except ImportError:  # pragma: no cover
     BaseEstimator = TransformerMixin = object
 
 SCHEMA = "yggdrasil.credit_risk.model/1"
+
+#: Fonte ÚNICA das versões de coluna (:attr:`ModelSegmenter._col_version`):
+#: global ao processo, então nenhum valor se repete entre instâncias nem entre
+#: ``load()`` — memo que sobrevive à troca do ``seg``/df (UI) nunca casa por acaso.
+_VERSOES_COLUNA = itertools.count(1)
 
 #: Algoritmos suportados (registry extensível). Cada entrada indica em quais
 #: ``task_type`` é válido, o rótulo amigável para a UI e o ``extra`` de instalação
@@ -618,9 +627,18 @@ def _decimal_columns(df: pd.DataFrame, cols) -> list:
         col = df.iloc[:, j]
         if col.dtype != object:
             continue
-        validos = np.flatnonzero(col.notna().to_numpy())
-        if len(validos) and isinstance(col.iloc[int(validos[0])], decimal.Decimal):
-            achadas.append(df.columns[j])
+        # 1º não nulo por blocos posicionais crescentes (o mesmo notna da
+        # coluna inteira, só que parando cedo): na prática olha um bloco
+        # só. Posição, não rótulo: o índice do usuário pode repetir.
+        ini, b, n = 0, 4096, len(col)
+        while ini < n:
+            p = np.flatnonzero(col.iloc[ini:ini + b].notna().to_numpy())
+            if len(p):
+                if isinstance(col.iloc[ini + int(p[0])], decimal.Decimal):
+                    achadas.append(df.columns[j])
+                break
+            ini += b
+            b *= 2
     return list(dict.fromkeys(achadas))
 
 
@@ -700,9 +718,16 @@ def _bin_mask_series(series: pd.Series, b: dict) -> pd.Series:
     (no transformador serializável).
 
     ``b["include_na"]`` (categorização manual com faltantes alocados numa faixa —
-    ver :meth:`ModelSegmenter.set_missing_bin`): a faixa também recebe os NaN."""
+    ver :meth:`ModelSegmenter.set_missing_bin`): a faixa também recebe os NaN.
+
+    ``{"kind": "na", "cats": [...]}``: faixa de faltantes de uma variável CRIADA a
+    partir das faixas de outra — além dos NaN, recebe as categorias que guardam o
+    faltante da origem como texto (ex.: ``"(faltante)"``)."""
     if b["kind"] == "na":
-        return series.isna()
+        m = series.isna()
+        if b.get("cats"):
+            m = m | pd.Series(_cat_group_masks(series, [b["cats"]])[0], index=series.index)
+        return m
     if b["kind"] == "num":
         m = series.between(b["lo"], b["hi"], inclusive="right")
     else:
@@ -717,13 +742,20 @@ def _cat_group_masks(series: pd.Series, grupos) -> list:
     cada linha. Em coluna de texto com milhões de linhas o ``astype(str)`` por
     linha era o custo dominante de tabela/IV/PSI/WoE das categóricas."""
     codes, uniq = pd.factorize(series, use_na_sentinel=True)     # NA → -1
-    ustr = np.array([str(u) for u in uniq], dtype=object)
+    ustr = pd.Index([str(u) for u in uniq], dtype=object)
     validos = codes >= 0
+    cod0 = np.where(validos, codes, 0)
     out = []
     for cats in grupos:
-        sel = np.isin(ustr, np.asarray(list(cats), dtype=object))
-        out.append(np.where(validos, sel[np.where(validos, codes, 0)], False)
-                   if len(ustr) else np.zeros(len(codes), dtype=bool))
+        if not len(ustr):
+            out.append(np.zeros(len(codes), dtype=bool))
+            continue
+        # busca por HASH (Index.isin): o np.isin em arrays de objeto cai num laço
+        # que compara cada categoria com cada uma do grupo — O(K × G), quadrático
+        # na cardinalidade; travava (e derrubava o driver) em colunas com dezenas
+        # de milhares de níveis (CEP, IDs, Decimal vindo do toPandas)
+        sel = ustr.isin(list(cats))
+        out.append(validos & sel[cod0])
     return out
 
 
@@ -871,6 +903,100 @@ def _bin_codes_numericos(series: pd.Series, bins):
         alvo_na = next((i for i, _b in outros), -1)          # faixa "(faltante)" ou fora
     codes[nan] = alvo_na
     return codes
+
+
+def _particao_exata(series: pd.Series, bins) -> bool:
+    """``True`` quando as faixas formam uma PARTIÇÃO das linhas: cada linha cai
+    em no máximo uma faixa, e o código de :func:`_bin_codes` (1ª faixa que casa,
+    inclusive o atalho do ``searchsorted``) coincide com as máscaras de
+    :func:`_bin_masks` — só então contar por código (``bincount``) dá o mesmo que
+    somar as máscaras. Checagem estática, sem montar máscara por faixa; na dúvida
+    devolve ``False`` e o chamador segue pelo caminho das máscaras. Exige:
+
+    * faixas numéricas contíguas e disjuntas e nenhum ``-inf`` na coluna (o
+      ``searchsorted`` põe ``-inf`` na 1ª faixa; a máscara ``x > -inf``, em
+      nenhuma);
+    * dtype numpy puro, ou ``isna`` igual a ``isnan`` (Float64/pyarrow guardam
+      NaN que não é NA: o atalho o manda à faixa do faltante, a máscara não);
+    * grupos categóricos (e ``cats`` das faixas ``na``) disjuntos como texto —
+      sobrepostos, a máscara conta a linha duas vezes e o código, uma;
+    * no máximo uma faixa recebendo o faltante (``include_na`` + ``kind='na'``)."""
+    if not bins:
+        return False
+    kinds = [b.get("kind") for b in bins]
+    if any(k not in ("num", "cat", "na") for k in kinds):
+        return False
+    if sum(bool(b.get("include_na")) for b in bins) + kinds.count("na") > 1:
+        return False
+    if "num" not in kinds:
+        vistos: set = set()
+        for b in bins:
+            grupo = {str(c) for c in (b.get("cats") or ())}
+            if grupo & vistos:
+                return False
+            vistos |= grupo
+        return True
+    # numéricas: sem grupo categórico misturado (o texto de um número casaria)
+    if "cat" in kinds or any(b.get("cats") for b in bins if b["kind"] == "na"):
+        return False
+    try:
+        fx = sorted((float(b["lo"]), float(b["hi"])) for b in bins if b["kind"] == "num")
+    except (TypeError, ValueError, KeyError):
+        return False
+    if any(not lo < hi for lo, hi in fx) or any(
+            fx[k][0] != fx[k - 1][1] for k in range(1, len(fx))):
+        return False
+    try:
+        x = series.to_numpy(dtype="float64", na_value=np.nan)
+    except (TypeError, ValueError):
+        return False
+    if np.isneginf(x).any():
+        return False
+    dt = series.dtype
+    if not (isinstance(dt, np.dtype) and dt.kind in "biuf"):
+        na = series.isna().to_numpy(dtype=bool, na_value=True)
+        if not np.array_equal(na, np.isnan(x)):
+            return False
+    return True
+
+
+def _primeiros_observados(col: pd.Series, mask=None, n: int = 10_000) -> pd.Series:
+    """Os ``n`` primeiros valores não nulos de ``col`` (só nas linhas de ``mask``,
+    se dada), na ordem e no dtype original: o mesmo que
+    ``col[mask].dropna().iloc[:n]``, lendo blocos sucessivos (20k, dobrando até
+    200k linhas) em vez de copiar a coluna inteira — o custo vai até a posição
+    do n-ésimo não nulo, não até o fim da base."""
+    partes, falta, ini, bloco, tot = [], n, 0, 20_000, len(col)
+    while ini < tot and falta > 0:
+        fim = min(ini + bloco, tot)
+        if mask is None:
+            pedaco = col.iloc[ini:fim]
+        else:
+            p = np.flatnonzero(mask[ini:fim])
+            pedaco = col.iloc[p + ini] if p.size else None
+        if pedaco is not None:
+            pedaco = pedaco.dropna().iloc[:falta]
+            if len(pedaco):
+                partes.append(pedaco)
+                falta -= len(pedaco)
+        ini, bloco = fim, min(2 * bloco, 200_000)
+    if not partes:
+        return col.iloc[:0]
+    return partes[0] if len(partes) == 1 else pd.concat(partes, ignore_index=True)
+
+
+def _bins_de_grupos(grupos, na_present) -> list:
+    """Faixas ``cat`` de grupos categóricos (textos de faltante fora; grupo vazio
+    some) e a faixa de faltantes no fim, se houver faltante e alguma faixa."""
+    _NA_TOK = {"nan", "NaN", "<NA>", "None"}
+    bins = []
+    for g in grupos:
+        cats = [str(c) for c in g if str(c) not in _NA_TOK]
+        if cats:
+            bins.append({"kind": "cat", "cats": cats})
+    if bins and na_present:
+        bins.append({"kind": "na"})
+    return bins
 
 
 class WoeBinEncoder(BaseEstimator, TransformerMixin):
@@ -1059,6 +1185,19 @@ class ModelSegmenter:
     #: vez de linhas × colunas. Bases menores que isso rodam num bloco só.
     _CHUNK_ROWS = 250_000
 
+    #: Registro dos caches POR LINHA da base (referenciam todas as linhas):
+    #: (atributo, fábrica do valor vazio — ``None`` = sem cache). Todos nascem
+    #: no ``__init__`` (o ``setdefault`` dos pontos de uso só cobre objeto que
+    #: não passou por ele), então o ``__dict__.update`` do :meth:`load` os zera
+    #: junto com o df; :meth:`_detached_scorer` os zera para
+    #: não irem no broadcast do Spark; :meth:`_invalidate_bins` poda, nos dict,
+    #: as chaves da variável (1º elemento da chave, ou a própria chave).
+    _ROW_CACHES = (("_safra_cache", dict), ("_fatias_cache", dict),
+                   ("_bincode_cache", dict), ("_iv_row_cache", dict),
+                   ("_amostra_safra_cache", dict), ("_rating_codes_cache", None),
+                   ("_raw_score_cache", None), ("_amostra_graficos_cache", None),
+                   ("_ajuste_pos_cache", dict))
+
     def __init__(
         self,
         df: pd.DataFrame,
@@ -1124,6 +1263,14 @@ class ModelSegmenter:
         # o bootstrap custa segundos e é pedido 2× no mesmo clique (tabela da UI +
         # qualificação do shift em metric_shifts).
         self._metrics_ci_cache: tuple | None = None
+        self._reset_row_caches()
+        # versão dos VALORES de cada coluna: chave dos memos por variável — nunca
+        # id()/ponteiro de dados, que mudam a cada acesso (pandas 3) ou são
+        # reaproveitados pelo GC. Toda coluna crua nasce com versão própria
+        # (contador global: outra base/load ⇒ outro valor); derivadas e dummies
+        # ganham versão nova ao serem criadas/recriadas/removidas (_touch_cols).
+        # Ler por :meth:`_col_key` (atribui versão a coluna sem registro).
+        self._col_version: dict = {c: next(_VERSOES_COLUNA) for c in self.df.columns}
         self.target = target
         self.task_type = task_type
         self.sample_col = sample_col
@@ -1344,16 +1491,25 @@ class ModelSegmenter:
         cap = self.max_linhas_graficos
         return bool(cap) and len(self.df) > int(cap)
 
-    def _mascara_amostra_graficos(self):
-        """Máscara (memoizada) da amostra aleatória dos gráficos, ou ``None``."""
+    def _chave_amostra_graficos(self):
+        """``(cap, n, random_state)`` da amostra dos gráficos em vigor, ou
+        ``None`` fora de :meth:`_amostra_graficos` / base abaixo do teto — a
+        identidade da máscara para as chaves de memo (nunca só um bool)."""
         if not (self.__dict__.get("_amostra_graficos_on") and self.amostra_graficos_ativa()):
             return None
-        cap, n = int(self.max_linhas_graficos), len(self.df)
+        return (int(self.max_linhas_graficos), len(self.df), self.random_state)
+
+    def _mascara_amostra_graficos(self):
+        """Máscara (memoizada) da amostra aleatória dos gráficos, ou ``None``."""
+        chave = self._chave_amostra_graficos()
+        if chave is None:
+            return None
         hit = self.__dict__.get("_amostra_graficos_cache")
-        if hit is None or hit[0] != (cap, n):
+        if hit is None or hit[0] != chave:
+            cap, n, _ = chave
             m = np.zeros(n, dtype=bool)
             m[np.random.default_rng(self.random_state).choice(n, cap, replace=False)] = True
-            hit = ((cap, n), m)
+            hit = (chave, m)
             self._amostra_graficos_cache = hit
         return hit[1]
 
@@ -1383,17 +1539,22 @@ class ModelSegmenter:
             cache[time_col] = hit
         return hit
 
-    def _fatias_por_safra(self, time_col, sample=None, all_rows=False):
+    def _fatias_por_safra(self, time_col, sample=None, all_rows=False, amostrar=True):
         """``(idx, limites, rotulos)``: posições das linhas do recorte ordenadas
         por safra (estável) e os limites de cada safra em ``idx`` — a safra ``k``
-        é ``idx[limites[k]:limites[k+1]]``. Memoizado: vale p/ qualquer variável."""
+        é ``idx[limites[k]:limites[k+1]]``. Memoizado: vale p/ qualquer variável.
+        ``amostrar=False``: nunca restringe à amostra dos gráficos (ver
+        :meth:`_rows_mask`) — números de decisão (backtest, métricas)."""
         cache = self.__dict__.setdefault("_fatias_cache", {})
+        # amostragem EFETIVA num campo só (None = base inteira): o recorte sem
+        # amostra cai na mesma entrada dentro e fora do contexto de gráficos
         key = (time_col, sample, bool(all_rows) or self.sample_col is None,
-               self._mascara_amostra_graficos() is not None)
+               self._chave_amostra_graficos() if amostrar else None)
         hit = cache.get(key)
         if hit is None:
             cod, rot = self._safra_codes(time_col)
-            idx = np.flatnonzero(self._rows_mask(sample, all_rows=all_rows) & (cod >= 0))
+            idx = np.flatnonzero(self._rows_mask(sample, all_rows=all_rows,
+                                                 amostrar=amostrar) & (cod >= 0))
             idx = idx[np.argsort(cod[idx], kind="stable")]
             limites = np.searchsorted(cod[idx], np.arange(len(rot) + 1))
             hit = (idx, limites, rot)
@@ -1440,9 +1601,11 @@ class ModelSegmenter:
             return "(faltante)"
         if b["kind"] == "num":
             lbl = f"({_fmt(b['lo'])}, {_fmt(b['hi'])}]"
-        elif (len(b["cats"]) == 1
-              and self.var_meta.get(feature, {}).get("derived_from")):
-            lbl = str(b["cats"][0])        # derivada: a categoria JÁ é o rótulo da faixa
+        elif (self.var_meta.get(feature, {}).get("derived_from")
+              and len([c for c in b["cats"] if c not in b.get("na_cats", ())]) == 1):
+            # derivada: a categoria JÁ é o rótulo da faixa (sem o texto do faltante
+            # que veio junto quando os faltantes foram alocados nela)
+            lbl = str(next(c for c in b["cats"] if c not in b.get("na_cats", ())))
         else:
             lbl = "{" + ", ".join(map(str, b["cats"])) + "}"
         return lbl + (" + faltante" if b.get("include_na") else "")
@@ -1463,7 +1626,51 @@ class ModelSegmenter:
         feats = set(features)
         for k in [k for k in self._bins_cache if k[0] in feats]:
             self._bins_cache.pop(k, None)
+        self._evict_row_caches(feats)
         self._rank_version += 1
+
+    def _reset_row_caches(self):
+        """(Re)cria vazios todos os caches por linha de :attr:`_ROW_CACHES`."""
+        for nome, fabrica in self._ROW_CACHES:
+            setattr(self, nome, fabrica() if fabrica is not None else None)
+
+    def _evict_row_caches(self, feats):
+        """Tira dos caches por linha (os dict de :attr:`_ROW_CACHES`) as chaves
+        das variáveis ``feats`` — 1º elemento da chave, ou a própria chave."""
+        for nome, fabrica in self._ROW_CACHES:
+            cache = self.__dict__.get(nome)
+            if fabrica is not dict or not cache:
+                continue
+            for k in [k for k in cache
+                      if (k[0] if isinstance(k, tuple) and k else k) in feats]:
+                cache.pop(k, None)
+
+    def _touch_cols(self, *names):
+        """Marca que os VALORES das colunas ``names`` mudaram (criadas,
+        recriadas ou removidas): versão nova em :attr:`_col_version` (do
+        contador global) e poda os caches por linha delas."""
+        versoes = self.__dict__.setdefault("_col_version", {})   # objeto antigo
+        for n in names:
+            versoes[n] = next(_VERSOES_COLUNA)
+        self._evict_row_caches(set(names))
+
+    def _col_key(self, name):
+        """Versão atual dos valores da coluna ``name`` (componente das chaves de
+        memo por variável). Coluna sem registro (ex.: objeto antigo, coluna posta
+        no ``df`` por fora) recebe uma versão nova na 1ª leitura."""
+        versoes = self.__dict__.setdefault("_col_version", {})
+        v = versoes.get(name)
+        if v is None:
+            v = versoes[name] = next(_VERSOES_COLUNA)
+        return v
+
+    def _drop_derived_column(self, name):
+        """Tira do ``df`` a coluna de uma variável criada (se presente), com a
+        marcação de :meth:`_touch_cols` — único ponto de remoção (API e o
+        desfazer/refazer da UI)."""
+        if name in self.df.columns:
+            self.df.drop(columns=name, inplace=True)
+        self._touch_cols(name)
 
     def _resolve_bins(self, feature, max_n_bins=5, min_bin_size=0.05, splits=None,
                       sample=None):
@@ -1494,8 +1701,26 @@ class ModelSegmenter:
             raise ImportError("optbinning não instalado. Rode: pip install optbinning")
         if splits is None:
             splits = self.var_meta.get(feature, {}).get("splits")
+        if splits is None and self._faixas_da_origem(feature) is None:
+            # binning ótimo: só o gather das linhas sorteadas, sem copiar o recorte
+            # (None ⇒ candidata a binária etc.: segue o caminho abaixo)
+            if self._detect_kind(feature) == "num":
+                rapido = self._bins_num_por_posicao(feature, max_n_bins, min_bin_size, sample)
+                if rapido is not None:
+                    return rapido, "num"
+            else:
+                rapido = self._bins_cat_fatorada(feature, max_n_bins, min_bin_size, sample)
+                if rapido is not None:
+                    return rapido, "cat"
         fit = self._frame(sample, cols=[feature, self.target])
         kind = self._detect_kind(feature, fit)
+
+        derivada = self._faixas_da_origem(feature)
+        if derivada is not None:
+            # variável criada a partir das faixas de outra: a análise usa as MESMAS
+            # faixas da origem (na ordem dela, faltante como faixa de faltantes) —
+            # sem re-binning, que reordenava por risco e podia fundir faixas
+            return self._bins_derivada(feature, fit, splits, derivada), "cat"
 
         if splits is None:
             # binária (2 níveis): um nível por faixa, sem optbinning — o mínimo de
@@ -1547,25 +1772,193 @@ class ModelSegmenter:
             if len(ys) < 4 or not (xs != xs[0]).any():
                 grupos = []
             else:
-                if self.task_type == "classification":
-                    b = OptimalBinning(name=feature, dtype="categorical",
-                                       max_n_bins=max_n_bins, min_bin_size=min_bin_size,
-                                       monotonic_trend="auto_asc_desc")
-                    grupos = [list(a) for a in _fit_optbinning_splits(b, xs, ys.astype(int))]
-                else:
-                    b = ContinuousOptimalBinning(
-                        name=feature, dtype="categorical", max_n_bins=max_n_bins,
-                        min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
-                    grupos = [list(a) for a in _fit_optbinning_splits(b, xs, ys)]
-        _NA_TOK = {"nan", "NaN", "<NA>", "None"}
+                grupos = self._grupos_optbinning(feature, xs, ys, max_n_bins, min_bin_size)
+        bins = _bins_de_grupos(grupos, na_present)
+        return self._aplica_destino_na(feature, bins, fit, splits is not None), kind
+
+    def _grupos_optbinning(self, feature, xs, ys, max_n_bins, min_bin_size, max_rows=None):
+        """Grupos do binning ótimo categórico de ``(xs, ys)`` (``max_rows=0``:
+        linhas já sorteadas)."""
+        if self.task_type == "classification":
+            b = OptimalBinning(name=feature, dtype="categorical",
+                               max_n_bins=max_n_bins, min_bin_size=min_bin_size,
+                               monotonic_trend="auto_asc_desc")
+            ys = ys.astype(int)
+        else:
+            b = ContinuousOptimalBinning(
+                name=feature, dtype="categorical", max_n_bins=max_n_bins,
+                min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
+        return [list(a) for a in _fit_optbinning_splits(b, xs, ys, max_rows=max_rows)]
+
+    def _bins_cat_fatorada(self, feature, max_n_bins, min_bin_size, sample=None):
+        """Binning ótimo de uma variável CATEGÓRICA com a coluna fatorada UMA vez
+        (``pd.factorize`` só das linhas da amostra): o
+        faltante, as linhas de ajuste e a constância saem dos códigos, e o texto
+        entregue ao optbinning só é montado nas linhas já sorteadas — o mesmo
+        ``xs`` do recorte. Níveis só de texto: ``níveis[códigos]``; object com
+        outros tipos (Decimal, misto 1/1.0/True/'1', que o hash funde mas o
+        ``str`` separa): ``astype(str)`` só nessas linhas (o mesmo ``str`` por
+        linha). Os códigos ficam nesta chamada (nada vai para cache). ``None`` ⇒
+        caminho do recorte: candidata a binária, coluna duplicada, ou dtype fora
+        de object/texto/category (datetime etc.: o ``astype(str)`` olha a coluna
+        toda)."""
+        col = self.df[feature]
+        if not isinstance(col, pd.Series) or feature == self.target:
+            return None
+        dt = col.dtype
+        objeto = dt == object
+        arrow = str(getattr(dt, "pyarrow_dtype", "")) in ("string", "large_string")
+        if not (objeto or arrow or isinstance(dt, (pd.StringDtype, pd.CategoricalDtype))):
+            return None
+        mask = None if self.sample_col is None else self._frame_mask(sample)
+        # níveis não hasheáveis (list/dict) ⇒ caminho do recorte, que só faz
+        # hash do prefixo da amostra e segue com o astype(str)
+        try:
+            if pd.unique(_primeiros_observados(col, mask)).size <= 2:
+                return None                   # candidata a binária: _bins_binaria
+            # só as linhas da amostra são fatoradas (o hash fica do tamanho dela)
+            pos = None if mask is None else np.flatnonzero(mask)
+            parte = col if pos is None else col.iloc[pos]
+            codes, niveis = pd.factorize(parte, use_na_sentinel=True)   # NA → -1
+        except TypeError:
+            return None
+        codes = np.asarray(codes, dtype=np.int32)
+        niveis = np.asarray(niveis, dtype=object)
+        texto = pd.api.types.infer_dtype(niveis, skipna=True) == "string"
+        if not (texto or objeto):
+            return None                       # category de números etc.
+        obs = codes >= 0
+        na_present = not obs.all()
+        yok = self.df[self.target].notna().to_numpy(dtype=bool)
+        obs &= yok if pos is None else yok[pos]
+        lin = np.flatnonzero(obs)            # = linhas de f2 (relativas a parte)
+        del obs, yok
+        grupos = []
+        if len(lin) >= 4:
+            idx = _amostra_optbinning(len(lin))         # mesmo sorteio do ajuste
+            sel = lin if idx is None else lin[idx]
+            if texto:
+                xs = niveis[codes[sel]]
+                cl = codes[lin]
+                varia = bool((cl != cl[0]).any())       # mesmo código ⇔ mesmo texto
+            else:
+                xs = parte.iloc[sel].astype(str).to_numpy()
+                varia = bool((xs != xs[0]).any())
+                if not varia and idx is not None:       # amostra constante: olha tudo
+                    xt = parte.iloc[lin].astype(str).to_numpy()
+                    varia = bool((xt != xt[0]).any())
+            if varia:
+                abs_sel = sel if pos is None else pos[sel]
+                ys = self.df[self.target].iloc[abs_sel].to_numpy(dtype="float64")
+                grupos = self._grupos_optbinning(feature, xs, ys, max_n_bins,
+                                                 min_bin_size, max_rows=0)
+        return _bins_de_grupos(grupos, na_present)   # ótimo: _aplica_destino_na não muda
+
+    def _posicoes_ajuste(self, sample=None):
+        """``(máscara da amostra ou None, linhas sorteadas, y nelas)`` do ajuste
+        numérico do optbinning: as linhas da amostra com alvo observado
+        (``~isnan`` do alvo em float64, como no recorte) e o mesmo sorteio de
+        :func:`_fit_optbinning_splits` — que depende só de quantas são, então vale
+        para toda variável numérica. Memoizado por (amostra, teto, alvo)."""
+        sk = None if self.sample_col is None else (
+            sample if sample is not None else self.ref_sample)
+        cap = _common_mod.OPTBINNING_MAX_ROWS
+        ck = (sk, cap, self.target, self._col_key(self.target))
+        hit = self._ajuste_pos_cache.get(ck)
+        if hit is None:
+            yf = self.df[self.target].to_numpy(dtype="float64")
+            ok = ~np.isnan(yf)
+            mask = None if sk is None else self._frame_mask(sk)
+            pos = np.flatnonzero(ok if mask is None else mask & ok)
+            idx = _amostra_optbinning(len(pos), cap)
+            sel = pos if idx is None else pos[idx]
+            hit = self._ajuste_pos_cache[ck] = (mask, pos, sel, yf[sel])
+        return hit
+
+    def _bins_num_por_posicao(self, feature, max_n_bins, min_bin_size, sample=None):
+        """Binning ótimo de uma variável NUMÉRICA sem copiar o recorte: os mesmos
+        (x, y) que :meth:`_resolve_bins_uncached` entregava ao optbinning, por
+        gather das linhas de :meth:`_posicoes_ajuste` (ajuste com ``max_rows=0``:
+        já sorteadas). ``None`` quando os 10 mil primeiros observados da amostra
+        têm até 2 níveis (candidata a binária) — aí vale o caminho do recorte."""
+        col = self.df[feature]
+        if not isinstance(col, pd.Series):
+            return None                                   # coluna duplicada no df
+        mask, pos, sel, y = self._posicoes_ajuste(sample)
+        if pd.unique(_primeiros_observados(col, mask)).size <= 2:
+            return None
+        try:
+            xf = col.to_numpy(dtype="float64")
+        except (TypeError, ValueError):
+            return None
+        x = xf[sel]                                       # gather: array novo
+        if len(pos) < 4:
+            cortes = []
+        else:
+            # constância: basta a amostra sorteada mostrar 2 valores; senão olha
+            # todas as linhas de ajuste (nenhum observado ⇒ sem corte)
+            xo = x[~np.isnan(x)]
+            varia = bool(xo.size) and xo.min() != xo.max()
+            if not varia and sel is not pos:
+                xo = xf[pos]
+                xo = xo[~np.isnan(xo)]
+                varia = bool(xo.size) and xo.min() != xo.max()
+            if not varia:
+                cortes = []
+            elif self.task_type == "classification":
+                b = OptimalBinning(name=feature, dtype="numerical",
+                                   max_n_bins=max_n_bins, min_bin_size=min_bin_size,
+                                   monotonic_trend="auto_asc_desc")
+                cortes = _fit_optbinning_splits(b, x, y.astype(int), max_rows=0)
+            else:
+                b = ContinuousOptimalBinning(
+                    name=feature, dtype="numerical", max_n_bins=max_n_bins,
+                    min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
+                cortes = _fit_optbinning_splits(b, x, y.copy(), max_rows=0)
+        if not cortes:
+            return []
+        edges = [-np.inf, *cortes, np.inf]
+        bins = [{"kind": "num", "lo": edges[i], "hi": edges[i + 1]}
+                for i in range(len(edges) - 1)]
+        # faltante = isna da coluna original (Float64 guarda NaN que não é NA)
+        na = col.isna().to_numpy(dtype=bool, na_value=True)
+        if (na.any() if mask is None else (na & mask).any()):
+            bins.append({"kind": "na"})
+        return bins             # binning ótimo: _aplica_destino_na não muda nada
+
+    def _faixas_da_origem(self, feature):
+        """``[(rótulo, é_faltante), ...]`` das faixas de origem de uma variável
+        criada por :meth:`create_categorical` (na ordem da origem), ou ``None``."""
+        meta = self.var_meta.get(feature) or {}
+        src, dbins = meta.get("derived_from"), meta.get("derived_bins")
+        if not src or not dbins or meta.get("derived_dummy"):
+            return None
+        return [(self._bin_label(src, b), b.get("kind") == "na") for b in dbins]
+
+    def _bins_derivada(self, feature, fit, splits, origem) -> list:
+        """Faixas de uma variável criada: uma por faixa da origem presente na base
+        (ou os grupos manuais, ordenados pela origem); a faixa que guarda o faltante
+        da origem vira a faixa de faltantes (``{"kind": "na", "cats": [...]}``)."""
+        pos = {lbl: i for i, (lbl, _na) in enumerate(origem)}
+        na_lbls = [lbl for lbl, na in origem if na]
+        presentes = {str(v) for v in pd.unique(self.df[feature].dropna())}
+        if splits is not None:
+            grupos = [[str(c) for c in g] for g in splits]
+        else:
+            grupos = [[lbl] for lbl, _na in origem if lbl in presentes]
+        # categorias fora da origem (não deveria haver) não somem: grupo próprio
+        vistos = {c for g in grupos for c in g}
+        grupos += [[c] for c in sorted(presentes - vistos)]
+        grupos.sort(key=lambda g: min((pos.get(c, len(pos)) for c in g), default=len(pos)))
         bins = []
         for g in grupos:
-            cats = [str(c) for c in g if str(c) not in _NA_TOK]
-            if cats:
-                bins.append({"kind": "cat", "cats": cats})
-        if bins and na_present:
+            if g and all(c in na_lbls for c in g):
+                bins.append({"kind": "na", "cats": list(g)})
+            elif g:
+                bins.append({"kind": "cat", "cats": list(g)})
+        if fit[feature].isna().any() and not any(b["kind"] == "na" for b in bins):
             bins.append({"kind": "na"})
-        return self._aplica_destino_na(feature, bins, fit, splits is not None), kind
+        return self._aplica_destino_na(feature, bins, fit, splits is not None)
 
     # níveis da flag abaixo destes limites deixam o IV instável (aviso, não bloqueio)
     _BINARIA_MIN_SHARE = 0.01
@@ -1581,11 +1974,12 @@ class ModelSegmenter:
         nível vira a sua faixa (numérica: corte no ponto médio; categórica/bool:
         um grupo por nível) e os faltantes seguem em faixa própria."""
         col = fit[feature]
-        obs = col.dropna()
-        # rejeição rápida: >2 níveis já nas primeiras linhas ⇒ não é binária
-        # (evita varrer/converter milhões de valores em cada variável contínua)
-        if pd.unique(obs.iloc[:10_000]).size > 2:
+        # rejeição rápida: >2 níveis já nos 10 mil primeiros observados ⇒ não é
+        # binária (lidos em blocos: nem o dropna da coluna inteira, nem varrer/
+        # converter milhões de valores em cada variável contínua)
+        if pd.unique(_primeiros_observados(col)).size > 2:
             return None
+        obs = col.dropna()
         if kind == "num":
             vals = np.sort(pd.unique(obs.to_numpy(dtype="float64")))
             if vals.size != 2:
@@ -1653,6 +2047,12 @@ class ModelSegmenter:
                 return bins
         faixas = [dict(b) for b in faixas]
         faixas[idx]["include_na"] = True
+        # variável criada: o faltante da origem é a categoria "(faltante)" (texto) —
+        # vai junto, senão essas linhas ficariam sem faixa
+        na_cats = [c for b in bins if b["kind"] == "na" for c in b.get("cats", ())]
+        if na_cats and faixas[idx]["kind"] == "cat":
+            faixas[idx]["cats"] = list(faixas[idx]["cats"]) + na_cats
+            faixas[idx]["na_cats"] = na_cats
         return faixas
 
     def _risco(self, y) -> float:
@@ -1859,6 +2259,10 @@ class ModelSegmenter:
         col = sub[feature]
         kind = self._detect_kind(feature, sub)
         n = int(len(col)); n_miss = int(col.isna().sum())
+        origem = self._faixas_da_origem(feature)
+        na_lbls = [lbl for lbl, eh_na in (origem or []) if eh_na]
+        if na_lbls:                        # variável criada: "(faltante)" é o faltante
+            n_miss += int(_cat_group_masks(col, [na_lbls])[0].sum())
         res = {"variavel": feature, "tipo": kind, "n": n, "n_missing": n_miss,
                "pct_missing": round(100 * n_miss / n, 2) if n else float("nan"),
                "incluida": feature in self.included,
@@ -2345,9 +2749,24 @@ class ModelSegmenter:
         ok = linhas & (cod >= 0)
         if not ok.any():
             return pd.DataFrame(columns=["safra"])
-        rot_faixa = np.asarray(ordem + ["(faltante)"], dtype=object)
-        tab = pd.crosstab(np.asarray(rot, dtype=object)[cod[ok]],
-                          rot_faixa[np.where(bc[ok] >= 0, bc[ok], len(ordem))])
+        # contagem (safra, faixa) por bincount sobre códigos — mesma tabela da
+        # crosstab sobre os rótulos-texto, sem hashear rótulos gigantes por
+        # linha. Rótulos repetidos (ex.: faixa "na" rotulada "(faltante)")
+        # fundem-se em ``labs`` como a crosstab fundiria; linhas e colunas sem
+        # observação saem (rk/ck); os nomes row_0/col_0 são os da crosstab e
+        # o dtype dos índices fica para o pandas inferir, como ela faz.
+        labs = list(dict.fromkeys(ordem + ["(faltante)"]))
+        pos_lab = {l: j for j, l in enumerate(labs)}
+        lab_id = np.array([pos_lab[l] for l in ordem + ["(faltante)"]], dtype=np.int64)
+        L = len(labs)
+        f = lab_id[np.where(bc[ok] >= 0, bc[ok], len(ordem))]
+        mat = np.bincount(cod[ok].astype(np.int64) * L + f,
+                          minlength=len(rot) * L).reshape(len(rot), L)
+        rk, ck = mat.sum(axis=1) > 0, mat.sum(axis=0) > 0
+        tab = pd.DataFrame(
+            mat[np.ix_(rk, ck)],
+            index=pd.Index([rot[i] for i in np.flatnonzero(rk)], name="row_0"),
+            columns=pd.Index([labs[j] for j in np.flatnonzero(ck)], name="col_0"))
         pct = tab.div(tab.sum(axis=1), axis=0) * 100
         cols = [c for c in dict.fromkeys(ordem) if c in pct.columns]
         if "(faltante)" in pct.columns and "(faltante)" not in cols:
@@ -2792,8 +3211,7 @@ class ModelSegmenter:
         if filhas:
             raise ValueError(f"'{self.label(name)}' é a origem de {filhas} — exclua "
                              "essas variáveis antes.")
-        if name in self.df.columns:
-            self.df.drop(columns=name, inplace=True)
+        self._drop_derived_column(name)
         if name in self.candidates:
             self.candidates.remove(name)
         self.included.discard(name)
@@ -2808,8 +3226,7 @@ class ModelSegmenter:
         Devolve os nomes removidos."""
         removidas = self.derived_features()
         for n in removidas:
-            if n in self.df.columns:
-                self.df.drop(columns=n, inplace=True)
+            self._drop_derived_column(n)
             if n in self.candidates:
                 self.candidates.remove(n)
             self.included.discard(n)
@@ -2955,6 +3372,11 @@ class ModelSegmenter:
         (como configurado) e ``faixa`` (rótulo da faixa que os recebe)."""
         ref = self._frame(self.ref_sample, cols=[feature, self.target])
         na = ref[feature].isna().to_numpy()
+        origem = self._faixas_da_origem(feature)
+        if origem is not None:            # variável criada: "(faltante)" é o faltante
+            na_lbls = [lbl for lbl, eh_na in origem if eh_na]
+            if na_lbls:
+                na = na | _cat_group_masks(ref[feature], [na_lbls])[0]
         n, tot = int(na.sum()), len(ref)
         taxa = self._risco(ref[self.target].to_numpy(dtype="float64")[na]) if n else float("nan")
         if not self.manual_bins(feature):
@@ -5826,14 +6248,16 @@ class ModelSegmenter:
             raise ValueError("plot_roc é exclusivo de classificação (eventos "
                              "binários); em regressão use plot_calibration/"
                              "plot_residuals.")
-        from sklearn.metrics import roc_curve, roc_auc_score
+        from sklearn.metrics import roc_curve, auc as _auc_trap
         y, sc = self._sample_scores(sample)
         fig, ax = _new_ax(figsize, dpi, ax)
         if len(np.unique(y)) < 2:
             ax.text(0.5, 0.5, "amostra com 1 classe", ha="center", va="center",
                     transform=ax.transAxes, color="#889"); ax.axis("off")
             fig.tight_layout(); return fig
-        fpr, tpr, _ = roc_curve(y, sc); auc = roc_auc_score(y, sc)
+        # trapézio sobre a MESMA curva: é o que roc_auc_score faz por dentro
+        # (roc_curve + auc), sem ordenar o score uma segunda vez
+        fpr, tpr, _ = roc_curve(y, sc); auc = _auc_trap(fpr, tpr)
         ax.plot(fpr, tpr, color="#15324a", lw=2.2, label=f"AUC={auc:.3f} · Gini={2*auc-1:.3f}")
         ax.plot([0, 1], [0, 1], color="#bbb", ls="--", lw=1)
         ax.set_xlabel("FPR"); ax.set_ylabel("TPR")
@@ -6363,8 +6787,10 @@ class ModelSegmenter:
         """Métricas do modelo **por safra** (mês de ``date_col``/``time_col``).
 
         Classificação: ``safra, n, taxa_evento, auc, ks, gini``. Regressão:
-        ``safra, n, previsto_medio, realizado_medio, mae, rmse, r2``. Reutiliza
-        :func:`~yggdrasil.metrics.classification_metrics` /
+        ``safra, n, previsto_medio, realizado_medio, mae, rmse, r2``. AUC/KS/Gini
+        saem da mesma curva ROC de
+        :func:`~yggdrasil.metrics.classification_metrics` (só ela, sem o pacote
+        inteiro, quando o alvo é 0/1), e a regressão reutiliza
         :func:`~yggdrasil.metrics.regression_metrics` (mesmo pacote de
         :meth:`metrics`). Safras com poucas linhas ou classe única não quebram —
         as métricas ficam NaN.
@@ -6398,7 +6824,22 @@ class ModelSegmenter:
             row.update({c: float("nan") for c in met_cols})
             if is_clf:
                 row["taxa_evento"] = self._risco(y)
-                if y.size >= 2 and len(np.unique(y)) == 2:
+                uy = np.unique(y)
+                if y.size >= 2 and len(uy) == 2 and set(uy.tolist()) <= {0.0, 1.0}:
+                    # alvo 0/1: só a curva ROC, com o arredondamento de
+                    # classification_metrics (gini do auc NÃO arredondado) — o
+                    # pacote inteiro (f1, log loss, …) era jogado fora
+                    try:
+                        pack = _roc_pack(y, sc)
+                        if pack is not None:
+                            row.update({c: round(float(v), 6) if np.isfinite(v)
+                                        else float("nan")
+                                        for c, v in zip(("auc", "gini", "ks"), pack[:3])})
+                    except Exception:  # noqa: BLE001 - safra degenerada ⇒ NaN
+                        pass
+                elif y.size >= 2 and len(uy) == 2:
+                    # outra codificação (ex.: {-1,1}): caminho antigo, que pode
+                    # levantar no f1/precisão e deixar a safra em NaN
                     try:
                         m = classification_metrics(y, sc)
                         row.update({c: m.get(c, float("nan"))
@@ -6421,14 +6862,16 @@ class ModelSegmenter:
 
     def plot_metrics_by_safra(self, sample=None, metrics=("ks", "auc"),
                               time_col=None, figsize=(9.6, 4.2), dpi=150,
-                              save_path=None, ax=None, ylim=None):
+                              save_path=None, ax=None, ylim=None, table=None):
         """Evolução das métricas do modelo por safra (linhas), a partir de
         :meth:`metrics_by_safra`. ``metrics`` que não existirem para o
         ``task_type`` são ignoradas (default de regressão: ``mae``/``rmse``).
         ``ylim=(lo, hi)`` fixa o eixo vertical (ex.: ``(0, 1)`` para padronizar a
         leitura quando o alvo está em [0,1]); tem precedência sobre a heurística
-        que fixa [0,1] para métricas de discriminação."""
-        ms = self.metrics_by_safra(sample, time_col)
+        que fixa [0,1] para métricas de discriminação. ``table``: a saída de
+        :meth:`metrics_by_safra` já calculada para os mesmos ``sample``/
+        ``time_col`` (evita recalcular quando quem chama já tem a tabela)."""
+        ms = table if table is not None else self.metrics_by_safra(sample, time_col)
         cols = [m for m in metrics if m in ms.columns and m not in ("safra", "n")]
         if not cols:                        # default de clf pedido em regressão
             cols = [c for c in ("mae", "rmse") if c in ms.columns]
@@ -8312,23 +8755,32 @@ class ModelSegmenter:
             raise ValueError("Informe time_col ou configure date_col.")
         if self.score_ is None:
             raise RuntimeError("Gere o score antes (fit / set_model).")
-        base = self._frame(sample) if sample else self.df
-        if time_col not in base.columns:
+        if time_col not in self.df.columns:
             raise ValueError(f"Coluna de tempo '{time_col}' não existe no DataFrame.")
-        sc = self.score_.reindex(base.index)
-        safra = pd.to_datetime(base[time_col], errors="coerce").dt.to_period("M")
+        # fatias por safra sobre ARRAYS (como metrics_by_safra): o groupby da
+        # base ordenava e copiava todas as colunas só para ler alvo e score.
+        # Nunca na amostra dos gráficos (amostrar=False): é número de decisão.
+        idx, limites, rot = self._fatias_por_safra(time_col, sample, all_rows=not sample,
+                                                   amostrar=False)
+        # só as linhas do recorte com safra válida (as que o groupby via), já
+        # na ordem das fatias; mesma conversão de _risco/_calib_test
+        y_ord = np.asarray(self.df[self.target].iloc[idx], dtype="float64")
+        sc_ord = self.score_.reindex(self.df.index).to_numpy(dtype="float64")[idx]
         rows = []
-        for per, g in base.groupby(safra):
-            sg = sc.reindex(g.index)
-            prev = float(sg.mean(skipna=True))
-            real = self._risco(g[self.target])
+        for j, per in enumerate(rot):
+            a, b = int(limites[j]), int(limites[j + 1])
+            if a == b:                        # safra ausente neste recorte
+                continue
+            y_g, sg = y_ord[a:b], sc_ord[a:b]
+            prev = float(pd.Series(sg).mean(skipna=True))
+            real = self._risco(y_g)
             gap = real - prev if (np.isfinite(prev) and np.isfinite(real)) else np.nan
-            t = self._calib_test(g[self.target], sg)
+            t = self._calib_test(y_g, sg)
             if tol is not None:               # fallback/compat: tolerância fixa
                 status = "ok" if (np.isfinite(gap) and abs(gap) <= tol) else "alerta"
             else:
                 status = t["status"]
-            rows.append({"safra": str(per), "n": len(g),
+            rows.append({"safra": str(per), "n": b - a,
                          "previsto_medio": round(prev, 4) if np.isfinite(prev) else np.nan,
                          "realizado_medio": round(real, 4) if np.isfinite(real) else np.nan,
                          "gap": round(gap, 4) if np.isfinite(gap) else np.nan,
@@ -8361,18 +8813,32 @@ class ModelSegmenter:
         if self.score_ is None:
             raise RuntimeError("Gere o score antes (fit / set_model).")
         from scipy.stats import chi2
-        base = self._frame(sample) if sample else self.df
-        sc = self.score_.reindex(base.index)
-        y = base[self.target]
-        ok = sc.notna() & y.notna()
-        sc, y = sc[ok], y[ok].astype("float64")
-        if len(sc) == 0:
-            raise ValueError("Sem linhas válidas (score e alvo) para o teste.")
-        grp = pd.qcut(sc, q=int(n_groups), duplicates="drop")
+        if not self.df.index.is_unique:
+            # índice repetido: o .loc por rótulo multiplica linhas — mantém o
+            # comportamento de sempre (caminho por rótulos)
+            grupos = self._hl_grupos_rotulos(sample, n_groups)
+        else:
+            # posições numpy: máscara da amostra só nas colunas lidas (sem copiar
+            # o recorte inteiro) e grupos por codes==k na ordem original — os
+            # mesmos vetores do .groups + .loc, logo as mesmas somas bit a bit
+            mask = (self._frame_mask(sample) if (sample and self.sample_col is not None)
+                    else np.ones(len(self.df), dtype=bool))
+            if self.score_.index is self.df.index or self.score_.index.equals(self.df.index):
+                s = self.score_.to_numpy(dtype="float64")[mask]
+            else:
+                s = self.score_.reindex(self.df.index).to_numpy(dtype="float64")[mask]
+            y = self.df[self.target][mask].to_numpy(dtype="float64", na_value=np.nan)
+            ok = ~np.isnan(s) & ~np.isnan(y)
+            s, y = s[ok], y[ok]
+            if s.size == 0:
+                raise ValueError("Sem linhas válidas (score e alvo) para o teste.")
+            cat = pd.qcut(s, q=int(n_groups), duplicates="drop")
+            codes = np.asarray(cat.codes)
+            # só as faixas com linhas (= observed=True do groupby)
+            grupos = ((str(cat.categories[k]), s[codes == k], y[codes == k])
+                      for k in range(len(cat.categories)) if (codes == k).any())
         rows, stat = [], 0.0
-        for faixa, idx in sc.groupby(grp, observed=True).groups.items():
-            s_g = sc.loc[idx].to_numpy(dtype="float64")
-            y_g = y.loc[idx].to_numpy(dtype="float64")
+        for faixa, s_g, y_g in grupos:
             n = int(s_g.size)
             obs = float(y_g.sum())
             esp = float(s_g.sum())
@@ -8380,7 +8846,7 @@ class ModelSegmenter:
             den = esp * (1.0 - p_bar)
             contrib = ((obs - esp) ** 2 / den) if den > 0 else 0.0
             stat += contrib
-            rows.append({"faixa": str(faixa), "n": n,
+            rows.append({"faixa": faixa, "n": n,
                          "eventos_obs": int(round(obs)),
                          "eventos_esp": round(esp, 1),
                          "taxa_obs": round(obs / n, 4) if n else np.nan,
@@ -8392,6 +8858,22 @@ class ModelSegmenter:
                 "p_value": float(chi2.sf(stat, df_hl)),
                 "df": int(df_hl), "n_groups": int(g_eff),
                 "table": pd.DataFrame(rows)}
+
+    def _hl_grupos_rotulos(self, sample, n_groups):
+        """Grupos ``(faixa, score, alvo)`` do :meth:`hosmer_lemeshow` pelo
+        caminho antigo (``.groups`` + ``.loc`` por rótulo) — só para df com
+        índice repetido, onde o resultado depende dessa semântica."""
+        base = self._frame(sample) if sample else self.df
+        sc = self.score_.reindex(base.index)
+        y = base[self.target]
+        ok = sc.notna() & y.notna()
+        sc, y = sc[ok], y[ok].astype("float64")
+        if len(sc) == 0:
+            raise ValueError("Sem linhas válidas (score e alvo) para o teste.")
+        grp = pd.qcut(sc, q=int(n_groups), duplicates="drop")
+        return [(str(faixa), sc.loc[idx].to_numpy(dtype="float64"),
+                 y.loc[idx].to_numpy(dtype="float64"))
+                for faixa, idx in sc.groupby(grp, observed=True).groups.items()]
 
     def plot_backtest(self, sample=None, tolerancia=0.2, time_col=None,
                       figsize=(9.6, 4.4), dpi=150, save_path=None, ax=None):
@@ -8756,6 +9238,9 @@ class ModelSegmenter:
         def _n(v):
             return repr(float(v))
         if b["kind"] == "na":
+            if b.get("cats"):
+                lits = ", ".join("'" + str(c).replace("'", "''") + "'" for c in b["cats"])
+                return f"({col} IS NULL OR {col} IN ({lits}))"
             return f"{col} IS NULL"
         if b["kind"] == "num":
             partes = []
@@ -9082,6 +9567,7 @@ class ModelSegmenter:
         meta = {"categoria": None, "derived_from": feature,
                 "derived_kind": kind, "derived_bins": bins}
         self.df[name] = self._derived_values(self.df[feature], meta, feature)
+        self._touch_cols(name)
         if name not in self.candidates:
             self.candidates.append(name)
         self.var_meta[name] = meta
@@ -9135,6 +9621,7 @@ class ModelSegmenter:
                     "derived_bins": [b], "derived_dummy": True,
                     "dummy_ref": spec["labels"][spec["ref"]]}
             self.df[name] = self._derived_values(self.df[feature], meta, feature)
+            self._touch_cols(name)
             if name not in self.candidates:
                 self.candidates.append(name)
             self.var_meta[name] = meta
@@ -9183,6 +9670,7 @@ class ModelSegmenter:
             if not src or name in self.df.columns or src not in self.df.columns:
                 continue
             self.df[name] = self._derived_values(self.df[src], meta, src)
+            self._touch_cols(name)
 
     def _score_pandas(self, pdf, col_score="score", col_rating="rating", col_value=None,
                       ruler_sample=None, recreate_categories=None, cat_suffix="_faixa",
@@ -9250,15 +9738,9 @@ class ModelSegmenter:
         s._rank_cache = {}
         s._metrics_cache = None
         # caches por LINHA da base (safra/faixa) e por variável: nada disso pode
-        # ir no pickle para os executores
-        s._safra_cache = {}
-        s._bincode_cache = {}
-        s._iv_row_cache = {}
-        s._fatias_cache = {}
-        s._amostra_safra_cache = {}
-        s._rating_codes_cache = None
-        s._raw_score_cache = None
-        s._amostra_graficos_cache = None
+        # ir no pickle para os executores (registro único em _ROW_CACHES)
+        s._reset_row_caches()
+        s._col_version = dict(self.__dict__.get("_col_version") or {})
         s._metrics_ci_cache = None
         s._shap_cache = {}
         s.score_ = None
@@ -9725,7 +10207,7 @@ class ModelSegmenter:
         if self.task_type != "classification":
             raise ValueError("plot_roc_compare é exclusivo de classificação; em "
                              "regressão compare pelas métricas (compare_to).")
-        from sklearn.metrics import roc_curve, roc_auc_score
+        from sklearn.metrics import roc_curve, auc as _auc_trap
         snap = self._resolve_snapshot(baseline)
         if sample is None:
             sample = self.ref_sample
@@ -9743,7 +10225,7 @@ class ModelSegmenter:
             if len(np.unique(y)) < 2:
                 continue
             fpr, tpr, _ = roc_curve(y, s)
-            auc = roc_auc_score(y, s)
+            auc = _auc_trap(fpr, tpr)       # = roc_auc_score, sem 2ª ordenação
             ax.plot(fpr, tpr, color=cor, ls=ls, lw=2.0,
                     label=f"{nome} · AUC={auc:.3f}")
         ax.plot([0, 1], [0, 1], color="#bbb", ls=":", lw=1)

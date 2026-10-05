@@ -305,6 +305,11 @@ def _aplicar_regua_pandas(regua, df, col_seg="segmento",
 # ``self.fallback``) de "explicitamente None" (sem fallback nesta chamada)
 _FALLBACK_OMITIDO = object()
 
+# sentinela p/ o ``time_col`` do variable_inversion: pula o laço por safra (o
+# gráfico por amostra não lê nada dele). ``time_col=False`` não serve: o
+# ``time_col or self.date_col`` o transformaria em date_col.
+_SEM_SAFRAS = object()
+
 
 def _emit_progress(cb, key: str, label: str, status: str, detail: str = "") -> None:
     """Dispara um evento de progresso (aplicação da régua) para a UI, se houver
@@ -546,6 +551,16 @@ class TreeSegmenter:
     # ------------------------------------------------------------------
     # Helpers de bin genéricos (numérico OU categórico)
     # ------------------------------------------------------------------
+    def _sub(self, mask, *cols):
+        """Recorte de LINHAS só com as colunas usadas: as pedidas (variável, safra)
+        + alvo, amostra e peso. ``self.df[mask]`` copiava TODAS as colunas da base a
+        cada recorte (nó da árvore, gráfico, amostra) — em milhões de linhas × dezenas
+        de colunas era o grosso do tempo e do pico de memória da UI."""
+        keep = [c for c in dict.fromkeys((*cols, self.target, self.sample_col,
+                                          self.weight_col))
+                if c is not None and c in self.df.columns]
+        return self.df.loc[mask, keep]
+
     def _detect_kind(self, sub, feature, dtype):
         """Decide se a variável é tratada como 'num' ou 'cat'."""
         if dtype in ("num", "cat"):
@@ -628,7 +643,7 @@ class TreeSegmenter:
         hit = self._bins_cache.get(key)
         if hit is not None:
             return hit[0], hit[1], hit[2]
-        res = self._resolve_bins(self.df[mask], feature, splits, dtype, max_n_bins,
+        res = self._resolve_bins(self._sub(mask, feature), feature, splits, dtype, max_n_bins,
                                  min_bin_size, max_bin_size, relax_max, min_mean_diff,
                                  criterion)
         if len(self._bins_cache) > 6000:        # backstop de memória
@@ -667,10 +682,14 @@ class TreeSegmenter:
                 x, y = x[ok], y[ok]                         # alvo NaN não entra no ajuste
                 yfit = y.astype(int) if self._is_clf else y    # binário 0/1 só na classif.
                 x_obs = x[~np.isnan(x)]
-                # classificação exige as 2 classes presentes; regressão não
+                # classificação exige as 2 classes presentes; regressão não.
+                # "Menos de 2 distintos" por min == max (O(n), sem ordenar como o
+                # np.unique): sem NaN em x_obs/yfit, equivale a unique().size < 2
+                # (inclusive -0.0 == 0.0 e ±inf). O curto-circuito protege o min()
+                # de array vazio. Nunca max-min == 0: inf - inf dá NaN.
                 degenerado = (len(yfit) < 4 or x_obs.size == 0
-                              or np.unique(x_obs).size < 2
-                              or (self._is_clf and np.unique(yfit).size < 2))
+                              or x_obs.min() == x_obs.max()
+                              or (self._is_clf and yfit.min() == yfit.max()))
                 if degenerado:
                     cortes = []                            # dados degenerados → sem corte
                 elif criterion != "optbin":
@@ -722,8 +741,12 @@ class TreeSegmenter:
             xs = fit[feature].astype(str).to_numpy()
             yf = fit[self.target].to_numpy(dtype="float64")
             ys = yf.astype(int) if self._is_clf else yf       # binário só na classif.
-            degenerado = (len(ys) < 4 or np.unique(xs).size < 2
-                          or (self._is_clf and np.unique(ys).size < 2))
+            # ≥2 textos distintos por comparação com o 1º (O(n), sem ordenar
+            # strings Python como o np.unique); len(ys) < 4 vem antes e garante
+            # xs[0]. Sempre sobre xs JÁ em str: factorize/nunique na coluna bruta
+            # fundiria 1/1.0/True e Decimal('1.0')/Decimal('1.00').
+            degenerado = (len(ys) < 4 or not (xs[1:] != xs[0]).any()
+                          or (self._is_clf and ys.min() == ys.max()))
             if degenerado:
                 grupos = []                          # dados degenerados → sem grupos
             elif criterion != "optbin":
@@ -793,7 +816,7 @@ class TreeSegmenter:
         n_total = len(self.df)
         previews = {}
         for sid, seg in targets.items():
-            sub = self.df[seg["mask"]]
+            sub = self._sub(seg["mask"], feature)
             # cache por id(mask): o Preview popula o solver e o .grow() seguinte
             # (mesma folha/feature/args) reaproveita, sem rodar optbinning 2×.
             bins, modo, kind = self._resolve_bins_cached(
@@ -850,7 +873,7 @@ class TreeSegmenter:
         }
         novos, modo_usado = {}, None
         for sid, seg in targets.items():
-            sub = self.df[seg["mask"]]
+            sub = self._sub(seg["mask"])
             if splits is None:
                 n_fit = len(self._fit_frame(sub, min_bin_size))
                 if n_fit < self.min_leaf_rows:
@@ -1585,9 +1608,31 @@ class TreeSegmenter:
         """Tabela de folhas (memoizada por versão da árvore + parâmetros). A UI
         chama isto ~5× por _refresh (direto e via _grade_map); a memoização evita
         revarrer as máscaras full-length por folha a cada chamada."""
-        out = self._agg_memo(
-            ("leaves", ascending, with_psi, with_test, test),
-            lambda: self._compute_leaves(ascending, with_psi, with_test, test))
+        # Composição sobre a tabela BASE memoizada: _compute_leaves monta as
+        # colunas base sem ler with_psi/with_test/test e só no fim acrescenta PSI
+        # e teste de adjacência — refazer as folhas inteiras por combinação de
+        # parâmetros (placar, tabela de folhas) era redundante. A base usa a MESMA
+        # chave que leaves()/_grade_map já preenchem; 'test' só entra na chave com
+        # with_test (senão é ignorado), para não duplicar a base com 'welch'.
+        test_k = test if with_test else "mannwhitney"
+        base_key = ("leaves", ascending, False, False, "mannwhitney")
+        key = ("leaves", ascending, with_psi, with_test, test_k)
+
+        def _composta():
+            # _agg_memo direto (não via leaves(), que inseriria 'apelido') e sobre
+            # a CÓPIA que ele devolve: o objeto em cache da base nunca é mutado.
+            # Mesma ordem de _compute_leaves: base → PSI → teste de adjacência.
+            out = self._agg_memo(base_key, lambda: self._compute_leaves(ascending))
+            if with_psi and self.sample_col is not None:
+                out = self._append_psi_cols(out)
+            if with_test:
+                out = self._append_adjacency_test(out, test=test)
+            return out
+
+        if key == base_key:
+            out = self._agg_memo(base_key, lambda: self._compute_leaves(ascending))
+        else:
+            out = self._agg_memo(key, _composta)
         # coluna 'apelido' SÓ quando há apelido definido — e FORA do memo: os
         # apelidos mudam sem alterar a versão da árvore, então não podem ficar
         # presos no cache por versão (o memo devolve cópia defensiva).
@@ -1601,10 +1646,11 @@ class TreeSegmenter:
         linhas, n_total = [], len(self.df)
         # total de SALDO (soma dos pesos) p/ a visão dupla contratos × saldo
         w_total = float(self._weights.sum()) if self.weight_col is not None else 0.0
+        amostras = list(self._sample_masks) if self.sample_col is not None else []
         for sid, seg in self.segments.items():
             if not seg["is_leaf"]:
                 continue
-            sub = self.df[seg["mask"]]
+            sub = self._sub(seg["mask"])
             # valor_medio na referência (DES) = base da régua; assim nota é
             # monotônica no alvo que entra em predict/apply_spark (com fallback)
             if self.sample_col is not None:
@@ -1636,7 +1682,7 @@ class TreeSegmenter:
                 row["valor_medio_pond"] = round(vp, 4) if not pd.isna(vp) else np.nan
             row["valor_std"] = round(sub[self.target].std(), 4)
             if self.sample_col is not None:
-                for amostra in self.df[self.sample_col].dropna().unique():
+                for amostra in amostras:
                     s_am = sub.loc[sub[self.sample_col] == amostra, self.target]
                     row[f"valor_{amostra}"] = round(s_am.mean(), 4) if len(s_am) else np.nan
                     if self.weight_col is not None:   # alvo PONDERADO por amostra
@@ -1803,9 +1849,11 @@ class TreeSegmenter:
         n_total = len(self.df)
         linhas: list[str] = []
 
+        y_all = self.df[self.target]
+
         def stats(sid):
-            sub = self.df[self.segments[sid]["mask"]]
-            pdv = sub[self.target].mean() if len(sub) else float("nan")
+            sub = y_all[self.segments[sid]["mask"]]      # só o alvo (não a base toda)
+            pdv = sub.mean() if len(sub) else float("nan")
             return len(sub), 100 * len(sub) / n_total, pdv
 
         def rotulo(sid):
@@ -1909,7 +1957,7 @@ class TreeSegmenter:
         def stats(sid):
             m = self.segments[sid]["mask"]
             n = int(m.sum())
-            sub = self.df[m]
+            sub = self._sub(m)                   # alvo + amostra (não a base toda)
             if ref is not None:
                 sr = sub.loc[sub[self.sample_col] == ref, self.target]
                 pdv = sr.mean() if len(sr) else (sub[self.target].mean() if n else float("nan"))
@@ -1919,8 +1967,8 @@ class TreeSegmenter:
 
         def sample_value(sid, a):
             m = self.segments[sid]["mask"] & (self.df[self.sample_col] == a)
-            sub = self.df[m]
-            return sub[self.target].mean() if len(sub) else float("nan")
+            sub = self.df.loc[m, self.target]
+            return sub.mean() if len(sub) else float("nan")
 
         # menor nota entre as folhas de cada ramo — usada para ordenar os
         # ramos da esquerda (menor nota) para a direita (maior nota)
@@ -2432,7 +2480,7 @@ class TreeSegmenter:
         for sid, seg in self.segments.items():
             if not seg["is_leaf"]:
                 continue
-            sub = self.df[seg["mask"]]
+            sub = self._sub(seg["mask"])
             if self.sample_col is not None:
                 ref = sub.loc[sub[self.sample_col] == self.ref_sample, self.target]
                 pdv = float(ref.mean()) if len(ref) else float(sub[self.target].mean())
@@ -3245,7 +3293,7 @@ class TreeSegmenter:
         mask = pd.Series(True, index=self.df.index)
         if sample is not None and self.sample_col is not None:
             mask = self.df[self.sample_col] == sample
-        base = self.df.loc[mask]
+        base = self._sub(mask, time_col)
         sc_full = pred[mask.values]
         safra = pd.to_datetime(base[time_col], errors="coerce").dt.to_period("M")
         met_cols = (["taxa_evento", "auc", "ks", "gini"] if self._is_clf
@@ -3464,7 +3512,7 @@ class TreeSegmenter:
         if sid is None or sid not in self.segments:
             sid, sub = "root", self.df
         else:
-            sub = self.df[self.segments[sid]["mask"]]
+            sub = self._sub(self.segments[sid]["mask"], feature)
         # `splits` (mesmos do preview/grow) garante que o gráfico bata com a tabela
         bins, modo, kind = self._resolve_bins_cached(sid, feature, splits, dtype,
                                                      max_n_bins, min_bin_size, max_bin_size,
@@ -3542,7 +3590,7 @@ class TreeSegmenter:
         if sid is None or sid not in self.segments:
             sid, sub = "root", self.df
         else:
-            sub = self.df[self.segments[sid]["mask"]]
+            sub = self._sub(self.segments[sid]["mask"], feature)
         kind = self._detect_kind(sub, feature, dtype)
         if kind != "num":
             # categórica não tem histograma — barras de representatividade × alvo
@@ -3684,7 +3732,7 @@ class TreeSegmenter:
         if sample is not None and self.sample_col is not None:
             mask = mask & (self.df[self.sample_col] == sample)
         col = self.df.loc[mask, feature]
-        kind = self._detect_kind(self.df[mask], feature, None)
+        kind = self._detect_kind(self.df, feature, None)
         n = int(len(col)); n_miss = int(col.isna().sum())
         res = {"variavel": feature, "tipo": kind, "amostra": sample, "n": n,
                "n_missing": n_miss,
@@ -3737,7 +3785,7 @@ class TreeSegmenter:
             sample = self.ref_sample
         if sample is not None and self.sample_col is not None:
             mask = mask & (self.df[self.sample_col] == sample)
-        sub = self.df[mask]
+        sub = self._sub(mask, feature)
         n_tot = max(len(sub), 1)
         risco_label = "event_rate" if self._is_clf else "alvo_medio"
         bins, _modo, kind = self._resolve_bins(sub, feature, splits, None,
@@ -3802,7 +3850,7 @@ class TreeSegmenter:
         mask = self._leaf_mask(sid)
         if sample is not None and self.sample_col is not None:
             mask = mask & (self.df[self.sample_col] == sample)
-        sub = self.df[mask]
+        sub = self._sub(mask, feature, time_col)
         if time_col not in sub.columns:
             raise ValueError(f"Coluna de tempo '{time_col}' não existe no DataFrame.")
         safra = pd.to_datetime(sub[time_col], errors="coerce").dt.to_period("M")
@@ -3834,7 +3882,7 @@ class TreeSegmenter:
         if time_col is None:
             raise ValueError("Informe time_col ou configure date_col no segmenter.")
         mask = self._leaf_mask(sid)
-        leaf = self.df[mask]
+        leaf = self._sub(mask, feature, time_col)
         if time_col not in leaf.columns:
             raise ValueError(f"Coluna de tempo '{time_col}' não existe no DataFrame.")
         ref = leaf[leaf[self.sample_col] == self.ref_sample]
@@ -3872,7 +3920,7 @@ class TreeSegmenter:
             sample = self.ref_sample
         if sample is not None and self.sample_col is not None:
             mask = mask & (self.df[self.sample_col] == sample)
-        sub = self.df[mask]
+        sub = self._sub(mask, feature)
         rot = self.feature_labels.get(feature, feature)
         fig, ax = self._new_ax(figsize, dpi, ax)
         try:
@@ -4029,7 +4077,7 @@ class TreeSegmenter:
         mask0 = self._leaf_mask(sid)
         ref_mask = (mask0 & (self.df[self.sample_col] == self.ref_sample)
                     if self.sample_col is not None else mask0)
-        ref = self.df[ref_mask]
+        ref = self._sub(ref_mask, feature)
         bins, _modo, _kind = self._resolve_bins(ref, feature, None, None,
                                                 max_n_bins, min_bin_size)
         empty = {"status": "green", "samples": [], "safras": [], "ordered": [],
@@ -4052,16 +4100,18 @@ class TreeSegmenter:
         xs_s_lab = [str(a) if a is not None else "todos" for a in xs_s]
         ser_s = {i: [] for i in range(len(bins))}
         for a in xs_s:
-            fa = (self.df[mask0 & (self.df[self.sample_col] == a)]
-                  if a is not None else self.df[mask0])
+            fa = (self._sub(mask0 & (self.df[self.sample_col] == a), feature)
+                  if a is not None else self._sub(mask0, feature))
             for i, b in enumerate(bins):
                 ser_s[i].append(_risco(fa[self._mask_in(fa, feature, b)]))
         # por safra
         xs_t, ser_t = [], {i: [] for i in range(len(bins))}
-        tcol = time_col or self.date_col
+        # _SEM_SAFRAS (uso interno do gráfico por amostra): sem laço por safra
+        tcol = None if time_col is _SEM_SAFRAS else (time_col or self.date_col)
         if tcol is not None and tcol in self.df.columns:
-            base = (self.df[mask0 & (self.df[self.sample_col] == sample)]
-                    if (sample and self.sample_col is not None) else self.df[mask0])
+            base = (self._sub(mask0 & (self.df[self.sample_col] == sample), feature, tcol)
+                    if (sample and self.sample_col is not None)
+                    else self._sub(mask0, feature, tcol))
             safra = pd.to_datetime(base[tcol], errors="coerce").dt.to_period("M")
             for per, g in base.groupby(safra):
                 if len(g) < min_n:
@@ -4098,12 +4148,19 @@ class TreeSegmenter:
 
     def plot_variable_inversion_by_sample(self, feature, sid=None, max_n_bins=6,
                                           min_bin_size=0.05, figsize=(7.6, 4.0),
-                                          dpi=150, save_path=None, ax=None):
+                                          dpi=150, save_path=None, ax=None, inv=None):
         """Risco de cada faixa por amostra; cruzamentos = inversão da ordem de risco.
-        Espelha :meth:`ModelSegmenter.plot_variable_inversion_by_sample`."""
+        Espelha :meth:`ModelSegmenter.plot_variable_inversion_by_sample`.
+
+        ``inv``: resultado de :meth:`variable_inversion` já calculado (mesmos
+        ``feature``/``sid``/``max_n_bins``/``min_bin_size``; o ``time_col`` não
+        importa, este gráfico só lê as faixas e a série por amostra) — evita
+        refazer o cálculo quando a mesma análise também desenha o gráfico por
+        safra. Sem ele, o cálculo pula o laço por safra, que aqui seria descartado."""
         import matplotlib.pyplot as plt
-        inv = self.variable_inversion(feature, sid=sid, max_n_bins=max_n_bins,
-                                      min_bin_size=min_bin_size)
+        if inv is None:
+            inv = self.variable_inversion(feature, sid=sid, time_col=_SEM_SAFRAS,
+                                          max_n_bins=max_n_bins, min_bin_size=min_bin_size)
         fig, ax = self._new_ax(figsize, dpi, ax)
         s = inv.get("series")
         if not s or not inv["ordered"]:
@@ -4131,13 +4188,17 @@ class TreeSegmenter:
     def plot_variable_inversion_by_safra(self, feature, sid=None, time_col=None,
                                          sample=None, max_n_bins=6, min_bin_size=0.05,
                                          min_n=20, figsize=(9.6, 4.0), dpi=150,
-                                         save_path=None, ax=None):
+                                         save_path=None, ax=None, inv=None):
         """Risco de cada faixa por safra; safras com inversão ficam sombreadas.
-        Espelha :meth:`ModelSegmenter.plot_variable_inversion_by_safra`."""
+        Espelha :meth:`ModelSegmenter.plot_variable_inversion_by_safra`.
+
+        ``inv``: resultado de :meth:`variable_inversion` já calculado com os
+        MESMOS parâmetros (inclusive ``time_col``) — evita refazer o cálculo."""
         import matplotlib.pyplot as plt
-        inv = self.variable_inversion(feature, sid=sid, time_col=time_col, sample=sample,
-                                      max_n_bins=max_n_bins, min_bin_size=min_bin_size,
-                                      min_n=min_n)
+        if inv is None:
+            inv = self.variable_inversion(feature, sid=sid, time_col=time_col, sample=sample,
+                                          max_n_bins=max_n_bins, min_bin_size=min_bin_size,
+                                          min_n=min_n)
         fig, ax = self._new_ax(figsize, dpi, ax)
         s = inv.get("series")
         if not s or not s["xs_safra"]:
@@ -4178,15 +4239,15 @@ class TreeSegmenter:
         mask0 = self._leaf_mask(sid)
         m = (mask0 & (self.df[self.sample_col] == (sample or self.ref_sample))
              if self.sample_col is not None else mask0)
-        fit = self.df[m]
+        fit = self._sub(m, feature)
         if self._detect_kind(fit, feature, None) != "num":
             return []
         x = fit[feature].to_numpy(dtype="float64")
         y = fit[self.target].to_numpy(dtype="float64")
         ok = ~np.isnan(y); x, y = x[ok], y[ok]
         x_obs = x[~np.isnan(x)]
-        if len(y) < 4 or x_obs.size == 0 or np.unique(x_obs).size < 2:
-            return []
+        if len(y) < 4 or x_obs.size == 0 or x_obs.min() == x_obs.max():
+            return []                     # min == max ⇔ <2 distintos (sem NaN)
         if self._is_clf:
             b = OptimalBinning(name=feature, dtype="numerical", max_n_bins=max_n_bins,
                                min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
@@ -4215,9 +4276,7 @@ class TreeSegmenter:
         import matplotlib.colors as mcolors
         fig, ax = self._new_ax(figsize, dpi, ax)
         mask0 = self._leaf_mask(sid)
-        ref_mask = (mask0 & (self.df[self.sample_col] == self.ref_sample)
-                    if self.sample_col is not None else mask0)
-        if self._detect_kind(self.df[ref_mask], feature, None) != "num":
+        if self._detect_kind(self.df, feature, None) != "num":
             ax.text(0.5, 0.5, "apenas para variáveis numéricas", ha="center",
                     va="center", transform=ax.transAxes, color="#889"); ax.axis("off")
             fig.tight_layout(); return fig
@@ -4233,7 +4292,7 @@ class TreeSegmenter:
                     transform=ax.transAxes, color="#889"); ax.axis("off")
             fig.tight_layout(); return fig
         labels = [self._bin_label_short(b) for b in bins]   # sem repetir 'feat:' na legenda
-        base_all = self.df[mask0]                 # distribuição sobre toda a folha
+        base_all = self._sub(mask0, feature, tcol)  # distribuição sobre toda a folha
         safra = pd.to_datetime(base_all[tcol], errors="coerce").dt.to_period("M")
         xs, Y = [], [[] for _ in bins]
         for per, g in base_all.groupby(safra):
@@ -4287,7 +4346,7 @@ class TreeSegmenter:
         mask = self._leaf_mask(sid)
         if sample is not None and self.sample_col is not None:
             mask = mask & (self.df[self.sample_col] == sample)
-        sub = self.df[mask]
+        sub = self._sub(mask, feature, time_col)
         if time_col not in sub.columns:
             raise ValueError(f"Coluna de tempo '{time_col}' não existe no DataFrame.")
         safra = pd.to_datetime(sub[time_col], errors="coerce").dt.to_period("M").astype(str)
@@ -4357,14 +4416,20 @@ class TreeSegmenter:
         return fig
 
     def plot_variable_timeseries(self, feature, time_col=None, sid=None, sample=None,
-                                 figsize=(12.0, 3.4), save_path=None, dpi=150, ax=None):
+                                 figsize=(12.0, 3.4), save_path=None, dpi=150, ax=None,
+                                 bs=None):
         """Variável NUMÉRICA: percentis por safra (min–max, p5–p95, média).
-        Variável CATEGÓRICA: representatividade de cada categoria por safra."""
-        if self._detect_kind(self.df[self._leaf_mask(sid)], feature, None) == "cat":
+        Variável CATEGÓRICA: representatividade de cada categoria por safra.
+
+        ``bs``: resultado de :meth:`variable_by_safra` já calculado com os MESMOS
+        ``feature``/``time_col``/``sid``/``sample`` — evita refazer o cálculo
+        (só vale para a numérica; a categórica o ignora)."""
+        if self._detect_kind(self.df, feature, None) == "cat":
             return self.plot_variable_share_timeseries(
                 feature, time_col, sid=sid, sample=sample, figsize=figsize,
                 save_path=save_path, dpi=dpi, ax=ax)
-        bs = self.variable_by_safra(feature, time_col, sid=sid, sample=sample)
+        if bs is None:
+            bs = self.variable_by_safra(feature, time_col, sid=sid, sample=sample)
         fig, ax = self._new_ax(figsize, dpi, ax)
         if bs.empty or bs["media"].notna().sum() == 0:
             ax.text(0.5, 0.5, "sem dados por safra", ha="center", va="center",
@@ -4940,11 +5005,18 @@ class TreeSegmenter:
         if self.sample_col is None or time_col is None or time_col not in self.df.columns:
             return None
         if time_col not in self._samp_by_cache:
+            sc = self.sample_col
             saf = pd.to_datetime(self.df[time_col], errors="coerce").dt.to_period("M").astype(str)
+            # frame de 2 colunas (Series alinhadas pelo MESMO índice do df, sem
+            # realinhar mesmo com índice duplicado) em vez de assign + dropna sobre
+            # a base inteira: o groupby só lê '_saf' e a amostra, e as duas cópias
+            # das ~100 colunas eram um pico do tamanho da base (≈16 GB a 10M).
+            # sample_col == '_saf' colidiria no dict: mantém o caminho antigo.
+            src = (self.df.assign(_saf=saf) if sc == "_saf"
+                   else pd.DataFrame({"_saf": saf, sc: self.df[sc]}))
             self._samp_by_cache[time_col] = (
-                self.df.assign(_saf=saf)
-                .dropna(subset=[self.sample_col])
-                .groupby("_saf")[self.sample_col]
+                src.dropna(subset=[sc])
+                .groupby("_saf")[sc]
                 .agg(lambda s: s.mode().iat[0] if not s.mode().empty else None))
         return self._samp_by_cache[time_col]
 
@@ -5434,8 +5506,7 @@ class TreeSegmenter:
             nonref = []
         psi_on = with_psi and bool(nonref)
 
-        leaf = self.df[leaf_mask]
-        base = self.df[leaf_mask & ref_mask]            # porção DES da folha (referência)
+        base = self._sub(leaf_mask & ref_mask, *features)  # porção DES da folha (referência)
         yb = base[self.target].to_numpy(dtype="float64")
         yb = yb[~np.isnan(yb)]
         if self._is_clf:
@@ -5455,9 +5526,9 @@ class TreeSegmenter:
         ref_frame = cur_frames = None
         n_ref_leaf = 0
         if psi_on:
-            ref_frame = self.df[leaf_mask & (self.df[self.sample_col] == self.ref_sample)]
+            ref_frame = base                     # mesma máscara: folha ∩ DES
             n_ref_leaf = len(ref_frame)
-            cur_frames = {a: self.df[leaf_mask & (self.df[self.sample_col] == a)]
+            cur_frames = {a: self._sub(leaf_mask & (self.df[self.sample_col] == a), *features)
                           for a in nonref}
 
         rows = []
@@ -5540,7 +5611,6 @@ class TreeSegmenter:
         categorias (categórico). Útil para indicar o melhor 'máx. bins' e os
         cortes ao dividir a folha por aquela variável."""
         sid = sid if (sid in self.segments) else "root"
-        sub = self.df[self._leaf_mask(sid)]
         bins, _modo, kind = self._resolve_bins_cached(
             sid, feature, None, None, max_n_bins, min_bin_size, relax_max=True)
         cuts, groups = [], []
@@ -6052,7 +6122,7 @@ class TreeSegmenter:
         for sid, seg in self.segments.items():
             if not seg["is_leaf"]:
                 continue
-            sub = self.df[seg["mask"]]
+            sub = self._sub(seg["mask"])
             if self.sample_col is not None:
                 ref = sub.loc[sub[self.sample_col] == self.ref_sample, self.target]
                 pdv = float(ref.mean()) if len(ref) else float(sub[self.target].mean())
@@ -6828,7 +6898,7 @@ class TreeSegmenter:
             for sid in atuais:
                 if sid in self.segments and not self.segments[sid]["is_leaf"]:
                     continue
-                sub = self.df[self.segments[sid]["mask"]]
+                sub = self._sub(self.segments[sid]["mask"])
                 n_leaf = len(sub)
                 # ---- critério escolhido (≠ optbin): split BINÁRIO guloso pelo
                 # melhor (feature, corte) por esse critério ----
@@ -6885,7 +6955,8 @@ class TreeSegmenter:
                     var = row["variavel"]
                     try:
                         bins_fit, kind = self._concentration_bins(
-                            sub, var, min_leaf_repr, max_bin_repr)
+                            self._sub(self.segments[sid]["mask"], var), var,
+                            min_leaf_repr, max_bin_repr)
                     except Exception:
                         continue
                     if bins_fit is None:

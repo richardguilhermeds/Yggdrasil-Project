@@ -28,6 +28,7 @@ import html as _html
 import re
 from contextlib import contextmanager
 
+import numpy as np
 import pandas as pd
 
 try:
@@ -1036,6 +1037,7 @@ class TreeSegmenterUI:
         self._on_mode_change(None)   # estado inicial de visibilidade dos controles
         self._sync_autoconc_visibility()   # sliders de concentração do auto-fit
         self._refresh()              # _refresh_iv já mescla o PSI/CSI por variável
+        self._abre_na_arvore_interativa()   # 1ª (e única) renderização do canvas
         # contexto inicial (variável, folha) do guard do _on_feature_change: sem
         # ele, a 1ª re-rotulagem (ordenar por IV) invalidaria o preview à toa
         self._feat_ctx = (self._sel_feature(warn=False), self.dd_leaf.value)
@@ -2907,16 +2909,26 @@ class TreeSegmenterUI:
         self.panel = W.VBox([topbar, banner, bar_box, tabs, console, self.tree_sel_style])
         self.panel.add_class("treeui")
 
-        # A interface ABRE na Árvore interativa, já com a importância (IV) de
-        # cada variável calculada — sugestões por IV e o seletor ordenado, sem
-        # nenhum clique. Com a Construir oculta o canvas É a aba 0 (o default do
-        # Tab), então NÃO há mudança de selected_index para disparar o observer:
-        # o render eager é invocado direto. Custo pago 1× na abertura (o IV da
-        # raiz é memoizado para o resto da sessão).
-        if tabs.selected_index == self._canvas_tab_index:
+        # A 1ª renderização do canvas (a aba em que a interface abre) NÃO acontece
+        # aqui: fica com o fim do __init__, depois do _refresh — ver
+        # _abre_na_arvore_interativa. Desenhar aqui e de novo no _refresh pagava
+        # o canvas e o painel 2× na abertura.
+
+    def _abre_na_arvore_interativa(self):
+        """A interface ABRE na Árvore interativa, já com a importância (IV) de
+        cada variável calculada — sugestões por IV e o seletor ordenado, sem
+        nenhum clique. Chamada UMA vez, no fim do __init__, depois do _refresh
+        (dd_leaf já populado): é a única renderização do canvas na abertura,
+        com center=True. Com a Construir oculta o canvas É a aba 0 (o default do
+        Tab), então NÃO há mudança de selected_index para disparar o observer:
+        o render é invocado direto. Custo pago 1× na abertura (o IV da raiz é
+        memoizado para o resto da sessão). Pressuposto: na construção a árvore
+        só tem a raiz, então o foco inicial é "root" como antes."""
+        if self.tabs.selected_index == self._canvas_tab_index:
             self._on_tab_change({"new": self._canvas_tab_index})
         else:
-            tabs.selected_index = self._canvas_tab_index
+            # o observer de selected_index dispara o _on_tab_change sozinho
+            self.tabs.selected_index = self._canvas_tab_index
 
     _DARK_FIG = {"bg": "#1F272D", "ink": "#E8ECF0", "line": "#37444F"}
 
@@ -3143,11 +3155,26 @@ class TreeSegmenterUI:
     def _node_value(self, sid, sample=None):
         # lê só a coluna-alvo (não materializa o subframe inteiro) — chamado por nó
         # × amostra em _tree_html, que percorre a árvore inteira a cada render.
-        m = self.seg.segments[sid]["mask"]
+        # memo por (máscara do nó, amostra): a máscara é trocada sempre que o nó é
+        # refeito (grow/merge/prune/undo), então o cache se invalida sozinho — a
+        # máscara fica no valor para o id não ser reciclado. Um render chama isto
+        # dezenas de vezes por nó; antes cada chamada mascarava a coluna inteira.
+        mask = self.seg.segments[sid]["mask"]
+        cache = self.__dict__.setdefault("_node_value_cache", {})
+        key = (id(mask), sample)
+        hit = cache.get(key)
+        if hit is not None and hit[0] is mask:
+            return hit[1]
+        m = mask.to_numpy(dtype=bool)
         if sample is not None and sample in self._sample_masks:
-            m = m & self._sample_masks[sample]
-        sr = self.df[self.target][m]
-        return sr.mean() if len(sr) else float("nan")
+            m = m & self._sample_masks[sample].to_numpy(dtype=bool)
+        y = self.df[self.target].to_numpy(dtype="float64")[m]
+        y = y[~np.isnan(y)]
+        val = float(y.mean()) if y.size else float("nan")
+        if len(cache) > 4096:                      # backstop de memória
+            cache.clear()
+        cache[key] = (mask, val)
+        return val
 
     def _leaf_values(self):
         ref = self.ref_sample if self.sample_col is not None else None
@@ -4092,10 +4119,13 @@ class TreeSegmenterUI:
         # fechado, nada a fazer — o próximo "Ver árvore" já desenha o estado novo
         if self._tree_img_visible():
             self._refresh_tree_widget()
-        # canvas da aba "Árvore interativa": redesenha só se estiver à vista; senão
-        # marca pendente e o _on_tab_change desenha ao abrir a aba
+        # canvas da aba "Árvore interativa": redesenha só se estiver à vista E já
+        # montado; senão marca pendente e o _on_tab_change desenha ao abrir a aba
+        # (na construção, o _cv_rendered ainda é False: a 1ª renderização, com
+        # center=True, fica só com o _abre_na_arvore_interativa do __init__)
         if (getattr(self, "tabs", None) is not None
-                and self.tabs.selected_index == self._canvas_tab_index):
+                and self.tabs.selected_index == self._canvas_tab_index
+                and getattr(self, "_cv_rendered", False)):
             self._refresh_canvas()
         else:
             self._cv_dirty = True
@@ -4300,9 +4330,10 @@ class TreeSegmenterUI:
         feat = self._sel_feature(warn=False)
         if feat is None:
             return "num"                   # entrada inválida: controles neutros
-        sub = (self.df if sid is None or sid not in self.seg.segments
-               else self.df[self.seg.segments[sid]["mask"]])
-        return self.seg._detect_kind(sub, feat, None)
+        # o tipo sai só do dtype da coluna, que o recorte de linhas preserva (até
+        # com 0 linhas): ler da base inteira dá o mesmo resultado sem copiar a
+        # folha com todas as colunas (na raiz, a base inteira) a cada chamada
+        return self.seg._detect_kind(self.df, feat, None)
 
     def _on_mode_change(self, _):
         """Mostra o controle certo conforme modo e tipo da variável.
@@ -4391,7 +4422,10 @@ class TreeSegmenterUI:
         self._cat_ctx = (feat, sid)
         if sid is None or sid not in self.seg.segments:
             self.cat_box.children = (); return
-        sub = self.df[self.seg.segments[sid]["mask"]]
+        # só a variável e o alvo (mesma fonte e mesmas linhas de antes); o
+        # dict.fromkeys evita coluna duplicada quando a variável é o próprio alvo
+        sub = self.df.loc[self.seg.segments[sid]["mask"],
+                          list(dict.fromkeys([feat, self.target]))]
         s = sub[feat]
         valid = sub[s.notna()]
         if len(valid) == 0:
@@ -5198,8 +5232,8 @@ class TreeSegmenterUI:
                 f"</tr></thead><tbody>{trs}</tbody></table>")
 
     def _parse_cuts(self, feature, sid):
-        sub = self.df[self.seg.segments[sid]["mask"]]
-        kind = self.seg._detect_kind(sub, feature, None)
+        self.seg.segments[sid]          # sid inválido segue dando KeyError
+        kind = self.seg._detect_kind(self.df, feature, None)   # só o dtype importa
         if kind == "num":
             raw = self.tx_cuts.value.strip()
             return [float(x) for x in raw.replace(";", ",").split(",")
@@ -5739,11 +5773,14 @@ class TreeSegmenterUI:
             self._log(f"Análise de '{lbl}' concluída"
                       + (f" · folha {self._leaf_label(sid)}" if sid not in (None, 'root') else "")
                       + ".")
-            self._render_var_analysis(feat, sid, tcol, summ, trend)
+            self._render_var_analysis(feat, sid, tcol, summ, trend, bs=bs)
 
-    def _render_var_analysis(self, feat, sid, tcol, summ, trend):
+    def _render_var_analysis(self, feat, sid, tcol, summ, trend, bs=None):
         """Renderiza os cards/gráficos da aba 'Análise de variável' a partir do
-        resumo já calculado (separado do handler p/ o corpo caber sob o _busy)."""
+        resumo já calculado (separado do handler p/ o corpo caber sob o _busy).
+        ``bs``: os percentis por safra que o handler já calculou para a tendência
+        (None se não calculou ou se deu erro: aí o gráfico calcula e, se falhar
+        de novo, mostra o erro como antes)."""
         kind = summ.get("tipo")
 
         def err(what, e):
@@ -5761,11 +5798,22 @@ class TreeSegmenterUI:
                 full_width=True)
         except Exception as e:
             self.out_var_dist.value = err("distribuição & risco", e)
+        # Inversão da ordem de risco: calculada UMA vez (com a safra da tela) e
+        # entregue aos dois gráficos. O por amostra só lê as faixas e a série por
+        # amostra, que não dependem da coluna de safra. Sem coluna de safra, ou se
+        # o cálculo falhar, o por amostra calcula sozinho (sem o laço por safra)
+        # e o por safra mostra o erro como antes. Nada fica em cache.
+        inv, inv_erro = None, None
+        if tcol and tcol in self.df.columns:
+            try:
+                inv = self.seg.variable_inversion(feat, sid=sid, time_col=tcol)
+            except Exception as e:
+                inv_erro = e
         # Inversão da ordem de risco · por amostra
         if self.sample_col is not None:
             try:
                 self.out_var_inv_s.value = self._fig_html(
-                    self.seg.plot_variable_inversion_by_sample(feat, sid=sid),
+                    self.seg.plot_variable_inversion_by_sample(feat, sid=sid, inv=inv),
                     full_width=True)
             except Exception as e:
                 self.out_var_inv_s.value = err("inversão por amostra", e)
@@ -5781,7 +5829,8 @@ class TreeSegmenterUI:
             _fs_par = (8.6, 4.2)
             try:
                 self.out_var_time.value = self._fig_html(
-                    self.seg.plot_variable_timeseries(feat, tcol, sid=sid, figsize=_fs_par),
+                    self.seg.plot_variable_timeseries(feat, tcol, sid=sid, figsize=_fs_par,
+                                                      bs=bs),
                     full_width=True, tight=False)
             except Exception as e:
                 self.out_var_time.value = err("série temporal", e)
@@ -5796,8 +5845,11 @@ class TreeSegmenterUI:
             except Exception as e:
                 self.out_var_psi.value = err("PSI por safra", e)
             try:
+                if inv_erro is not None:
+                    raise inv_erro
                 self.out_var_inv_t.value = self._fig_html(
-                    self.seg.plot_variable_inversion_by_safra(feat, sid=sid, time_col=tcol),
+                    self.seg.plot_variable_inversion_by_safra(feat, sid=sid, time_col=tcol,
+                                                              inv=inv),
                     full_width=True)
             except Exception as e:
                 self.out_var_inv_t.value = err("inversão por safra", e)
@@ -7451,9 +7503,11 @@ class TreeSegmenterUI:
         feature = feature or self._cv_feature(warn=False)
         if sid is None or feature is None:
             return "num"
-        sub = self.df[self.seg.segments[sid]["mask"]]
+        self.seg.segments[sid]          # sid inválido segue dando KeyError (fora do try)
         try:
-            return self.seg._detect_kind(sub, feature, None)
+            # o recorte da folha não muda o dtype: lê da base inteira, sem copiar
+            # o nó com todas as colunas; variável ausente continua virando "num"
+            return self.seg._detect_kind(self.df, feature, None)
         except Exception:
             return "num"
 
@@ -7673,7 +7727,9 @@ class TreeSegmenterUI:
             return
         self._cv_cat_widgets = {}
         self._cv_cat_ctx = (feat, sid)
-        sub = self.df[self.seg.segments[sid]["mask"]]
+        # só a variável e o alvo, como no _rebuild_cat_box
+        sub = self.df.loc[self.seg.segments[sid]["mask"],
+                          list(dict.fromkeys([feat, self.target]))]
         s = sub[feat]
         valid = sub[s.notna()]
         if len(valid) == 0:
