@@ -6792,14 +6792,29 @@ class TreeSegmenter:
         granularidade fina, e seu `min_bin_size` é relativo a DES, não global.)
         Devolve (bins, kind) ou (None, kind) se a variável não respeita o mín/máx
         (ex.: grupo de faltantes abaixo do mínimo, ou bin que não cabe entre mín/máx)."""
+        import heapq
+
         N = len(self.df)
         if not N:
             return None, "num"
         kind = self._detect_kind(sub, feature, dtype)
-        na_present = bool(sub[feature].isna().any())
+        col = sub[feature]
+        na_cnt = int(col.isna().sum())
+        na_present = na_cnt > 0
+        # o grupo de faltantes é checado ANTES de montar os bins finos: abaixo do
+        # mínimo a variável é descartada de qualquer jeito (mesmo (None, kind) que
+        # o retorno lá embaixo), sem pagar quantil/groupby à toa.
+        if na_present and min_leaf_repr is not None and na_cnt / N < min_leaf_repr - 1e-9:
+            return None, kind
 
+        # `cnt` = contagem (int64) de linhas por bin fino. Com ela a concentração
+        # de um bin fundido é a SOMA das contagens das partes, sem varrer a folha
+        # de novo a cada fusão (o laço antigo refazia K máscaras por iteração,
+        # O(K²·n) — travava o autofit com categórica de alta cardinalidade, ex.:
+        # Decimal com ~100k níveis). None = cai no caminho antigo (grepr).
+        cnt = None
         if kind == "num":
-            x = sub[feature].dropna().to_numpy(dtype="float64")
+            x = col.dropna().to_numpy(dtype="float64")
             if x.size == 0 or np.unique(x).size < 2:
                 return None, kind
             qs = np.quantile(x, np.linspace(0.0, 1.0, 25)[1:-1])   # ~24 faixas finas
@@ -6807,47 +6822,138 @@ class TreeSegmenter:
             edges = [-np.inf, *cuts, np.inf]
             core = [{"kind": "num", "lo": edges[i], "hi": edges[i + 1]}
                     for i in range(len(edges) - 1)]
+            # contagem aditiva só quando ela é EXATAMENTE a do between por bin:
+            # cortes estritamente crescentes e sem NaN (±inf repetidos fazem o
+            # np.quantile devolver corte NaN, que o sorted deixa fora de ordem e o
+            # between conta diferente) e coluna float64/inteira (numpy ou anulável),
+            # cuja comparação com o limite float é feita em float64 — float32
+            # compararia em float32 e divergiria; dtype pyarrow compara pelo
+            # pyarrow. Fora disso, caminho antigo.
+            cuts_arr = np.asarray(cuts, dtype="float64")
+            mascarado = isinstance(col.array, (pd.arrays.IntegerArray,
+                                               pd.arrays.FloatingArray))
+            base_dt = col.dtype.numpy_dtype if mascarado else col.dtype
+            if (isinstance(base_dt, np.dtype)
+                    and (base_dt == np.float64 or base_dt.kind in "iu")
+                    and not np.isnan(cuts_arr).any()
+                    and bool(np.all(np.diff(cuts_arr) > 0))):
+                # (lo, hi] do between = searchsorted 'left'; -inf não cai em bin
+                # nenhum (lo=-inf é exclusivo) e +inf vai para o último; NaN que
+                # sobreviva ao dropna (Float64 anulável com 0/0) também fica de fora
+                xs = x[~np.isnan(x) & (x != -np.inf)]
+                cnt = np.bincount(np.searchsorted(cuts_arr, xs, side="left"),
+                                  minlength=len(core)).astype(np.int64)
         else:
             # uma categoria por grupo, ordenadas por alvo em DES (contiguidade de risco)
             ref = self._fit_frame(sub, 0.0).dropna(subset=[feature, self.target])
             means = (ref.groupby(ref[feature].astype(str))[self.target].mean()
                      .sort_values())
-            present = [str(c) for c in pd.unique(sub[feature].dropna().astype(str))]
-            ordered = [c for c in means.index if c in present]
-            ordered += [c for c in present if c not in ordered]
+            present = [str(c) for c in pd.unique(col.dropna().astype(str))]
+            # pertinência por set (por lista eram O(K²) comparações de string em
+            # alta cardinalidade); a ordem resultante é a mesma
+            present_set = set(present)
+            ordered = [c for c in means.index if c in present_set]
+            seen = set(ordered)
+            ordered += [c for c in present if c not in seen]
             if len(ordered) < 2:
                 return None, kind
             core = [{"kind": "cat", "cats": [c]} for c in ordered]
-
-        def grepr(b):
-            return int(self._mask_in(sub, feature, b).sum()) / N
+            # contagem por categoria sobre a coluna INTEIRA convertida a texto — a
+            # mesma base do astype(str).isin do _mask_in, inclusive o 'nan'/'None'
+            # literal que colide com o nulo convertido; repr do grupo = soma
+            vc = col.astype(str).value_counts(dropna=True)
+            vcd = dict(zip(vc.index, vc.to_numpy()))
+            cnt = np.array([int(vcd.get(c, 0)) for c in ordered], dtype=np.int64)
 
         na = [{"kind": "na"}] if na_present else []
-        if na and min_leaf_repr is not None and grepr(na[0]) < min_leaf_repr - 1e-9:
-            return None, kind
 
-        while len(core) > 1 and min_leaf_repr is not None:
-            reprs = [grepr(b) for b in core]
-            i = int(np.argmin(reprs))
-            if reprs[i] >= min_leaf_repr - 1e-9:
+        if cnt is None:
+            # caminho antigo: concentração medida por máscara a cada iteração
+            def grepr(b):
+                return int(self._mask_in(sub, feature, b).sum()) / N
+
+            while len(core) > 1 and min_leaf_repr is not None:
+                reprs = [grepr(b) for b in core]
+                i = int(np.argmin(reprs))
+                if reprs[i] >= min_leaf_repr - 1e-9:
+                    break
+                cands = [k for k in (i - 1, i + 1) if 0 <= k < len(core)]
+                ok = ([k for k in cands if reprs[i] + reprs[k] <= max_bin_repr + 1e-9]
+                      if max_bin_repr is not None else cands)
+                j = min(ok or cands, key=lambda k: reprs[k])
+                a, b2 = sorted((i, j))
+                if kind == "num":
+                    core[a] = {"kind": "num", "lo": core[a]["lo"], "hi": core[b2]["hi"]}
+                else:
+                    core[a] = {"kind": "cat", "cats": core[a]["cats"] + core[b2]["cats"]}
+                del core[b2]
+
+            if len(core) < 2:
+                return None, kind
+            out = core + na
+            if min_leaf_repr is not None and any(grepr(b) < min_leaf_repr - 1e-9 for b in out):
+                return None, kind
+            if max_bin_repr is not None and any(grepr(b) > max_bin_repr + 1e-9 for b in out):
+                return None, kind
+            return out, kind
+
+        # caminho aditivo: mesma sequência de fusões do laço antigo, em O(K log K).
+        # Cada bin vivo é um nó de lista ligada identificado pelo índice do seu 1º
+        # bin fino (a ordem dos ids = a ordem das faixas) e cobre o trecho
+        # [no, fim[no]]. O heap guarda (contagem, id): o topo válido é o argmin da
+        # concentração com desempate pelo PRIMEIRO índice, como o np.argmin — a
+        # contagem/N é estritamente crescente na contagem. Entradas velhas (nó
+        # removido ou contagem desatualizada) são descartadas ao sair do topo.
+        n_core = len(core)
+        cl = cnt.tolist()
+        fim = list(range(n_core))
+        ant = list(range(-1, n_core - 1))
+        prox = [*range(1, n_core), -1]
+        morto = [False] * n_core
+        vivos = n_core
+        heap = [(cl[i], i) for i in range(n_core)]
+        heapq.heapify(heap)
+        while vivos > 1 and min_leaf_repr is not None:
+            c, i = heap[0]
+            if morto[i] or cl[i] != c:
+                heapq.heappop(heap)
+                continue
+            ri = cl[i] / N
+            if ri >= min_leaf_repr - 1e-9:
                 break
-            cands = [k for k in (i - 1, i + 1) if 0 <= k < len(core)]
-            ok = ([k for k in cands if reprs[i] + reprs[k] <= max_bin_repr + 1e-9]
+            cands = [k for k in (ant[i], prox[i]) if k >= 0]
+            # teto na MESMA forma do laço antigo: soma de duas frações (nunca
+            # (a+b)/N, que pode diferir no último ulp)
+            ok = ([k for k in cands if ri + cl[k] / N <= max_bin_repr + 1e-9]
                   if max_bin_repr is not None else cands)
-            j = min(ok or cands, key=lambda k: reprs[k])
-            a, b2 = sorted((i, j))
-            if kind == "num":
-                core[a] = {"kind": "num", "lo": core[a]["lo"], "hi": core[b2]["hi"]}
-            else:
-                core[a] = {"kind": "cat", "cats": core[a]["cats"] + core[b2]["cats"]}
-            del core[b2]
+            j = min(ok or cands, key=lambda k: cl[k] / N)
+            a, b2 = (i, j) if i < j else (j, i)
+            cl[a] += cl[b2]
+            fim[a] = fim[b2]
+            prox[a] = prox[b2]
+            if prox[b2] >= 0:
+                ant[prox[b2]] = a
+            morto[b2] = True
+            vivos -= 1
+            heapq.heappush(heap, (cl[a], a))
 
-        if len(core) < 2:
+        if vivos < 2:
             return None, kind
-        out = core + na
-        if min_leaf_repr is not None and any(grepr(b) < min_leaf_repr - 1e-9 for b in out):
+        # materializa os bins só no fim (o nó 0 nunca é removido: não tem vizinho
+        # à esquerda, então é sempre o `a` da fusão)
+        nos, no = [], 0
+        while no >= 0:
+            nos.append(no)
+            no = prox[no]
+        if kind == "num":
+            out = [{"kind": "num", "lo": edges[no], "hi": edges[fim[no] + 1]} for no in nos]
+        else:
+            out = [{"kind": "cat", "cats": ordered[no:fim[no] + 1]} for no in nos]
+        out += na
+        reps = [cl[no] / N for no in nos] + ([na_cnt / N] if na else [])
+        if min_leaf_repr is not None and any(r < min_leaf_repr - 1e-9 for r in reps):
             return None, kind
-        if max_bin_repr is not None and any(grepr(b) > max_bin_repr + 1e-9 for b in out):
+        if max_bin_repr is not None and any(r > max_bin_repr + 1e-9 for r in reps):
             return None, kind
         return out, kind
 
