@@ -491,12 +491,16 @@ class TreeSegmenter:
         # mínimo de linhas (na amostra de ajuste) para tentar binning ótimo
         self.min_leaf_rows = min_leaf_rows
 
+        uniq = None
         if sample_col is not None:
             if sample_col not in self.df.columns:
                 raise ValueError(
                     f"Coluna de amostra '{sample_col}' não está no DataFrame "
                     f"(colunas: {list(self.df.columns)}).")
-            amostras = self.df[sample_col].dropna().unique().tolist()
+            # UMA passada de unique: a validação usa a lista (.tolist()) e as
+            # máscaras abaixo iteram o MESMO array (antes eram duas passadas)
+            uniq = self.df[sample_col].dropna().unique()
+            amostras = uniq.tolist()
             if ref_sample not in amostras:
                 raise ValueError(
                     f"Amostra de referência '{ref_sample}' não encontrada em "
@@ -510,12 +514,23 @@ class TreeSegmenter:
         # `df[sample_col]==a` full-length a cada chamada — caro e repetido por
         # folha×amostra. Aqui vira lookup. _mask_ref é a máscara da referência.
         if sample_col is not None:
-            self._sample_masks = {a: (self.df[sample_col] == a)
-                                  for a in self.df[sample_col].dropna().unique()}
+            self._sample_masks = {a: (self.df[sample_col] == a) for a in uniq}
             self._mask_ref = self._sample_masks.get(ref_sample)
         else:
             self._sample_masks = {}
             self._mask_ref = None
+        # amostras na ordem de dropna().unique() (= ordem das chaves acima). Os
+        # métodos liam `df[sample_col].dropna().unique()` de novo a cada chamada;
+        # agora leem esta lista (use list(self._samples) se for alterá-la).
+        self._samples = list(self._sample_masks)
+        # código da amostra por linha (int32; -1 = sem amostra: NaN/None/pd.NA),
+        # com k = posição em self._samples. Derivado das PRÓPRIAS máscaras (mesma
+        # partição que define os denominadores do PSI). None se alguma linha
+        # casar com duas amostras (só com objetos de igualdade não transitiva) —
+        # aí os caminhos por código caem no caminho antigo.
+        self._sample_codes = self._build_sample_codes()
+        # _ordered_samples_with_value: função pura do df → memo preguiçoso (tupla)
+        self._osv_memo: tuple | None = None
 
         # cada segmento: id -> dict(mask, label, depth, is_leaf, path, parent, conditions)
         self.segments: dict[str, dict] = {
@@ -541,8 +556,10 @@ class TreeSegmenter:
         Chamado por TODA mutação estrutural (grow/prune/collapse/merge_*/
         auto_merge/_load_segments/fit_auto)."""
         self._tree_version += 1
-        if len(self._agg_cache) > 64:        # backstop: só guardamos a versão atual
-            self._agg_cache.clear()
+        # a versão só cresce: as entradas das versões anteriores nunca mais são
+        # lidas. Limpar já (em vez do antigo backstop de 64 entradas) solta os
+        # arrays por linha (código/rótulo da folha) das versões mortas.
+        self._agg_cache.clear()
 
     def _agg_memo(self, key, build):
         """Memoiza ``build()`` por (key, versão-da-árvore). Devolve sempre uma
@@ -561,6 +578,91 @@ class TreeSegmenter:
             # 'desc':dict}) não podem vazar por referência e contaminar o cache.
             return copy.deepcopy(hit)
         return hit
+
+    # ------------------------------------------------------------------
+    # Máscaras/códigos de amostra (fixos após a construção)
+    # ------------------------------------------------------------------
+    def _build_sample_codes(self):
+        """Código da amostra por linha (int32 read-only; -1 = sem amostra),
+        montado a partir de ``_sample_masks`` (NA da máscara anulável = fora).
+        ``None`` sem sample_col ou se alguma linha cair em duas máscaras."""
+        if not self._sample_masks:
+            return None
+        codes = np.full(len(self.df), -1, dtype=np.int32)
+        for k, m in enumerate(self._sample_masks.values()):
+            mb = m.to_numpy(dtype=bool, na_value=False)
+            if (codes[mb] >= 0).any():
+                return None
+            codes[mb] = k
+        codes.flags.writeable = False
+        return codes
+
+    def _smask(self, a):
+        """Máscara da amostra ``a`` sobre a base INTEIRA — a mesma Series de
+        ``df[sample_col] == a``, lida das máscaras pré-computadas em vez de
+        recomparar a coluna (object) full-length. Rótulo fora das amostras
+        (inexistente, NaN, não hasheável) cai no ``==`` literal, com o mesmo
+        resultado de antes. A Series é COMPARTILHADA: não altere in-place
+        (``&=``/``|=``); quem a devolve ao chamador entrega ``.copy()``."""
+        try:
+            m = self._sample_masks.get(a)
+        except TypeError:
+            m = None
+        if m is None:
+            return self.df[self.sample_col] == a
+        return m
+
+    def _leaf_codes(self, leaf_ids=None):
+        """``(sids, código)``: código int32 (read-only) da folha de cada linha —
+        posição em ``sids``, -1 = sem folha (órfã). ``leaf_ids=None`` = todas as
+        folhas na ordem de ``segments`` (mesma chave da tupla explícita).
+        Memoizado por versão; substitui o array object de rótulos por linha."""
+        ids = (tuple(leaf_ids) if leaf_ids is not None
+               else tuple(sid for sid, s in self.segments.items() if s["is_leaf"]))
+
+        def build():
+            code = np.full(len(self.df), -1, dtype=np.int32)
+            for k, sid in enumerate(ids):
+                code[self.segments[sid]["mask"].values] = k
+            code.flags.writeable = False
+            return ids, code
+        return self._agg_memo(("leaf_codes", ids), build)
+
+    def _leaf_sample_counts(self, leaf_ids=None):
+        """Contagem de linhas por (folha, amostra) como função ``cnt(sid, amostra)``
+        → int: o MESMO número do antigo ``pd.crosstab(leaf_id, df[sample_col])``
+        (órfãs e amostra NaN fora), via UM bincount de códigos inteiros. As
+        linhas inválidas (folha -1 ou amostra -1) saem ANTES de combinar os
+        códigos — senão folha k com amostra -1 cairia na célula da folha k-1."""
+        ids, code = self._leaf_codes(leaf_ids)
+        sc = self._sample_codes
+        if sc is None or not self.df.index.is_unique:
+            # caminho antigo, literal: crosstab sobre uma CÓPIA da série de
+            # rótulos (o memo antigo devolvia .copy(), com outro objeto de
+            # índice). Com índice DUPLICADO o crosstab reindexa e levanta
+            # ValueError — é o comportamento atual de psi()/leaves(with_psi),
+            # preservado aqui; deixar de levantar é decisão à parte.
+            ct = pd.crosstab(self._leaf_id_series(leaf_ids).copy(),
+                             self.df[self.sample_col])
+
+            def cnt(sid, amostra):
+                col = ct[amostra] if amostra in ct.columns else None
+                return col.get(sid, 0) if col is not None else 0
+            return cnt
+        n_s, n_l = len(self._samples), len(ids)
+        valid = (code >= 0) & (sc >= 0)
+        flat = np.bincount(code[valid].astype(np.int64) * n_s + sc[valid],
+                           minlength=n_l * n_s)
+        mat = flat.reshape(n_l, n_s)
+        # sid → linha por DICIONÁRIO (não por posição: quem pergunta pode estar
+        # noutra ordem, ex. out["segmento"] ordenado por nota)
+        linha = {sid: k for k, sid in enumerate(ids)}
+        coluna = {a: j for j, a in enumerate(self._samples)}
+
+        def cnt(sid, amostra):
+            k, j = linha.get(sid), coluna.get(amostra)
+            return int(mat[k, j]) if (k is not None and j is not None) else 0
+        return cnt
 
     def _nonfeature_cols(self) -> set:
         """Colunas que NÃO entram na modelagem (não viram variáveis candidatas):
@@ -605,7 +707,13 @@ class TreeSegmenter:
         """Amostra usada para AJUSTAR o binning ótimo (só DES, se houver)."""
         if self.sample_col is None:
             return sub
-        fit_data = sub[sub[self.sample_col] == self.ref_sample]
+        if sub is self.df:
+            # base INTEIRA (ex.: csi, por variável): a máscara da referência já
+            # existe — é a mesma `self.df[sample_col] == ref_sample`. Recortes
+            # (sub ≠ self.df) seguem comparando no próprio recorte.
+            fit_data = sub[self._mask_ref]
+        else:
+            fit_data = sub[sub[self.sample_col] == self.ref_sample]
         if len(fit_data) < 2 * int(min_bin_size * len(self.df)):
             return sub  # ramo com pouco DES: usa o ramo inteiro
         return fit_data
@@ -875,7 +983,7 @@ class TreeSegmenter:
                              or f["conditions"][-1].get("include_na")
                              for f in filhos.values()):
             return
-        ref = ((self.df[self.sample_col] == self.ref_sample).to_numpy()
+        ref = (self._smask(self.ref_sample).to_numpy()
                if self.sample_col is not None else np.ones(len(self.df), dtype=bool))
         y_all = self.df[self.target].to_numpy(dtype="float64")
 
@@ -1240,7 +1348,7 @@ class TreeSegmenter:
                    "n": int(len(sub)),
                    "valor_medio": round(float(s_t.mean()), 4) if len(s_t) else np.nan}
             if self.sample_col is not None:
-                for amostra in self.df[self.sample_col].dropna().unique():
+                for amostra in self._samples:
                     s_am = sub.loc[sub[self.sample_col] == amostra, self.target]
                     row[f"n_{amostra}"] = int(len(s_am))
                     row[f"valor_{amostra}"] = (round(float(s_am.mean()), 4)
@@ -1687,14 +1795,31 @@ class TreeSegmenter:
         # total de SALDO (soma dos pesos) p/ a visão dupla contratos × saldo
         w_total = float(self._weights.sum()) if self.weight_col is not None else 0.0
         amostras = list(self._sample_masks) if self.sample_col is not None else []
+        # código da amostra por linha (pré-computado): o alvo por amostra DENTRO
+        # da folha vira comparação de int, sem recomparar a coluna (object) da
+        # amostra a cada folha×amostra. Sem os códigos, o caminho antigo.
+        sc = self._sample_codes if self.sample_col is not None else None
+        k_am = {a: j for j, a in enumerate(self._samples)}
+
+        def _alvo_am(sub, sc_sub, amostra):
+            if sc_sub is not None:
+                return sub.loc[sc_sub == k_am[amostra], self.target]
+            return sub.loc[sub[self.sample_col] == amostra, self.target]
+
         for sid, seg in self.segments.items():
             if not seg["is_leaf"]:
                 continue
             sub = self._sub(seg["mask"])
+            # códigos das linhas de `sub`, na MESMA ordem: sub = df.loc[máscara]
+            # é recorte posicional (máscara com o índice do df), então o gather
+            # pela máscara numpy alinha linha a linha (vale com índice duplicado)
+            m_np = seg["mask"].values
+            sc_sub = (sc[m_np] if (sc is not None and isinstance(m_np, np.ndarray)
+                                   and m_np.dtype == bool) else None)
             # valor_medio na referência (DES) = base da régua; assim nota é
             # monotônica no alvo que entra em predict/apply_spark (com fallback)
             if self.sample_col is not None:
-                ref_t = sub.loc[sub[self.sample_col] == self.ref_sample, self.target]
+                ref_t = _alvo_am(sub, sc_sub, self.ref_sample)
                 pd_m = ref_t.mean() if len(ref_t) else sub[self.target].mean()
             else:
                 pd_m = sub[self.target].mean()
@@ -1723,7 +1848,7 @@ class TreeSegmenter:
             row["valor_std"] = round(sub[self.target].std(), 4)
             if self.sample_col is not None:
                 for amostra in amostras:
-                    s_am = sub.loc[sub[self.sample_col] == amostra, self.target]
+                    s_am = _alvo_am(sub, sc_sub, amostra)
                     row[f"valor_{amostra}"] = round(s_am.mean(), 4) if len(s_am) else np.nan
                     if self.weight_col is not None:   # alvo PONDERADO por amostra
                         vpa = self._wmean(seg["mask"] & self._sample_masks[amostra])
@@ -1748,17 +1873,17 @@ class TreeSegmenter:
 
     # contribuição de PSI por folha para cada amostra (≠ referência)
     def _append_psi_cols(self, out, eps: float = 1e-6):
-        # Vetorizado: um único crosstab(folha, amostra) substitui os laços
-        # (mask_folha & mask_amostra).sum() full-length por folha×amostra. O
-        # denominador continua o tamanho TOTAL da amostra (máscaras pré-computadas).
+        # Vetorizado: uma única contagem (folha, amostra) por bincount substitui
+        # os laços (mask_folha & mask_amostra).sum() full-length por folha×amostra.
+        # O denominador continua o tamanho TOTAL da amostra (máscaras
+        # pré-computadas). leaf_ids vem ordenado por nota: a contagem é lida
+        # por sid (dicionário), não por posição.
         leaf_ids = out["segmento"].tolist()
-        leaf_id = self._leaf_id_series()
-        ct = pd.crosstab(leaf_id, self.df[self.sample_col])
+        cnt = self._leaf_sample_counts()
 
         def fracs(amostra):
             n = float(self._sample_masks[amostra].sum())
-            col = ct[amostra] if amostra in ct.columns else None
-            return {sid: (float(col.get(sid, 0.0)) / n if (col is not None and n) else 0.0)
+            return {sid: (float(cnt(sid, amostra)) / n if n else 0.0)
                     for sid in leaf_ids}
 
         ref_pct = fracs(self.ref_sample)
@@ -1766,7 +1891,7 @@ class TreeSegmenter:
         # as demais amostras saem no laço abaixo, ao lado do respectivo PSI.
         out[f"repr_{self.ref_sample}_%"] = [round(100 * ref_pct[sid], 1)
                                             for sid in leaf_ids]
-        for amostra in self.df[self.sample_col].dropna().unique():
+        for amostra in self._samples:
             if amostra == self.ref_sample:
                 continue
             cur_pct = fracs(amostra)
@@ -1858,21 +1983,29 @@ class TreeSegmenter:
         """Série (index = df.index) com o id da folha de cada linha (NA se nenhuma).
         Como as folhas são mutuamente exclusivas, isso permite trocar os laços
         ``(mask_folha & mask_amostra).sum()`` por um único ``pd.crosstab``.
-        Memoizada por versão da árvore."""
+        Memoizada por versão da árvore.
+
+        Derivada PREGUIÇOSAMENTE do código int32 da folha (``_leaf_codes``): o
+        array object só é montado quando alguém pede os rótulos, e fica no cache
+        read-only. Cada chamada devolve um wrapper Series NOVO sobre esse array
+        (O(1), sem a cópia profunda de N ponteiros); só leia — escrever nos
+        valores levanta ValueError."""
+        ids, code = self._leaf_codes(leaf_ids)
+
         def build():
-            ids = leaf_ids if leaf_ids is not None else \
-                [sid for sid, s in self.segments.items() if s["is_leaf"]]
-            # array numpy gravável e DEPOIS embrulhado em Series: sob pandas ≥3.0
-            # (copy-on-write) ``Series.values`` é read-only e a atribuição in-place
-            # ``s.values[mask] = sid`` levantaria ValueError.
-            arr = np.full(len(self.df), pd.NA, dtype=object)
-            for sid in ids:
-                arr[self.segments[sid]["mask"].values] = sid
-            return pd.Series(arr, index=self.df.index, dtype=object)
+            # rótulo por código; o código -1 (órfã) indexa a ÚLTIMA posição = NA
+            lab = np.empty(len(ids) + 1, dtype=object)
+            for k, sid in enumerate(ids):
+                lab[k] = sid
+            lab[len(ids)] = pd.NA
+            arr = lab[code]
+            arr.flags.writeable = False
+            return arr
         # a identidade do conjunto entra na chave: uma chamada com subconjunto de
-        # folhas não pode devolver a série do conjunto completo do cache.
-        cache_key = ("leaf_id_series", tuple(leaf_ids) if leaf_ids is not None else None)
-        return self._agg_memo(cache_key, build)
+        # folhas não pode devolver a série do conjunto completo do cache. None
+        # vira a tupla das folhas na ordem de segments (uma entrada só).
+        arr = self._agg_memo(("leaf_id_arr", ids), build)
+        return pd.Series(arr, index=self.df.index, dtype=object, copy=False)
 
     # ------------------------------------------------------------------
     # TREE: desenha a árvore hierárquica (nós internos + folhas) em texto.
@@ -2006,7 +2139,7 @@ class TreeSegmenter:
             return n, (100 * n / n_total if n_total else 0.0), pdv
 
         def sample_value(sid, a):
-            m = self.segments[sid]["mask"] & (self.df[self.sample_col] == a)
+            m = self.segments[sid]["mask"] & self._smask(a)
             sub = self.df.loc[m, self.target]
             return sub.mean() if len(sub) else float("nan")
 
@@ -2103,7 +2236,7 @@ class TreeSegmenter:
                       else f"{self._risk_word} —")
             metr = f"repr. {rep:.1f}%  |  {pd_txt}"
             if show_samples and self.sample_col is not None:
-                amostras = list(self.df[self.sample_col].dropna().unique())
+                amostras = list(self._samples)
                 metr += "\n" + " | ".join(f"{a} {sample_value(sid, a) * 100:.2f}%"
                                           for a in amostras)
             t_metr = ax.text(x, y - 0.42 * bh, metr, ha="center", va="center",
@@ -2228,18 +2361,16 @@ class TreeSegmenter:
         if not leaf_ids:
             raise ValueError("Nenhuma folha — cresça a segmentação antes do PSI.")
 
-        # distribuição (% por folha) por amostra via UM crosstab vetorizado, em vez
-        # de (mask_folha & mask_amostra).sum() full-length por folha×amostra.
-        # Denominador = tamanho TOTAL da amostra (igual ao código original), via
-        # máscaras de amostra pré-computadas.
-        leaf_id_por_linha = self._leaf_id_series(leaf_ids)
-        ct = pd.crosstab(leaf_id_por_linha, self.df[self.sample_col])
+        # distribuição (% por folha) por amostra via UM bincount de códigos
+        # inteiros (folha × amostra) — as mesmas contagens do antigo crosstab de
+        # duas colunas object. Denominador = tamanho TOTAL da amostra (igual ao
+        # código original), via máscaras de amostra pré-computadas.
+        cnt = self._leaf_sample_counts(leaf_ids)
         dist = {}
-        for amostra in self.df[self.sample_col].dropna().unique():
+        for amostra in self._samples:
             n_am = float(self._sample_masks[amostra].sum())
-            col = ct[amostra] if amostra in ct.columns else None
             dist[amostra] = {
-                sid: (float(col.get(sid, 0.0)) / n_am if (col is not None and n_am) else 0.0)
+                sid: (float(cnt(sid, amostra)) / n_am if n_am else 0.0)
                 for sid in leaf_ids
             }
 
@@ -2288,7 +2419,7 @@ class TreeSegmenter:
         if features is None:
             features = [c for c in self.df.columns if c not in self._nonfeature_cols()]
 
-        nonref = [a for a in self.df[self.sample_col].dropna().unique()
+        nonref = [a for a in self._samples
                   if a != self.ref_sample]
         ref_mask = self._mask_ref
         n_ref = int(ref_mask.sum())
@@ -2391,7 +2522,7 @@ class TreeSegmenter:
 
         # ordem das amostras: referência primeiro
         if self.sample_col is not None:
-            todas = list(self.df[self.sample_col].dropna().unique())
+            todas = list(self._samples)
             ordem = ([self.ref_sample] + [a for a in todas if a != self.ref_sample])
             grupos = [(a, self._sample_masks[a]) for a in ordem]
         else:
@@ -2446,7 +2577,7 @@ class TreeSegmenter:
             if sample is None:
                 sample = self.ref_sample
             if check_sample is None:
-                nonref = [a for a in self.df[self.sample_col].dropna().unique()
+                nonref = [a for a in self._samples
                           if a != self.ref_sample]
                 check_sample = nonref[0] if nonref else None
         else:
@@ -2544,7 +2675,7 @@ class TreeSegmenter:
         pred = self._predicted_series()
         mask = pd.Series(True, index=self.df.index)
         if sample is not None and self.sample_col is not None:
-            mask = self.df[self.sample_col] == sample
+            mask = self._smask(sample)
         base = pd.DataFrame({
             "periodo": self.df.loc[mask, time_col].values,
             "real": self.df.loc[mask, self.target].values,
@@ -2617,7 +2748,7 @@ class TreeSegmenter:
         if self.sample_col is None:
             amostras = [None]
         else:
-            todas = list(self.df[self.sample_col].dropna().unique())
+            todas = list(self._samples)
             amostras = [self.ref_sample] + [a for a in todas if a != self.ref_sample]
         rows = []
         for a in amostras:
@@ -2625,7 +2756,7 @@ class TreeSegmenter:
             for sid in order:
                 m = self.segments[sid]["mask"]
                 if a is not None:
-                    m = m & (self.df[self.sample_col] == a)
+                    m = m & self._smask(a)
                 s = self.df.loc[m, self.target]
                 vals.append(float(s.mean()) if len(s) else np.nan)
             inv = []
@@ -2644,7 +2775,7 @@ class TreeSegmenter:
     # ------------------------------------------------------------------
     def calibration_table(self, check_sample: str | None = None) -> pd.DataFrame:
         if self.sample_col is not None and check_sample is None:
-            nonref = [a for a in self.df[self.sample_col].dropna().unique()
+            nonref = [a for a in self._samples
                       if a != self.ref_sample]
             check_sample = nonref[0] if nonref else self.ref_sample
         lv = self.leaves()
@@ -2655,7 +2786,7 @@ class TreeSegmenter:
             prev = float(prev_vals.mean()) if len(prev_vals) else np.nan
             m = self.segments[sid]["mask"]
             if check_sample is not None and self.sample_col is not None:
-                m = m & (self.df[self.sample_col] == check_sample)
+                m = m & self._smask(check_sample)
             real_vals = self.df.loc[m, self.target]
             real = float(real_vals.mean()) if len(real_vals) else np.nan
             rows.append({
@@ -2762,7 +2893,7 @@ class TreeSegmenter:
             sid = r["segmento"]
             m = self.segments[sid]["mask"]
             if sample is not None and self.sample_col is not None:
-                m = m & (self.df[self.sample_col] == sample)
+                m = m & self._smask(sample)
             v = self.df.loc[m, self.target].to_numpy(dtype="float64")
             v = v[~np.isnan(v)]
             if len(v) == 0:
@@ -2827,7 +2958,7 @@ class TreeSegmenter:
         if sample is None and self.sample_col is not None:
             sample = self.ref_sample
         if sample is not None and self.sample_col is not None:
-            y = self.df.loc[self.df[self.sample_col] == sample, self.target].to_numpy(dtype="float64")
+            y = self.df.loc[self._smask(sample), self.target].to_numpy(dtype="float64")
             sfx = f" — {sample}"
         else:
             y = self.df[self.target].to_numpy(dtype="float64")
@@ -2866,7 +2997,7 @@ class TreeSegmenter:
             sample = self.ref_sample
         sfx = ""
         if sample is not None and self.sample_col is not None:
-            mask = mask & (self.df[self.sample_col] == sample)
+            mask = mask & self._smask(sample)
             sfx = f" · {sample}"
         y = self.df.loc[mask, self.target].to_numpy(dtype="float64")
         y = y[~np.isnan(y)]
@@ -3026,15 +3157,17 @@ class TreeSegmenter:
             y = self.df[self.target].to_numpy(dtype="float64")
             y = y[~np.isnan(y)]
             return [(None, pd.Series(True, index=self.df.index))] if np.unique(y).size >= 2 else []
-        todas = list(self.df[self.sample_col].dropna().unique())
+        todas = list(self._samples)
         ordem = [self.ref_sample] + [a for a in todas if a != self.ref_sample]
         out = []
         for a in ordem:
-            mask = self.df[self.sample_col] == a
+            mask = self._smask(a)
             y = self.df.loc[mask, self.target].to_numpy(dtype="float64")
             y = y[~np.isnan(y)]
             if np.unique(y).size >= 2:
-                out.append((a, mask))
+                # .copy(): a máscara vai ao chamador — não pode ser a Series
+                # compartilhada de _sample_masks (um `&=` lá fora a corromperia)
+                out.append((a, mask.copy()))
         return out
 
     # ------------------------------------------------------------------
@@ -3098,7 +3231,7 @@ class TreeSegmenter:
             sample = self.ref_sample
         mask = pd.Series(True, index=self.df.index)
         if sample is not None and self.sample_col is not None:
-            mask = self.df[self.sample_col] == sample
+            mask = self._smask(sample)
         y = self.df.loc[mask, self.target].to_numpy(dtype="float64")
         s = pred[mask.values].to_numpy(dtype="float64")
         ok = ~(np.isnan(y) | np.isnan(s))
@@ -3161,7 +3294,7 @@ class TreeSegmenter:
         elif self.sample_col is None:
             grupos = [(None, pd.Series(True, index=self.df.index))]
         else:
-            todas = list(self.df[self.sample_col].dropna().unique())
+            todas = list(self._samples)
             ordem = [self.ref_sample] + [a for a in todas if a != self.ref_sample]
             grupos = [(a, self._sample_masks[a]) for a in ordem]
         if samples is not None:
@@ -3244,7 +3377,7 @@ class TreeSegmenter:
             sample = self.ref_sample
         mask = pd.Series(True, index=self.df.index)
         if sample is not None and self.sample_col is not None:
-            mask = self.df[self.sample_col] == sample
+            mask = self._smask(sample)
         y = self.df.loc[mask, self.target].to_numpy(dtype="float64")
         s = pred[mask.values].to_numpy(dtype="float64")
         ok = ~(np.isnan(y) | np.isnan(s))
@@ -3332,7 +3465,7 @@ class TreeSegmenter:
         pred = self._predicted_series()
         mask = pd.Series(True, index=self.df.index)
         if sample is not None and self.sample_col is not None:
-            mask = self.df[self.sample_col] == sample
+            mask = self._smask(sample)
         base = self._sub(mask, time_col)
         sc_full = pred[mask.values]
         safra = pd.to_datetime(base[time_col], errors="coerce").dt.to_period("M")
@@ -3449,7 +3582,7 @@ class TreeSegmenter:
             sid = r["segmento"]
             m = self.segments[sid]["mask"]
             if sample is not None and self.sample_col is not None:
-                m = m & (self.df[self.sample_col] == sample)
+                m = m & self._smask(sample)
             v = self.df.loc[m, self.target].to_numpy(dtype="float64")
             v = v[~np.isnan(v)]
             if len(v) == 0:
@@ -3505,7 +3638,7 @@ class TreeSegmenter:
         mask = pd.Series(True, index=self.df.index)
         sfx = ""
         if sample is not None and self.sample_col is not None:
-            mask = self.df[self.sample_col] == sample
+            mask = self._smask(sample)
             sfx = f" — {sample}"
         y = self.df.loc[mask, self.target].to_numpy(dtype="float64")
         s = pred[mask.values].to_numpy(dtype="float64")
@@ -3694,7 +3827,7 @@ class TreeSegmenter:
             sample = self.ref_sample
         sfx = ""
         if sample is not None and self.sample_col is not None:
-            mask = mask & (self.df[self.sample_col] == sample)
+            mask = mask & self._smask(sample)
             sfx = f" · {sample}"
         y = self.df.loc[mask, self.target].to_numpy(dtype="float64")
         y = y[~np.isnan(y)]
@@ -3719,7 +3852,7 @@ class TreeSegmenter:
         # alvo da carteira (mesma amostra) como referência
         cart = self.df
         if sample is not None and self.sample_col is not None:
-            cart = self.df[self.df[self.sample_col] == sample]
+            cart = self.df[self._smask(sample)]
         yc = cart[self.target].to_numpy(dtype="float64")
         yc = yc[~np.isnan(yc)]
         pc = float(np.mean(yc)) if yc.size else np.nan
@@ -3770,7 +3903,7 @@ class TreeSegmenter:
         if sample is None and self.sample_col is not None:
             sample = self.ref_sample
         if sample is not None and self.sample_col is not None:
-            mask = mask & (self.df[self.sample_col] == sample)
+            mask = mask & self._smask(sample)
         col = self.df.loc[mask, feature]
         kind = self._detect_kind(self.df, feature, None)
         n = int(len(col)); n_miss = int(col.isna().sum())
@@ -3824,7 +3957,7 @@ class TreeSegmenter:
         if sample is None and self.sample_col is not None:
             sample = self.ref_sample
         if sample is not None and self.sample_col is not None:
-            mask = mask & (self.df[self.sample_col] == sample)
+            mask = mask & self._smask(sample)
         sub = self._sub(mask, feature)
         n_tot = max(len(sub), 1)
         risco_label = "event_rate" if self._is_clf else "alvo_medio"
@@ -3889,7 +4022,7 @@ class TreeSegmenter:
             raise ValueError("Informe time_col ou configure date_col no segmenter.")
         mask = self._leaf_mask(sid)
         if sample is not None and self.sample_col is not None:
-            mask = mask & (self.df[self.sample_col] == sample)
+            mask = mask & self._smask(sample)
         sub = self._sub(mask, feature, time_col)
         if time_col not in sub.columns:
             raise ValueError(f"Coluna de tempo '{time_col}' não existe no DataFrame.")
@@ -3959,7 +4092,7 @@ class TreeSegmenter:
         if sample is None and self.sample_col is not None:
             sample = self.ref_sample
         if sample is not None and self.sample_col is not None:
-            mask = mask & (self.df[self.sample_col] == sample)
+            mask = mask & self._smask(sample)
         sub = self._sub(mask, feature)
         rot = self.feature_labels.get(feature, feature)
         fig, ax = self._new_ax(figsize, dpi, ax)
@@ -4115,7 +4248,7 @@ class TreeSegmenter:
         UMA variável. Veredito verde/amarelo/vermelho. Espelha
         :meth:`ModelSegmenter.variable_inversion`."""
         mask0 = self._leaf_mask(sid)
-        ref_mask = (mask0 & (self.df[self.sample_col] == self.ref_sample)
+        ref_mask = (mask0 & self._smask(self.ref_sample)
                     if self.sample_col is not None else mask0)
         ref = self._sub(ref_mask, feature)
         bins, _modo, _kind = self._resolve_bins(ref, feature, None, None,
@@ -4140,7 +4273,7 @@ class TreeSegmenter:
         xs_s_lab = [str(a) if a is not None else "todos" for a in xs_s]
         ser_s = {i: [] for i in range(len(bins))}
         for a in xs_s:
-            fa = (self._sub(mask0 & (self.df[self.sample_col] == a), feature)
+            fa = (self._sub(mask0 & self._smask(a), feature)
                   if a is not None else self._sub(mask0, feature))
             for i, b in enumerate(bins):
                 ser_s[i].append(_risco(fa[self._mask_in(fa, feature, b)]))
@@ -4149,7 +4282,7 @@ class TreeSegmenter:
         # _SEM_SAFRAS (uso interno do gráfico por amostra): sem laço por safra
         tcol = None if time_col is _SEM_SAFRAS else (time_col or self.date_col)
         if tcol is not None and tcol in self.df.columns:
-            base = (self._sub(mask0 & (self.df[self.sample_col] == sample), feature, tcol)
+            base = (self._sub(mask0 & self._smask(sample), feature, tcol)
                     if (sample and self.sample_col is not None)
                     else self._sub(mask0, feature, tcol))
             safra = pd.to_datetime(base[tcol], errors="coerce").dt.to_period("M")
@@ -4277,7 +4410,7 @@ class TreeSegmenter:
         if OptimalBinning is None:
             raise ImportError("optbinning não instalado. Rode: pip install optbinning")
         mask0 = self._leaf_mask(sid)
-        m = (mask0 & (self.df[self.sample_col] == (sample or self.ref_sample))
+        m = (mask0 & self._smask(sample or self.ref_sample)
              if self.sample_col is not None else mask0)
         fit = self._sub(m, feature)
         if self._detect_kind(fit, feature, None) != "num":
@@ -4385,7 +4518,7 @@ class TreeSegmenter:
             raise ValueError("Informe time_col ou configure date_col no segmenter.")
         mask = self._leaf_mask(sid)
         if sample is not None and self.sample_col is not None:
-            mask = mask & (self.df[self.sample_col] == sample)
+            mask = mask & self._smask(sample)
         sub = self._sub(mask, feature, time_col)
         if time_col not in sub.columns:
             raise ValueError(f"Coluna de tempo '{time_col}' não existe no DataFrame.")
@@ -4538,11 +4671,14 @@ class TreeSegmenter:
         """Amostras que têm alvo observada, com a referência (DES) à frente."""
         if self.sample_col is None:
             return []
-        samples = list(self.df[self.sample_col].dropna().unique())
-        com_pd = [a for a in samples
-                  if self.df.loc[self.df[self.sample_col] == a, self.target].notna().any()]
-        ref = [self.ref_sample] if self.ref_sample in com_pd else []
-        return ref + [a for a in com_pd if a != self.ref_sample]
+        # função pura do df (amostras e alvo não mudam): calculada uma vez e
+        # guardada como TUPLA; o chamador recebe uma lista nova (pode alterá-la)
+        if self._osv_memo is None:
+            com_pd = [a for a in self._samples
+                      if self.df.loc[self._sample_masks[a], self.target].notna().any()]
+            ref = [self.ref_sample] if self.ref_sample in com_pd else []
+            self._osv_memo = tuple(ref + [a for a in com_pd if a != self.ref_sample])
+        return list(self._osv_memo)
 
     def _sibling_meta(self, parent_sid, leaves=None):
         """Metadados das folhas-irmãs de `parent_sid`:
@@ -4679,7 +4815,7 @@ class TreeSegmenter:
             m = self.segments[sid]["mask"]
             vals = []
             for a in usar:
-                mm = m & (self.df[self.sample_col] == a) if a is not None else m
+                mm = m & self._smask(a) if a is not None else m
                 v = self.df.loc[mm, self.target].to_numpy(dtype="float64")
                 v = v[~np.isnan(v)]
                 vals.append(float(v.mean()) if v.size else float("nan"))
@@ -4699,7 +4835,7 @@ class TreeSegmenter:
         ordered, nota, desc, _pd = self._sibling_meta(parent_sid, leaves)
         base = pd.Series(True, index=self.df.index)
         if sample is not None and self.sample_col is not None:
-            base = base & (self.df[self.sample_col] == sample)
+            base = base & self._smask(sample)
         per_all = pd.to_datetime(self.df[time_col], errors="coerce").dt.to_period("M")
         safras = sorted(per_all[base].dropna().unique())
         xs = [str(p) for p in safras]
@@ -5471,7 +5607,7 @@ class TreeSegmenter:
                     transform=ax.transAxes, color="#889"); ax.axis("off")
             fig.tight_layout(); return fig
         notas = lv["nota"].tolist()
-        all_samples = [self.ref_sample] + [a for a in self.df[self.sample_col].dropna().unique()
+        all_samples = [self.ref_sample] + [a for a in self._samples
                                            if a != self.ref_sample]
         cols = [(a, f"repr_{a}_%") for a in all_samples if f"repr_{a}_%" in lv.columns]
         n_leaves = len(notas); n_s = max(len(cols), 1)
@@ -5538,8 +5674,8 @@ class TreeSegmenter:
         else:
             leaf_mask = self.segments[sid]["mask"]
         if self.sample_col is not None:
-            ref_mask = self.df[self.sample_col] == self.ref_sample
-            nonref = [a for a in self.df[self.sample_col].dropna().unique()
+            ref_mask = self._smask(self.ref_sample)
+            nonref = [a for a in self._samples
                       if a != self.ref_sample]
         else:
             ref_mask = pd.Series(True, index=self.df.index)
@@ -5568,7 +5704,7 @@ class TreeSegmenter:
         if psi_on:
             ref_frame = base                     # mesma máscara: folha ∩ DES
             n_ref_leaf = len(ref_frame)
-            cur_frames = {a: self._sub(leaf_mask & (self.df[self.sample_col] == a), *features)
+            cur_frames = {a: self._sub(leaf_mask & self._smask(a), *features)
                           for a in nonref}
 
         rows = []
@@ -6175,7 +6311,7 @@ class TreeSegmenter:
                 pdv = float(sub[self.target].mean())
             if np.isnan(pdv):                       # folha vazia → alvo global (sem NaN na régua)
                 if self.sample_col is not None:
-                    g = self.df.loc[self.df[self.sample_col] == self.ref_sample,
+                    g = self.df.loc[self._smask(self.ref_sample),
                                     self.target].mean()
                 else:
                     g = self.df[self.target].mean()
@@ -6197,7 +6333,9 @@ class TreeSegmenter:
         faltante numa variável sem rota de faltantes ou categoria fora de toda
         folha. Esperado 0 na base de desenvolvimento; >0 antecipa linhas nulas
         no scoring (use ``fallback`` para roteá-las)."""
-        return int(self._leaf_id_series().isna().sum())
+        # código -1 = sem folha (o mesmo NA da série de rótulos, sem montá-la)
+        _ids, code = self._leaf_codes()
+        return int((code < 0).sum())
 
     def predict(self, X: pd.DataFrame, col_seg="segmento",
                 col_nota="nota", col_valor="valor_regua",
@@ -7328,9 +7466,9 @@ class TreeSegmenter:
                              self.leaves(with_psi=(self.sample_col is not None))))
                 dev_df = oot_df = None
                 if save_base and self.sample_col is not None:
-                    dev_df = self.df[self.df[self.sample_col] == self.ref_sample]
+                    dev_df = self.df[self._smask(self.ref_sample)]
                     if val_sample is not None:
-                        oot_df = self.df[self.df[self.sample_col] == val_sample]
+                        oot_df = self.df[self._smask(val_sample)]
                 log_tabbed_report(
                     mlflow, run, title=f"TreeSegmenter — {self.task_type}",
                     subtitle=f"alvo '{self.target}' · {n_folhas} folhas · ref. {self.ref_sample}",

@@ -1003,11 +1003,12 @@ class TreeSegmenterUI:
         # vivem SÓ nesta sessão — fechar o notebook os descarta. Ver card "Cenários".
         self._scenarios: dict = {}
 
-        # máscaras de amostra (fixas) e amostras ≠ referência (ex.: OOT)
+        # máscaras de amostra (fixas) e amostras ≠ referência (ex.: OOT): as do
+        # segmentador (mesma base, mesmo índice) — não recomparar a coluna aqui
         if sample_col is not None:
-            self._samples = list(df[sample_col].dropna().unique())
+            self._samples = list(self.seg._samples)
             self._nonref = [a for a in self._samples if a != ref_sample]
-            self._sample_masks = {a: (df[sample_col] == a) for a in self._samples}
+            self._sample_masks = self.seg._sample_masks
             # amostras SEM variável resposta (ex.: ESTABILIDADE = público recente
             # só para validação): entram no PSI, mas não têm alvo para exibir.
             self._psi_only = [a for a in self._nonref
@@ -6072,6 +6073,7 @@ class TreeSegmenterUI:
             self.seg = TreeSegmenter(self.df, copy=False, **self._kwargs)
             # o segmentador novo nasce sem fallback — reaplica a escolha da UI
             self.seg.fallback = self.dd_fallback.value
+            self._sample_masks = self.seg._sample_masks   # (mesmo conteúdo)
             self.locked.clear()
             self._pending = None
             self._log("Árvore reiniciada.")
@@ -8269,6 +8271,7 @@ class TreeSegmenterUI:
                 self._checkpoint()
                 self.seg = TreeSegmenter(self.df, copy=False, **self._kwargs)
                 self.seg.fallback = self.dd_fallback.value
+                self._sample_masks = self.seg._sample_masks   # (mesmo conteúdo)
                 self.locked.clear()
                 self._pending = None
                 self._cv_sel = "root"
