@@ -42,10 +42,10 @@ from test_tree_perf_onda3_iv import (  # noqa: E402
 
 TASKS = ["classification", "regression"]
 
-# Ajustes independentes comparados com igualdade exata: CP-SAT com 1 worker
-# (ver ``cpsat_deterministico`` no conftest) para o empate do ótimo não virar
-# falha intermitente.
-pytestmark = pytest.mark.usefixtures("cpsat_deterministico")
+# Ajustes independentes comparados com igualdade exata SEM a fixture
+# ``cpsat_deterministico`` do conftest: a própria lib roda o CP-SAT de cada
+# ajuste com 1 worker (``_common._cpsat_um_worker``, por thread), então o
+# empate do ótimo não muda o resultado entre n_jobs=1 e n_jobs=4.
 
 # nomes usados pela cópia literal abaixo (resolvidos no módulo do teste)
 _fit_optbinning_splits = segmod._fit_optbinning_splits
@@ -673,32 +673,52 @@ def test_ui_usa_n_jobs_ate_8(monkeypatch):
     assert "n_jobs" not in ui._kwargs
 
 
-def test_cpsat_deterministico_chega_ao_optbinning_nas_threads():
-    """A fixture do módulo (``cpsat_deterministico``) vale para o solver que o
-    optbinning cria — inclusive dentro das threads ygg-optbin do ``n_jobs``."""
-    from optbinning import OptimalBinning
-    from ortools.sat.python import cp_model
+def test_cpsat_um_worker_nas_threads_do_lote(monkeypatch):
+    """Sem fixture: todo ``CpSolver`` que o optbinning cria no lote paralelo
+    nasce com 1 worker — inclusive nas threads ygg-optbin do ``n_jobs`` (o
+    contador do ``_cpsat_um_worker`` é por thread e entra NO worker)."""
+    import optbinning.binning.cp as ob_cp
+    assert _common._instala_cpsat_um_worker()
+    proxy = ob_cp.cp_model                       # fachada instalada pela lib
+    cls = proxy.CpSolver
     workers = []
-    cls = cp_model.CpSolver
 
     class _Espiao(cls):
         def Solve(self, *a, **k):                    # noqa: N802 - API do ortools
             workers.append((threading.current_thread().name,
                             self.parameters.num_workers))
             return super().Solve(*a, **k)
-    orig = cp_model.CpSolver
-    cp_model.CpSolver = _Espiao
-    try:
-        rng = np.random.default_rng(0)
-        x = rng.choice(list("ABCDEFG"), 3000)
-        y = (rng.uniform(size=3000) < np.where(np.isin(x, list("ABC")), 0.3, 0.1)).astype(int)
-        OptimalBinning(dtype="categorical", solver="cp").fit(x, y)
-        seg = _seg(n=1500)
-        seg.n_jobs = 4
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            seg.variable_iv(features=list(FEATS))
-    finally:
-        cp_model.CpSolver = orig
+    monkeypatch.setattr(proxy, "CpSolver", _Espiao)
+    seg = _seg(n=1500)
+    seg.n_jobs = 4
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        seg.variable_iv(features=list(FEATS))
     assert workers and all(w == 1 for _, w in workers)
     assert any(n.startswith("ygg-optbin") for n, _ in workers)
+
+
+def test_lista_como_variavel_so_ela_falha():
+    """Nome não hashável (lista) no meio das variáveis: só ela sai com '—' e IV
+    NaN, como no ajuste em série — antes derrubava o lote inteiro."""
+    a, b = _par("classification")
+    feats = ["f64", ["cat", "i64"], "cat", "i64", "hcard", "mix"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ra = a.variable_iv(None, features=feats, with_psi=False)
+        rb = b.variable_iv(None, features=feats, with_psi=False)
+    _iguais(ra, rb)
+    assert rb["iv"].notna().sum() == len(feats) - 1
+    assert _cache(a) == _cache(b)
+
+
+def test_pickle_sem_n_jobs_usa_serie():
+    """Segmentador despicklado de antes do n_jobs (sem o atributo): o IV roda
+    em série, sem AttributeError."""
+    import pickle
+    a, b = _par("classification")
+    velho = pickle.loads(pickle.dumps(b))
+    del velho.__dict__["n_jobs"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _iguais(a.variable_iv(None), velho.variable_iv(None))

@@ -474,9 +474,10 @@ class TreeSegmenter:
         # e é usada mesmo com copy=True. Não é persistido em to_dict().
         # n_jobs: threads dos ajustes do optbinning no variable_iv (uma variável
         # por thread; o CART e o CP-SAT soltam a GIL). 1 (padrão) = em série,
-        # como antes; -1 = todos os núcleos. Os cortes são os mesmos, salvo
-        # empate entre ótimos do CP-SAT (que já roda com vários workers). Não é
-        # persistido em to_dict(); pode ser trocado depois em ``seg.n_jobs``.
+        # como antes; -1 = todos os núcleos. Os cortes são idênticos aos do
+        # ajuste em série, inclusive em empate de ótimo: o CP-SAT de cada ajuste
+        # roda com 1 worker (_cpsat_um_worker, por thread). Não é persistido em
+        # to_dict(); pode ser trocado depois em ``seg.n_jobs``.
         if task_type not in TASK_TYPES:
             raise ValueError(
                 f"task_type inválido: {task_type!r}. Use um de {TASK_TYPES}.")
@@ -1177,7 +1178,8 @@ class TreeSegmenter:
         ``erro`` (ex.: KeyboardInterrupt/Cancel no laço do IV), sem esperar e
         com ``cancel_futures`` — fora do lote não há ajuste em curso (o lote
         sempre termina ou espera os seus)."""
-        n_jobs = _normaliza_n_jobs(self.n_jobs)
+        # getattr: segmentador despicklado de antes do n_jobs (sem o atributo)
+        n_jobs = _normaliza_n_jobs(getattr(self, "n_jobs", 1))
         if (n_jobs <= 1 or not isinstance(features, (list, tuple))
                 or len(features) < 2):
             def obter_serie(i, feat):
@@ -1211,11 +1213,19 @@ class TreeSegmenter:
             itens, pend, preps = [], {}, []
             for feat in features[ini:ini + tam_lote]:
                 key = self._bins_key(mask, feat, None, None, max_n_bins, min_bin_size)
-                hit = self._bins_cache.get(key)
+                try:
+                    hit = self._bins_cache.get(key)
+                    repetida = key in pend
+                except Exception:
+                    # chave não hashável (ex.: lista no lugar do nome): fica fora
+                    # do lote — o obter repete a consulta e falha SÓ nesta
+                    # variável, como no ajuste em série (antes derrubava o lote)
+                    itens.append((key, {"usado": True}))
+                    continue
                 if hit is not None:
                     itens.append((key, {"usado": True}))
                     continue
-                if key in pend:                     # variável repetida no lote
+                if repetida:                        # variável repetida no lote
                     itens.append((key, pend[key]))
                     continue
                 val = {}
