@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from ..config import ColumnConfig
+from ..utils import sem_aviso_solver_cvxpy
 from .config import EDAConfig
 from .dtypes import as_numeric, has_target, infer_feature_kind
 
@@ -43,11 +44,13 @@ def _numeric_edges(method, xnum, target, problem_type, n_bins):
                     edges = np.unique(np.concatenate([[-np.inf], thr, [np.inf]]))
                 else:
                     if problem_type == "classification":
-                        from optbinning import OptimalBinning
+                        with sem_aviso_solver_cvxpy():
+                            from optbinning import OptimalBinning
                         ob = OptimalBinning(dtype="numerical", max_n_bins=n_bins)
                         ob.fit(xt, yt.astype(int))
                     else:
-                        from optbinning import ContinuousOptimalBinning
+                        with sem_aviso_solver_cvxpy():
+                            from optbinning import ContinuousOptimalBinning
                         ob = ContinuousOptimalBinning(dtype="numerical", max_n_bins=n_bins)
                         ob.fit(xt, yt)
                     edges = np.unique(np.concatenate([[-np.inf], np.asarray(ob.splits, float), [np.inf]]))

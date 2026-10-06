@@ -63,8 +63,11 @@ from .._common import (
 )
 from .. import _common as _common_mod   # OPTBINNING_MAX_ROWS lido na hora
 
+from ...utils import sem_aviso_solver_cvxpy as _sem_aviso_solver_cvxpy
+
 try:  # optbinning é dependência core, mas degradamos com elegância.
-    from optbinning import ContinuousOptimalBinning, OptimalBinning
+    with _sem_aviso_solver_cvxpy():     # cala a sondagem de solvers do cvxpy
+        from optbinning import ContinuousOptimalBinning, OptimalBinning
 except ImportError:  # pragma: no cover
     ContinuousOptimalBinning = OptimalBinning = None
 

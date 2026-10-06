@@ -32,8 +32,11 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pandas as pd
 
+from ...utils import sem_aviso_solver_cvxpy as _sem_aviso_solver_cvxpy
+
 try:
-    from optbinning import ContinuousOptimalBinning, OptimalBinning
+    with _sem_aviso_solver_cvxpy():     # cala a sondagem de solvers do cvxpy
+        from optbinning import ContinuousOptimalBinning, OptimalBinning
 except ImportError:  # pragma: no cover
     OptimalBinning = None
     ContinuousOptimalBinning = None

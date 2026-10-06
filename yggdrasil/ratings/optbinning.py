@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from ..utils import sem_aviso_solver_cvxpy
 from .base import RatingStrategy
 
 
@@ -30,7 +31,8 @@ class OptBinningRating(RatingStrategy):
 
     def _fit_binner(self, scores_dev: np.ndarray, target_dev: np.ndarray) -> None:
         if self._problem_type == "classification":
-            from optbinning import OptimalBinning
+            with sem_aviso_solver_cvxpy():
+                from optbinning import OptimalBinning
 
             ob = OptimalBinning(
                 name="score",
@@ -41,7 +43,8 @@ class OptBinningRating(RatingStrategy):
             )
             ob.fit(scores_dev, target_dev.astype(int))
         else:
-            from optbinning import ContinuousOptimalBinning
+            with sem_aviso_solver_cvxpy():
+                from optbinning import ContinuousOptimalBinning
 
             ob = ContinuousOptimalBinning(
                 name="score",
