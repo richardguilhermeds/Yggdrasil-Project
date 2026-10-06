@@ -53,7 +53,7 @@ def _base(task):
     f64[rng.random(N) < .07] = pd.NA
     df["x_f64"] = f64
     df["x_const"] = 3.0
-    df["x_flag_rara"] = (rng.random(N) < 0.004).astype(float)       # aviso de nível raro
+    df["x_flag_rara"] = (rng.random(N) < 0.004).astype(float)       # binária rara
     # 0/1 nos 10 mil primeiros observados da DES, contínua depois: optbinning
     # pelo caminho do recorte (numérico)
     df["x_tarde"] = np.where(i < 18_000, rng.integers(0, 2, N), rng.normal(5, 2, N))
@@ -111,6 +111,21 @@ def _roda(seg, seed=123, **kw):
     return r, estado, avisos
 
 
+def _aviso_no_preparo(monkeypatch):
+    """Aviso emitido no PREPARO (thread principal), como fazia o antigo aviso de
+    binária com nível raro: tem de sair igual em série e com o pool — o filtro
+    estreito das threads não pode calá-lo."""
+    orig = ModelSegmenter._bins_binaria
+
+    def bins_binaria(self, feature, fit, kind):
+        out = orig(self, feature, fit, kind)
+        if out is not None and feature == "x_flag_rara":
+            warnings.warn("aviso do preparo (teste): x_flag_rara")
+        return out
+
+    monkeypatch.setattr(ModelSegmenter, "_bins_binaria", bins_binaria)
+
+
 def _espia_pool(monkeypatch):
     """Conta os ajustes que foram ao pool e em quais threads rodaram."""
     vistos = []
@@ -152,6 +167,7 @@ def _espia_cpsat(monkeypatch):
 def test_ranking_n_jobs_1_igual_a_4(task, monkeypatch):
     vistos = _espia_pool(monkeypatch)
     cpsat = _espia_cpsat(monkeypatch)
+    _aviso_no_preparo(monkeypatch)
     s1, s4 = _monta(task, 1), _monta(task, 4)
     filtros = list(warnings.filters)
     r1, e1, w1 = _roda(s1)
@@ -179,9 +195,10 @@ def test_ranking_n_jobs_1_igual_a_4(task, monkeypatch):
     assert p1 == p4 and len(p1) >= 10
     # RNG global: a árvore saca dele, o nº de saques é o mesmo
     assert e1[0] == e4[0] and np.array_equal(e1[1], e4[1]) and e1[2:] == e4[2:]
-    # os mesmos avisos (nível raro, Decimal...) e nenhum vazado das threads
+    # os mesmos avisos (os do preparo saem na thread principal) e nenhum vazado
+    # das threads
     assert w1 == w4
-    assert any("nível raro" in m for _c, m in w1)
+    assert any("aviso do preparo" in m for _c, m in w1)
 
     # 2º ranking noutro max_n_bins: ajustes com os prebins (pedido "calado")
     n_antes = len(vistos)

@@ -2993,8 +2993,8 @@ class ModelSegmenter:
         encerrado com ``shutdown(wait=True)`` ANTES de restaurá-lo — inclusive
         numa interrupção. Preparar e finalizar ficam FORA do filtro: até o
         Python 3.13 os filtros são globais, e o ``catch_warnings`` que as
-        dependências do fit abrem nas threads poderia calar avisos da preparação
-        (nível raro etc.), que assim saem como no caminho em série.
+        dependências do fit abrem nas threads poderia calar avisos da preparação,
+        que assim saem como no caminho em série.
 
         O worker devolve ``(cortes, exceção)``. ``ValueError`` (inviável / sem
         corte) ⇒ ``[]``, calado como em :func:`_fit_optbinning_splits`; num
