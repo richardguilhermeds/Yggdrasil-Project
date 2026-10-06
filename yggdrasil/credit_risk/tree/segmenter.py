@@ -3149,10 +3149,16 @@ class TreeSegmenter:
         return self._agg_memo(("metrics", ck), lambda: self._compute_metrics(cutoff))
 
     def _compute_metrics(self, cutoff: float | None = None) -> pd.DataFrame:
+        leaf_ids = [sid for sid, s in self.segments.items() if s["is_leaf"]]
         if self._is_clf:
+            # classificação: caminho por contagens folha×amostra×classe (mesmo
+            # resultado, sem ordenar as N linhas por amostra). None = alguma
+            # pré-condição não vale → caminho antigo, literal, logo abaixo.
+            rapido = self._metrics_clf_contagens(cutoff, leaf_ids)
+            if rapido is not None:
+                return rapido
             from yggdrasil.metrics.classification import classification_metrics
 
-        leaf_ids = [sid for sid, s in self.segments.items() if s["is_leaf"]]
         if self.sample_col is not None:
             ref_mask = self._mask_ref
         else:
@@ -3215,6 +3221,191 @@ class TreeSegmenter:
                         "RMSE": round(float(np.sqrt(np.mean(err ** 2))), 4),
                         "R2": round(1 - ss_res / ss_tot, 4) if ss_tot > 0 else np.nan,
                     })
+            linhas.append(base)
+        return pd.DataFrame(linhas)
+
+    # dtypes do alvo em que o groupby.mean do caminho antigo acumula e divide em
+    # float64 (0/1 → soma inteira exata) — aí pos/(pos+neg) é o MESMO float.
+    # float32/Float32 dividem em float32; object/pyarrow têm outro caminho.
+    _METRICS_DTYPES_ANULAVEIS = (
+        pd.Int8Dtype, pd.Int16Dtype, pd.Int32Dtype, pd.Int64Dtype,
+        pd.UInt8Dtype, pd.UInt16Dtype, pd.UInt32Dtype, pd.UInt64Dtype,
+        pd.Float64Dtype,
+    )
+
+    def _metrics_clf_contagens(self, cutoff, leaf_ids):
+        """``metrics()`` da classificação a partir de contagens por folha.
+
+        O score de uma linha é o pd_map da sua folha, então dentro de cada
+        (folha, amostra) só importa quantos 1 e quantos 0 há. Um bincount
+        folha×amostra×classe (``_metrics_clf_tabela``) substitui o groupby/map
+        por linha, e as métricas saem de 2L linhas sintéticas (y=1 com peso pos,
+        y=0 com peso neg) com ``sample_weight`` no roc_curve/accuracy/f1 do
+        sklearn: as somas cumulativas ponderadas são os MESMOS inteiros do
+        caminho por linha, logo fpr/tpr/limiares/AUC/KS/corte e acurácia/F1
+        saem iguais bit a bit.
+
+        Devolve ``None`` (o chamador usa o caminho antigo, literal) quando a
+        tabela não pode ser montada (ver ``_metrics_clf_tabela``) ou em qualquer
+        exceção no cálculo (o caminho antigo reproduz a mesma)."""
+        tab = self._metrics_clf_tabela(leaf_ids)
+        if tab is None:
+            return None
+        try:
+            return self._metrics_clf_de_tabela(tab, cutoff)
+        except Exception:
+            return None
+
+    def _metrics_clf_tabela(self, leaf_ids):
+        """``(ids, pos, neg, score, coluna)`` do caminho por contagens, ou
+        ``None`` quando alguma pré-condição não vale.
+
+        ``pos``/``neg``: contagem de alvo 1/0 por folha (linha, na ordem de
+        ``ids``) × amostra (coluna ``coluna[a]``), com uma coluna EXTRA no fim
+        para as linhas SEM amostra (sample_col NaN/None/pd.NA).
+        ``score``: o pd_map do caminho antigo, folha a folha, no MESMO float.
+
+        ``None`` quando: códigos de amostra indisponíveis; alvo de dtype fora
+        da lista acima; alvo com valor fora de {0, 1} (o caminho antigo levanta
+        o ValueError do roc_curve) ou -0.0; NaN não mascarado em alvo Float64 (o
+        antigo o propaga); linha válida fora das contagens; ou qualquer exceção
+        na montagem (o caminho antigo reproduz a mesma)."""
+        if self.sample_col is not None and self._sample_codes is None:
+            return None
+        dt = self.df[self.target].dtype
+        if isinstance(dt, np.dtype):
+            if not (dt.kind in "biu" or dt == np.float64):
+                return None
+        elif not isinstance(dt, self._METRICS_DTYPES_ANULAVEIS):
+            return None
+        try:
+            return self._metrics_clf_tabela_calc(leaf_ids)
+        except Exception:
+            return None
+
+    def _metrics_clf_tabela_calc(self, leaf_ids):
+        # MESMA conversão do caminho antigo (lá feita por amostra)
+        y = self.df[self.target].to_numpy(dtype="float64")
+        ok_y = ~np.isnan(y)
+        # Float64 anulável pode carregar NaN NÃO mascarado (ex.: 0/0): isna() dá
+        # False e o groupby/mean antigo PROPAGA o NaN (média da folha NaN,
+        # overall pd.NA). Aqui ele viraria "ausente" — então só segue quando o
+        # NaN da conversão é exatamente o NA do pandas (numpy float64: isna ≡
+        # isnan; Int*/UInt*: só o NA mascarado).
+        if int((~ok_y).sum()) != int(self.df[self.target].isna().sum()):
+            return None
+        yv = y[ok_y]
+        if not ((yv == 0) | (yv == 1)).all() or np.signbit(yv).any():
+            return None
+        if self.sample_col is not None:
+            ref_mask = self._mask_ref
+        else:
+            ref_mask = pd.Series(True, index=self.df.index)
+        # overall: média do alvo de TODA a referência (órfãs incluídas), pela
+        # mesma expressão de antes (inclusive o tipo do NA de alvo anulável)
+        overall = self.df.loc[ref_mask, self.target].mean()
+
+        ids, code = self._leaf_codes(leaf_ids)
+        n_l = len(ids)
+        if self.sample_col is not None:
+            n_s = len(self._samples)
+            # coluna por amostra pela MESMA chave de dicionário do caminho
+            # antigo (_sample_masks[a] e _mask_ref = _sample_masks.get(ref))
+            coluna = {a: j for j, a in enumerate(self._samples)}
+            j_ref = coluna[self.ref_sample]
+            # linhas SEM amostra (sample_col NaN/None/pd.NA → código -1) vão
+            # para a coluna EXTRA n_s, não somem: o all_pd antigo é o groupby
+            # da folha sobre TODAS as linhas do df, com ou sem amostra
+            sc = np.where(self._sample_codes >= 0, self._sample_codes, n_s)
+        else:
+            n_s = 1
+            coluna = {}
+            j_ref = 0
+            sc = np.zeros(len(self.df), dtype=np.int32)
+        nb = n_s + 1
+        # órfãs (código -1) e alvo NaN saem ANTES de combinar os códigos
+        ok = (code >= 0) & ok_y
+        comb = code.astype(np.int64) * nb + sc
+        pos = np.bincount(comb[ok & (y == 1)], minlength=n_l * nb).reshape(n_l, nb)
+        neg = np.bincount(comb[ok & (y == 0)], minlength=n_l * nb).reshape(n_l, nb)
+        # garantia: TODA linha com folha e alvo válido (as sem amostra também)
+        # caiu numa célula — senão o fallback all_pd perderia linhas
+        if int(pos.sum()) + int(neg.sum()) != int(ok.sum()):
+            return None
+
+        # pd_map com o MESMO fallback do caminho antigo: referência → todas as
+        # linhas da folha (TODAS as colunas, inclusive a extra das sem amostra)
+        # → overall. Média de 0/1 = pos/(pos+neg), exata.
+        ref_pos, ref_cnt = pos[:, j_ref], pos[:, j_ref] + neg[:, j_ref]
+        all_pos = pos.sum(axis=1)
+        all_cnt = all_pos + neg.sum(axis=1)
+        score = np.empty(n_l, dtype="float64")
+        for k in range(n_l):
+            if ref_cnt[k] > 0:
+                v = ref_pos[k] / ref_cnt[k]
+            elif all_cnt[k] > 0:
+                v = all_pos[k] / all_cnt[k]
+            else:
+                v = np.nan
+            score[k] = float(v) if pd.notna(v) else float(overall)
+        return ids, pos, neg, score, coluna
+
+    def _metrics_clf_de_tabela(self, tab, cutoff):
+        from sklearn.metrics import (accuracy_score, auc as _auc, f1_score,
+                                     roc_curve)
+        ids, pos, neg, score, coluna = tab
+        # folhas com score NaN (overall NaN) ficam fora, como o filtro `valid`
+        com_score = ~np.isnan(score)
+
+        if self.sample_col is not None:
+            ordem = ([self.ref_sample]
+                     + [a for a in self._samples if a != self.ref_sample])
+            grupos = [(a, self._sample_masks[a], coluna[a]) for a in ordem]
+        else:
+            grupos = [("todos", pd.Series(True, index=self.df.index), 0)]
+
+        def _r6(v):
+            # mesmo arredondamento de classification_metrics (digits=6)
+            return round(float(v), 6) if np.isfinite(v) else float("nan")
+
+        def _metrics_from_table(p, q, s):
+            # métricas de UMA amostra a partir das contagens por folha
+            n_pos, n_neg = int(p.sum()), int(q.sum())
+            if n_pos + n_neg == 0:
+                return {"taxa_default": np.nan, "KS": np.nan, "AUC": np.nan,
+                        "Gini": np.nan, "Acuracia": np.nan, "F1": np.nan}
+            # linhas sintéticas SÓ com peso > 0 (classe sem linhas não vira
+            # rótulo; o sklearn também descartaria, mas sem gerar limiar)
+            m1, m0 = p > 0, q > 0
+            y_g = np.r_[np.ones(int(m1.sum())), np.zeros(int(m0.sum()))]
+            s_g = np.r_[s[m1], s[m0]]
+            w_g = np.r_[p[m1], q[m0]].astype("float64")
+            # classe única: olha os TOTAIS (como o np.unique(y)<2 do _roc_pack)
+            if n_pos > 0 and n_neg > 0:
+                fpr, tpr, thr = roc_curve(y_g, s_g, sample_weight=w_g)
+                auc_v = float(_auc(fpr, tpr))
+                jj = int(np.argmax(tpr - fpr))
+                ks = float(tpr[jj] - fpr[jj])
+                corte_ks = float(thr[jj]) if np.isfinite(thr[jj]) else 1.0
+                gini = 2 * auc_v - 1
+            else:
+                auc_v = gini = ks = float("nan")
+                corte_ks = 0.5
+            corte = corte_ks if cutoff is None else float(cutoff)
+            y_pred = (s_g >= corte).astype(int)
+            return {
+                "taxa_default": round(float(n_pos / (n_pos + n_neg)), 4),
+                "KS": _r6(ks), "AUC": _r6(auc_v), "Gini": _r6(gini),
+                "Acuracia": _r6(accuracy_score(y_g, y_pred, sample_weight=w_g)),
+                "F1": _r6(f1_score(y_g, y_pred, zero_division=0,
+                                   sample_weight=w_g)),
+            }
+
+        linhas = []
+        for nome, mask, j in grupos:
+            base = {"amostra": nome, "n": int(mask.sum())}
+            base.update(_metrics_from_table(pos[com_score, j], neg[com_score, j],
+                                            score[com_score]))
             linhas.append(base)
         return pd.DataFrame(linhas)
 
