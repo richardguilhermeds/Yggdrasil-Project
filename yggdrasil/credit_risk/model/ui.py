@@ -135,23 +135,16 @@ _CSS = """
 .pill-yellow { background-color:var(--warn-bg); color:var(--warn-ink); }
 .pill-red    { background-color:var(--bad-bg); color:var(--bad-ink); }
 .mseg-legend { font-size:11px; color:var(--muted); margin:6px 0 2px; line-height:1.55; }
-/* aba Análise de variáveis: destaque de quem está no modelo. Faixa de status
-   + seções tingidas (verde = no modelo treinado · azul = selecionada, ainda fora
-   do modelo). Só longhands: var() em atalho não re-resolve no toggle de tema. */
+/* aba Análise de variáveis: faixa de status de quem está no modelo (verde = no
+   modelo treinado; selecionada ou fora = neutro). As seções da aba NÃO são
+   tingidas — mantêm o fundo de sempre. Só longhands: var() em atalho não
+   re-resolve no toggle de tema. */
 .mseg-an-status { margin:8px 0 4px 0; padding:8px 12px; border-radius:10px;
   font-size:12.5px; line-height:1.5; border-left-width:4px; border-left-style:solid;
   border-left-color:var(--line); background-color:var(--tile-bg); color:var(--muted); }
 .mseg-an-status b { font-weight:600; }
 .mseg-an-status.st-modelo { background-color:var(--ok-bg); border-left-color:var(--ok-ink);
   color:var(--ok-ink); }
-.mseg-an-status.st-sel { background-color:var(--info-bg); border-left-color:var(--info-ink);
-  color:var(--info-ink); }
-.mseg-an-sec { border-radius:10px; padding:6px 8px; border-left-width:4px;
-  border-left-style:solid; border-left-color:transparent; box-sizing:border-box; }
-.mseg-var-modelo .mseg-an-sec { background-color:var(--ok-bg); border-left-color:var(--ok-ink); }
-.mseg-var-modelo .mseg-an-sec .mseg-h { color:var(--ok-ink); }
-.mseg-var-sel .mseg-an-sec { background-color:var(--info-bg); border-left-color:var(--info-ink); }
-.mseg-var-sel .mseg-an-sec .mseg-h { color:var(--info-ink); }
 /* card "Categorizar a variável na mão": passos numerados, faltantes e faixas */
 .mseg-step { margin-top:12px; padding-top:10px; border-top-width:1px;
   border-top-style:dashed; border-top-color:var(--line); }
@@ -1067,18 +1060,14 @@ class ModelSegmenterUI:
         return self._MARCA_AN.get(self._status_var_modelo(feat), "") + self.seg.label(feat)
 
     def _sync_an_destaque(self):
-        """Pinta a aba Análise conforme a variável em tela: faixa de status +
-        seções em verde (no modelo) ou azul (selecionada). Barato — só troca
-        classes CSS e um HTML curto, sem recalcular nada."""
+        """Faixa de status da aba Análise para a variável em tela (verde se está
+        no modelo treinado; neutra se só selecionada ou fora). As seções da aba
+        não são tingidas. Barato — só um HTML curto, sem recalcular nada."""
         tab = getattr(self, "_tab_an", None)
         if tab is None or getattr(self, "dd_var2", None) is None:
             return
         feat = self.dd_var2.value
         st = self._status_var_modelo(feat) if feat is not None else None
-        for cls in ("mseg-var-modelo", "mseg-var-sel"):
-            tab.remove_class(cls)
-        if st:
-            tab.add_class(f"mseg-var-{st}")
         if feat is None:
             self.out_an_status.value = ""
             return
@@ -1099,7 +1088,7 @@ class ModelSegmenterUI:
         else:
             txt = (f"<b>{nome}</b> está fora do modelo — análise exploratória. "
                    "Para usá-la, inclua na aba Variáveis.")
-        cls = {"modelo": " st-modelo", "sel": " st-sel"}.get(st, "")
+        cls = " st-modelo" if st == "modelo" else ""
         nota = ""
         if s.amostra_graficos_ativa():
             n_am = f"{int(s.max_linhas_graficos):,}".replace(",", ".")
@@ -1775,12 +1764,8 @@ class ModelSegmenterUI:
         # distribuição AO LADO da tabela por faixa + inversão entre amostras (chart menor)
         # grade 3x2 da "Análise de variáveis"
         def _col(titulo, out, width="49%"):
-            # .mseg-an-sec: a seção ganha o tom verde/azul quando a variável
-            # analisada está no modelo (ver _sync_an_destaque)
-            box = W.VBox([W.HTML(f"<div class='mseg-h'>{titulo}</div>"), out],
-                         layout=W.Layout(width=width))
-            box.add_class("mseg-an-sec")
-            return box
+            return W.VBox([W.HTML(f"<div class='mseg-h'>{titulo}</div>"), out],
+                          layout=W.Layout(width=width))
         _row = lambda a, b: W.HBox(
             [a, b], layout=W.Layout(justify_content="space-between", align_items="flex-start"))
         # aba unificada (mesmas seções/ordem do TreeSegmenterUI):
@@ -1801,7 +1786,7 @@ class ModelSegmenterUI:
                           "(numéricas: optimal binning · categóricas: faixas da variável)", self.out_an_optbin_share,
                           width="100%")
         # faixa de status logo abaixo do seletor: diz se a variável em tela está no
-        # modelo (verde), só selecionada (azul) ou fora (neutro)
+        # modelo treinado (verde), só selecionada ou fora (neutro)
         self.out_an_status = W.HTML()
         tab_an = W.VBox([
             W.HBox([self.dd_var2, self.tg_an_iv, self.dd_sample2, self.tx_time2,

@@ -1,7 +1,8 @@
 """Destaque, na aba "Análise de variáveis", das variáveis que estão no modelo.
 
-* ModelSegmenterUI: ✓ = no modelo treinado (verde) · ● = selecionada, ainda
-  fora do modelo (azul) · sem marca = fora da seleção.
+* ModelSegmenterUI: ✓ = no modelo treinado (faixa de status verde) · ● =
+  selecionada, ainda fora do modelo · sem marca = fora da seleção. As seções da
+  aba não são tingidas (nem verde, nem azul): mantêm o fundo de sempre.
 * TreeSegmenterUI: ✓ = usada em alguma quebra da árvore (verde); o destaque
   segue a variável ANALISADA (a que está em tela).
 """
@@ -31,6 +32,17 @@ def _df(n=2500, seed=0):
 
 def _classes(w):
     return set(w._dom_classes)
+
+
+def _classes_arvore(w):
+    """Classes de ``w`` e de todos os widgets dentro dele."""
+    out = set(w._dom_classes)
+    for c in getattr(w, "children", ()) or ():
+        out |= _classes_arvore(c)
+    return out
+
+
+_TINTA_MODEL = {"mseg-an-sec", "mseg-var-modelo", "mseg-var-sel"}
 
 
 # ───────────────────────── ModelSegmenterUI ─────────────────────────
@@ -70,26 +82,35 @@ def test_model_modelo_treinado_fica_verde_e_marcado(mui):
     assert not _rotulo(ui, "ruido")[:2] in ("✓ ", "● ")
 
     _ver(ui, "score")
-    assert "mseg-var-modelo" in _classes(ui._tab_an)
+    assert not (_TINTA_MODEL & _classes_arvore(ui._tab_an))      # seções sem tinta
     assert "st-modelo" in ui.out_an_status.value and "modelo treinado" in ui.out_an_status.value
 
     _ver(ui, "garantia")
-    assert "mseg-var-sel" in _classes(ui._tab_an)
-    assert "mseg-var-modelo" not in _classes(ui._tab_an)
+    assert not (_TINTA_MODEL & _classes_arvore(ui._tab_an))
+    assert "st-" not in ui.out_an_status.value                   # faixa neutra, sem azul
     assert "próximo re-treino" in ui.out_an_status.value
 
     _ver(ui, "ruido")
-    assert not ({"mseg-var-modelo", "mseg-var-sel"} & _classes(ui._tab_an))
+    assert not (_TINTA_MODEL & _classes_arvore(ui._tab_an))
+    assert "st-" not in ui.out_an_status.value
     assert "fora do modelo" in ui.out_an_status.value
 
 
-def test_model_sem_treino_selecionada_fica_azul(mui):
+def test_model_sem_treino_selecionada_fica_neutra(mui):
     ui = mui
     ui.seg.include("score")
     ui._refresh_bar()
     _ver(ui, "score")
-    assert "mseg-var-sel" in _classes(ui._tab_an)
+    assert not (_TINTA_MODEL & _classes_arvore(ui._tab_an))
+    assert "st-" not in ui.out_an_status.value
     assert "ainda não foi treinado" in ui.out_an_status.value
+
+
+def test_model_css_sem_tinta_azul_nas_secoes():
+    from yggdrasil.credit_risk.model import ui as mui_mod
+    css = mui_mod._CSS
+    assert not any(c in css for c in _TINTA_MODEL)
+    assert "st-sel" not in css
 
 
 def test_model_marcas_acompanham_inclusao_e_preservam_selecao(mui):
@@ -104,7 +125,7 @@ def test_model_marcas_acompanham_inclusao_e_preservam_selecao(mui):
         ui._on_include_var(None)
     assert _rotulo(ui, "ruido").startswith("● ")
     assert ui.dd_var2.value == "ruido"                         # mesma variável em tela
-    assert "mseg-var-sel" in _classes(ui._tab_an)
+    assert "está selecionada" in ui.out_an_status.value
 
 
 def test_model_marca_convive_com_ordenacao_por_iv(mui):
