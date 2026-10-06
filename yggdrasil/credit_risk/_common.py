@@ -218,3 +218,76 @@ def eh_booleana(serie) -> bool:
         return True
     return serie.dtype == object and pd.api.types.infer_dtype(serie, skipna=True) == "boolean"
 
+
+
+def copy_on_write_garantido() -> bool:
+    """O Copy-on-Write do pandas está ATIVO agora? ``True`` só com pandas >= 3
+    (CoW é o único modo) ou pandas 2.x com ``pd.options.mode.copy_on_write is
+    True`` — identidade, como o próprio ``using_copy_on_write`` do pandas: o
+    ``'warn'`` do 2.2 é string truthy mas NÃO é CoW, e o ArrayManager do 2.0/2.1
+    também não o aplica. pandas 1.x: nunca (CoW experimental e incompleto).
+
+    Só LÊ a opção — a lib nunca liga o CoW (é um efeito global na sessão do
+    usuário: atribuição encadeada deixa de valer e ``.values`` vira só-leitura)."""
+    try:
+        maior = int(str(pd.__version__).split(".")[0])
+    except (TypeError, ValueError):
+        return False
+    if maior >= 3:
+        return True
+    if maior < 2:
+        return False
+    try:
+        if pd.options.mode.copy_on_write is not True:
+            return False
+        from pandas._config import using_copy_on_write
+        return using_copy_on_write() is True
+    except Exception:  # noqa: BLE001 - opção/API ausente: trata como sem CoW
+        return False
+
+
+def _buffer_como_copia(v) -> bool:
+    """O buffer de um bloco já tem o layout que ``.copy()`` (profundo) produziria?
+    Contíguo em C e gravável — ndarray do bloco, ``_ndarray`` dos NDArrayBacked
+    (Categorical, datetime/period, string[python], NumpyExtensionArray) ou
+    ``_data``/``_mask`` dos mascarados (Int64/Float64/boolean). O Arrow é imutável
+    e o ``.copy()`` dele devolve o mesmo ChunkedArray. Qualquer outro tipo:
+    ``False`` (a cópia rasa não é garantidamente idêntica)."""
+    if isinstance(v, np.ndarray):
+        return bool(v.flags.c_contiguous and v.flags.writeable)
+    if hasattr(v, "_pa_array"):
+        return True
+    nd = getattr(v, "_ndarray", None)
+    if isinstance(nd, np.ndarray):
+        return bool(nd.flags.c_contiguous and nd.flags.writeable)
+    dados, mascara = getattr(v, "_data", None), getattr(v, "_mask", None)
+    if isinstance(dados, np.ndarray) and isinstance(mascara, np.ndarray):
+        return all(bool(a.flags.c_contiguous and a.flags.writeable) for a in (dados, mascara))
+    return False
+
+
+def copia_df(df: pd.DataFrame) -> pd.DataFrame:
+    """``df.copy()`` que, sob Copy-on-Write GARANTIDO (:func:`copy_on_write_garantido`),
+    é RASA — sem duplicar a base (~8 GB a 10M linhas × 100 colunas).
+
+    Com CoW o pandas copia o bloco na 1ª escrita de qualquer um dos lados, então
+    o isolamento entre a cópia e o original continua total. Para o resultado
+    ficar IDÊNTICO ao da cópia profunda (que consolida os blocos e devolve
+    buffers contíguos em C e graváveis), a cópia rasa é consolidada do mesmo
+    jeito — só os grupos fragmentados são fundidos (memória nova só para eles;
+    sem isso, inserir derivadas numa base fragmentada emitiria o
+    PerformanceWarning "highly fragmented") — e cada bloco compartilhado precisa
+    já ter o layout da cópia (:func:`_buffer_como_copia`): sum/BLAS sobre
+    coluna com passo ≠ 1 arredondam diferente. Falhou qualquer guarda (ou
+    API interna ausente): cópia profunda, como sempre. Sem CoW: cópia profunda —
+    desligar o CoW DEPOIS de copiar com ele ligado quebra o isolamento."""
+    if not copy_on_write_garantido():
+        return df.copy()
+    try:
+        out = df.copy(deep=False)
+        out._consolidate_inplace()
+        if all(_buffer_como_copia(b.values) for b in out._mgr.blocks):
+            return out
+    except Exception:  # noqa: BLE001 - API interna do pandas mudou: caminho antigo
+        pass
+    return df.copy()

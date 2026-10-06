@@ -57,6 +57,7 @@ from .._common import (
     sql_texto as _sql_texto,
     eh_booleana as _eh_booleana,
     _amostra_optbinning,
+    copia_df as _copia_df,
 )
 from .. import _common as _common_mod   # OPTBINNING_MAX_ROWS lido na hora
 
@@ -1532,7 +1533,13 @@ class ModelSegmenter:
         if target not in df.columns:
             raise ValueError(f"Alvo '{target}' não está no DataFrame.")
 
-        self.df = df.copy()
+        # cópia RASA só com Copy-on-Write garantido (pandas >= 3, ou a opção
+        # ligada pelo usuário no 2.x) e com o layout de blocos da cópia profunda
+        # (ver _common.copia_df): o pandas copia o bloco na 1ª escrita de qualquer
+        # lado, então escrever no df do usuário depois não chega aqui e vice-versa,
+        # sem duplicar a base. Sem CoW, a cópia profunda de sempre — a lib nunca
+        # liga o CoW, e desligá-lo depois de construir quebraria o isolamento.
+        self.df = _copia_df(df)
         # Decimal (DecimalType do toPandas) no alvo/candidatas é lido como
         # CATEGÓRICO: cada valor distinto vira um nível do one-hot denso (é o
         # que derruba o driver em base grande). Avisa em vez de converter: a
@@ -1609,7 +1616,12 @@ class ModelSegmenter:
         if sample_col is not None:
             if sample_col not in self.df.columns:
                 raise ValueError(f"Coluna de amostra '{sample_col}' não está no DataFrame.")
-            amostras = self.df[sample_col].dropna().unique().tolist()
+            unicas = self.df[sample_col].dropna().unique()
+            amostras = unicas.tolist()
+            # semeia o memo de _samples() com a MESMA expressão de lá (list() do
+            # unique, que mantém np.int64/np.datetime64 — o .tolist() acima vira
+            # tipo Python e é só para a mensagem/print)
+            self._samples_cache = [ref_sample] + [a for a in list(unicas) if a != ref_sample]
             if ref_sample not in amostras:
                 raise ValueError(
                     f"Amostra de referência '{ref_sample}' não encontrada em "
@@ -9783,7 +9795,7 @@ class ModelSegmenter:
     # ------------------------------------------------------------------
     def assign(self, col_score="score", col_rating="rating") -> pd.DataFrame:
         """Cópia do df com o score e o rating de cada linha."""
-        out = self.df.copy()
+        out = _copia_df(self.df)       # rasa só sob CoW (ver _common.copia_df)
         if self.score_ is not None:
             out[col_score] = self._to_points(self.score_)       # escala de negócio
         if self.rating_ is not None:
@@ -10498,7 +10510,7 @@ class ModelSegmenter:
                 if self.var_meta.get(n, {}).get("derived_from") and n not in X.columns]
         if not need:
             return X
-        X = X.copy()
+        X = _copia_df(X)               # rasa só sob CoW (ver _common.copia_df)
         for n in need:
             meta = self.var_meta[n]; src = meta["derived_from"]
             if src not in X.columns:
@@ -10537,7 +10549,7 @@ class ModelSegmenter:
                        f"{n:,} linhas".replace(",", "."))
         scored = self.predict(pdf, col_score=col_score, col_rating=col_rating,
                               col_value=col_value, ruler_sample=ruler_sample)
-        out = pdf.copy()
+        out = _copia_df(pdf)           # rasa só sob CoW (ver _common.copia_df)
         for c in scored.columns:
             out[c] = scored[c].to_numpy()
         _emit_progress(progress_callback, "score", "Escorar (score + rating)", "ok",
