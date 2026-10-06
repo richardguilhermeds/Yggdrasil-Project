@@ -56,6 +56,7 @@ from .._common import (
     count_inversions as _count_inversions,
     fit_optbinning_splits as _fit_optbinning_splits,
     _amostra_optbinning,
+    _cpsat_um_worker,
     psi_from_shares as _psi_from_shares,
     sql_texto as _sql_texto,
     eh_booleana as _eh_booleana,
@@ -121,7 +122,8 @@ def _fit_splits_na_thread(b, x, y, falhas) -> list:
     interrupção (ver :meth:`TreeSegmenter._bins_iv_resolvedor`). Com avisos por
     contexto (``sys.flags.context_aware_warnings``, 3.14+) os filtros da thread
     principal não chegam aqui — aí o ``catch_warnings`` local é seguro e é usado.
-    ``np.errstate`` é por thread e fica.
+    ``np.errstate`` é por thread e fica — assim como o CP-SAT com 1 worker
+    (:func:`_cpsat_um_worker`, contador por thread: tem de entrar NO worker).
 
     x/y já vêm amostrados (``_resolve_bins_preparar(amostrar=True)``). Mesma
     política de erro: ``ValueError`` (inviável / sem corte) → ``[]`` calado;
@@ -131,10 +133,10 @@ def _fit_splits_na_thread(b, x, y, falhas) -> list:
         if getattr(sys.flags, "context_aware_warnings", False):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                with np.errstate(divide="ignore", invalid="ignore"):
+                with np.errstate(divide="ignore", invalid="ignore"), _cpsat_um_worker():
                     b.fit(x, y)
         else:
-            with np.errstate(divide="ignore", invalid="ignore"):
+            with np.errstate(divide="ignore", invalid="ignore"), _cpsat_um_worker():
                 b.fit(x, y)
         return list(b.splits)
     except ValueError:

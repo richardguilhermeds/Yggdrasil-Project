@@ -57,6 +57,7 @@ from .._common import (
     sql_texto as _sql_texto,
     eh_booleana as _eh_booleana,
     _amostra_optbinning,
+    _cpsat_um_worker,
     copia_df as _copia_df,
 )
 from .. import _common as _common_mod   # OPTBINNING_MAX_ROWS lido na hora
@@ -8600,7 +8601,11 @@ class ModelSegmenter:
         wf = self._rating_frame()
         cfg = self._make_cfg("_amostra")
         fit_df = wf[wf["score"].notna() & wf[self.target].notna()]
-        strat.fit(fit_df, cfg, problem_type=self.task_type)
+        # régua 'optbin' ajusta OptimalBinning dentro de ratings/: o CP-SAT roda
+        # com 1 worker (mesmo score ⇒ mesmos cortes, inclusive em empate); nas
+        # demais estratégias o escopo é inócuo (não criam solver)
+        with _cpsat_um_worker():
+            strat.fit(fit_df, cfg, problem_type=self.task_type)
         self.rating_ = strat.transform(wf, cfg)
         self.rating_strategy = strat
         self.rating_col_ = strat.column

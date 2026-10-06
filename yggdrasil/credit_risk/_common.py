@@ -11,6 +11,9 @@ módulos e já haviam começado a **divergir** (guard de NaN no PSI, default de
 """
 from __future__ import annotations
 
+import contextlib
+import threading
+import types
 import warnings
 
 import numpy as np
@@ -150,6 +153,100 @@ def _amostra_optbinning(n, max_rows=None):
     return None
 
 
+# ---- CP-SAT do optbinning com 1 worker (determinismo) ----
+# O optbinning cria o solver em ``optbinning.binning.cp`` (``BinningCP.solve``,
+# herdado pelo ContinuousBinningCP) com ``cp_model.CpSolver()`` fixando só o
+# tempo máximo: o CP-SAT usa então TODOS os núcleos em paralelo e, quando há
+# EMPATE de ótimo, devolve soluções diferentes entre execuções (ex.: grupos
+# {2.00}/{0.1, 0.10} × {2.00, 0.1}/{0.10} numa categórica). Com 1 worker a busca
+# é determinística — mesmo (x, y) ⇒ mesmos cortes — e, nestes modelos pequenos
+# (≤ max_n_prebins faixas), até mais rápida; os núcleos ficam livres para
+# paralelizar ENTRE variáveis (n_jobs).
+#
+# Desenho: só o nome ``cp_model`` DENTRO de ``optbinning.binning.cp`` passa a
+# apontar para um proxy que delega tudo ao módulo real do OR-Tools, exceto
+# ``CpSolver``: uma subclasse que fixa 1 worker SÓ quando a thread corrente está
+# dentro de um ajuste da lib (contador POR THREAD, :func:`_cpsat_um_worker`).
+# Fora disso — ajustes do próprio usuário, outras threads — o solver nasce igual
+# ao original, e o ``cp_model`` global do OR-Tools fica intocado. Preferido a
+# trocar/restaurar o atributo a cada ajuste com contador global + lock porque
+# (a) a troca valeria também para ajustes de OUTRAS threads do usuário enquanto
+# a lib ajusta e (b) nada é trocado por ajuste: as threads do lote paralelo só
+# mexem no próprio contador, sem corrida. A instalação é única (lock + flag) e
+# idempotente (inclusive após reload deste módulo); se o layout do optbinning
+# mudar (sem ``binning.cp.cp_model``), não instala e o ajuste segue como antes.
+# OPTBINNING_CPSAT_WORKERS é lido na criação de cada solver; 0/None devolve o
+# padrão do optbinning (todos os núcleos, não determinístico em empate).
+OPTBINNING_CPSAT_WORKERS = 1
+
+_CPSAT_TLS = threading.local()        # .n = profundidade de ajustes da lib nesta thread
+_CPSAT_LOCK = threading.Lock()
+_CPSAT_INSTALADO = False
+
+
+class _CpModelProxy(types.ModuleType):
+    """Fachada do ``ortools.sat.python.cp_model`` vista só pelo
+    ``optbinning.binning.cp``: tudo vem do módulo real (``__getattr__``), menos
+    ``CpSolver`` — subclasse que, dentro de :func:`_cpsat_um_worker`, nasce com
+    :data:`OPTBINNING_CPSAT_WORKERS` workers."""
+
+    def __init__(self, real):
+        super().__init__(real.__name__, real.__doc__)
+        self._yg_real = real
+
+        class CpSolver(real.CpSolver):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                w = OPTBINNING_CPSAT_WORKERS
+                if w and getattr(_CPSAT_TLS, "n", 0):
+                    try:
+                        self.parameters.num_workers = int(w)
+                    except AttributeError:   # OR-Tools antigo: só o nome velho
+                        self.parameters.num_search_workers = int(w)
+
+        CpSolver.__qualname__ = "CpSolver"
+        self.CpSolver = CpSolver
+
+    def __getattr__(self, nome):
+        return getattr(self._yg_real, nome)
+
+
+def _instala_cpsat_um_worker() -> bool:
+    """Instala (uma vez) o :class:`_CpModelProxy` em ``optbinning.binning.cp``.
+    Devolve ``False`` se o optbinning não tiver o layout esperado."""
+    global _CPSAT_INSTALADO
+    if _CPSAT_INSTALADO:
+        return True
+    with _CPSAT_LOCK:
+        if _CPSAT_INSTALADO:
+            return True
+        try:
+            import optbinning.binning.cp as ob_cp
+            atual = ob_cp.cp_model
+            real = atual.__dict__.get("_yg_real", atual)   # proxy de um reload anterior
+            if not isinstance(real, types.ModuleType) or not hasattr(real, "CpSolver"):
+                return False
+            ob_cp.cp_model = _CpModelProxy(real)
+        except Exception:
+            return False
+        _CPSAT_INSTALADO = True
+        return True
+
+
+@contextlib.contextmanager
+def _cpsat_um_worker():
+    """Escopo de um ajuste da lib: os ``CpSolver`` que o optbinning criar NESTA
+    thread nascem com :data:`OPTBINNING_CPSAT_WORKERS` workers. Reentrante e
+    por thread (seguro no ``ThreadPoolExecutor`` dos lotes paralelos)."""
+    _instala_cpsat_um_worker()
+    tls = _CPSAT_TLS
+    tls.n = getattr(tls, "n", 0) + 1
+    try:
+        yield
+    finally:
+        tls.n -= 1
+
+
 def fit_optbinning_splits(b, x, y, max_rows=None, idx=None) -> list:
     """Roda ``b.fit(x, y)`` e devolve ``list(b.splits)``.
 
@@ -164,7 +261,8 @@ def fit_optbinning_splits(b, x, y, max_rows=None, idx=None) -> list:
     ``max_rows`` (padrão :data:`OPTBINNING_MAX_ROWS`): com mais linhas, ajusta
     numa amostra aleatória de ``max_rows`` (semente fixa). ``idx`` (opcional):
     posições já sorteadas (:func:`_amostra_optbinning`) — com ``None`` o sorteio
-    é feito aqui, exatamente como antes."""
+    é feito aqui, exatamente como antes. O CP-SAT do ajuste roda com 1 worker
+    (:func:`_cpsat_um_worker`): mesmo (x, y) ⇒ mesmos cortes, inclusive em empate."""
     if idx is None:
         idx = _amostra_optbinning(len(x), max_rows)
     if idx is not None:
@@ -173,7 +271,7 @@ def fit_optbinning_splits(b, x, y, max_rows=None, idx=None) -> list:
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            with np.errstate(divide="ignore", invalid="ignore"):
+            with np.errstate(divide="ignore", invalid="ignore"), _cpsat_um_worker():
                 b.fit(x, y)
         return list(b.splits)
     except ValueError:
