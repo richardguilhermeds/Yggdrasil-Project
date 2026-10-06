@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import html as _html
 import re
+from collections import OrderedDict
 from contextlib import contextmanager
 
 import numpy as np
@@ -983,7 +984,12 @@ class TreeSegmenterUI:
         # copy=False: o segmentador compartilha os dados do df da UI em vez de
         # duplicar a base na RAM (ver a docstring da classe: não altere o df
         # in-place com a UI aberta)
-        self.seg = TreeSegmenter(df, copy=False, **self._kwargs)
+        # n_jobs: os ajustes do optbinning do IV (painel e sugestões) rodam em
+        # threads — até 8, sem passar dos núcleos da máquina. Fora do _kwargs
+        # (como o copy) e não persistido no JSON da árvore.
+        import os
+        self._n_jobs = min(os.cpu_count() or 1, 8)
+        self.seg = TreeSegmenter(df, copy=False, n_jobs=self._n_jobs, **self._kwargs)
         self.locked: set = set()
         # guarda do seletor de lado do "mover corte": trocar as options dispara o
         # observer, que não deve re-sincronizar enquanto a sincronia está em curso
@@ -1040,8 +1046,11 @@ class TreeSegmenterUI:
         # cache do PNG (base64) do histograma da folha, por (sid, versão da árvore)
         self._leaf_hist_cache: dict = {}
         # cache do IV por variável usado pelo "ordenar por IV" dos seletores,
-        # por (sid, versão da árvore) — lazy: só calcula com o toggle ligado
+        # pela MÁSCARA da folha (ver _iv_entry) — lazy: só calcula com o toggle ligado
         self._iv_sort_cache: dict = {}
+        # variable_iv (DataFrame) do painel de IV e da janelinha de IV do canvas,
+        # também pela máscara da folha (ver _iv_df)
+        self._iv_df_cache: dict = {}
         # contrapartida de cada <img> nos dois temas (ver _fig_html/_on_dark): o
         # toggle troca a tag no lugar, sem refazer o cálculo que gerou a figura
         self._fig_escuro: dict = {}      # <img> claro  -> <img> escuro
@@ -3212,19 +3221,34 @@ class TreeSegmenterUI:
         if a not in sm or b not in sm:
             return name, float("nan"), 0, 0
         leaf = self.seg.segments[sid]["mask"]
+        # memo por (máscara da folha, a, b, teste, min_n): o cabeçalho e a tabela
+        # de folhas refazem este teste a cada render. A máscara da folha é trocada
+        # sempre que a folha é refeita; ela e as das amostras ficam no valor e são
+        # conferidas com `is` (id não reciclado; o reset troca as das amostras).
+        cache = self.__dict__.setdefault("_sample_test_cache", {})
+        key = (id(leaf), a, b, self.dd_test.value, min_n)
+        hit = cache.get(key)
+        if (hit is not None and hit[0] is leaf and hit[1] is sm[a]
+                and hit[2] is sm[b]):
+            return hit[3]
         va = self.df.loc[leaf & sm[a], self.target].dropna().to_numpy()
         vb = self.df.loc[leaf & sm[b], self.target].dropna().to_numpy()
         if len(va) < min_n or len(vb) < min_n:
-            return name, float("nan"), len(va), len(vb)
-        try:
-            from scipy.stats import mannwhitneyu, ttest_ind
-            if self.dd_test.value == "welch":
-                p = float(ttest_ind(va, vb, equal_var=False).pvalue)
-            else:
-                p = float(mannwhitneyu(va, vb, alternative="two-sided").pvalue)
-        except Exception:
-            p = float("nan")
-        return name, p, len(va), len(vb)
+            res = (name, float("nan"), len(va), len(vb))
+        else:
+            try:
+                from scipy.stats import mannwhitneyu, ttest_ind
+                if self.dd_test.value == "welch":
+                    p = float(ttest_ind(va, vb, equal_var=False).pvalue)
+                else:
+                    p = float(mannwhitneyu(va, vb, alternative="two-sided").pvalue)
+            except Exception:
+                p = float("nan")
+            res = (name, p, len(va), len(vb))
+        if len(cache) > 4096:                      # backstop de memória
+            cache.clear()
+        cache[key] = (leaf, sm[a], sm[b], res)
+        return res
 
     def _sibling_adjacent_tests(self, sid):
         """Teste de alvo (na amostra DES) entre a folha e cada IRMÃ TERMINAL
@@ -3804,12 +3828,40 @@ class TreeSegmenterUI:
             return float("nan")
         leaf = self.seg.segments[sid]["mask"]
         s_mask = self._sample_masks[sample]
-        n_ref, n_s = int(ref_mask.sum()), int(s_mask.sum())
+        # memo por (máscara do nó, amostra, eps): _tree_html, o canvas e o
+        # cabeçalho pedem o MESMO (nó, amostra) várias vezes por render, e cada
+        # conta varre máscaras full-length. As três máscaras ficam no valor e
+        # são conferidas com `is`. Não lê a matriz de _append_psi_cols: ela
+        # arredonda a 4 casas e mudaria a cor na fronteira 0,10/0,25.
+        cache = self.__dict__.setdefault("_leaf_psi_cache", {})
+        key = (id(leaf), sample, eps)
+        hit = cache.get(key)
+        if (hit is not None and hit[0] is leaf and hit[1] is ref_mask
+                and hit[2] is s_mask):
+            return hit[3]
+        n_ref, n_s = self._sample_n(self.ref_sample), self._sample_n(sample)
         if n_ref == 0 or n_s == 0:
-            return float("nan")
-        p_ref = max((leaf & ref_mask).sum() / n_ref, eps)
-        p_cur = max((leaf & s_mask).sum() / n_s, eps)
-        return float((p_cur - p_ref) * math.log(p_cur / p_ref))
+            val = float("nan")
+        else:
+            p_ref = max((leaf & ref_mask).sum() / n_ref, eps)
+            p_cur = max((leaf & s_mask).sum() / n_s, eps)
+            val = float((p_cur - p_ref) * math.log(p_cur / p_ref))
+        if len(cache) > 4096:                      # backstop de memória
+            cache.clear()
+        cache[key] = (leaf, ref_mask, s_mask, val)
+        return val
+
+    def _sample_n(self, sample):
+        """``int(máscara.sum())`` da amostra — fixa por segmentador: calculada uma
+        vez por máscara (conferida com `is`; o reset troca as máscaras)."""
+        m = self._sample_masks[sample]
+        cache = self.__dict__.setdefault("_sample_n_cache", {})
+        hit = cache.get(sample)
+        if hit is not None and hit[0] is m:
+            return hit[1]
+        n = int(m.sum())
+        cache[sample] = (m, n)
+        return n
 
     def _leaf_table_spec(self):
         """(lv, cols, headers) da tabela de folhas — fonte única para a versão
@@ -3984,6 +4036,27 @@ class TreeSegmenterUI:
         cache = getattr(self, "_leaf_opts_cache", None)
         if cache is not None and cache[0] == key:
             return cache[1]
+        # 2º nível: LRU pela ASSINATURA ESTRUTURAL da árvore (mesma do
+        # _agg_memo do segmentador) + cadeados + apelidos. O undo/redo volta a
+        # um estado já visto com os mesmos objetos-máscara, mas numa versão
+        # nova. A entrada guarda o segmentador e as máscaras (referência forte,
+        # conferidos com `is`) e o contexto do segmentador (rótulos de variável
+        # lidos pela descrição etc.; ver TreeSegmenter._agg_contexto).
+        lru = self.__dict__.setdefault("_leaf_opts_lru", OrderedDict())
+        sig = (self.seg._agg_assinatura() if self.seg._AGG_LRU_SIGS > 0
+               else None)
+        lk = (sig[0], key[1], key[2]) if sig is not None else None
+        try:
+            ent = lru.get(lk) if lk is not None else None
+            if (ent is not None and ent[0] is self.seg
+                    and all(a is b for a, b in zip(ent[1], sig[1]))
+                    and self.seg._agg_contexto_ok(ent[2])):
+                lru.move_to_end(lk)
+                # lista NOVA por versão (como o recálculo); tuplas são imutáveis
+                self._leaf_opts_cache = (key, list(ent[3]))
+                return self._leaf_opts_cache[1]
+        except Exception:
+            lk = None
         seg = self.seg
         filhos: dict = {}
         for sid, s in seg.segments.items():
@@ -4019,6 +4092,20 @@ class TreeSegmenterUI:
 
         rec("root")
         self._leaf_opts_cache = (key, opts)
+        if lk is not None:
+            try:
+                lru[lk] = (self.seg, sig[1], self.seg._agg_contexto(), list(opts))
+                lru.move_to_end(lk)
+                # mesmos tetos da LRU do segmentador: assinaturas e máscaras
+                # distintas retidas (a entrada recém-gravada nunca sai)
+                while len(lru) > 1:
+                    if len(lru) <= self.seg._AGG_LRU_SIGS and len(
+                            {id(m) for e in lru.values() for m in e[1]}
+                    ) <= self.seg._AGG_LRU_MASCARAS:
+                        break
+                    lru.popitem(last=False)
+            except Exception:
+                pass
         return opts
 
     def _set_html(self, widget, key, html):
@@ -4154,21 +4241,84 @@ class TreeSegmenterUI:
     # ------------------------------------------------------------------
     # Seletores de variável (Dropdown + ordenação por IV)
     # ------------------------------------------------------------------
-    def _iv_map(self, sid):
-        """IV por variável p/ ordenar os seletores — memoizado por (folha,
-        versão da árvore). O cálculo (variable_iv sem PSI) só roda sob demanda
-        (toggle ligado); mutações na árvore invalidam via _tree_version."""
+    def _iv_entry(self, sid):
+        """Entrada do _iv_sort_cache da folha ``sid`` (criada vazia se faltar).
+
+        Chave ``(id(seg), id(máscara), features, with_psi=False)``: o IV de uma
+        folha só depende das linhas da máscara (o df não muda), e a máscara é
+        TROCADA sempre que a folha é refeita — undo/redo e split sem efeito não
+        invalidam mais o cálculo, e voltar a uma folha já vista é cache-hit. A
+        máscara fica na entrada e é conferida com `is` (id não reciclado).
+
+        Slots: ``calc`` = o cálculo do próprio _iv_map (vale enquanto a máscara
+        viver); ``semeado`` = ``(versão, dict)`` gravado pelo _compute_iv, que
+        usa outras features e o PSI, e por isso vale SÓ na versão em que foi
+        gravado (como na chave por versão de antes); ``erro`` = ``(versão, {})``
+        de uma falha, que também expira na próxima mutação — nunca fica gravada
+        de forma permanente."""
         sid = sid if sid in self.seg.segments else "root"
-        key = (sid, self.seg._tree_version)
-        if key not in self._iv_sort_cache:
-            try:
-                iv = self.seg.variable_iv(sid, features=list(self.features),
-                                          with_psi=False)
-                self._iv_sort_cache[key] = dict(zip(iv["variavel"], iv["iv"]))
-            except Exception as e:
-                self._log(f"(IV p/ ordenação indisponível: {type(e).__name__}: {e})")
-                self._iv_sort_cache[key] = {}
-        return self._iv_sort_cache[key]
+        mask = self.seg.segments[sid]["mask"]
+        key = (id(self.seg), id(mask), tuple(self.features), False)
+        ent = self._iv_sort_cache.get(key)
+        if ent is None or ent["mask"] is not mask:
+            if len(self._iv_sort_cache) > 64:        # backstop de memória
+                self._iv_sort_cache.clear()
+            ent = {"mask": mask, "calc": None, "semeado": None, "erro": None}
+            self._iv_sort_cache[key] = ent
+        return sid, ent
+
+    def _iv_map(self, sid):
+        """IV por variável p/ ordenar os seletores — memoizado pela máscara da
+        folha (ver _iv_entry). O cálculo (variable_iv sem PSI) só roda sob
+        demanda (toggle ligado)."""
+        sid, ent = self._iv_entry(sid)
+        ver = self.seg._tree_version
+        if ent["semeado"] is not None and ent["semeado"][0] == ver:
+            return ent["semeado"][1]
+        if ent["calc"] is not None:
+            return ent["calc"]
+        if ent["erro"] is not None and ent["erro"][0] == ver:
+            return ent["erro"][1]
+        try:
+            iv = self.seg.variable_iv(sid, features=list(self.features),
+                                      with_psi=False)
+            ent["calc"] = dict(zip(iv["variavel"], iv["iv"]))
+            return ent["calc"]
+        except Exception as e:
+            self._log(f"(IV p/ ordenação indisponível: {type(e).__name__}: {e})")
+            ent["erro"] = (ver, {})
+            return ent["erro"][1]
+
+    def _iv_df(self, sid, features, with_psi):
+        """``seg.variable_iv(sid, features, with_psi)`` memoizado pela máscara da
+        folha (``None``/``'root'``/sid inexistente → máscara da raiz), com chave
+        ``(id(seg), id(máscara), features, with_psi)`` — ``features=None`` (todas
+        as variáveis do segmentador) tem chave própria. Devolve uma CÓPIA (o
+        painel deriva tabelas dela). Exceção não é guardada: propaga, e a
+        próxima chamada tenta de novo."""
+        nsid = sid if sid in self.seg.segments else "root"
+        mask = self.seg.segments[nsid]["mask"]
+        feats = None if features is None else tuple(features)
+        key = (id(self.seg), id(mask), feats, bool(with_psi))
+        hit = self._iv_df_cache.get(key)
+        if hit is not None and hit[0] is mask:
+            return hit[1].copy()
+        iv = self.seg.variable_iv(sid, features=None if feats is None else list(feats),
+                                  with_psi=with_psi)
+        if len(self._iv_df_cache) > 64:              # backstop de memória
+            self._iv_df_cache.clear()
+        self._iv_df_cache[key] = (mask, iv)
+        return iv.copy()
+
+    def _limpa_caches_do_seg(self):
+        """Esvazia os memos da UI que guardam máscaras/resultados do segmentador
+        — chamado sempre que ``self.seg`` é substituído (reset): as entradas da
+        árvore anterior nunca mais dão hit e só reteriam máscaras na RAM."""
+        self._iv_sort_cache.clear()
+        self._iv_df_cache.clear()
+        for nome in ("_leaf_psi_cache", "_sample_test_cache", "_sample_n_cache",
+                     "_leaf_opts_lru"):
+            self.__dict__.pop(nome, None)
 
     def _vars_na_arvore(self) -> dict:
         """``{variável: nº de quebras}`` das variáveis usadas na árvore atual.
@@ -5368,10 +5518,11 @@ class TreeSegmenterUI:
     def _compute_iv(self):
         self._iv_dirty = False
         sid = self.dd_leaf.value
-        iv = self.seg.variable_iv(sid)
-        # aproveita o cálculo p/ o "ordenar por IV" dos seletores (mesma folha)
-        self._iv_sort_cache[(sid if sid in self.seg.segments else "root",
-                             self.seg._tree_version)] = dict(zip(iv["variavel"], iv["iv"]))
+        iv = self._iv_df(sid, None, True)   # = seg.variable_iv(sid), memoizado
+        # aproveita o cálculo p/ o "ordenar por IV" dos seletores (mesma folha) —
+        # vale só nesta versão da árvore (ver _iv_entry)
+        _, ent = self._iv_entry(sid)
+        ent["semeado"] = (self.seg._tree_version, dict(zip(iv["variavel"], iv["iv"])))
         pd_med = iv.attrs.get("valor_medio")
         has_psi = "pior_psi" in iv.columns
         disp = (iv[["variavel", "n_bins", "iv", "forca"]].copy()
@@ -6070,7 +6221,9 @@ class TreeSegmenterUI:
                         msg="reiniciando a árvore…"):
             antes = self._delta_snapshot()
             self._checkpoint()
-            self.seg = TreeSegmenter(self.df, copy=False, **self._kwargs)
+            self.seg = TreeSegmenter(self.df, copy=False, n_jobs=self._n_jobs,
+                                     **self._kwargs)
+            self._limpa_caches_do_seg()
             # o segmentador novo nasce sem fallback — reaplica a escolha da UI
             self.seg.fallback = self.dd_fallback.value
             self._sample_masks = self.seg._sample_masks   # (mesmo conteúdo)
@@ -8269,7 +8422,9 @@ class TreeSegmenterUI:
             with self._busy(self.btn_cv_reset, msg="reiniciando a árvore…"):
                 antes = self._delta_snapshot()
                 self._checkpoint()
-                self.seg = TreeSegmenter(self.df, copy=False, **self._kwargs)
+                self.seg = TreeSegmenter(self.df, copy=False, n_jobs=self._n_jobs,
+                                         **self._kwargs)
+                self._limpa_caches_do_seg()
                 self.seg.fallback = self.dd_fallback.value
                 self._sample_masks = self.seg._sample_masks   # (mesmo conteúdo)
                 self.locked.clear()
@@ -8455,14 +8610,10 @@ class TreeSegmenterUI:
         """Tabela da janelinha de IV: variável, faixas, IV, força, PSI por
         amostra e o VEREDITO de uso — derivado das classificações que o próprio
         segmentador calcula (força do IV e classe do pior PSI), não de limiares
-        reinventados aqui. Memoizada por (folha, versão da árvore): o
-        variable_iv com PSI é caro."""
+        reinventados aqui. O variable_iv com PSI é caro: memoizado pela máscara
+        da folha (ver _iv_df) — o HTML é remontado a partir dele."""
         sid = sid if sid in self.seg.segments else "root"
-        key = (sid, self.seg._tree_version)
-        cache = getattr(self, "_cv_iv_cache", None)
-        if cache is not None and cache[0] == key:
-            return cache[1]
-        iv = self.seg.variable_iv(sid, features=list(self.features), with_psi=True)
+        iv = self._iv_df(sid, self.features, True)
         # "psi_classificacao" também começa com "psi_" mas é TEXTO (o veredito),
         # não o PSI de uma amostra — fora da lista numérica
         amostras = [c for c in iv.columns
@@ -8509,7 +8660,6 @@ class TreeSegmenterUI:
                 "<table style='border-collapse:collapse;width:100%'>"
                 "<thead><tr>" + "".join(f"<th style='{th}'>{_esc(c)}</th>" for c in cab)
                 + "</tr></thead><tbody>" + "".join(linhas) + "</tbody></table></div>")
-        self._cv_iv_cache = (key, html)
         return html
 
     def _on_cv_dist(self, _):

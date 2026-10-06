@@ -23,7 +23,11 @@ Contexto: parâmetros de risco de crédito sob Resolução CMN 4.966/2021 e IFRS
 """
 from __future__ import annotations
 
+import os
+import sys
 import warnings
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -51,6 +55,7 @@ from .._common import (
     classifica_iv as _classifica_iv,
     count_inversions as _count_inversions,
     fit_optbinning_splits as _fit_optbinning_splits,
+    _amostra_optbinning,
     psi_from_shares as _psi_from_shares,
     sql_texto as _sql_texto,
     eh_booleana as _eh_booleana,
@@ -83,6 +88,74 @@ def _copy_on_write_ativo() -> bool:
         return pd.options.mode.copy_on_write is True
     except Exception:            # opção ausente (pandas antigo) → sem CoW
         return False
+
+
+def _normaliza_n_jobs(n_jobs) -> int:
+    """Nº de threads dos ajustes do optbinning (convenção do sklearn): ``None``
+    ou 1 = em série (padrão); -1 = todos os núcleos; k ≥ 1 = k threads."""
+    if n_jobs is None:
+        return 1
+    n = int(n_jobs)
+    if n == -1:
+        return os.cpu_count() or 1
+    if n < 1:
+        raise ValueError(f"n_jobs inválido: {n_jobs!r}. Use None, -1 ou um inteiro >= 1.")
+    return n
+
+
+def _fit_splits_na_thread(b, x, y, falhas) -> list:
+    """Variante do ``fit_optbinning_splits`` para as threads do lote paralelo do
+    :meth:`TreeSegmenter.variable_iv` — SEM ``warnings.catch_warnings``.
+
+    Até o Python 3.13 (e nos runtimes do Databricks) o ``catch_warnings`` salva e
+    restaura o ``warnings.filters`` GLOBAL: com várias threads entrando e saindo,
+    uma restaura a lista que a outra já trocou. Por isso o "ignore" fica num
+    ÚNICO ``catch_warnings`` na thread principal, em volta do lote (as threads
+    leem os filtros globais). ATENÇÃO: as dependências do fit (sklearn
+    ``check_array``/``type_of_target``, pandas ``pandas_dtype``…) abrem
+    ``catch_warnings`` + ``simplefilter`` DENTRO dos workers — trocam a lista
+    global e, ao sair, repõem a lista que salvaram (que contém o "ignore" do
+    lote). Isso só é inofensivo enquanto o ``catch_warnings`` da thread principal
+    estiver aberto (ele restaura a lista original ao sair, por cima de tudo); por
+    isso NENHUM ajuste pode seguir rodando depois que o lote sai — nem na
+    interrupção (ver :meth:`TreeSegmenter._bins_iv_resolvedor`). Com avisos por
+    contexto (``sys.flags.context_aware_warnings``, 3.14+) os filtros da thread
+    principal não chegam aqui — aí o ``catch_warnings`` local é seguro e é usado.
+    ``np.errstate`` é por thread e fica.
+
+    x/y já vêm amostrados (``_resolve_bins_preparar(amostrar=True)``). Mesma
+    política de erro: ``ValueError`` (inviável / sem corte) → ``[]`` calado;
+    outra exceção → ``[]`` e ``(nome, exceção)`` em ``falhas`` — o aviso é
+    emitido depois, na thread principal (:class:`_RefazFalha`)."""
+    try:
+        if getattr(sys.flags, "context_aware_warnings", False):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    b.fit(x, y)
+        else:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                b.fit(x, y)
+        return list(b.splits)
+    except ValueError:
+        return []
+    except Exception as e:
+        falhas.append((getattr(b, "name", "?"), e))
+        return []
+
+
+class _RefazFalha:
+    """Binning de mentira que relança, na thread principal, a exceção que um
+    ajuste sofreu numa thread do lote. Passado ao ``fit_optbinning_splits``, o
+    aviso "optbinning falhou inesperadamente" sai pelo MESMO código (mesma
+    mensagem, categoria e origem) que sairia no ajuste em série."""
+
+    def __init__(self, name, exc):
+        self.name = name
+        self._exc = exc
+
+    def fit(self, x, y):
+        raise self._exc
 
 
 def _sem_prefixo_da_variavel(labels, feature):
@@ -384,6 +457,7 @@ class TreeSegmenter:
         weight_col: str | None = None,
         verbose: bool = True,
         copy: bool = True,
+        n_jobs: int | None = 1,
     ):
         # copy: True (padrão) guarda uma cópia PROFUNDA do df — o segmentador
         # fica isolado de qualquer escrita posterior no df do chamador. False
@@ -396,6 +470,11 @@ class TreeSegmenter:
         # e deixaria velhos os caches por máscara. Com copy-on-write ligado
         # (pandas >= 3, ou mode.copy_on_write=True) a cópia rasa já é isolada,
         # e é usada mesmo com copy=True. Não é persistido em to_dict().
+        # n_jobs: threads dos ajustes do optbinning no variable_iv (uma variável
+        # por thread; o CART e o CP-SAT soltam a GIL). 1 (padrão) = em série,
+        # como antes; -1 = todos os núcleos. Os cortes são os mesmos, salvo
+        # empate entre ótimos do CP-SAT (que já roda com vários workers). Não é
+        # persistido em to_dict(); pode ser trocado depois em ``seg.n_jobs``.
         if task_type not in TASK_TYPES:
             raise ValueError(
                 f"task_type inválido: {task_type!r}. Use um de {TASK_TYPES}.")
@@ -416,6 +495,7 @@ class TreeSegmenter:
         # cache do binning ótimo por folha (o solver do optbinning é o gargalo) —
         # ver _resolve_bins_cached; chaveado por id() da máscara da folha
         self._bins_cache: dict = {}
+        self.n_jobs = _normaliza_n_jobs(n_jobs)
         # ---- caches de agregados por VERSÃO da árvore (desempenho) -------------
         # Toda mutação estrutural (grow/prune/collapse/merge_*/auto_merge/load/
         # fit_auto) chama _bump_version(). leaves()/_leaf_order()/_grade_map()/
@@ -424,9 +504,19 @@ class TreeSegmenter:
         # recompute redundante (o maior gargalo da UI da árvore no Databricks).
         self._tree_version: int = 0
         self._agg_cache: dict = {}        # (nome, *args, version) -> resultado
+        # 2º nível: LRU por ASSINATURA ESTRUTURAL (ver _agg_assinatura). O undo/
+        # redo volta a um estado já visto com os MESMOS objetos-máscara, mas numa
+        # versão nova — o cache por versão dava miss em tudo. assinatura -> {
+        # 'mascaras' (referência forte, conferida com `is`), 'rotulos', 'vals'}.
+        self._agg_lru: OrderedDict = OrderedDict()
         # alvo por folha restrito à referência — chaveado por id(mask),
         # invalida sozinho quando a folha é refeita (mesma ideia do _bins_cache)
         self._leaf_target_cache: dict = {}
+        # p-valor do teste de alvo entre duas folhas (_pair_pvalue), chaveado por
+        # (id da máscara a, id da máscara b, teste, min_n) — mesma ideia: as duas
+        # máscaras ficam no valor e são conferidas com `is`. Limpo junto com o
+        # _leaf_target_cache (não retém máscaras que aquele cache já soltou).
+        self._pair_p_cache: dict = {}
         # máscara por ASSINATURA DE CONDIÇÕES: como (condições → máscara) é função
         # PURA do df (que não muda), o cache nunca fica stale. Acelera undo/redo —
         # _load_segments reconstruía toda máscara via _match_conditions_pandas a
@@ -561,15 +651,131 @@ class TreeSegmenter:
         # arrays por linha (código/rótulo da folha) das versões mortas.
         self._agg_cache.clear()
 
+    # agregados que também ficam na LRU por assinatura: resultados PEQUENOS e
+    # funções puras de (estrutura, máscaras, df imutável, parâmetros da chave).
+    # Os arrays por linha (leaf_codes/leaf_id_arr, N posições) ficam só no
+    # cache por versão — não seguram memória de estados antigos.
+    _AGG_LRU_NOMES = frozenset({"leaves", "leaf_order", "grade_map", "metrics",
+                                "psi", "feature_importance"})
+    _AGG_LRU_SIGS = 8          # últimas assinaturas retidas (0 desliga a LRU)
+    _AGG_LRU_MASCARAS = 256    # teto de máscaras DISTINTAS retidas pela LRU
+
+    def _agg_assinatura(self):
+        """``(chave, máscaras)`` da estrutura ATUAL da árvore, ou ``None`` se não
+        der para montar uma chave hashável. A chave cobre, por segmento e na
+        ordem de ``segments``: sid, id da máscara, is_leaf, pai, rótulo,
+        profundidade, caminho e as condições na forma serializada (a mesma do
+        undo/redo e do cache de máscaras). ``máscaras`` são os objetos, para a
+        LRU segurar a referência (o id não é reciclado) e conferir com ``is``.
+
+        Calculada na LEITURA (a cada miss do cache por versão), nunca em
+        _bump_version: a versão sobe ANTES da mutação, e uma assinatura
+        congelada ali gravaria o resultado pós-mutação sob a estrutura antiga."""
+        try:
+            partes, mascaras = [], []
+            for sid, s in self.segments.items():
+                m = s["mask"]
+                partes.append((sid, id(m), bool(s["is_leaf"]), s["parent"],
+                               s["label"], s["depth"], tuple(s["path"]),
+                               self._sig_conds(s["conditions"])))
+                mascaras.append(m)
+            chave = tuple(partes)
+            hash(chave)
+        except Exception:
+            return None
+        return chave, tuple(mascaras)
+
+    def _sig_conds(self, conds):
+        """Condições na forma serializada (``_conds_key(_conditions_json)``), que
+        é a forma que o undo/redo restaura — o estado vivo e o restaurado têm a
+        mesma chave. Um limite numérico que o ``float()`` do JSON não representa
+        exatamente (int > 2**53, Decimal) ganha o ``repr`` cru: aí o estado vivo
+        e o restaurado diferem na chave (miss, seguro), porque a ordem e o texto
+        poderiam diferir."""
+        k = self._conds_key(self._conditions_json(conds))
+        for c in conds:
+            if c["kind"] == "num" and any(not (b == float(b))
+                                          for b in (c["lo"], c["hi"])):
+                return k + "|" + repr(conds)
+        return k
+
+    def _agg_contexto(self):
+        """O que os agregados leem ALÉM da estrutura: os objetos fixos da
+        construção (conferidos com ``is``) e a configuração (com ``==``), com
+        os rótulos de variável (``feature_labels``, lidos pela descrição das
+        folhas). Uma entrada da LRU só vale com o mesmo contexto."""
+        return ((self.df, self._weights, self._mask_ref, self._sample_codes),
+                (self.target, self.sample_col, self.ref_sample, self.task_type,
+                 self.weight_col, tuple(self._samples), dict(self.feature_labels)))
+
+    def _agg_contexto_ok(self, ctx):
+        objs, vals = self._agg_contexto()
+        return all(a is b for a, b in zip(ctx[0], objs)) and ctx[1] == vals
+
+    def _agg_lru_valida(self, ent, sig):
+        """A entrada vale para ``sig``: as MESMAS máscaras (``is``) e o mesmo
+        contexto."""
+        return (all(a is b for a, b in zip(ent["mascaras"], sig[1]))
+                and self._agg_contexto_ok(ent["ctx"]))
+
+    def _agg_lru_ler(self, key, sig):
+        """Valor de ``key`` na entrada da assinatura ``sig`` ou ``None``."""
+        ent = self._agg_lru.get(sig[0])
+        if ent is None or not self._agg_lru_valida(ent, sig):
+            return None
+        self._agg_lru.move_to_end(sig[0])
+        return ent["vals"].get(key)
+
+    def _agg_lru_gravar(self, key, sig, valor):
+        """Grava ``valor`` sob ``sig`` (substitui a entrada se as máscaras ou o
+        contexto não baterem) e despeja as mais antigas além de
+        ``_AGG_LRU_SIGS`` assinaturas ou ``_AGG_LRU_MASCARAS`` máscaras
+        distintas. A entrada recém-gravada nunca é despejada (as máscaras dela
+        são as da árvore atual, vivas em ``segments`` de qualquer forma)."""
+        lru = self._agg_lru
+        ent = lru.get(sig[0])
+        if ent is None or not self._agg_lru_valida(ent, sig):
+            ent = {"mascaras": sig[1], "ctx": self._agg_contexto(), "vals": {}}
+            lru[sig[0]] = ent
+        ent["vals"][key] = valor
+        lru.move_to_end(sig[0])
+        while len(lru) > 1:
+            if len(lru) <= self._AGG_LRU_SIGS:
+                n_masc = len({id(m) for e in lru.values() for m in e["mascaras"]})
+                if n_masc <= self._AGG_LRU_MASCARAS:
+                    break
+            lru.popitem(last=False)
+
     def _agg_memo(self, key, build):
         """Memoiza ``build()`` por (key, versão-da-árvore). Devolve sempre uma
         cópia defensiva (DataFrame/Series/dict/list) para o chamador não corromper
-        o cache. ``build`` é uma função sem argumentos."""
+        o cache. ``build`` é uma função sem argumentos.
+
+        No miss da versão, os agregados de ``_AGG_LRU_NOMES`` consultam a LRU
+        por assinatura estrutural: voltar (undo/redo, collapse + o mesmo split
+        com as máscaras reaproveitadas) a uma árvore já vista reaproveita o
+        resultado em vez de revarrer as máscaras."""
         import copy
         ck = (key, self._tree_version)
         hit = self._agg_cache.get(ck)
         if hit is None:
-            hit = build()
+            sig = None
+            if self._AGG_LRU_SIGS > 0 and key[0] in self._AGG_LRU_NOMES:
+                # assinatura ANTES do build: o resultado é gravado sob a
+                # estrutura em que foi calculado (build só lê a árvore)
+                sig = self._agg_assinatura()
+                if sig is not None:
+                    try:
+                        hit = self._agg_lru_ler(key, sig)
+                    except Exception:       # ex.: feature_labels trocado por
+                        sig = hit = None    # algo não comparável → sem LRU
+            if hit is None:
+                hit = build()
+                if sig is not None and hit is not None:
+                    try:
+                        self._agg_lru_gravar(key, sig, hit)
+                    except Exception:
+                        pass
             self._agg_cache[ck] = hit
         if isinstance(hit, (pd.DataFrame, pd.Series)):
             return hit.copy()
@@ -720,11 +926,146 @@ class TreeSegmenter:
 
     def _mask_in(self, frame, feature, b):
         """Máscara booleana das linhas de `frame` que caem no bin `b`."""
+        return self._mask_in_col(frame[feature], b)
+
+    @staticmethod
+    def _mask_in_col(col, b):
+        """:meth:`_mask_in` sobre a própria coluna (Series) — mesmo resultado de
+        ``_mask_in(frame, feature, b)`` com ``col = frame[feature]``."""
         if b["kind"] == "na":
-            return frame[feature].isna()
+            return col.isna()
         if b["kind"] == "num":
-            return frame[feature].between(b["lo"], b["hi"], inclusive="right")
-        return frame[feature].astype(str).isin(b["cats"])
+            return col.between(b["lo"], b["hi"], inclusive="right")
+        return col.astype(str).isin(b["cats"])
+
+    @staticmethod
+    def _bin_ids(col, bins):
+        """Código da faixa por linha (int32; -1 = nenhuma faixa) numa passada só,
+        ou ``None`` quando não dá para garantir ``(ids == k)`` idêntico a
+        ``_mask_in_col(col, bins[k]).to_numpy()`` — aí o chamador volta ao
+        ``_mask_in`` por faixa (caminho antigo). Troca K ``astype(str)``/``between``
+        da coluna (um por faixa, e por amostra/safra) por um só.
+
+        - num (faixas contíguas (-inf, c1], …, (ck, inf] + 'na'): só para coluna
+          numpy float64, ou inteira com |x| ≤ 2**53 (conversão exata). ``searchsorted
+          (cortes, x, 'left')`` dá o i com c[i-1] < x ≤ c[i], a pertinência do
+          ``between(lo, hi, 'right')``; -inf não cai em faixa nenhuma e NaN vai para
+          'na'. float32/anuláveis/object/Decimal: ``None`` (o ``between`` compara em
+          outra precisão ou devolve NA, e o IV hoje vira NaN nesse caso).
+        - cat: ``astype(str)`` UMA vez e busca exata do texto nas categorias (as
+          faixas são disjuntas); NA vai para 'na'. Se uma linha NA também casar com
+          uma categoria (ex.: ``pd.NaT`` → 'NaT' literal) ela hoje conta nas DUAS
+          faixas — não cabe num código único, então ``None``. Nunca ``factorize``
+          dos valores brutos: fundiria 1/'1'/True e Decimal('1.0')/('1.00')."""
+        if not isinstance(col, pd.Series) or not bins:
+            return None
+        kinds = [b.get("kind") for b in bins]
+        na_pos = [k for k, kd in enumerate(kinds) if kd == "na"]
+        if len(na_pos) > 1:
+            return None
+        na_i = na_pos[0] if na_pos else -1
+        num_pos = [k for k, kd in enumerate(kinds) if kd == "num"]
+        cat_pos = [k for k, kd in enumerate(kinds) if kd == "cat"]
+        if len(num_pos) + len(cat_pos) + len(na_pos) != len(bins):
+            return None
+        n = len(col)
+
+        if num_pos and not cat_pos:
+            dt = col.dtype
+            if not isinstance(dt, np.dtype) or not (dt == np.float64 or dt.kind in "iu"):
+                return None
+
+            def _exato(v):                  # corte representável em float64 exato
+                if isinstance(v, (bool, np.bool_)):
+                    return False
+                if isinstance(v, np.floating):      # longdouble não cabe em float64
+                    return v.dtype.itemsize <= 8
+                if isinstance(v, float):
+                    return True
+                if isinstance(v, (int, np.integer)):
+                    return abs(int(v)) <= 2 ** 53
+                return False
+            los = [bins[k]["lo"] for k in num_pos]
+            his = [bins[k]["hi"] for k in num_pos]
+            if not all(_exato(v) for v in (*los, *his)):
+                return None
+            los = [float(v) for v in los]
+            his = [float(v) for v in his]
+            if not (los[0] == -np.inf and his[-1] == np.inf
+                    and all(his[j] == los[j + 1] for j in range(len(his) - 1))):
+                return None
+            cuts = np.asarray(his[:-1], dtype=np.float64)
+            if np.isnan(cuts).any() or (cuts.size > 1 and (np.diff(cuts) < 0).any()):
+                return None
+            x = col.to_numpy()
+            if dt.kind in "iu":
+                if n and (int(x.min()) < -2 ** 53 or int(x.max()) > 2 ** 53):
+                    return None
+                x = x.astype(np.float64)
+            mapa = np.asarray(num_pos, dtype=np.int32)
+            ids = mapa[np.searchsorted(cuts, x, side="left")]
+            ids[x == -np.inf] = -1                 # (-inf, c1] exclui o -inf
+            ids[np.isnan(x)] = na_i                # NaN: só a faixa 'na'
+            return ids
+
+        if cat_pos and not num_pos:
+            flat, grp = [], []
+            for k in cat_pos:
+                for c in bins[k]["cats"]:
+                    flat.append(c)
+                    grp.append(k)
+            if not all(type(c) is str for c in flat):
+                return None
+            idx = pd.Index(np.asarray(flat, dtype=object), dtype=object)
+            if not idx.is_unique:                  # faixas não disjuntas
+                return None
+            vals = np.asarray(col.astype(str).to_numpy(), dtype=object)
+            onde = idx.get_indexer(vals)           # -1 = texto fora das faixas
+            ids = np.asarray([*grp, -1], dtype=np.int32)[onde]
+            if na_i >= 0:
+                isna = col.isna().to_numpy(dtype=bool)
+                if isna.any():
+                    if (ids[isna] >= 0).any():     # NA que casa com categoria
+                        return None
+                    ids[isna] = na_i
+            return ids
+        return None
+
+    def _bin_counts(self, col, bins, ids=None):
+        """Nº de linhas de ``col`` em cada faixa (lista de int, ordem de
+        ``bins``) — o mesmo ``int(_mask_in(...).sum())`` por faixa, contado de uma
+        vez pelo código de faixa (:meth:`_bin_ids`), com fallback literal."""
+        if ids is None:
+            ids = self._bin_ids(col, bins)
+        if ids is None:
+            return [int(self._mask_in_col(col, b).sum()) for b in bins]
+        return [int(c) for c in np.bincount(ids[ids >= 0], minlength=len(bins))]
+
+    def _bin_masks(self, frame, feature, bins):
+        """Máscara de cada faixa sobre ``frame`` (lista, ordem de ``bins``):
+        ``ids == k`` (ndarray bool, mesmos valores do ``_mask_in``) quando há código
+        de faixa por linha; senão o ``_mask_in`` de cada faixa (caminho antigo)."""
+        if not bins:
+            return []
+        ids = self._bin_ids(frame[feature], bins)
+        if ids is None:
+            return [self._mask_in(frame, feature, b) for b in bins]
+        return [ids == k for k in range(len(bins))]
+
+    def _pos_of(self, mask):
+        """Posições (ordem crescente) das linhas de ``self.df.loc[mask]`` — o
+        recorte por COLUNA (``self.df[col].iloc[pos]``) dá os mesmos valores, na
+        mesma ordem, que a coluna do frame ``self.df.loc[mask, cols]``. Máscara
+        bool/boolean alinhada à base: ``flatnonzero`` (NA conta como False, como no
+        ``.loc``). Fora disso, o próprio ``.loc`` sobre uma Series de posições."""
+        if isinstance(mask, pd.Series) and (mask.index is self.df.index
+                                            or mask.index.equals(self.df.index)):
+            if mask.dtype == bool:
+                return np.flatnonzero(mask.to_numpy())
+            if isinstance(mask.dtype, pd.BooleanDtype):
+                return np.flatnonzero(mask.to_numpy(dtype=bool, na_value=False))
+        marc = pd.Series(np.arange(len(self.df)), index=self.df.index)
+        return marc.loc[mask].to_numpy()
 
     @staticmethod
     def _bin_label(feature, b):
@@ -776,19 +1117,196 @@ class TreeSegmenter:
         da folha (o fit do optbin já restringe à DES internamente)."""
         nsid = sid if (sid in self.segments) else "root"
         mask = self.segments[nsid]["mask"]
-        key = (id(mask), feature, self._splits_key(splits), dtype, max_n_bins,
-               min_bin_size, max_bin_size, relax_max, round(float(min_mean_diff), 9),
-               criterion)
+        key = self._bins_key(mask, feature, splits, dtype, max_n_bins, min_bin_size,
+                             max_bin_size, relax_max, min_mean_diff, criterion)
         hit = self._bins_cache.get(key)
         if hit is not None:
             return hit[0], hit[1], hit[2]
         res = self._resolve_bins(self._sub(mask, feature), feature, splits, dtype, max_n_bins,
                                  min_bin_size, max_bin_size, relax_max, min_mean_diff,
                                  criterion)
+        self._bins_cache_put(key, res, mask)
+        return res[0], res[1], res[2]
+
+    def _bins_key(self, mask, feature, splits, dtype, max_n_bins, min_bin_size,
+                  max_bin_size=None, relax_max=False, min_mean_diff=0.0,
+                  criterion="optbin"):
+        """Chave do :attr:`_bins_cache` (ver :meth:`_resolve_bins_cached`)."""
+        return (id(mask), feature, self._splits_key(splits), dtype, max_n_bins,
+                min_bin_size, max_bin_size, relax_max, round(float(min_mean_diff), 9),
+                criterion)
+
+    def _bins_cache_put(self, key, res, mask):
+        """Grava ``res`` = (bins, modo, kind) no :attr:`_bins_cache` (thread
+        principal; com o backstop de memória de sempre)."""
         if len(self._bins_cache) > 6000:        # backstop de memória
             self._bins_cache.clear()
         self._bins_cache[key] = (res[0], res[1], res[2], mask)
-        return res[0], res[1], res[2]
+
+    def _bins_iv_resolvedor(self, sid, features, max_n_bins, min_bin_size):
+        """Bins do :meth:`variable_iv` por variável: devolve ``(obter, fechar)``.
+
+        ``obter(i, feat)`` (``feat = features[i]``) = ``_resolve_bins_cached(sid,
+        feat, None, None, max_n_bins, min_bin_size)`` — mesmo valor, mesmas exceções e o MESMO
+        estado final do :attr:`_bins_cache`. Com ``n_jobs`` = 1 (padrão) é
+        literalmente essa chamada. Com ``n_jobs`` > 1, os ajustes do optbinning
+        rodam em threads, em LOTES de ``2·n_jobs`` variáveis (memória limitada:
+        cada ajuste pendente guarda só x/y já amostrados):
+
+        1. preparar (thread principal, na ordem): consulta o cache e roda o
+           :meth:`_resolve_bins_preparar` das que faltam — exceção fica guardada;
+        2. resolver: ``map`` ORDENADO num ``ThreadPoolExecutor`` (criado por
+           chamada; nada de processos), dentro de UM ``catch_warnings`` +
+           ``simplefilter("ignore")`` na thread principal; o nosso código nos
+           workers não mexe nos filtros, mas as dependências do fit (sklearn,
+           pandas) mexem — por isso o lote só sai do ``catch_warnings`` com
+           TODOS os ajustes terminados, inclusive numa interrupção: aí cancela
+           os pendentes e espera os em curso (no máximo 1 por worker) antes de
+           relançar (ver :func:`_fit_splits_na_thread`). Com 1 só ajuste no
+           lote, roda em série, como antes;
+        3. finalizar (thread principal): ``obter(i)`` repete a lógica do cache
+           do ajuste em série — hit usa o cache; o 1º miss emite os avisos de
+           falha daquela variável e relança a exceção guardada ou grava o
+           resultado (com o backstop de 6000); um 2º miss do mesmo ajuste (o
+           backstop limpou o cache no meio do lote) recalcula em série, como o
+           ajuste em série faria.
+
+        ``fechar(erro)`` encerra o executor no fim do :meth:`variable_iv`; com
+        ``erro`` (ex.: KeyboardInterrupt/Cancel no laço do IV), sem esperar e
+        com ``cancel_futures`` — fora do lote não há ajuste em curso (o lote
+        sempre termina ou espera os seus)."""
+        n_jobs = _normaliza_n_jobs(self.n_jobs)
+        if (n_jobs <= 1 or not isinstance(features, (list, tuple))
+                or len(features) < 2):
+            def obter_serie(i, feat):
+                return self._resolve_bins_cached(sid, feat, None, None,
+                                                 max_n_bins, min_bin_size)
+            return obter_serie, (lambda erro=False: None)
+
+        nsid = sid if (sid in self.segments) else "root"
+        mask = self.segments[nsid]["mask"]
+        tam_lote = 2 * n_jobs
+        estado = {"ini": None, "itens": None, "ex": None}
+
+        def _executor():
+            if estado["ex"] is None:
+                estado["ex"] = ThreadPoolExecutor(max_workers=n_jobs,
+                                                  thread_name_prefix="ygg-optbin")
+            return estado["ex"]
+
+        def _tarefa(val):
+            # roda numa thread do executor: só o ajuste (numpy + optbinning)
+            falhas = []
+            try:
+                aj = self._resolve_bins_resolver(
+                    val["prep"],
+                    ajusta=lambda b, x, y: _fit_splits_na_thread(b, x, y, falhas))
+            except Exception as e:
+                return falhas, None, e
+            return falhas, aj, None
+
+        def _lote(ini):
+            itens, pend, preps = [], {}, []
+            for feat in features[ini:ini + tam_lote]:
+                key = self._bins_key(mask, feat, None, None, max_n_bins, min_bin_size)
+                hit = self._bins_cache.get(key)
+                if hit is not None:
+                    itens.append((key, {"usado": True}))
+                    continue
+                if key in pend:                     # variável repetida no lote
+                    itens.append((key, pend[key]))
+                    continue
+                val = {}
+                try:
+                    prep = self._resolve_bins_preparar(
+                        self._sub(mask, feat), feat, None, None, max_n_bins,
+                        min_bin_size, amostrar=True)
+                except Exception as e:
+                    val["exc"] = e
+                else:
+                    val["prep"] = prep
+                    if prep["fit"] is not None:
+                        preps.append(val)
+                pend[key] = val
+                itens.append((key, val))
+
+            if len(preps) == 1:
+                # 1 ajuste só: em série, exatamente como o _resolve_bins
+                val = preps[0]
+                try:
+                    val["ajuste"] = self._resolve_bins_resolver(val["prep"])
+                except Exception as e:
+                    val["exc"] = e
+            elif preps:
+                ex = _executor()
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    try:
+                        saidas = list(ex.map(_tarefa, preps))
+                    except BaseException:
+                        # KeyboardInterrupt/Cancel: cancela os pendentes e ESPERA os
+                        # ajustes em curso (no máximo 1 por worker) ainda DENTRO do
+                        # catch_warnings — as dependências do fit (sklearn/pandas)
+                        # abrem catch_warnings nos workers; se a thread principal
+                        # restaurasse os filtros antes, os ajustes que seguem
+                        # despejariam avisos e um worker, ao sair do próprio
+                        # catch_warnings, reporia a lista com o "ignore" do lote
+                        # (vazaria para a sessão inteira)
+                        estado["ex"] = None
+                        ex.shutdown(wait=True, cancel_futures=True)
+                        raise
+                for val, (falhas, aj, exc) in zip(preps, saidas):
+                    val["falhas"] = falhas
+                    if exc is not None:
+                        val["exc"] = exc
+                    else:
+                        val["ajuste"] = aj
+            for val in pend.values():
+                if "prep" in val:
+                    if "exc" not in val:
+                        try:
+                            val["res"] = self._resolve_bins_finalizar(
+                                val["prep"], val.get("ajuste"))
+                        except Exception as e:
+                            val["exc"] = e
+                    del val["prep"]                 # solta x/y do ajuste
+                    val.pop("ajuste", None)
+            estado["ini"], estado["itens"] = ini, itens
+
+        def obter(i, feat):
+            ini = estado["ini"]
+            if ini is None or not (ini <= i < ini + tam_lote):
+                _lote(i - i % tam_lote)
+                ini = estado["ini"]
+            key, val = estado["itens"][i - ini]
+            hit = self._bins_cache.get(key)
+            if hit is not None:
+                return hit[0], hit[1], hit[2]
+            if val.get("usado"):
+                # miss de novo (era hit no preparo e o backstop limpou o cache, ou
+                # variável repetida): o ajuste em série recalcularia — recalcula
+                return self._resolve_bins_cached(sid, feat, None, None,
+                                                 max_n_bins, min_bin_size)
+            val["usado"] = True
+            # 1º miss: os avisos "falhou inesperadamente" saem agora, na ordem em
+            # que o ajuste em série os emitiria
+            for nome, e in val.pop("falhas", ()):
+                _fit_optbinning_splits(_RefazFalha(nome, e), np.empty(0), np.empty(0))
+            if "exc" in val:
+                raise val.pop("exc")
+            res = val.pop("res")
+            self._bins_cache_put(key, res, mask)
+            return res[0], res[1], res[2]
+
+        def fechar(erro=False):
+            ex, estado["ex"] = estado["ex"], None
+            if ex is not None:
+                if erro:
+                    ex.shutdown(wait=False, cancel_futures=True)
+                else:
+                    ex.shutdown(wait=True)
+
+        return obter, fechar
 
     def _resolve_bins(self, sub, feature, splits, dtype, max_n_bins, min_bin_size,
                       max_bin_size=None, relax_max=False, min_mean_diff=0.0,
@@ -805,8 +1323,31 @@ class TreeSegmenter:
         min_mean_diff: diferença mínima do alvo médio (taxa de default em
         classificação) exigida entre bins consecutivas no binning ótimo; 0 = sem
         restrição.
+
+        Dividido em preparar → resolver → finalizar: só o resolver (o ajuste do
+        optbinning) pode rodar fora da thread principal — ver o lote paralelo do
+        :meth:`variable_iv` (``n_jobs``). Aqui os três rodam em sequência, com o
+        mesmo resultado de antes.
         """
+        prep = self._resolve_bins_preparar(sub, feature, splits, dtype, max_n_bins,
+                                           min_bin_size, max_bin_size, relax_max,
+                                           min_mean_diff, criterion)
+        return self._resolve_bins_finalizar(prep, self._resolve_bins_resolver(prep))
+
+    def _resolve_bins_preparar(self, sub, feature, splits, dtype, max_n_bins,
+                               min_bin_size, max_bin_size=None, relax_max=False,
+                               min_mean_diff=0.0, criterion="optbin", amostrar=False):
+        """1ª etapa do :meth:`_resolve_bins` (thread principal: lê o pandas).
+
+        Decide o tipo, aplica cortes/grupos manuais, o critério alternativo e o
+        teste de degenerado. Quando falta o ajuste do optbinning, guarda em
+        ``prep['fit']`` só os arrays do ajuste (x/y já filtrados) e os parâmetros —
+        nada do recorte ``sub``. ``amostrar=True`` (lote paralelo) já sorteia aqui
+        a amostra de ajuste (:func:`_amostra_optbinning`, o MESMO sorteio que o
+        ``fit_optbinning_splits`` faria): x/y ficam com ≤ ``OPTBINNING_MAX_ROWS``
+        linhas enquanto esperam a vez no lote, e o ajuste dá o mesmo resultado."""
         kind = self._detect_kind(sub, feature, dtype)
+        prep = {"kind": kind, "fit": None}
 
         if kind == "num":
             if splits is not None:
@@ -836,32 +1377,22 @@ class TreeSegmenter:
                     t = _best_numeric_cut(x, yfit, criterion, self._is_clf, min_n)
                     cortes = [t] if t is not None else []
                 else:
-                    def _opt(mnb, mbs):
-                        b = self._OptBin(
-                            name=feature, dtype="numerical", max_n_bins=mnb,
-                            min_bin_size=min_bin_size, max_bin_size=mbs,
-                            monotonic_trend="auto_asc_desc",
-                            **{self._diff_kwarg: min_mean_diff})
-                        return _fit_optbinning_splits(b, x, yfit)
-                    cortes = _opt(max_n_bins, max_bin_size)
-                    if not cortes and max_bin_size is not None and relax_max:
-                        # o máximo pode deixar o problema INFEASIBLE p/ este nº de
-                        # bins/amostra: tenta mais bins e, por fim, relaxa o máximo
-                        for k in range(max_n_bins + 1, 9):
-                            cortes = _opt(k, max_bin_size)
-                            if cortes:
-                                break
-                        if not cortes:
-                            cortes = _opt(max_n_bins, None)
+                    cortes = None                          # pendente: ajuste no resolver
+                    if amostrar:
+                        idx = _amostra_optbinning(len(x))
+                        if idx is not None:
+                            x, yfit = x[idx], yfit[idx]
+                    prep["fit"] = {"feature": feature, "dtype": "numerical",
+                                   "x": x, "y": yfit, "max_n_bins": max_n_bins,
+                                   "min_bin_size": min_bin_size,
+                                   "max_bin_size": max_bin_size, "relax_max": relax_max,
+                                   "min_mean_diff": min_mean_diff}
                 modo = "ótimo" if criterion == "optbin" else criterion
-            if not cortes:
-                return [], modo, kind
-            edges = [-np.inf, *cortes, np.inf]
-            bins = [{"kind": "num", "lo": edges[i], "hi": edges[i + 1]}
-                    for i in range(len(edges) - 1)]
-            if sub[feature].isna().any():
-                bins.append({"kind": "na"})
-            return bins, modo, kind
+            prep["cortes"], prep["modo"] = cortes, modo
+            # a bin de faltantes só entra com corte — ou com ajuste pendente (o
+            # isna é puro: lido aqui, o resultado é o mesmo de lê-lo no fim)
+            prep["na"] = bool(sub[feature].isna().any()) if (cortes is None or cortes) else False
+            return prep
 
         # ---- categórico ----
         na_present = bool(sub[feature].isna().any())
@@ -893,20 +1424,88 @@ class TreeSegmenter:
                 par = _best_categorical_split(xs, ys, criterion, self._is_clf, min_n)
                 grupos = [list(par[0]), list(par[1])] if par is not None else []
             else:
-                b = self._OptBin(
-                    name=feature, dtype="categorical", max_n_bins=max_n_bins,
-                    min_bin_size=min_bin_size, max_bin_size=max_bin_size,
-                    monotonic_trend="auto_asc_desc",
-                    **{self._diff_kwarg: min_mean_diff})
-                grupos = [list(arr) for arr in _fit_optbinning_splits(b, xs, ys)]
+                grupos = None                        # pendente: ajuste no resolver
+                if amostrar:
+                    idx = _amostra_optbinning(len(xs))
+                    if idx is not None:
+                        xs, ys = xs[idx], ys[idx]
+                prep["fit"] = {"feature": feature, "dtype": "categorical",
+                               "x": xs, "y": ys, "max_n_bins": max_n_bins,
+                               "min_bin_size": min_bin_size,
+                               "max_bin_size": max_bin_size, "relax_max": relax_max,
+                               "min_mean_diff": min_mean_diff}
             modo = "ótimo" if criterion == "optbin" else criterion
+        prep.update(grupos=grupos, modo=modo, na_present=na_present)
+        return prep
+
+    def _resolve_bins_resolver(self, prep, ajusta=None):
+        """2ª etapa do :meth:`_resolve_bins`: o ajuste do optbinning (o gargalo).
+
+        Só numpy + optbinning — não lê o pandas nem escreve em ``self`` —, então
+        pode rodar numa thread do lote paralelo. Devolve os splits do optbinning
+        (lista, possivelmente vazia) ou ``None`` quando ``prep`` não tem ajuste
+        pendente. ``ajusta`` (padrão: ``fit_optbinning_splits``, resolvido na
+        hora da chamada) faz o ``b.fit`` e devolve ``list(b.splits)``."""
+        f = prep["fit"]
+        if f is None:
+            return None
+        if ajusta is None:
+            ajusta = _fit_optbinning_splits
+        if f["dtype"] == "numerical":
+            def _opt(mnb, mbs):
+                b = self._OptBin(
+                    name=f["feature"], dtype="numerical", max_n_bins=mnb,
+                    min_bin_size=f["min_bin_size"], max_bin_size=mbs,
+                    monotonic_trend="auto_asc_desc",
+                    **{self._diff_kwarg: f["min_mean_diff"]})
+                return ajusta(b, f["x"], f["y"])
+            max_n_bins, max_bin_size = f["max_n_bins"], f["max_bin_size"]
+            cortes = _opt(max_n_bins, max_bin_size)
+            if not cortes and max_bin_size is not None and f["relax_max"]:
+                # o máximo pode deixar o problema INFEASIBLE p/ este nº de
+                # bins/amostra: tenta mais bins e, por fim, relaxa o máximo
+                for k in range(max_n_bins + 1, 9):
+                    cortes = _opt(k, max_bin_size)
+                    if cortes:
+                        break
+                if not cortes:
+                    cortes = _opt(max_n_bins, None)
+            return cortes
+        b = self._OptBin(
+            name=f["feature"], dtype="categorical", max_n_bins=f["max_n_bins"],
+            min_bin_size=f["min_bin_size"], max_bin_size=f["max_bin_size"],
+            monotonic_trend="auto_asc_desc",
+            **{self._diff_kwarg: f["min_mean_diff"]})
+        return ajusta(b, f["x"], f["y"])
+
+    @staticmethod
+    def _resolve_bins_finalizar(prep, ajuste):
+        """3ª etapa do :meth:`_resolve_bins` (thread principal): cortes → faixas
+        (+ bin de faltantes) ou grupos → faixas (sem os rótulos de NA)."""
+        kind, modo = prep["kind"], prep["modo"]
+        if kind == "num":
+            cortes = prep["cortes"] if prep["fit"] is None else ajuste
+            if not cortes:
+                return [], modo, kind
+            edges = [-np.inf, *cortes, np.inf]
+            bins = [{"kind": "num", "lo": edges[i], "hi": edges[i + 1]}
+                    for i in range(len(edges) - 1)]
+            if prep["na"]:
+                bins.append({"kind": "na"})
+            return bins, modo, kind
+
+        # ---- categórico ----
+        if prep["fit"] is None:
+            grupos = prep["grupos"]
+        else:
+            grupos = [list(arr) for arr in ajuste]
         _NA_TOK = {"nan", "NaN", "<NA>", "None"}
         bins = []
         for g in grupos:
             cats = [str(c) for c in g if str(c) not in _NA_TOK]
             if cats:
                 bins.append({"kind": "cat", "cats": cats})
-        if bins and na_present:
+        if bins and prep["na_present"]:
             bins.append({"kind": "na"})
         return bins, modo, kind
 
@@ -915,8 +1514,11 @@ class TreeSegmenter:
     # ------------------------------------------------------------------
     def _bin_table(self, sub, feature, bins, n_ref):
         linhas, is_na = [], []
-        for b in bins:
-            m = self._mask_in(sub, feature, b)
+        # código de faixa por linha calculado UMA vez (ids == k é a mesma máscara do
+        # _mask_in); sem ele, o _mask_in por faixa de antes
+        ids = self._bin_ids(sub[feature], bins) if bins else None
+        for k, b in enumerate(bins):
+            m = self._mask_in(sub, feature, b) if ids is None else (ids == k)
             s = sub.loc[m, self.target]
             if len(s) == 0:
                 continue
@@ -1920,6 +2522,7 @@ class TreeSegmenter:
         vals = vals[~np.isnan(vals)]
         if len(self._leaf_target_cache) > 4000:   # backstop de memória
             self._leaf_target_cache.clear()
+            self.__dict__.get("_pair_p_cache", {}).clear()
         self._leaf_target_cache[ck] = (vals, mask)   # guarda mask p/ o id não reciclar
         return vals
 
@@ -1928,15 +2531,33 @@ class TreeSegmenter:
                      min_n: int = 8) -> float:
         if mannwhitneyu is None:        # scipy ausente (importado no topo do módulo)
             return np.nan
+        # memo por (máscara a, máscara b, teste, min_n): o p-valor é função pura
+        # dos alvos DES das duas folhas, e a máscara é TROCADA sempre que a folha é
+        # refeita — o cabeçalho/canvas da UI e o prune/auto_merge repetem os
+        # mesmos pares várias vezes por rodada. O par NÃO é ordenado (o teste
+        # recebe a e b nessa ordem) e as duas máscaras ficam no valor, conferidas
+        # com `is`, para o id não ser reciclado.
+        ma, mb = self.segments[sid_a]["mask"], self.segments[sid_b]["mask"]
+        cache = self.__dict__.setdefault("_pair_p_cache", {})
+        key = (id(ma), id(mb), test, min_n)
+        hit = cache.get(key)
+        if hit is not None and hit[0] is ma and hit[1] is mb:
+            return hit[2]
         a, b = self._leaf_target(sid_a), self._leaf_target(sid_b)
         if len(a) < min_n or len(b) < min_n:
-            return np.nan
-        try:
-            if test == "welch":
-                return float(ttest_ind(a, b, equal_var=False).pvalue)
-            return float(mannwhitneyu(a, b, alternative="two-sided").pvalue)
-        except Exception:
-            return np.nan
+            p = np.nan
+        else:
+            try:
+                if test == "welch":
+                    p = float(ttest_ind(a, b, equal_var=False).pvalue)
+                else:
+                    p = float(mannwhitneyu(a, b, alternative="two-sided").pvalue)
+            except Exception:
+                p = np.nan
+        if len(cache) > 4000:                    # backstop de memória
+            cache.clear()
+        cache[key] = (ma, mb, p)
+        return p
 
     # p-valor do teste de alvo entre uma folha e a IRMÃ adjacente (mesmo pai).
     #   Só irmãs são diretamente comparáveis (e fundíveis), por isso o teste é
@@ -2353,8 +2974,20 @@ class TreeSegmenter:
     def psi(self, eps: float = 1e-6) -> pd.DataFrame:
         if self.sample_col is None:
             raise ValueError("PSI requer sample_col definido no construtor.")
-        return self._agg_memo(("psi", round(float(eps), 12)),
-                              lambda: self._compute_psi(eps))
+
+        def build():
+            # o detalhe por folha (efeito colateral de _compute_psi) vai JUNTO
+            # no valor memoizado, como cópia: um hit (inclusive da LRU, noutro
+            # estado já visto) reatribui o detalhe do próprio resultado
+            out = self._compute_psi(eps)
+            return out, [dict(d) for d in self._psi_detalhe]
+        out, det = self._agg_memo(("psi", round(float(eps), 12)), build)
+        # psi_detalhe() sempre corresponde ao ÚLTIMO psi() chamado. Antes só um
+        # recálculo o trocava: psi(eps=a) → psi(eps=b) → psi(eps=a) devolvia o
+        # detalhe de b no último passo (corrigido aqui — não é paridade bit a
+        # bit com o antigo nesse caso de eps alternado na mesma versão).
+        self._psi_detalhe = [dict(d) for d in det]
+        return out.copy()
 
     def _compute_psi(self, eps: float = 1e-6) -> pd.DataFrame:
         leaf_ids = [sid for sid, s in self.segments.items() if s["is_leaf"]]
@@ -2443,14 +3076,26 @@ class TreeSegmenter:
             # máscara de cada bin sobre o df calculada UMA vez (inclui o .astype(str)
             # caro das categóricas) e reusada para a referência e todas as amostras —
             # antes era recomputada 1+n_amostras vezes por bin.
-            bin_masks = [self._mask_in(self.df, feat, b) for b in bins]
-            ref_pct = [(int((bm & ref_mask).sum()) / n_ref) for bm in bin_masks]
+            # Com código de faixa por linha (uma passada na coluna), as contagens
+            # amostra × faixa saem de um bincount sobre as linhas da amostra.
+            ids = self._bin_ids(self.df[feat], bins)
+            if ids is not None and not all(m.dtype == bool for m in (
+                    ref_mask, *(self._sample_masks[a] for a in nonref))):
+                ids = None                       # máscara anulável: caminho antigo
+            if ids is None:
+                bin_masks = [self._mask_in(self.df, feat, b) for b in bins]
+
+            def _cnt_csi(msk):
+                if ids is None:
+                    return [int((bm & msk).sum()) for bm in bin_masks]
+                ia = ids[msk.to_numpy()]
+                return [int(c) for c in np.bincount(ia[ia >= 0], minlength=len(bins))]
+            ref_pct = [(c / n_ref) for c in _cnt_csi(ref_mask)]
             pior = 0.0
             for a in nonref:
                 a_mask = self._sample_masks[a]
                 n_a = int(a_mask.sum())
-                cur_pct = [(int((bm & a_mask).sum()) / n_a if n_a else 0.0)
-                           for bm in bin_masks]
+                cur_pct = [(c / n_a if n_a else 0.0) for c in _cnt_csi(a_mask)]
                 csi_tot, contribs = _psi_from_shares(ref_pct, cur_pct, eps,
                                                      return_contrib=True)
                 for b, p_ref, p_cur, contrib in zip(bins, ref_pct, cur_pct,
@@ -3974,8 +4619,9 @@ class TreeSegmenter:
         n_non_tot = float(np.nansum(y_all == 0)) if self._is_clf else 0.0
         n_base = float(np.sum(~np.isnan(y_all)))
         rows, iv_total, is_na = [], 0.0, []
-        for b in bins:
-            m = self._mask_in(sub, feature, b).to_numpy()
+        ids = self._bin_ids(sub[feature], bins)   # 1 passada; None = _mask_in por faixa
+        for k, b in enumerate(bins):
+            m = self._mask_in(sub, feature, b).to_numpy() if ids is None else (ids == k)
             yi = y_all[m]; yi_ok = yi[~np.isnan(yi)]
             n_i = int(m.sum())
             if n_i == 0:
@@ -4066,14 +4712,16 @@ class TreeSegmenter:
         if not bins:
             return pd.DataFrame(columns=["safra", "n", "psi", "classificacao"])
         n_ref = len(ref)
-        ref_pct = [max(int(self._mask_in(ref, feature, b).sum()) / n_ref, eps) for b in bins]
+        # contagens por faixa num passo por recorte (código de faixa por linha),
+        # em vez de um _mask_in (astype(str) da coluna) por faixa × safra
+        ref_pct = [max(c / n_ref, eps) for c in self._bin_counts(ref[feature], bins)]
         safra = pd.to_datetime(leaf[time_col], errors="coerce").dt.to_period("M")
         rows = []
         for per, g in leaf.groupby(safra):
             n_g = len(g)
             if n_g == 0:
                 continue
-            cur_pct = [int(self._mask_in(g, feature, b).sum()) / n_g for b in bins]
+            cur_pct = [c / n_g for c in self._bin_counts(g[feature], bins)]
             psi = _psi_from_shares(ref_pct, cur_pct, eps)
             rows.append({"safra": str(per), "n": n_g, "psi": round(psi, 4),
                          "classificacao": _classifica_psi(psi)})
@@ -4265,7 +4913,7 @@ class TreeSegmenter:
             y = y[~np.isnan(y)]
             return float(np.mean(y)) if y.size else float("nan")
 
-        ref_risco = [_risco(ref[self._mask_in(ref, feature, b)]) for b in bins]
+        ref_risco = [_risco(ref[m]) for m in self._bin_masks(ref, feature, bins)]
         order = sorted(range(len(bins)),
                        key=lambda i: (np.inf if pd.isna(ref_risco[i]) else ref_risco[i]))
         # por amostra
@@ -4275,8 +4923,8 @@ class TreeSegmenter:
         for a in xs_s:
             fa = (self._sub(mask0 & self._smask(a), feature)
                   if a is not None else self._sub(mask0, feature))
-            for i, b in enumerate(bins):
-                ser_s[i].append(_risco(fa[self._mask_in(fa, feature, b)]))
+            for i, m in enumerate(self._bin_masks(fa, feature, bins)):
+                ser_s[i].append(_risco(fa[m]))
         # por safra
         xs_t, ser_t = [], {i: [] for i in range(len(bins))}
         # _SEM_SAFRAS (uso interno do gráfico por amostra): sem laço por safra
@@ -4290,8 +4938,8 @@ class TreeSegmenter:
                 if len(g) < min_n:
                     continue
                 xs_t.append(str(per))
-                for i, b in enumerate(bins):
-                    ser_t[i].append(_risco(g[self._mask_in(g, feature, b)]))
+                for i, m in enumerate(self._bin_masks(g, feature, bins)):
+                    ser_t[i].append(_risco(g[m]))
         series = {"ordered": order, "labels": labels, "ref_risco": ref_risco,
                   "xs_sample": xs_s_lab, "ser_sample": ser_s,
                   "xs_safra": xs_t, "ser_safra": ser_t}
@@ -4473,8 +5121,8 @@ class TreeSegmenter:
             if n_g == 0:
                 continue
             xs.append(str(per))
-            for i, b in enumerate(bins):
-                Y[i].append(100 * int(self._mask_in(g, feature, b).sum()) / n_g)
+            for i, c in enumerate(self._bin_counts(g[feature], bins)):
+                Y[i].append(100 * c / n_g)
         if not xs:
             ax.text(0.5, 0.5, "sem dados por safra", ha="center", va="center",
                     transform=ax.transAxes, color="#889"); ax.axis("off")
@@ -5682,9 +6330,13 @@ class TreeSegmenter:
             nonref = []
         psi_on = with_psi and bool(nonref)
 
-        base = self._sub(leaf_mask & ref_mask, *features)  # porção DES da folha (referência)
-        yb = base[self.target].to_numpy(dtype="float64")
-        yb = yb[~np.isnan(yb)]
+        # porção DES da folha (referência) recortada por POSIÇÃO e por coluna: o
+        # frame folha∩DES com todas as variáveis (≈6 GB na raiz a 10M) não é mais
+        # montado — cada variável recorta só a própria coluna dentro do laço
+        pos_base = self._pos_of(leaf_mask & ref_mask)
+        yb_all = self.df[self.target].iloc[pos_base].to_numpy(dtype="float64")
+        ok_y = ~np.isnan(yb_all)
+        yb = yb_all[ok_y]
         if self._is_clf:
             ybin = yb.astype(int)
             tot_bad = int(ybin.sum())
@@ -5698,73 +6350,116 @@ class TreeSegmenter:
         mean_global = float(yb.mean()) if yb.size else np.nan
         n_base = int(yb.size)
 
-        # frames e contagens por amostra DENTRO da folha (para o PSI nos bins do IV)
-        ref_frame = cur_frames = None
+        # posições por amostra DENTRO da folha (para o PSI nos bins do IV)
+        pos_cur = {}
         n_ref_leaf = 0
         if psi_on:
-            ref_frame = base                     # mesma máscara: folha ∩ DES
-            n_ref_leaf = len(ref_frame)
-            cur_frames = {a: self._sub(leaf_mask & self._smask(a), *features)
-                          for a in nonref}
+            n_ref_leaf = len(pos_base)           # mesma máscara: folha ∩ DES
+            pos_cur = {a: self._pos_of(leaf_mask & self._smask(a)) for a in nonref}
+        # maus por faixa por contagem inteira quando o alvo (truncado) é 0/1
+        bin01 = bool(self._is_clf and ok_base
+                     and ((ybin == 0) | (ybin == 1)).all())
 
+        # bins por variável: _resolve_bins_cached (em série) ou o lote paralelo
+        # dos ajustes do optbinning com n_jobs > 1 — mesmos bins e mesmo cache
+        obter_bins, fechar_bins = (
+            self._bins_iv_resolvedor(sid, features, max_n_bins, min_bin_size)
+            if ok_base else (None, None))
         rows = []
-        for feat in features:
-            iv, nb, kind = np.nan, 0, "—"
-            psi_vals = {a: np.nan for a in nonref}
-            if ok_base:
-                try:
-                    bins, _modo, kind = self._resolve_bins_cached(
-                        sid, feat, None, None, max_n_bins, min_bin_size)
-                    nb = len(bins)
-                    if bins:
-                        # IV por faixa: classificação = WoE binário (Siddiqi)
-                        # Σ(dist_bons−dist_maus)·ln(dist_bons/dist_maus); regressão =
-                        # IV contínuo Σ (n_i/N)·|média_bin − média_global|.
-                        iv = 0.0
-                        yb_feat = base[self.target].to_numpy(dtype="float64")
-                        for b in bins:
-                            m = self._mask_in(base, feat, b).to_numpy()
-                            yi = yb_feat[m]
-                            yi = yi[~np.isnan(yi)]
-                            if yi.size == 0:
-                                continue
-                            if self._is_clf:
-                                yi = yi.astype(int)
-                                bad_i = int(yi.sum()); good_i = int(yi.size - bad_i)
-                                dg = good_i / tot_good
-                                db = bad_i / tot_bad
-                                if dg > 0 and db > 0:
-                                    iv += (dg - db) * np.log(dg / db)
+        erro = True
+        try:
+            for i, feat in enumerate(features):
+                iv, nb, kind = np.nan, 0, "—"
+                psi_vals = {a: np.nan for a in nonref}
+                if ok_base:
+                    try:
+                        bins, _modo, kind = obter_bins(i, feat)
+                        nb = len(bins)
+                        if bins:
+                            # IV por faixa: classificação = WoE binário (Siddiqi)
+                            # Σ(dist_bons−dist_maus)·ln(dist_bons/dist_maus); regressão =
+                            # IV contínuo Σ (n_i/N)·|média_bin − média_global|.
+                            iv = 0.0
+                            col_b = self.df[feat].iloc[pos_base]   # SÓ esta coluna
+                            ids_b = self._bin_ids(col_b, bins)
+                            if ids_b is None:
+                                # caminho antigo: uma máscara (_mask_in) por faixa
+                                for b in bins:
+                                    m = self._mask_in_col(col_b, b).to_numpy()
+                                    yi = yb_all[m]
+                                    yi = yi[~np.isnan(yi)]
+                                    if yi.size == 0:
+                                        continue
+                                    if self._is_clf:
+                                        yi = yi.astype(int)
+                                        bad_i = int(yi.sum()); good_i = int(yi.size - bad_i)
+                                        dg = good_i / tot_good
+                                        db = bad_i / tot_bad
+                                        if dg > 0 and db > 0:
+                                            iv += (dg - db) * np.log(dg / db)
+                                    else:
+                                        iv += (yi.size / n_base) * abs(float(yi.mean()) - mean_global)
                             else:
-                                iv += (yi.size / n_base) * abs(float(yi.mean()) - mean_global)
-                        # PSI sobre os MESMOS bins (DES × amostra, na folha)
-                        if psi_on and n_ref_leaf > 0:
-                            ref_shares = [int(self._mask_in(ref_frame, feat, b).sum())
-                                          / n_ref_leaf for b in bins]
-                            for a in nonref:
-                                n_a = len(cur_frames[a])
-                                if n_a == 0:
-                                    continue
-                                cur_shares = [int(self._mask_in(cur_frames[a], feat,
-                                                                b).sum()) / n_a
-                                              for b in bins]
-                                psi_vals[a] = round(_psi_from_shares(
-                                    ref_shares, cur_shares, eps=1e-6), 4)
-                except Exception:
-                    iv = np.nan
-            row = {
-                "variavel": feat, "tipo": kind, "n_bins": nb,
-                "iv": round(float(iv), 4) if not (iv is None or np.isnan(iv)) else np.nan,
-                "forca": _classifica_iv(iv, self.task_type),
-            }
-            if psi_on:
-                for a in nonref:
-                    row[f"psi_{a}"] = psi_vals[a]
-                validos = [v for v in psi_vals.values() if not pd.isna(v)]
-                pior = max(validos) if validos else np.nan
-                row["pior_psi"] = round(float(pior), 4) if not pd.isna(pior) else np.nan
-                row["psi_classificacao"] = _classifica_psi(pior) if not pd.isna(pior) else "—"
-            rows.append(row)
+                                # código de faixa por linha: contagens só das linhas com
+                                # alvo válido, na mesma ordem de faixa (faixa vazia pula)
+                                ids_v = ids_b[ok_y]
+                                if self._is_clf:
+                                    dentro = ids_v >= 0
+                                    n_k = np.bincount(ids_v[dentro], minlength=nb)
+                                    bad_k = (np.bincount(ids_v[dentro & (ybin == 1)],
+                                                         minlength=nb) if bin01 else None)
+                                    for k in range(nb):
+                                        if n_k[k] == 0:
+                                            continue
+                                        bad_i = (int(bad_k[k]) if bin01
+                                                 else int(ybin[ids_v == k].sum()))
+                                        good_i = int(n_k[k] - bad_i)
+                                        dg = good_i / tot_good
+                                        db = bad_i / tot_bad
+                                        if dg > 0 and db > 0:
+                                            iv += (dg - db) * np.log(dg / db)
+                                else:
+                                    # média por faixa sobre o MESMO subarray, na mesma
+                                    # ordem (soma pairwise idêntica); nunca bincount
+                                    # com pesos (soma sequencial ≠ pairwise)
+                                    for k in range(nb):
+                                        yi = yb[ids_v == k]
+                                        if yi.size == 0:
+                                            continue
+                                        iv += (yi.size / n_base) * abs(float(yi.mean()) - mean_global)
+                            # PSI sobre os MESMOS bins (DES × amostra, na folha): TODAS as
+                            # linhas do recorte contam, inclusive as de alvo NaN
+                            if psi_on and n_ref_leaf > 0:
+                                ref_shares = [c / n_ref_leaf
+                                              for c in self._bin_counts(col_b, bins, ids_b)]
+                                for a in nonref:
+                                    n_a = len(pos_cur[a])
+                                    if n_a == 0:
+                                        continue
+                                    col_a = self.df[feat].iloc[pos_cur[a]]
+                                    cur_shares = [c / n_a
+                                                  for c in self._bin_counts(col_a, bins)]
+                                    psi_vals[a] = round(_psi_from_shares(
+                                        ref_shares, cur_shares, eps=1e-6), 4)
+                    except Exception:
+                        iv = np.nan
+                row = {
+                    "variavel": feat, "tipo": kind, "n_bins": nb,
+                    "iv": round(float(iv), 4) if not (iv is None or np.isnan(iv)) else np.nan,
+                    "forca": _classifica_iv(iv, self.task_type),
+                }
+                if psi_on:
+                    for a in nonref:
+                        row[f"psi_{a}"] = psi_vals[a]
+                    validos = [v for v in psi_vals.values() if not pd.isna(v)]
+                    pior = max(validos) if validos else np.nan
+                    row["pior_psi"] = round(float(pior), 4) if not pd.isna(pior) else np.nan
+                    row["psi_classificacao"] = _classifica_psi(pior) if not pd.isna(pior) else "—"
+                rows.append(row)
+            erro = False
+        finally:
+            if fechar_bins is not None:
+                fechar_bins(erro)       # encerra o executor (com erro: cancela)
         out = (pd.DataFrame(rows)
                .sort_values("iv", ascending=False, na_position="last")
                .reset_index(drop=True))
@@ -5936,8 +6631,8 @@ class TreeSegmenter:
                 bins, _modo, kind = self._resolve_bins(
                     leaf, feat, None, None, max_n_bins, min_bin_size)
                 grupos = []
-                for b in bins:
-                    y = leaf.loc[self._mask_in(leaf, feat, b), self.target].to_numpy(dtype="float64")
+                for m in self._bin_masks(leaf, feat, bins):
+                    y = leaf.loc[m, self.target].to_numpy(dtype="float64")
                     y = y[~np.isnan(y)]
                     if y.size:
                         grupos.append(y)
@@ -6213,11 +6908,13 @@ class TreeSegmenter:
 
     @classmethod
     def from_dict(cls, data: dict, df: pd.DataFrame, verbose: bool = False,
-                  mask_cache: dict | None = None, copy: bool = True):
+                  mask_cache: dict | None = None, copy: bool = True,
+                  n_jobs: int | None = 1):
         """Reconstrói um segmentador a partir de `to_dict()` + um DataFrame.
 
-        ``copy`` é repassado ao construtor (cópia profunda × rasa do ``df`` —
-        ver ``TreeSegmenter.__init__``); não faz parte do JSON.
+        ``copy`` e ``n_jobs`` são repassados ao construtor (cópia profunda × rasa
+        do ``df`` e threads do optbinning — ver ``TreeSegmenter.__init__``); não
+        fazem parte do JSON.
 
         ``mask_cache`` (opcional): cache condições→máscara de OUTRA árvore sobre
         o **mesmo** ``df`` (o dict devolvido por :meth:`_prime_mask_cache`). O
@@ -6247,7 +6944,7 @@ class TreeSegmenter:
                   feature_labels=meta.get("feature_labels"),
                   problem_label=meta.get("problem_label"),
                   min_leaf_rows=meta.get("min_leaf_rows", 50),
-                  verbose=verbose, copy=copy)
+                  verbose=verbose, copy=copy, n_jobs=n_jobs)
         # fallback persistido (JSONs antigos não têm a chave → None = sem fallback)
         seg.fallback = meta.get("fallback")
         if mask_cache is not None:      # cache compartilhado (mesmo df) — ver docstring
@@ -6263,13 +6960,14 @@ class TreeSegmenter:
 
     @classmethod
     def load(cls, path: str, df: pd.DataFrame, verbose: bool = False,
-             copy: bool = True):
+             copy: bool = True, n_jobs: int | None = 1):
         """Carrega uma árvore salva em JSON e a aplica ao DataFrame fornecido.
-        ``copy`` é repassado ao construtor (ver ``TreeSegmenter.__init__``)."""
+        ``copy`` e ``n_jobs`` são repassados ao construtor (ver
+        ``TreeSegmenter.__init__``)."""
         import json
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return cls.from_dict(data, df, verbose=verbose, copy=copy)
+        return cls.from_dict(data, df, verbose=verbose, copy=copy, n_jobs=n_jobs)
 
     # ==================================================================
     # RÉGUA / SCORING

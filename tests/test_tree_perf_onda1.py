@@ -30,6 +30,11 @@ from yggdrasil.credit_risk.tree import segmenter as segmod
 
 TASKS = ["classification", "regression"]
 
+# Ajustes independentes comparados com igualdade exata: CP-SAT com 1 worker
+# (ver ``cpsat_deterministico`` no conftest) para o empate do ótimo não virar
+# falha intermitente.
+pytestmark = pytest.mark.usefixtures("cpsat_deterministico")
+
 
 # ----------------------------------------------------------------------
 # Fixture: base sintética com os tipos "chatos" do plano de equivalência
@@ -136,7 +141,17 @@ def _metodo_velho(nome, trocas):
     return ns[nome]
 
 
-_resolve_velho = _metodo_velho("_resolve_bins", _TROCAS_RESOLVE)
+# o _resolve_bins virou preparar → resolver → finalizar (n_jobs): o degenerado
+# mora no _resolve_bins_preparar; a versão "velha" refaz o _resolve_bins com ele
+_preparar_velho = _metodo_velho("_resolve_bins_preparar", _TROCAS_RESOLVE)
+
+
+def _resolve_velho(self, sub, feature, splits, dtype, max_n_bins, min_bin_size,
+                   max_bin_size=None, relax_max=False, min_mean_diff=0.0,
+                   criterion="optbin"):
+    prep = _preparar_velho(self, sub, feature, splits, dtype, max_n_bins, min_bin_size,
+                           max_bin_size, relax_max, min_mean_diff, criterion)
+    return self._resolve_bins_finalizar(prep, self._resolve_bins_resolver(prep))
 _optbin_velho = _metodo_velho("_optbin_numeric_bins", _TROCAS_OPTBIN)
 
 
@@ -240,7 +255,7 @@ def test_resolve_bins_sem_np_unique(task, monkeypatch):
 
     def espiao(ar, *a, **k):
         f = sys._getframe(1).f_code.co_name
-        if f in ("_resolve_bins", "_optbin_numeric_bins"):
+        if f in ("_resolve_bins", "_resolve_bins_preparar", "_optbin_numeric_bins"):
             if np.asarray(ar).dtype == object:
                 raise AssertionError(f"np.unique em array object dentro de {f}")
             chamadas.append(f)
@@ -429,7 +444,7 @@ def _checa_todas(seg, ordem):
 def test_leaves_composto_igual_compute(task, weight, sample, apelidos):
     seg = _seg_leaves(task, weight, sample, apelidos)
     _checa_todas(seg, COMBOS)                       # base antes (combo 0 é a base)
-    seg._agg_cache.clear()
+    seg._agg_cache.clear(); seg._agg_lru.clear()   # (e a LRU por assinatura)
     _checa_todas(seg, list(reversed(COMBOS)))       # composto antes da base
     # mutação (bump de versão): nada da versão anterior pode vazar
     with warnings.catch_warnings():

@@ -85,6 +85,40 @@ def _isola_estado_mlflow():
 
 
 @pytest.fixture
+def cpsat_deterministico(monkeypatch):
+    """CP-SAT do optbinning com 1 worker: ajustes independentes ficam reprodutíveis.
+
+    O optbinning cria ``cp_model.CpSolver()`` só com ``max_time_in_seconds``, e o
+    CP-SAT roda com vários workers em paralelo. Quando o ótimo NÃO é único (ajuste
+    categórico quase empatado), cada execução pode devolver um agrupamento
+    diferente — ex.: ``{2.00}``/``{0.1, 0.10}`` × ``{2.00, 0.1}``/``{0.10}`` em
+    ~1-2% das chamadas. Testes que comparam dois ajustes INDEPENDENTES com
+    igualdade exata (velho × novo, ``n_jobs`` 1 × 4) falhariam de vez em quando
+    sem nenhuma diferença no nosso código. Com 1 worker (e o limite de tempo
+    longe de estourar) a busca é determinística.
+
+    Opt-in (``pytest.mark.usefixtures``): só os testes de equivalência usam; o
+    código de produção não muda. Sem ortools, não faz nada.
+    """
+    try:
+        from ortools.sat.python import cp_model
+    except ImportError:                           # pragma: no cover - sem ortools
+        yield
+        return
+    original = cp_model.CpSolver
+
+    class _CpSolver1Worker(original):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.parameters.num_workers = 1
+
+    # o optbinning resolve ``cp_model.CpSolver`` na hora da chamada (também nas
+    # threads do ``n_jobs``), então trocar o atributo do módulo basta.
+    monkeypatch.setattr(cp_model, "CpSolver", _CpSolver1Worker)
+    yield
+
+
+@pytest.fixture
 def cfg() -> ColumnConfig:
     return ColumnConfig()
 

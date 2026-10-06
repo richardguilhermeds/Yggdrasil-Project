@@ -350,7 +350,7 @@ def test_zero_comparacoes_da_amostra_depois_do_init(monkeypatch, task):
     n = _contador_eq(monkeypatch, seg)
     with _quieto(), warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        seg._agg_cache.clear()
+        seg._agg_cache.clear(); seg._agg_lru.clear()   # (e a LRU por assinatura)
         seg.leaves(with_psi=True, with_test=True)
         seg.psi(); seg.metrics(); seg.metrics(cutoff=0.3)
         seg.monotonicity_report()
@@ -442,7 +442,7 @@ def test_compute_leaves_sem_codigos_usa_caminho_antigo():
     _cresce(seg)
     novo = seg.leaves()
     seg._sample_codes = None
-    seg._agg_cache.clear()
+    seg._agg_cache.clear(); seg._agg_lru.clear()   # (e a LRU por assinatura)
     _igual(seg.leaves(), novo)
 
 
@@ -534,7 +534,7 @@ def test_caminho_antigo_sem_codigos_igual():
     psi, det = seg.psi(), seg.psi_detalhe()
     lv = seg.leaves(with_psi=True)
     seg._sample_codes = None                      # força o crosstab
-    seg._agg_cache.clear()
+    seg._agg_cache.clear(); seg._agg_lru.clear()   # (e a LRU por assinatura)
     _igual(seg.psi(), psi)
     _igual(seg.psi_detalhe(), det)
     _igual(seg.leaves(with_psi=True), lv)
@@ -637,7 +637,7 @@ def test_leitores_do_wrapper_iguais(cow):
         novo = (seg.metrics(), seg.metrics(cutoff=0.2), seg.psi_by_safra(),
                 seg._value_color_range())
         seg._leaf_id_series = lambda leaf_ids=None: _leaf_id_antigo(seg, leaf_ids)
-        seg._agg_cache.clear()
+        seg._agg_cache.clear(); seg._agg_lru.clear()   # (e a LRU por assinatura)
         velho = (seg.metrics(), seg.metrics(cutoff=0.2), seg.psi_by_safra(),
                  seg._value_color_range())
         for a, b in zip(novo[:3], velho[:3]):
