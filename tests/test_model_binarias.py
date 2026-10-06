@@ -92,13 +92,16 @@ def test_continua_segue_no_binning_otimo():
     assert seg._bins_binaria("cont", seg._frame(None, ["cont", "target"]), "num") is None
 
 
-def test_aviso_so_para_nivel_raro():
-    seg = _seg()
-    with warnings.catch_warnings(record=True) as w:
+def test_binaria_rara_sem_aviso():
+    """Flag rara (f1: 1% da base) não emite UserWarning — nem na construção,
+    nem no ranking, nem ao resolver as faixas."""
+    with contextlib.redirect_stdout(io.StringIO()),             warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        seg.variable_iv(["f40", "f3", "f1"], with_psi=False)
-    msgs = [str(x.message) for x in w if "nível raro" in str(x.message)]
-    assert len(msgs) == 1 and "'f1'" in msgs[0]
+        seg = ModelSegmenter(_df(), target="target", sample_col="amostra")
+        seg.variable_iv(["f40", "f3", "f1", "f3_bool", "f3_sn"], with_psi=False)
+        for f in ("f1", "f3", "f3_bool", "f3_sn"):
+            seg._resolve_bins(f)
+    assert [str(x.message) for x in w if "yggdrasil" in x.filename] == []
 
 
 def test_manual_tem_precedencia():

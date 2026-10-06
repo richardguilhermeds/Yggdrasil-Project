@@ -5,8 +5,7 @@
   (1/1.0/True/Decimal(1), 0/False, o mesmo instante em fusos distintos) cai no
   caminho antigo — igualdade exata (ou o mesmo erro) com a versão anterior.
 * 3A: o gráfico "faixas do optimal binning" só LÊ o ``_bins_cache`` (hit
-  puro); no miss não grava lá, e o ranking seguinte ainda emite o aviso de
-  qualidade da binária com nível raro."""
+  puro); no miss não grava lá — quem grava é o ranking."""
 from __future__ import annotations
 
 import contextlib
@@ -132,15 +131,7 @@ def _seg(df):
         return ModelSegmenter(df, target="target", verbose=False, sample_col="amostra")
 
 
-def _avisos_raro(fn):
-    with contextlib.redirect_stdout(io.StringIO()), \
-            warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        fn()
-    return [str(x.message) for x in w if "nível raro" in str(x.message)]
-
-
-def test_optbin_no_miss_nao_grava_no_bins_cache_e_ranking_ainda_avisa():
+def test_optbin_no_miss_nao_grava_no_bins_cache_e_ranking_grava():
     seg = _seg(_base_raro())
     with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -148,8 +139,10 @@ def test_optbin_no_miss_nao_grava_no_bins_cache_e_ranking_ainda_avisa():
             seg._optbin_numeric_bins(f, seg.ref_sample)
             seg._optbin_numeric_bins(f)
     assert not any(k[0] in ("x_raro", "x_cont") for k in seg._bins_cache)
-    avisos = _avisos_raro(seg.variable_iv)
-    assert any("x_raro" in a for a in avisos), avisos
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        seg.variable_iv()
+    assert {"x_raro", "x_cont"} <= {k[0] for k in seg._bins_cache}
     # depois do ranking: hit puro do _bins_cache, mesmo resultado
     seg._optbin_cache.clear()
     n_cache = len(seg._bins_cache)

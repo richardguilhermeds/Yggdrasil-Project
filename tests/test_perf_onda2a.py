@@ -42,7 +42,6 @@ def _old_bins_binaria(self, feature, fit, kind):
         bins = [{"kind": "cat", "cats": [v]} for v in niveis]
     if col.isna().any():
         bins.append({"kind": "na"})
-    self._avisa_binaria_rara(feature, fit, bins)
     return bins
 
 

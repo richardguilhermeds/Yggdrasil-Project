@@ -2684,10 +2684,6 @@ class ModelSegmenter:
             bins.append({"kind": "na"})
         return self._aplica_destino_na(feature, bins, fit, splits is not None)
 
-    # níveis da flag abaixo destes limites deixam o IV instável (aviso, não bloqueio)
-    _BINARIA_MIN_SHARE = 0.01
-    _BINARIA_MIN_EVENTOS = 30
-
     def _bins_binaria(self, feature, fit, kind):
         """Bins de uma variável **binária** (exatamente 2 valores distintos fora os
         faltantes): um nível por faixa, sem optbinning. ``None`` se não for binária.
@@ -2719,30 +2715,7 @@ class ModelSegmenter:
             bins = [{"kind": "cat", "cats": [v]} for v in niveis]
         if col.isna().any():
             bins.append({"kind": "na"})
-        self._avisa_binaria_rara(feature, fit, bins)
         return bins
-
-    def _avisa_binaria_rara(self, feature, fit, bins) -> None:
-        """Avisa quando o nível minoritário da flag é pequeno demais para um IV
-        estável (share < 1% ou, na classificação, < 30 eventos)."""
-        y = fit[self.target].to_numpy(dtype="float64")
-        tot = int(np.sum(~np.isnan(y)))
-        if not tot:
-            return
-        fracos = []
-        for b, m in zip(bins[:2], _bin_masks(fit[feature], bins[:2])):
-            yi = y[m]
-            yi = yi[~np.isnan(yi)]
-            share = len(yi) / tot
-            eventos = int((yi == 1).sum()) if self.task_type == "classification" else None
-            if share < self._BINARIA_MIN_SHARE or (
-                    eventos is not None and eventos < self._BINARIA_MIN_EVENTOS):
-                txt = f"{self._bin_label(feature, b)}: {100 * share:.2f}% da base"
-                fracos.append(txt + (f", {eventos} eventos" if eventos is not None else ""))
-        if fracos:
-            warnings.warn(
-                f"'{self.label(feature)}' é binária com nível raro ({'; '.join(fracos)}) — "
-                "o IV é calculado nível a nível, mas fica instável com tão poucos casos.")
 
     def _aplica_destino_na(self, feature, bins, fit, manual) -> list:
         """Categorização manual: move os faltantes para a faixa escolhida em
@@ -3774,8 +3747,8 @@ class ModelSegmenter:
         if (meta.get("splits") is None and not meta.get("derived_from")
                 and not meta.get("derived_bins")):
             # só o HIT puro do ranking (leitura, sem efeito colateral): no miss,
-            # gravar no _bins_cache calaria o aviso de nível raro / de falha do
-            # optbinning que o ranking emitiria depois na mesma chave
+            # gravar no _bins_cache calaria o aviso de falha do optbinning que o
+            # ranking emitiria depois na mesma chave
             rb = self._bins_cache.get(
                 self._chave_bins_cache(feature, max_n_bins, min_bin_size, None, sample))
         if rb is not None:
@@ -3794,9 +3767,7 @@ class ModelSegmenter:
         fit = self._frame(sample, cols=[feature, self.target])
         if self._detect_kind(feature, fit) != "num":
             return []
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")      # o aviso de nível raro já sai no ranking
-            binaria = self._bins_binaria(feature, fit, "num")
+        binaria = self._bins_binaria(feature, fit, "num")
         if binaria is not None:
             return binaria
         x = fit[feature].to_numpy(dtype="float64")
