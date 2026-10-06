@@ -39,6 +39,7 @@ depois de desfazer é preciso **re-treinar** para o modelo refletir a configura�
 """
 from __future__ import annotations
 
+import os
 import re
 import warnings
 from collections import OrderedDict
@@ -484,13 +485,19 @@ class ModelSegmenterUI:
 
     def __init__(self, df, target="target", task_type="classification", sample_col=None,
                  ref_sample="DES", feature_labels=None, problem_label=None, features=None, date_col=None,
-                 random_state=42, score_invertido=True):
+                 random_state=42, score_invertido=True, n_jobs=None):
+        # n_jobs: threads dos ajustes do optbinning no ranking, repassado ao
+        # segmentador. None (padrão da UI interativa) = min(núcleos, 8); 1 = em
+        # série, o padrão do ModelSegmenter (modo de validação regulatória). Os
+        # bins são os mesmos com qualquer valor (CP-SAT com 1 worker).
+        if n_jobs is None:
+            n_jobs = min(os.cpu_count() or 1, 8)
         self.seg = ModelSegmenter(df, target=target, task_type=task_type,
                                   sample_col=sample_col, ref_sample=ref_sample,
                                   feature_labels=feature_labels, problem_label=problem_label,
                                   features=features,
                                   date_col=date_col, random_state=random_state, verbose=False,
-                                  score_invertido=score_invertido)
+                                  score_invertido=score_invertido, n_jobs=n_jobs)
         self.df = df
         self.task_type = task_type
         self.date_col = date_col

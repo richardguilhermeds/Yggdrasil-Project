@@ -12,6 +12,7 @@ módulos e já haviam começado a **divergir** (guard de NaN no PSI, default de
 from __future__ import annotations
 
 import contextlib
+import sys
 import threading
 import types
 import warnings
@@ -263,11 +264,7 @@ def fit_optbinning_splits(b, x, y, max_rows=None, idx=None) -> list:
     posições já sorteadas (:func:`_amostra_optbinning`) — com ``None`` o sorteio
     é feito aqui, exatamente como antes. O CP-SAT do ajuste roda com 1 worker
     (:func:`_cpsat_um_worker`): mesmo (x, y) ⇒ mesmos cortes, inclusive em empate."""
-    if idx is None:
-        idx = _amostra_optbinning(len(x), max_rows)
-    if idx is not None:
-        x = np.asarray(x)[idx]
-        y = np.asarray(y)[idx]
+    x, y = _recorta_amostra_optbinning(x, y, max_rows, idx)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -277,10 +274,56 @@ def fit_optbinning_splits(b, x, y, max_rows=None, idx=None) -> list:
     except ValueError:
         return []
     except Exception as e:
-        warnings.warn(
-            f"optbinning falhou inesperadamente em '{getattr(b, 'name', '?')}': "
-            f"{type(e).__name__}: {e}", RuntimeWarning)
+        avisa_falha_optbinning(b, e)
         return []
+
+
+def _recorta_amostra_optbinning(x, y, max_rows=None, idx=None):
+    """``(x, y)`` nas linhas de ajuste: ``idx`` dado, o sorteio de
+    :func:`_amostra_optbinning` (``idx=None``) ou tudo (sem amostragem)."""
+    if idx is None:
+        idx = _amostra_optbinning(len(x), max_rows)
+    if idx is not None:
+        x = np.asarray(x)[idx]
+        y = np.asarray(y)[idx]
+    return x, y
+
+
+def avisa_falha_optbinning(b, e) -> None:
+    """Aviso de falha INESPERADA do optbinning (qualquer exceção que não seja o
+    ``ValueError`` de problema inviável) — mesmo texto nos dois caminhos."""
+    warnings.warn(
+        f"optbinning falhou inesperadamente em '{getattr(b, 'name', '?')}': "
+        f"{type(e).__name__}: {e}", RuntimeWarning)
+
+
+def ajusta_optbinning_em_thread(b, x, y, max_rows=None, idx=None):
+    """Núcleo de :func:`fit_optbinning_splits` para rodar numa THREAD de
+    trabalho (lote paralelo do ranking, ``n_jobs``): mesma amostra, mesmo
+    ``np.errstate`` e mesmo CP-SAT com 1 worker (:func:`_cpsat_um_worker` —
+    ambos por thread: têm de entrar AQUI), mas SEM ``warnings.catch_warnings``
+    — até o Python 3.13 os filtros são globais e o enter/exit concorrente
+    restauraria listas trocadas por outra thread; quem cria o pool filtra uma
+    vez só, na thread principal, e só sai do filtro com o pool encerrado. Com
+    avisos por contexto (``sys.flags.context_aware_warnings``, 3.14+) o filtro
+    da thread principal não chega aqui — aí o ``catch_warnings`` local é seguro
+    e é usado. Devolve ``(cortes, exceção)`` (``[]`` na exceção): nada é avisado
+    aqui — a thread principal decide depois, já fora do filtro (``ValueError``
+    ⇒ ``[]`` calado, como em :func:`fit_optbinning_splits`; outra ⇒
+    :func:`avisa_falha_optbinning`)."""
+    x, y = _recorta_amostra_optbinning(x, y, max_rows, idx)
+    try:
+        if getattr(sys.flags, "context_aware_warnings", False):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with np.errstate(divide="ignore", invalid="ignore"), _cpsat_um_worker():
+                    b.fit(x, y)
+        else:
+            with np.errstate(divide="ignore", invalid="ignore"), _cpsat_um_worker():
+                b.fit(x, y)
+        return list(b.splits), None
+    except Exception as e:
+        return [], e
 
 
 def sql_texto(v) -> str:

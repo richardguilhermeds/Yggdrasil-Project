@@ -59,6 +59,7 @@ from .._common import (
     _amostra_optbinning,
     _cpsat_um_worker,
     copia_df as _copia_df,
+    ajusta_optbinning_em_thread as _ajusta_optbinning_em_thread,
 )
 from .. import _common as _common_mod   # OPTBINNING_MAX_ROWS lido na hora
 
@@ -288,6 +289,59 @@ def _inverted_pairs(ordered, values) -> list:
 
 
 # _fit_optbinning_splits vem de credit_risk._common (import acima)
+
+
+# módulos cujos avisos ficam calados enquanto o lote paralelo do ranking
+# (``n_jobs`` > 1) ajusta o optbinning em threads: até o Python 3.13 o filtro é
+# GLOBAL, então é estreito para não calar o resto do processo (o caminho em
+# série cala TUDO, mas só em volta do fit). _common entra pelo stacklevel dos
+# avisos do próprio fit (atribuídos a quem chama ``b.fit``) e
+# concurrent.futures/threading pelos de stacklevel mais alto.
+_MODULOS_AJUSTE_OPTBIN = (r"(optbinning|sklearn|ortools|scipy|numpy|pandas|"
+                          r"yggdrasil\.credit_risk\._common|concurrent\.futures|"
+                          r"threading)(\.|$)")
+
+
+def _normaliza_n_jobs(n_jobs) -> int:
+    """Nº de threads dos ajustes do optbinning no ranking (convenção do sklearn,
+    a mesma do TreeSegmenter): ``None`` ou 1 = em série (padrão); -1 = todos os
+    núcleos; k ≥ 1 = k threads."""
+    if n_jobs is None:
+        return 1
+    n = int(n_jobs)
+    if n == -1:
+        import os
+        return os.cpu_count() or 1
+    if n < 1:
+        raise ValueError(f"n_jobs inválido: {n_jobs!r}. Use None, -1 ou um inteiro >= 1.")
+    return n
+
+
+def _ajusta_pedido(pedido):
+    """Ajuste EM SÉRIE de um pedido ``(b, x, y, max_rows, calado)`` cedido pelas
+    etapas do binning (:meth:`ModelSegmenter._resolve_bins_etapas`) — o mesmo
+    :func:`_fit_optbinning_splits` de sempre (lido do módulo a cada chamada).
+    ``calado``: falha inesperada sem aviso (``[]``; quem pediu decide o que
+    fazer, ex.: refazer o ajuste completo)."""
+    b, x, y, max_rows, calado = pedido
+    if calado:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _fit_optbinning_splits(b, x, y, max_rows=max_rows)
+    return _fit_optbinning_splits(b, x, y, max_rows=max_rows)
+
+
+def _conduz_etapas(etapas):
+    """Conduz NA HORA um gerador de etapas do binning: cada pedido de ajuste vai
+    a :func:`_ajusta_pedido` e os cortes voltam ao gerador; devolve o
+    ``return`` dele. É o caminho em série (``n_jobs`` = 1) e o de toda chamada
+    fora do lote paralelo do ranking."""
+    try:
+        pedido = next(etapas)
+        while True:
+            pedido = etapas.send(_ajusta_pedido(pedido))
+    except StopIteration as fim:
+        return fim.value
 
 
 def _safra_por_unicos(dtype) -> bool:
@@ -1526,6 +1580,7 @@ class ModelSegmenter:
         score_scale: float = 1000.0,
         random_state: int | None = 42,
         score_invertido: bool = True,
+        n_jobs: int | None = 1,
     ):
         if task_type not in ("classification", "regression"):
             raise ValueError("task_type deve ser 'classification' ou 'regression'.")
@@ -1681,6 +1736,15 @@ class ModelSegmenter:
         # por _build_pipeline/_build_estimator, tune_optuna, backward_elimination e
         # SHAP; persistida em to_dict/from_dict. None também vira 42.
         self.random_state: int = 42 if random_state is None else int(random_state)
+        # n_jobs: threads dos ajustes do optbinning no ranking (:meth:`variable_iv`,
+        # uma variável por ajuste). 1 = em série (padrão — o modo de validação
+        # regulatória); -1 = todos os núcleos; k = k threads. Os bins, o ranking e
+        # o _bins_cache são os MESMOS com qualquer valor (o CP-SAT roda com 1
+        # worker: determinístico, inclusive em empate de ótimo). Configuração da
+        # SESSÃO: não entra em to_dict/save e o load mantém a deste objeto; pode
+        # ser trocado depois em ``seg.n_jobs``.
+        _normaliza_n_jobs(n_jobs)                    # valor inválido falha já aqui
+        self.n_jobs = n_jobs
         self.score_: pd.Series | None = None
         # camada de CALIBRAÇÃO pós-treino do score CRU (ver :meth:`calibrate`):
         # dict serializável {method, sample, params, …} aplicado no fluxo único
@@ -2235,7 +2299,22 @@ class ModelSegmenter:
 
         Se ``splits`` não for informado e a variável tiver **bins manuais**
         (``var_meta[feature]['splits']``, definidos via :meth:`set_manual_bins`),
-        eles são usados — sobrepondo o binning ótimo em toda a análise univariada."""
+        eles são usados — sobrepondo o binning ótimo em toda a análise univariada.
+
+        O corpo está em :meth:`_resolve_bins_etapas`, conduzido aqui na hora."""
+        return _conduz_etapas(self._resolve_bins_etapas(feature, max_n_bins, min_bin_size,
+                                                        splits, sample))
+
+    def _resolve_bins_etapas(self, feature, max_n_bins=5, min_bin_size=0.05, splits=None,
+                             sample=None):
+        """Corpo de :meth:`_resolve_bins_uncached` em ETAPAS (gerador): prepara,
+        cede cada pedido de ajuste do optbinning ``(b, x, y, max_rows, calado)``
+        (ver :func:`_ajusta_pedido`), recebe os cortes e finaliza — o ``return``
+        do gerador é ``(bins, kind)``. Quem conduz decide onde o ajuste roda: na
+        hora (:func:`_conduz_etapas`) ou numa thread do lote paralelo do ranking
+        (:meth:`_preaquece_bins`). Uma lógica só. Nenhum ``with`` atravessa um
+        ``yield`` (o lote intercala variáveis) e, suspenso à espera do ajuste, o
+        gerador só segura o x/y já sorteado."""
         if OptimalBinning is None:
             raise ImportError("optbinning não instalado. Rode: pip install optbinning")
         if splits is None:
@@ -2244,11 +2323,13 @@ class ModelSegmenter:
             # binning ótimo: só o gather das linhas sorteadas, sem copiar o recorte
             # (None ⇒ candidata a binária etc.: segue o caminho abaixo)
             if self._detect_kind(feature) == "num":
-                rapido = self._bins_num_por_posicao(feature, max_n_bins, min_bin_size, sample)
+                rapido = yield from self._bins_num_por_posicao_etapas(
+                    feature, max_n_bins, min_bin_size, sample)
                 if rapido is not None:
                     return rapido, "num"
             else:
-                rapido = self._bins_cat_fatorada(feature, max_n_bins, min_bin_size, sample)
+                rapido = yield from self._bins_cat_fatorada_etapas(
+                    feature, max_n_bins, min_bin_size, sample)
                 if rapido is not None:
                     return rapido, "cat"
         fit = self._frame(sample, cols=[feature, self.target])
@@ -2269,6 +2350,7 @@ class ModelSegmenter:
                 return binaria, kind
 
         if kind == "num":
+            tem_na = bool(fit[feature].isna().any())
             if splits is not None:
                 lo, hi = fit[feature].min(), fit[feature].max()
                 cortes = [s for s in sorted(splits) if lo < s < hi]
@@ -2281,15 +2363,26 @@ class ModelSegmenter:
                 if len(y) < 4 or x_obs.size == 0 or x_obs.min() == x_obs.max():
                     cortes = []
                 else:
-                    cortes = self._cortes_num_optbinning(
+                    # sorteio do teto já aqui — o MESMO de _fit_optbinning_splits
+                    # (ajuste com max_rows=0) — e o recorte da amostra inteira
+                    # solto: o gerador suspenso à espera do ajuste (lote paralelo
+                    # do ranking) não o segura, e o binning ótimo não volta a ler
+                    # ``fit`` (_aplica_destino_na não o usa)
+                    n_ajuste = len(y)
+                    idx = _amostra_optbinning(n_ajuste)
+                    if idx is not None:
+                        x, y = x[idx], y[idx]
+                    del ok, x_obs, idx
+                    fit = None
+                    cortes = yield from self._cortes_num_optbinning_etapas(
                         feature, x, y.astype(int) if self.task_type == "classification" else y,
-                        max_n_bins, min_bin_size, sample, len(y))
+                        max_n_bins, min_bin_size, sample, n_ajuste, max_rows=0)
             if not cortes:
                 return [], kind
             edges = [-np.inf, *cortes, np.inf]
             bins = [{"kind": "num", "lo": edges[i], "hi": edges[i + 1]}
                     for i in range(len(edges) - 1)]
-            if fit[feature].isna().any():
+            if tem_na:
                 bins.append({"kind": "na"})
             return self._aplica_destino_na(feature, bins, fit, splits is not None), kind
 
@@ -2304,13 +2397,27 @@ class ModelSegmenter:
             if len(ys) < 4 or not (xs != xs[0]).any():
                 grupos = []
             else:
-                grupos = self._grupos_optbinning(feature, xs, ys, max_n_bins, min_bin_size)
+                # idem ao numérico: sorteio já aqui, sem o texto da amostra inteira
+                # (um str por linha) vivo enquanto espera o ajuste
+                idx = _amostra_optbinning(len(xs))
+                if idx is not None:
+                    xs, ys = xs[idx], ys[idx]
+                del f2, idx
+                fit = None
+                grupos = yield from self._grupos_optbinning_etapas(
+                    feature, xs, ys, max_n_bins, min_bin_size, max_rows=0)
         bins = _bins_de_grupos(grupos, na_present)
         return self._aplica_destino_na(feature, bins, fit, splits is not None), kind
 
     def _grupos_optbinning(self, feature, xs, ys, max_n_bins, min_bin_size, max_rows=None):
         """Grupos do binning ótimo categórico de ``(xs, ys)`` (``max_rows=0``:
         linhas já sorteadas)."""
+        return _conduz_etapas(self._grupos_optbinning_etapas(feature, xs, ys, max_n_bins,
+                                                             min_bin_size, max_rows))
+
+    def _grupos_optbinning_etapas(self, feature, xs, ys, max_n_bins, min_bin_size,
+                                  max_rows=None):
+        """:meth:`_grupos_optbinning` em etapas (ver :meth:`_resolve_bins_etapas`)."""
         if self.task_type == "classification":
             b = OptimalBinning(name=feature, dtype="categorical",
                                max_n_bins=max_n_bins, min_bin_size=min_bin_size,
@@ -2320,9 +2427,15 @@ class ModelSegmenter:
             b = ContinuousOptimalBinning(
                 name=feature, dtype="categorical", max_n_bins=max_n_bins,
                 min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
-        return [list(a) for a in _fit_optbinning_splits(b, xs, ys, max_rows=max_rows)]
+        cortes = yield (b, xs, ys, max_rows, False)
+        return [list(a) for a in cortes]
 
     def _bins_cat_fatorada(self, feature, max_n_bins, min_bin_size, sample=None):
+        """Ver :meth:`_bins_cat_fatorada_etapas` (conduzido na hora)."""
+        return _conduz_etapas(self._bins_cat_fatorada_etapas(feature, max_n_bins,
+                                                             min_bin_size, sample))
+
+    def _bins_cat_fatorada_etapas(self, feature, max_n_bins, min_bin_size, sample=None):
         """Binning ótimo de uma variável CATEGÓRICA com a coluna fatorada UMA vez
         (``pd.factorize`` só das linhas da amostra): o
         faltante, as linhas de ajuste e a constância saem dos códigos, e o texto
@@ -2373,17 +2486,22 @@ class ModelSegmenter:
                 xs = niveis[codes[sel]]
                 cl = codes[lin]
                 varia = bool((cl != cl[0]).any())       # mesmo código ⇔ mesmo texto
+                del cl
             else:
                 xs = parte.iloc[sel].astype(str).to_numpy()
                 varia = bool((xs != xs[0]).any())
                 if not varia and idx is not None:       # amostra constante: olha tudo
                     xt = parte.iloc[lin].astype(str).to_numpy()
                     varia = bool((xt != xt[0]).any())
+                    del xt
             if varia:
                 abs_sel = sel if pos is None else pos[sel]
                 ys = self.df[self.target].iloc[abs_sel].to_numpy(dtype="float64")
-                grupos = self._grupos_optbinning(feature, xs, ys, max_n_bins,
-                                                 min_bin_size, max_rows=0)
+                # suspenso à espera do ajuste (lote paralelo do ranking): não
+                # segura os vetores do tamanho da amostra — só o que vai ao ajuste
+                del pos, parte, codes, lin
+                grupos = yield from self._grupos_optbinning_etapas(
+                    feature, xs, ys, max_n_bins, min_bin_size, max_rows=0)
         return _bins_de_grupos(grupos, na_present)   # ótimo: _aplica_destino_na não muda
 
     def _posicoes_ajuste(self, sample=None):
@@ -2424,6 +2542,12 @@ class ModelSegmenter:
 
     def _cortes_num_optbinning(self, feature, x, y, max_n_bins, min_bin_size, sample,
                                n_ajuste, max_rows=None):
+        """Ver :meth:`_cortes_num_optbinning_etapas` (conduzido na hora)."""
+        return _conduz_etapas(self._cortes_num_optbinning_etapas(
+            feature, x, y, max_n_bins, min_bin_size, sample, n_ajuste, max_rows))
+
+    def _cortes_num_optbinning_etapas(self, feature, x, y, max_n_bins, min_bin_size, sample,
+                                      n_ajuste, max_rows=None):
         """Cortes do binning ótimo NUMÉRICO de ``(x, y)`` (``y`` já no tipo do
         ajuste: int na classificação) via :func:`_fit_optbinning_splits` — o
         ``max_rows`` segue o dele. ``n_ajuste`` = linhas com alvo observado ANTES
@@ -2435,7 +2559,9 @@ class ModelSegmenter:
         :data:`_PREBINS_REUSO`). Prebins vazios ⇒ ``[]`` direto (o ajuste completo
         também dá ``[]``; o optbinning com ``user_splits=[]`` nem preenche as
         contagens de faltante). Se o ajuste com ``user_splits`` não terminar,
-        refaz o ajuste completo — o comportamento (e o aviso) de antes."""
+        refaz o ajuste completo — o comportamento (e o aviso) de antes. Em etapas
+        (ver :meth:`_resolve_bins_etapas`): os prebins são lidos ao preparar e
+        gravados ao finalizar, sempre na thread principal."""
         clf = self.task_type == "classification"
         kw = dict(name=feature, dtype="numerical", max_n_bins=max_n_bins,
                   min_bin_size=min_bin_size, monotonic_trend="auto_asc_desc")
@@ -2447,9 +2573,8 @@ class ModelSegmenter:
                 return []
             b = (OptimalBinning if clf else ContinuousOptimalBinning)(
                 user_splits=pre.copy(), **kw)
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")      # falha aqui ⇒ ajuste completo abaixo
-                cortes = _fit_optbinning_splits(b, x, y, max_rows=max_rows)
+            # calado: falha aqui ⇒ ajuste completo abaixo, sem aviso
+            cortes = yield (b, x, y, max_rows, True)
             if getattr(b, "_is_fitted", False):
                 return cortes
         if ck is None:
@@ -2457,7 +2582,7 @@ class ModelSegmenter:
         else:
             cls = _OptimalBinningCaptura if clf else _ContinuousOptimalBinningCaptura
         b = cls(**kw)
-        cortes = _fit_optbinning_splits(b, x, y, max_rows=max_rows)
+        cortes = yield (b, x, y, max_rows, False)
         capt = b.__dict__.get("_yg_prebins")
         # só de ajuste que terminou (``_is_fitted``); prebins vazios só se o
         # ajuste completo de fato deu "sem corte"
@@ -2469,6 +2594,11 @@ class ModelSegmenter:
         return cortes
 
     def _bins_num_por_posicao(self, feature, max_n_bins, min_bin_size, sample=None):
+        """Ver :meth:`_bins_num_por_posicao_etapas` (conduzido na hora)."""
+        return _conduz_etapas(self._bins_num_por_posicao_etapas(feature, max_n_bins,
+                                                                min_bin_size, sample))
+
+    def _bins_num_por_posicao_etapas(self, feature, max_n_bins, min_bin_size, sample=None):
         """Binning ótimo de uma variável NUMÉRICA sem copiar o recorte: os mesmos
         (x, y) que :meth:`_resolve_bins_uncached` entregava ao optbinning, por
         gather das linhas de :meth:`_posicoes_ajuste` (ajuste com ``max_rows=0``:
@@ -2499,7 +2629,10 @@ class ModelSegmenter:
             if not varia:
                 cortes = []
             else:
-                cortes = self._cortes_num_optbinning(
+                # suspenso à espera do ajuste (lote paralelo do ranking): sem a
+                # coluna inteira em float64 viva
+                del xf, xo
+                cortes = yield from self._cortes_num_optbinning_etapas(
                     feature, x,
                     y.astype(int) if self.task_type == "classification" else y.copy(),
                     max_n_bins, min_bin_size, sample, len(pos), max_rows=0)
@@ -2759,7 +2892,9 @@ class ModelSegmenter:
         A parte CARA (binning + IV + PSI por variável) é memoizada por assinatura de
         bins/amostra (``_rank_version``); a parte MUTÁVEL barata (incluida/categoria/
         motivo) é reanexada a cada chamada. Assim include/exclude/set_category e a 2ª
-        chamada após auto_select/auto_categorize NÃO recomputam o ranking inteiro."""
+        chamada após auto_select/auto_categorize NÃO recomputam o ranking inteiro.
+        Com ``n_jobs`` > 1 os ajustes do optbinning das variáveis ainda sem linha
+        em cache rodam em threads (:meth:`_preaquece_bins`) — mesmo resultado."""
         features = list(features) if features is not None else list(self.candidates)
         base = self._variable_iv_base(tuple(features), sample, max_n_bins,
                                       min_bin_size, bool(with_psi))
@@ -2788,13 +2923,28 @@ class ModelSegmenter:
         # derivação): mudar os bins de UMA variável invalidava o ranking inteiro
         # (_rank_version) e re-calculava IV/PSI de todas — agora só a dela
         row_cache = self.__dict__.setdefault("_iv_row_cache", {})
-        rows = []
-        for feat in features:
+
+        def chave_linha(feat):
             meta = self.var_meta.get(feat, {})
-            rkey = (feat, sample, max_n_bins, min_bin_size, with_psi, tuple(nonref),
+            return (feat, sample, max_n_bins, min_bin_size, with_psi, tuple(nonref),
                     self._splits_key(meta.get("splits")), repr(meta.get("na_destino")),
                     repr(meta.get("derived_bins")), meta.get("derived_from"),
                     feat in self.df.columns)
+
+        n_jobs = _normaliza_n_jobs(getattr(self, "n_jobs", 1))
+        if n_jobs > 1:
+            # optbinning das variáveis sem linha em cache ajustado em threads
+            # ANTES do laço, que então só bate no _bins_cache; o que não ficar
+            # pronto (erro, interrupção do lote) cai no laço, o de sempre
+            faltam = [f for f in features if row_cache.get(chave_linha(f)) is None]
+            if len(faltam) > 1:
+                try:
+                    self._preaquece_bins(faltam, max_n_bins, min_bin_size, sample, n_jobs)
+                except Exception:
+                    pass
+        rows = []
+        for feat in features:
+            rkey = chave_linha(feat)
             hit_row = row_cache.get(rkey)
             if hit_row is not None:
                 rows.append(dict(hit_row))
@@ -2848,6 +2998,102 @@ class ModelSegmenter:
             self._rank_cache.clear()
         self._rank_cache[key] = base
         return base
+
+    def _preaquece_bins(self, features, max_n_bins, min_bin_size, sample, n_jobs) -> None:
+        """Ranking com ``n_jobs`` > 1: grava no ``_bins_cache`` os bins das
+        ``features`` ainda ausentes (a MESMA chave de :meth:`_resolve_bins`), com
+        os ajustes do optbinning (pré-binagem CART do sklearn e CP-SAT com 1
+        worker, que soltam o GIL) em até ``n_jobs`` threads.
+
+        As etapas são as de :meth:`_resolve_bins_etapas` (uma lógica só):
+        preparar e finalizar na thread principal, na ordem das variáveis; só o
+        ``b.fit`` vai às threads (:func:`_ajusta_optbinning_em_thread`, que não
+        mexe nos filtros de warnings). Em LOTES de até ``2·n_jobs`` ajustes —
+        nunca as entradas de todas as variáveis de uma vez; os pedidos já chegam
+        sorteados, então no lote só ficam vivos os x/y da amostra de ajuste.
+        Cada lote roda num ``ThreadPoolExecutor`` criado ali (nunca atributo: o
+        segmentador vai por cloudpickle ao MLflow; nada de processos) dentro de
+        UM filtro de warnings estreito (:data:`_MODULOS_AJUSTE_OPTBIN`),
+        encerrado com ``shutdown(wait=True)`` ANTES de restaurá-lo — inclusive
+        numa interrupção. Preparar e finalizar ficam FORA do filtro: até o
+        Python 3.13 os filtros são globais, e o ``catch_warnings`` que as
+        dependências do fit abrem nas threads poderia calar avisos da preparação
+        (nível raro etc.), que assim saem como no caminho em série.
+
+        O worker devolve ``(cortes, exceção)``. ``ValueError`` (inviável / sem
+        corte) ⇒ ``[]``, calado como em :func:`_fit_optbinning_splits`; num
+        pedido ``calado`` (ajuste com prebins), qualquer falha ⇒ ``[]`` e as
+        etapas seguem para o ajuste completo, como em série. Falha INESPERADA
+        num ajuste comum, erro ao preparar ou ao finalizar: a variável fica fora
+        do cache e cai no laço do ranking, que a refaz em série com o mesmo
+        try/except — o aviso "optbinning falhou inesperadamente" sai de lá, na
+        thread principal e fora do filtro do lote. Os bins, o _bins_cache, os
+        prebins e os avisos são os do caminho em série (os da preparação só
+        saem antes do laço)."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        lote = []                  # (chave, etapas, pedido) à espera do ajuste
+        vistas = set()
+
+        def roda_lote():
+            itens = lote[:]
+            lote.clear()
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", module=_MODULOS_AJUSTE_OPTBIN)
+                pool = ThreadPoolExecutor(max_workers=min(n_jobs, len(itens)),
+                                          thread_name_prefix="ygg-optbin")
+                try:
+                    futs = [pool.submit(_ajusta_optbinning_em_thread, b, x, y, max_rows)
+                            for _ck, _etapas, (b, x, y, max_rows, _calado) in itens]
+                    resultados = [f.result() for f in futs]
+                finally:
+                    # threads encerradas ANTES de restaurar os filtros (numa
+                    # interrupção: cancela as pendentes e espera as em curso)
+                    pool.shutdown(wait=True, cancel_futures=True)
+            for (ck, etapas, pedido), (cortes, erro) in zip(itens, resultados):
+                calado = pedido[4]
+                pedido = None                    # solta x/y do ajuste
+                if erro is not None and not isinstance(erro, ValueError) and not calado:
+                    # falha INESPERADA (RuntimeError, MemoryError...): nada no
+                    # cache e nenhum aviso aqui — a variável cai no laço do
+                    # ranking, que refaz o ajuste em série: o mesmo aviso (uma
+                    # vez, na thread principal, fora do filtro do lote), a mesma
+                    # linha e a mesma reação a filtros 'error'; e um ajuste que
+                    # falhou só pela concorrência (memória) ainda pode dar certo
+                    etapas.close()
+                    continue
+                try:
+                    novo = etapas.send(cortes)   # [] no ValueError / no calado
+                except StopIteration as fim:
+                    self._bins_cache[ck] = fim.value
+                except Exception:
+                    etapas.close()               # cai no laço do ranking
+                else:
+                    # outro pedido (prebins sem ajuste ⇒ ajuste completo): próximo lote
+                    lote.append((ck, etapas, novo))
+
+        for feat in features:
+            try:
+                eff_splits = self.var_meta.get(feat, {}).get("splits")
+                ck = self._chave_bins_cache(feat, max_n_bins, min_bin_size, eff_splits, sample)
+                if ck in vistas or ck in self._bins_cache:
+                    continue
+                vistas.add(ck)
+                etapas = self._resolve_bins_etapas(feat, max_n_bins, min_bin_size,
+                                                   eff_splits, sample)
+                try:
+                    pedido = next(etapas)
+                except StopIteration as fim:      # sem optbinning (binária etc.)
+                    self._bins_cache[ck] = fim.value
+                    continue
+            except Exception:
+                continue                          # preparação falhou: laço
+            lote.append((ck, etapas, pedido))
+            pedido = None
+            if len(lote) >= 2 * n_jobs:
+                roda_lote()
+        while lote:
+            roda_lote()
 
     def _variable_psi(self, feature, samples, max_n_bins=5, min_bin_size=0.05,
                       eps=1e-6, _codigos=None) -> dict:
@@ -11315,6 +11561,8 @@ class ModelSegmenter:
                 seg.rating_labels_ = list(seg.rating_strategy.labels_)
         # adota o estado carregado no próprio objeto: evita o erro clássico de
         # ``seg.load(path)`` "não fazer nada" (antes só o retorno vinha carregado).
+        # n_jobs é da sessão (não vai para o JSON): fica o deste objeto
+        seg.n_jobs = getattr(self, "n_jobs", 1)
         self.__dict__.update(seg.__dict__)
         return self
 
