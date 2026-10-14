@@ -154,9 +154,14 @@ def _espia_cpsat(monkeypatch):
 
     def solve(self):
         out = orig(self)
+        # workers EFETIVOS: o optbinning >= 1.0 já fixa num_search_workers=1
+        # (e aí a lib não toca no num_workers — os dois juntos são inválidos:
+        # MODEL_INVALID, registrado como -1)
+        p = self.solver_.parameters
+        nw, nsw = int(p.num_workers), int(p.num_search_workers)
         with lock:
             vistos[(threading.current_thread() is threading.main_thread(),
-                    int(self.solver_.parameters.num_workers))] += 1
+                    -1 if (nw and nsw) else (nw or nsw))] += 1
         return out
 
     monkeypatch.setattr(ob_cp.BinningCP, "solve", solve)
@@ -192,7 +197,9 @@ def test_ranking_n_jobs_1_igual_a_4(task, monkeypatch):
     # coluna da chave: o contador é global, difere entre os dois objetos)
     p1 = {k[:5]: v.tolist() for k, v in s1.__dict__.get("_prebin_cache", {}).items()}
     p4 = {k[:5]: v.tolist() for k, v in s4.__dict__.get("_prebin_cache", {}).items()}
-    assert p1 == p4 and len(p1) >= 10
+    # a captura de prebins só existe onde o reuso vale (optbinning 0.20.x e
+    # sklearn < 1.8 — ver _PREBINS_REUSO); fora disso nenhum lado captura
+    assert p1 == p4 and (len(p1) >= 10 if segmod._PREBINS_REUSO else not p1)
     # RNG global: a árvore saca dele, o nº de saques é o mesmo
     assert e1[0] == e4[0] and np.array_equal(e1[1], e4[1]) and e1[2:] == e4[2:]
     # os mesmos avisos (os do preparo saem na thread principal) e nenhum vazado

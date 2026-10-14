@@ -60,6 +60,7 @@ from .._common import (
     fit_optbinning_splits as _fit_optbinning_splits,
     _amostra_optbinning,
     _cpsat_um_worker,
+    checa_status_optbinning as _checa_status_optbinning,
     psi_from_shares as _psi_from_shares,
     sql_texto as _sql_texto,
     eh_booleana as _eh_booleana,
@@ -141,6 +142,7 @@ def _fit_splits_na_thread(b, x, y, falhas) -> list:
         else:
             with np.errstate(divide="ignore", invalid="ignore"), _cpsat_um_worker():
                 b.fit(x, y)
+        _checa_status_optbinning(b)
         return list(b.splits)
     except ValueError:
         return []

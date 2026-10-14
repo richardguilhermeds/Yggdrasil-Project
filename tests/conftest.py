@@ -85,37 +85,26 @@ def _isola_estado_mlflow():
 
 
 @pytest.fixture
-def cpsat_deterministico(monkeypatch):
-    """CP-SAT do optbinning com 1 worker: ajustes independentes ficam reprodutíveis.
+def cpsat_deterministico():
+    """CP-SAT do optbinning com 1 worker também nos ajustes feitos PELO TESTE.
 
-    O optbinning cria ``cp_model.CpSolver()`` só com ``max_time_in_seconds``, e o
-    CP-SAT roda com vários workers em paralelo. Quando o ótimo NÃO é único (ajuste
-    categórico quase empatado), cada execução pode devolver um agrupamento
-    diferente — ex.: ``{2.00}``/``{0.1, 0.10}`` × ``{2.00, 0.1}``/``{0.10}`` em
-    ~1-2% das chamadas. Testes que comparam dois ajustes INDEPENDENTES com
-    igualdade exata (velho × novo, ``n_jobs`` 1 × 4) falhariam de vez em quando
-    sem nenhuma diferença no nosso código. Com 1 worker (e o limite de tempo
-    longe de estourar) a busca é determinística.
+    Os ajustes da lib já rodam com 1 worker (``_common._cpsat_um_worker``). As
+    cópias de referência "velho" dos testes de equivalência chamam o optbinning
+    direto, fora desse escopo — no optbinning 0.19/0.20 o CP-SAT usaria todos os
+    núcleos e, com ótimo empatado (ajuste categórico quase empatado), cada
+    execução poderia devolver um agrupamento diferente, e a comparação exata
+    velho × novo falharia de vez em quando sem nenhuma diferença no nosso código.
 
-    Opt-in (``pytest.mark.usefixtures``): só os testes de equivalência usam; o
-    código de produção não muda. Sem ortools, não faz nada.
+    Abre o mesmo escopo da lib na thread do teste — nada de trocar o
+    ``cp_model.CpSolver`` global do OR-Tools: uma subclasse que sempre fixa
+    ``num_workers`` dá ``MODEL_INVALID`` com o optbinning >= 1.0 (que já fixa
+    ``num_search_workers``) e, se o proxy da lib fosse instalado com ela ativa,
+    herdaria dela para o resto da sessão. Opt-in (``pytest.mark.usefixtures``).
     """
-    try:
-        from ortools.sat.python import cp_model
-    except ImportError:                           # pragma: no cover - sem ortools
+    from yggdrasil.credit_risk._common import _cpsat_um_worker
+
+    with _cpsat_um_worker():
         yield
-        return
-    original = cp_model.CpSolver
-
-    class _CpSolver1Worker(original):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.parameters.num_workers = 1
-
-    # o optbinning resolve ``cp_model.CpSolver`` na hora da chamada (também nas
-    # threads do ``n_jobs``), então trocar o atributo do módulo basta.
-    monkeypatch.setattr(cp_model, "CpSolver", _CpSolver1Worker)
-    yield
 
 
 @pytest.fixture

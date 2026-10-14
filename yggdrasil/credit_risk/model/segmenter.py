@@ -60,6 +60,7 @@ from .._common import (
     _cpsat_um_worker,
     copia_df as _copia_df,
     ajusta_optbinning_em_thread as _ajusta_optbinning_em_thread,
+    optbinning_terminou as _optbinning_terminou,
 )
 from .. import _common as _common_mod   # OPTBINNING_MAX_ROWS lido na hora
 
@@ -2578,7 +2579,7 @@ class ModelSegmenter:
                 user_splits=pre.copy(), **kw)
             # calado: falha aqui ⇒ ajuste completo abaixo, sem aviso
             cortes = yield (b, x, y, max_rows, True)
-            if getattr(b, "_is_fitted", False):
+            if _optbinning_terminou(b):
                 return cortes
         if ck is None:
             cls = OptimalBinning if clf else ContinuousOptimalBinning
@@ -2589,7 +2590,7 @@ class ModelSegmenter:
         capt = b.__dict__.get("_yg_prebins")
         # só de ajuste que terminou (``_is_fitted``); prebins vazios só se o
         # ajuste completo de fato deu "sem corte"
-        if (ck is not None and capt is not None and getattr(b, "_is_fitted", False)
+        if (ck is not None and capt is not None and _optbinning_terminou(b)
                 and (len(capt) or not cortes)):
             if len(cache) > 4096:                    # backstop (entradas de ≤20 floats)
                 cache.clear()

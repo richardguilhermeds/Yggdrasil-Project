@@ -176,8 +176,15 @@ def _amostra_optbinning(n, max_rows=None):
 # mexem no próprio contador, sem corrida. A instalação é única (lock + flag) e
 # idempotente (inclusive após reload deste módulo); se o layout do optbinning
 # mudar (sem ``binning.cp.cp_model``), não instala e o ajuste segue como antes.
-# OPTBINNING_CPSAT_WORKERS é lido na criação de cada solver; 0/None devolve o
-# padrão do optbinning (todos os núcleos, não determinístico em empate).
+#
+# Os workers entram na hora do ``Solve``, e SÓ se ninguém escolheu antes: o
+# optbinning >= 1.0 já fixa ``num_search_workers = 1`` (e ``random_seed = 0``)
+# logo depois de criar o solver, e o CP-SAT recusa o modelo (``MODEL_INVALID``,
+# "Do not specify both num_search_workers and num_workers") com os DOIS campos
+# preenchidos — o optbinning então devolve um bin só, calado. Nessas versões o
+# proxy não mexe em nada; nas antigas (0.19/0.20) fixa o 1 worker.
+# OPTBINNING_CPSAT_WORKERS é lido a cada ``Solve``; 0/None devolve o padrão do
+# optbinning (no 0.19/0.20: todos os núcleos, não determinístico em empate).
 OPTBINNING_CPSAT_WORKERS = 1
 
 _CPSAT_TLS = threading.local()        # .n = profundidade de ajustes da lib nesta thread
@@ -188,28 +195,68 @@ _CPSAT_INSTALADO = False
 class _CpModelProxy(types.ModuleType):
     """Fachada do ``ortools.sat.python.cp_model`` vista só pelo
     ``optbinning.binning.cp``: tudo vem do módulo real (``__getattr__``), menos
-    ``CpSolver`` — subclasse que, dentro de :func:`_cpsat_um_worker`, nasce com
-    :data:`OPTBINNING_CPSAT_WORKERS` workers."""
+    ``CpSolver`` — subclasse que, dentro de :func:`_cpsat_um_worker`, resolve com
+    :data:`OPTBINNING_CPSAT_WORKERS` workers (se quem criou o solver não fixou
+    os workers por conta própria).
+
+    A subclasse é montada sobre o ``CpSolver`` que o módulo real tem NA HORA da
+    leitura (e reaproveitada enquanto ele não muda): um patch do usuário em
+    ``cp_model.CpSolver`` continua chegando ao optbinning, e desfazê-lo também —
+    nada fica congelado no que existia quando o proxy foi instalado."""
 
     def __init__(self, real):
         super().__init__(real.__name__, real.__doc__)
         self._yg_real = real
-
-        class CpSolver(real.CpSolver):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                w = OPTBINNING_CPSAT_WORKERS
-                if w and getattr(_CPSAT_TLS, "n", 0):
-                    try:
-                        self.parameters.num_workers = int(w)
-                    except AttributeError:   # OR-Tools antigo: só o nome velho
-                        self.parameters.num_search_workers = int(w)
-
-        CpSolver.__qualname__ = "CpSolver"
-        self.CpSolver = CpSolver
+        self._yg_sub = (None, None)       # (CpSolver base, subclasse) da última leitura
 
     def __getattr__(self, nome):
+        if nome == "CpSolver":
+            return self._yg_cpsolver()
         return getattr(self._yg_real, nome)
+
+    def _yg_cpsolver(self):
+        base = self._yg_real.CpSolver
+        visto, sub = self._yg_sub
+        if visto is base:
+            return sub
+        sub = _subclasse_cpsolver(base)
+        self._yg_sub = (base, sub)
+        return sub
+
+
+def _subclasse_cpsolver(base):
+    """``CpSolver`` que fixa :data:`OPTBINNING_CPSAT_WORKERS` workers no
+    ``Solve`` de um ajuste da lib (ver :class:`_CpModelProxy`)."""
+
+    class CpSolver(base):
+        def _yg_fixa_workers(self):
+            w = OPTBINNING_CPSAT_WORKERS
+            if not (w and getattr(_CPSAT_TLS, "n", 0)):
+                return
+            p = self.parameters
+            # quem criou o solver já escolheu (optbinning >= 1.0): os dois
+            # campos juntos dão MODEL_INVALID — respeita a escolha.
+            if getattr(p, "num_workers", 0) or getattr(p, "num_search_workers", 0):
+                return
+            try:
+                p.num_workers = int(w)
+            except AttributeError:   # OR-Tools antigo: só o nome velho
+                p.num_search_workers = int(w)
+
+        # ``Solve`` (o que o optbinning chama) e ``solve`` (o nome novo — no
+        # OR-Tools recente ``Solve`` só delega a ele) separados, cada um pelo
+        # ``super()``: um alias ``solve = Solve`` entraria em recursão.
+        def Solve(self, *args, **kwargs):
+            self._yg_fixa_workers()
+            return super().Solve(*args, **kwargs)
+
+        if hasattr(base, "solve"):
+            def solve(self, *args, **kwargs):
+                self._yg_fixa_workers()
+                return super().solve(*args, **kwargs)
+
+    CpSolver.__qualname__ = "CpSolver"
+    return CpSolver
 
 
 def _instala_cpsat_um_worker() -> bool:
@@ -236,9 +283,10 @@ def _instala_cpsat_um_worker() -> bool:
 
 @contextlib.contextmanager
 def _cpsat_um_worker():
-    """Escopo de um ajuste da lib: os ``CpSolver`` que o optbinning criar NESTA
-    thread nascem com :data:`OPTBINNING_CPSAT_WORKERS` workers. Reentrante e
-    por thread (seguro no ``ThreadPoolExecutor`` dos lotes paralelos)."""
+    """Escopo de um ajuste da lib: os ``CpSolver`` que o optbinning usar NESTA
+    thread resolvem com :data:`OPTBINNING_CPSAT_WORKERS` workers — se o próprio
+    optbinning não fixou os workers (o >= 1.0 já fixa 1). Reentrante e por
+    thread (seguro no ``ThreadPoolExecutor`` dos lotes paralelos)."""
     _instala_cpsat_um_worker()
     tls = _CPSAT_TLS
     tls.n = getattr(tls, "n", 0) + 1
@@ -270,6 +318,7 @@ def fit_optbinning_splits(b, x, y, max_rows=None, idx=None) -> list:
             warnings.simplefilter("ignore")
             with np.errstate(divide="ignore", invalid="ignore"), _cpsat_um_worker():
                 b.fit(x, y)
+        checa_status_optbinning(b)
         return list(b.splits)
     except ValueError:
         return []
@@ -297,6 +346,33 @@ def avisa_falha_optbinning(b, e) -> None:
         f"{type(e).__name__}: {e}", RuntimeWarning)
 
 
+def checa_status_optbinning(b) -> None:
+    """Levanta ``RuntimeError`` se o solver RECUSOU o modelo (``MODEL_INVALID``).
+
+    O optbinning não levanta nesse caso: devolve um bin só, que viraria um "sem
+    corte válido" calado (foi assim que o conflito ``num_workers`` ×
+    ``num_search_workers`` do CP-SAT passou despercebido). Não é o "inviável"
+    das restrições (esse é ``INFEASIBLE`` e segue calado): é parâmetro do
+    solver ou um alvo contínuo de magnitude enorme (~1e12), que estoura a escala
+    inteira com que o optbinning monta o modelo — por isso vira o aviso de falha
+    inesperada, com a dica, e não o ``[]`` silencioso."""
+    try:
+        status = b.status
+    except Exception:
+        return
+    if status == "MODEL_INVALID":
+        raise RuntimeError(
+            "o solver recusou o modelo (status MODEL_INVALID) — com alvo contínuo "
+            "de magnitude muito grande, reescale o alvo (ex.: em milhares/milhões)")
+
+
+def optbinning_terminou(b) -> bool:
+    """O ajuste ``b`` terminou de verdade: ajustado e sem o ``MODEL_INVALID``
+    (ver :func:`checa_status_optbinning`), em que o optbinning se dá por
+    ajustado com um bin só."""
+    return bool(getattr(b, "_is_fitted", False)) and getattr(b, "_status", None) != "MODEL_INVALID"
+
+
 def ajusta_optbinning_em_thread(b, x, y, max_rows=None, idx=None):
     """Núcleo de :func:`fit_optbinning_splits` para rodar numa THREAD de
     trabalho (lote paralelo do ranking, ``n_jobs``): mesma amostra, mesmo
@@ -321,6 +397,7 @@ def ajusta_optbinning_em_thread(b, x, y, max_rows=None, idx=None):
         else:
             with np.errstate(divide="ignore", invalid="ignore"), _cpsat_um_worker():
                 b.fit(x, y)
+        checa_status_optbinning(b)
         return list(b.splits), None
     except Exception as e:
         return [], e

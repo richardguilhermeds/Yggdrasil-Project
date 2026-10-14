@@ -675,8 +675,10 @@ def test_ui_usa_n_jobs_ate_8(monkeypatch):
 
 def test_cpsat_um_worker_nas_threads_do_lote(monkeypatch):
     """Sem fixture: todo ``CpSolver`` que o optbinning cria no lote paralelo
-    nasce com 1 worker — inclusive nas threads ygg-optbin do ``n_jobs`` (o
-    contador do ``_cpsat_um_worker`` é por thread e entra NO worker)."""
+    resolve com 1 worker — inclusive nas threads ygg-optbin do ``n_jobs`` (o
+    contador do ``_cpsat_um_worker`` é por thread e entra NO worker). Os
+    workers entram no ``Solve`` (e o optbinning >= 1.0 já fixa o
+    ``num_search_workers``): mede-se o efetivo DEPOIS do solve."""
     import optbinning.binning.cp as ob_cp
     assert _common._instala_cpsat_um_worker()
     proxy = ob_cp.cp_model                       # fachada instalada pela lib
@@ -685,17 +687,23 @@ def test_cpsat_um_worker_nas_threads_do_lote(monkeypatch):
 
     class _Espiao(cls):
         def Solve(self, *a, **k):                    # noqa: N802 - API do ortools
+            out = super().Solve(*a, **k)
+            p = self.parameters
+            nw, nsw = p.num_workers, p.num_search_workers
+            # os dois campos juntos = MODEL_INVALID (registrado como -1)
             workers.append((threading.current_thread().name,
-                            self.parameters.num_workers))
-            return super().Solve(*a, **k)
+                            -1 if (nw and nsw) else (nw or nsw),
+                            self.StatusName(out)))
+            return out
     monkeypatch.setattr(proxy, "CpSolver", _Espiao)
     seg = _seg(n=1500)
     seg.n_jobs = 4
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         seg.variable_iv(features=list(FEATS))
-    assert workers and all(w == 1 for _, w in workers)
-    assert any(n.startswith("ygg-optbin") for n, _ in workers)
+    assert workers and all(w == 1 for _, w, _s in workers)
+    assert all(s in ("OPTIMAL", "FEASIBLE", "INFEASIBLE") for _, _w, s in workers)
+    assert any(n.startswith("ygg-optbin") for n, _w, _s in workers)
 
 
 def test_lista_como_variavel_so_ela_falha():
