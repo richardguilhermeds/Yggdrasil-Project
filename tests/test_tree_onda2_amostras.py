@@ -332,8 +332,10 @@ def _contador_eq(monkeypatch, seg):
     orig = pd.Series.__eq__
 
     def espia(self, other):
+        # no pandas 3 (copy-on-write) ``df[col]`` não devolve mais o MESMO
+        # objeto de índice: a identidade sozinha deixava o espião cego
         if (self.name == seg.sample_col and len(self) == len(seg.df)
-                and self.index is seg.df.index):
+                and (self.index is seg.df.index or self.index.equals(seg.df.index))):
             n["eq"] += 1
         return orig(self, other)
     monkeypatch.setattr(pd.Series, "__eq__", espia)
@@ -588,7 +590,9 @@ def test_wrapper_preguicoso_e_read_only(task):
     assert "leaf_codes" in chaves and "leaf_id_arr" not in chaves
     s1 = seg._leaf_id_series()
     s2 = seg._leaf_id_series(folhas)
-    assert s1 is not s2 and s1.values is s2.values   # MESMO array em cache
+    # MESMO array em cache (no pandas 3 o ``.values`` é uma view nova a cada
+    # chamada — a memória é a mesma)
+    assert s1 is not s2 and np.shares_memory(s1.values, s2.values)
     assert s1.index is seg.df.index and s1.dtype == object and s1.name is None
     pd.testing.assert_series_equal(s1, _leaf_id_antigo(seg), check_exact=True)
     ids, code = seg._leaf_codes()

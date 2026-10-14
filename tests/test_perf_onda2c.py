@@ -219,9 +219,20 @@ def test_caminho_rapido_numerica_e_categorica(seg):
         assert cod[1].dtype == np.int8          # códigos compactos
 
 
+def _tem_nan_nao_mascarado(s):
+    """Há NaN que NÃO é NA (o caso que obriga o caminho das máscaras)?"""
+    x = s.to_numpy(dtype="float64", na_value=np.nan)
+    return bool((np.isnan(x) & ~s.isna().to_numpy(dtype=bool)).any())
+
+
 @pytest.mark.parametrize("feat", ["x_neg", "x_f64n", "x_pa"])
 def test_fallback_menos_inf_e_nan_nao_mascarado(seg, feat):
-    _confere_tabela(seg, feat, rapido=False)
+    rapido = False
+    if feat == "x_f64n" and not _tem_nan_nao_mascarado(seg.df[feat]):
+        # pandas 3: o 0/0 do Float64 já nasce NA — sem NaN que não seja NA o
+        # atalho por códigos vale (a igualdade exata com o antigo é conferida)
+        rapido = True
+    _confere_tabela(seg, feat, rapido=rapido)
 
 
 def test_fallback_grupos_sobrepostos():
