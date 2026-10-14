@@ -646,6 +646,33 @@ class TreeSegmenter:
         self._psi_detalhe: list[dict] = []
         self._csi_detalhe: list[dict] = []
 
+    def __setstate__(self, state):
+        """Despickle (pickle/joblib/``copy``) tolerante a versão.
+
+        Os memos de agregado/binning começam VAZIOS: são caches puros, alguns
+        chaveados por ``id()`` de máscara (ids de outro processo podem coincidir
+        com objetos novos) e o formato deles muda entre versões (o ``psi`` da
+        0.0.21 guardava só o DataFrame). Um segmentador salvo por uma versão
+        anterior também não tem os atributos DERIVADOS que vieram depois
+        (amostras/códigos por linha, ``n_jobs``) — recompostos aqui a partir do
+        df e das máscaras, em vez de estourar ``AttributeError`` em
+        ``leaves``/``metrics``/``psi``."""
+        self.__dict__.update(state)
+        d = self.__dict__
+        d["_agg_cache"] = {}
+        d["_agg_lru"] = OrderedDict()
+        d["_bins_cache"] = {}
+        d["_leaf_target_cache"] = {}
+        d["_pair_p_cache"] = {}
+        d["_samp_by_cache"] = {}
+        d["_osv_memo"] = None
+        d.setdefault("n_jobs", 1)
+        d.setdefault("_tree_version", 0)
+        if "_samples" not in d:
+            d["_samples"] = list(d.get("_sample_masks") or {})
+        if "_sample_codes" not in d:
+            d["_sample_codes"] = self._build_sample_codes()
+
     # ------------------------------------------------------------------
     # Versão da árvore + memoização de agregados (desempenho)
     # ------------------------------------------------------------------
