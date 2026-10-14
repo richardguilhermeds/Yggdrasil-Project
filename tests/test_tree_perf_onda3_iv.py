@@ -295,14 +295,34 @@ def test_bin_ids_igual_mask_in_por_faixa(task):
         assert f not in rapidos and f in lentos
 
 
+# pandas < 3: ``astype(str)`` escreve ``pd.NaT`` como o texto 'NaT' (a linha NA
+# casa com uma categoria 'NaT'). pandas >= 3: o ``astype(str)`` mantém o NA — a
+# linha só cai na faixa 'na', no caminho antigo e no rápido.
+_NAT_VIRA_TEXTO = pd.Series([pd.NaT], dtype=object).astype(str).iloc[0] == "NaT"
+
+
+def _ids_iguais_ao_antigo(s, bins):
+    ids = TreeSegmenter._bin_ids(s, bins)
+    assert ids is not None
+    for k, b in enumerate(bins):
+        np.testing.assert_array_equal(
+            ids == k, TreeSegmenter._mask_in_col(s, b).to_numpy(dtype=bool))
+    return ids
+
+
 def test_bin_ids_na_que_casa_com_categoria_volta_ao_caminho_antigo():
     s = pd.Series(["NaT", pd.NaT, "k", None, "k"], dtype=object)
     bins = [{"kind": "cat", "cats": ["NaT"]}, {"kind": "cat", "cats": ["k"]},
             {"kind": "na"}]
-    assert TreeSegmenter._bin_ids(s, bins) is None
-    # sem a faixa 'na' a linha NaT cai só na categoria 'NaT' — código único vale
-    ids = TreeSegmenter._bin_ids(s, bins[:2])
-    np.testing.assert_array_equal(ids, [0, 0, 1, -1, 1])
+    if _NAT_VIRA_TEXTO:
+        # a linha NaT está na categoria 'NaT' E em 'na' — sem código único
+        assert TreeSegmenter._bin_ids(s, bins) is None
+    else:
+        _ids_iguais_ao_antigo(s, bins)
+    # sem a faixa 'na' a linha NaT cai no máximo na categoria 'NaT' — vale
+    ids = _ids_iguais_ao_antigo(s, bins[:2])
+    if _NAT_VIRA_TEXTO:
+        np.testing.assert_array_equal(ids, [0, 0, 1, -1, 1])
 
 
 @pytest.mark.parametrize("bins,esperado", [
@@ -486,7 +506,8 @@ def test_variable_iv_caminho_rapido_nao_usa_mask_in(monkeypatch):
     seg.variable_iv("root", features=[f for f in FAST if f != "cat_nat"])
     assert chamadas == []
     seg.variable_iv("root", features=["f32", "cat_nat"])
-    assert set(chamadas) == {"f32", "cat_nat"}
+    # cat_nat só precisa do caminho antigo onde o NaT vira o texto 'NaT'
+    assert set(chamadas) == ({"f32", "cat_nat"} if _NAT_VIRA_TEXTO else {"f32"})
 
 
 def test_variable_iv_pico_de_memoria_menor():
